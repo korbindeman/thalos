@@ -56,7 +56,7 @@ use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::structures::{StructureKind, StructurePlacement, StructureRegistry, StructureSite};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
 use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
@@ -223,10 +223,10 @@ fn site_scatter_region(site: &StructureSite, body_radius_m: f64) -> Option<Scatt
                 treatment: ScatterTreatment::Lawn,
             }
         }
-        StructureKind::Runway => {
-            let (half_along_m, half_across_m) = crate::runway::runway_footprint();
-            clear(half_along_m, half_across_m)
-        }
+        StructureKind::Runway {
+            half_length_m,
+            half_width_m,
+        } => clear(half_length_m as f64, half_width_m as f64),
         StructureKind::Building {
             half_x_m, half_z_m, ..
         } => clear(half_x_m as f64, half_z_m as f64),
@@ -235,6 +235,22 @@ fn site_scatter_region(site: &StructureSite, body_radius_m: f64) -> Option<Scatt
         StructureKind::Launchpad { radius_m } => clear(radius_m as f64, radius_m as f64),
         StructureKind::Tank { radius_m, .. } => clear(radius_m as f64, radius_m as f64),
     })
+}
+
+/// The building-terrain scatter regions for one body — a base's ground reads
+/// as a lawn and its paved/built footprints clear the blades. Shared by the
+/// CPU tile builds and the GPU grass field's control window
+/// (`rendering::gpu_grass`), so both layers honour the same footprints.
+pub(crate) fn grass_scatter_regions(
+    structures: &StructureRegistry,
+    body_id: BodyId,
+    radius_m: f64,
+) -> Vec<ScatterRegion> {
+    structures
+        .sites_on(body_id)
+        .iter()
+        .filter_map(|site| site_scatter_region(site, radius_m))
+        .collect()
 }
 
 /// Fade band half-width for a ring's near/far cross-fade.
@@ -391,6 +407,8 @@ fn drive_grass_tiles(
     structures: Res<StructureRegistry>,
     graphics: Res<GraphicsSettings>,
     freecam: Res<FreeCam>,
+    scatter_focus: Res<ShadowFocusOverride>,
+    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut commands: Commands,
 ) {
@@ -421,6 +439,8 @@ fn drive_grass_tiles(
     let cam_pos = scatter_view_center(
         &freecam,
         ship_cam_q.single().ok(),
+        scatter_focus.center_world,
+        crate::game_context::god_view_active(game_ctx.as_deref()),
         sim.simulation.ship_state().position,
     );
 
@@ -491,11 +511,25 @@ fn drive_grass_tiles(
     }
     let arc_dist = |center_dir: DVec3| -> f64 { center_dir.angle_between(cam_dir) * radius_m };
 
-    // Despawn tiles past their ring's reach (outer edge + a fade band of slack).
+    // With the GPU grass field active (`rendering::gpu_grass`), the WHOLE CPU
+    // clipmap parks — the field's five bands now cover the full ~340 m reach
+    // (including the former card ring), with zero persistent geometry. Toggling
+    // the setting off restores the full CPU clipmap as a fallback.
+    let min_ring = if graphics.gpu_grass {
+        GRASS_RINGS.len() as u8
+    } else {
+        0u8
+    };
+
+    // Despawn tiles past their ring's reach (outer edge + a fade band of
+    // slack), and any tile in a ring the GPU field has taken over.
     let stale: Vec<RingTileKey> = grass
         .tiles
         .keys()
         .filter(|rk| {
+            if rk.ring < min_ring {
+                return true;
+            }
             let ring = &GRASS_RINGS[rk.ring as usize];
             let reach = ring.outer_m + ring_band_m(ring) as f64 + ring.tile_size_m;
             grass_tile_frame(rk.key, ring_tps[rk.ring as usize])
@@ -528,7 +562,11 @@ fn drive_grass_tiles(
     // tiles build while their blades are scaled to ~0 — the build is invisible
     // (no pop-in), and they grow in as the craft approaches.
     let mut candidates: Vec<(f64, RingTileKey)> = Vec::new();
-    for (ring_idx, ring) in GRASS_RINGS.iter().enumerate() {
+    for (ring_idx, ring) in GRASS_RINGS
+        .iter()
+        .enumerate()
+        .skip(min_ring as usize)
+    {
         let tps = ring_tps[ring_idx];
         let band = ring_band_m(ring) as f64;
         let lo = (ring.inner_m - band).max(0.0);
@@ -572,13 +610,8 @@ fn drive_grass_tiles(
     // the structure registry, so authored and player-placed bases both apply;
     // empty off-base, so wild terrain is untouched. Shared (`Arc`) into every
     // tile build dispatched this frame.
-    let scatter_regions: Arc<Vec<ScatterRegion>> = Arc::new(
-        structures
-            .sites_on(body_id)
-            .iter()
-            .filter_map(|site| site_scatter_region(site, radius_m))
-            .collect(),
-    );
+    let scatter_regions: Arc<Vec<ScatterRegion>> =
+        Arc::new(grass_scatter_regions(&structures, body_id, radius_m));
 
     let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
     let pool = AsyncComputeTaskPool::get();

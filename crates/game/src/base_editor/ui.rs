@@ -62,6 +62,10 @@ struct BaseEditorOverlay;
 #[derive(Component)]
 struct BaseEditorText;
 
+/// The overlay's heading, retitled in launch-select mode.
+#[derive(Component)]
+struct BaseEditorTitle;
+
 #[derive(Component, Clone, Copy)]
 enum PaletteAction {
     Select,
@@ -77,6 +81,7 @@ impl Plugin for BaseEditorUiPlugin {
                 Update,
                 (
                     toggle_overlay,
+                    sync_overlay_for_mode,
                     handle_palette_clicks,
                     style_palette_buttons,
                     update_overlay_text,
@@ -121,6 +126,7 @@ fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
                     margin: UiRect::bottom(Val::Px(4.0)),
                     ..default()
                 },
+                BaseEditorTitle,
             ));
             spawn_palette_button(panel, &theme, PaletteAction::Select, "Select / Move");
             for (i, preset) in PRESETS.iter().enumerate() {
@@ -248,6 +254,40 @@ fn style_palette_buttons(
     }
 }
 
+/// In launch-select mode the overlay is a launch picker, not a building editor:
+/// retitle it and collapse the building palette (the presets + Select/Move
+/// buttons) so only the launch hint remains.
+fn sync_overlay_for_mode(
+    editor: Res<BaseEditor>,
+    mut titles: Query<&mut Text, With<BaseEditorTitle>>,
+    mut buttons: Query<&mut Node, With<PaletteAction>>,
+) {
+    if !editor.is_changed() {
+        return;
+    }
+    let select_launch = editor.mode == BaseEditorMode::SelectLaunch;
+    let title = if select_launch {
+        "SELECT LAUNCH POINT"
+    } else {
+        "SURFACE BASE EDITOR"
+    };
+    for mut t in &mut titles {
+        if t.0 != title {
+            t.0 = title.to_string();
+        }
+    }
+    let display = if select_launch {
+        Display::None
+    } else {
+        Display::Flex
+    };
+    for mut node in &mut buttons {
+        if node.display != display {
+            node.display = display;
+        }
+    }
+}
+
 fn toggle_overlay(
     editor: Res<BaseEditor>,
     mut overlay: Query<&mut Visibility, With<BaseEditorOverlay>>,
@@ -276,6 +316,10 @@ fn update_overlay_text(
         return;
     }
     let body = match editor.mode {
+        BaseEditorMode::SelectLaunch => {
+            "CHOOSE A LAUNCH POINT\nLMB  launch from the highlighted runway or pad\nWASD pan · scroll zoom · Esc  cancel"
+                .to_string()
+        }
         BaseEditorMode::PickSite => {
             "PICK A SITE\nLMB  confirm (flattens the land)\nQ/E  rotate   WASD  pan   Esc  exit"
                 .to_string()

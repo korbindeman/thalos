@@ -298,6 +298,7 @@ mod tests {
                 mass_fraction: 1.0,
             }],
             power_draw_kw: 0.0,
+            gimbal_range_deg: 0.0,
         }
     }
 

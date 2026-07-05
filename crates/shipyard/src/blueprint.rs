@@ -399,6 +399,7 @@ fn insert_part(
                     dry_mass: e.dry_mass,
                     reactants: e.reactants.clone(),
                     power_draw_kw: e.power_draw_kw,
+                    gimbal_range_deg: e.gimbal_range_deg,
                 },
                 EngineActivation::default(),
                 FuelCrossfeed::default(),
@@ -859,6 +860,57 @@ mod tests {
         assert!(kero.capacity > 0.0, "wet wings provide kerosene capacity");
         assert!(kero.mass_kg > 0.0, "wet wings spawn full of kerosene");
         assert!(s.wing_area_m2 > 0.0);
+    }
+
+    /// The shipped orbital rocket must stay loadable and actually be
+    /// orbital-class: parse `ships/atlas.ron` against the catalog, confirm it
+    /// carries methalox propellant, lifts off (full-thrust accel > Thalos
+    /// surface gravity), and has enough Δv for low Thalos orbit (~7 km/s).
+    /// Also guards that its engines are gimballed — the ascent is unflyable
+    /// without thrust vectoring. Numbers here are conservative single-stack
+    /// proxies; the real staged Δv is higher.
+    #[test]
+    fn atlas_sample_is_an_orbital_rocket() {
+        const G0: f64 = 9.80665;
+        const THALOS_SURFACE_G: f64 = 9.06;
+        const THALOS_ORBIT_DV: f64 = 7000.0;
+
+        let cat = PartCatalog::load_from_str(include_str!("../../../assets/parts.ron"))
+            .expect("parse parts.ron");
+        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/atlas.ron"))
+            .expect("parse atlas.ron");
+        let s = bp.stats(&cat).expect("atlas stats");
+
+        assert!(s.dry_mass_kg > 0.0 && s.propellant_mass_kg > 0.0);
+        for r in [Resource::Methane, Resource::Lox] {
+            let pool = s.resources.get(&r).unwrap_or_else(|| panic!("carries {r:?}"));
+            assert!(pool.mass_kg > 0.0, "spawns full of {r:?}");
+        }
+
+        // Liftoff: full thrust must beat weight at the launch (wet) mass.
+        assert!(
+            s.current_acceleration() > THALOS_SURFACE_G,
+            "atlas can't lift off ({:.1} m/s² ≤ g {THALOS_SURFACE_G})",
+            s.current_acceleration()
+        );
+
+        // Δv (single-stack lower bound: combined Isp over the full mass ratio —
+        // staging only adds to this) must clear low Thalos orbit.
+        let dv = s.combined_isp_s * G0 * (s.wet_mass_kg() / s.dry_mass_kg).ln();
+        assert!(
+            dv > THALOS_ORBIT_DV,
+            "atlas Δv {dv:.0} m/s below Thalos orbit needs (~{THALOS_ORBIT_DV})"
+        );
+
+        // Both stage engines must gimbal, or the ascent can't be steered.
+        for id in ["typhon", "boreas"] {
+            let CatalogEntry::Engine(e) =
+                cat.resolve(id).unwrap_or_else(|e| panic!("{id} in catalog: {e:?}"))
+            else {
+                panic!("{id} should be an engine");
+            };
+            assert!(e.gimbal_range_deg > 0.0, "{id} must be gimballed for ascent steering");
+        }
     }
 }
 

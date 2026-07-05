@@ -581,19 +581,29 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     let terrain = woody_terrain_factor(sp.layer, &sample, sp.slope_limit);
                     sample.grass_w * alt * clump * terrain
                 };
-                // Clearing around a flatten pad (e.g. the runway): the *forest*
-                // fades out approaching the airfield over a margin beyond the pad
-                // ramp, so trees don't crowd right up to the strip. Rocks are
-                // ground-level gravel — fine right up to the apron — so they only
-                // honour the pad itself (the `flatten_exclusion` gate above).
+                // Clearing around a flatten pad (e.g. the runway / spaceport
+                // basin): the *forest* fades in over a margin beyond the pad's
+                // ramp so trees don't crowd right up to the strip. Measured with
+                // the pad's RECTANGULAR exterior distance (the same tangent frame
+                // as `TerrainFlatten::weight`), NOT a circular radius off the
+                // diagonal — a wide basin (km across) would otherwise clear a
+                // multi-km disc that swallows the whole surrounding view, leaving
+                // the base ringed by bare ground instead of forest at its edge.
+                // Rocks are ground-level gravel — fine right up to the apron — so
+                // they only honour the pad itself (the `flatten_exclusion` gate).
                 if sp.layer != VegLayer::Rock
                     && let Some(flatten) = &input.flatten_exclusion
                 {
-                    let cos = dir.dot(flatten.center_dir).clamp(-1.0, 1.0);
-                    let d = (cos.acos() * input.radius_m) as f32;
-                    let pad_reach =
-                        (flatten.half_along_m.hypot(flatten.half_across_m) + flatten.ramp_m) as f32;
-                    accept *= smoothstep(pad_reach, pad_reach + VEG_CLEARING_MARGIN_M, d);
+                    let offset = (dir - flatten.center_dir) * flatten.radius_m;
+                    let along = offset.dot(flatten.tangent_along).abs()
+                        - flatten.half_along_m
+                        - flatten.ramp_m;
+                    let across = offset.dot(flatten.tangent_across).abs()
+                        - flatten.half_across_m
+                        - flatten.ramp_m;
+                    // Exterior distance beyond the ramped rectangle (0 inside it).
+                    let d = along.max(0.0).hypot(across.max(0.0)) as f32;
+                    accept *= smoothstep(0.0, VEG_CLEARING_MARGIN_M, d);
                 }
                 // Thinning only ever *removes* points, so the min-spacing
                 // guarantee from elimination is preserved.

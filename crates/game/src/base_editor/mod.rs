@@ -27,17 +27,22 @@
 
 mod camera;
 mod connections;
+mod launch_select;
 mod pick;
 mod place;
 mod ui;
 
-use bevy::math::DVec3;
+pub use launch_select::SpaceportLaunchRequest;
+
+use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
+use crate::structures::{
+    Facility, StructureId, StructureKind, StructurePlacement, StructureRegistry,
+};
 use crate::view::ViewMode;
 
 pub use place::BaseBuildState;
@@ -67,6 +72,12 @@ pub enum BaseEditorMode {
     PickSite,
     /// Place / move / delete buildings on the active site's flattened pad.
     PlaceBuildings,
+    /// Pick a launch point (one of the base's runways or launchpads) to place +
+    /// launch the current craft from. Opened programmatically by the
+    /// launch-select flow (the shipyard's LAUNCH), not the pause-menu SURFACE
+    /// BASE button; `active_site` is the spaceport basin. See
+    /// [`launch_select`](self::launch_select).
+    SelectLaunch,
 }
 
 /// Run condition: the base editor is open.
@@ -88,28 +99,46 @@ impl Plugin for BaseEditorPlugin {
             .add_plugins(pick::BaseEditorPickPlugin)
             .add_plugins(place::BaseEditorPlacePlugin)
             .add_plugins(connections::BaseEditorConnectionsPlugin)
+            .add_plugins(launch_select::BaseEditorLaunchSelectPlugin)
             .add_plugins(ui::BaseEditorUiPlugin)
             .add_systems(Update, apply_open_state);
     }
 }
 
-/// Runway-edge bounding radius used as the runway's connection node, so the
-/// authored tarmac meets the runway's side rather than its centreline.
-const RUNWAY_EDGE_M: f64 = 18.0;
-
-/// Author the **default base**: a launch complex laid out beside the runway on
-/// the shared flat basin (everything coplanar — `Drape` at `pad_r`). Two large
-/// launchpads with clearing around them, each flanked by a flame diverter and a
-/// small tank farm; a VAB and a pair of hangars set back along the far edge;
-/// blockhouses and an operations building near the strip. A tarmac MST links the
-/// runway, pads, big buildings and blockhouses (the satellite tanks/diverters
-/// stay off the road network). Called by the runway scenario after it installs
-/// the basin BaseSite. `pad_r = radius_m + E`.
+/// Author the **default base**: a spaceport laid out on the shared flat basin
+/// (everything coplanar — `Drape` at `pad_r`), with the paving links between the
+/// placed features generated automatically as a **typed connection network**
+/// (taxiways / aprons / roads / crawlerways). The two numbered runways (the
+/// primary plus the angled crosswind secondary forming a **V** off its `−along`
+/// threshold) are spawned by [`crate::runway`]; this lays out everything else
+/// and the pavement between it:
 ///
-/// Layout is in runway-frame `(along, off)` metres from the runway centre, with
-/// `+off` = the launch-complex side (`heading × center_dir`) — the same side the
-/// basin is offset toward in [`crate::runway`], so the complex falls inside the
-/// flattened basin.
+/// - **Airside** (`ConnectionKind::Taxiway`) — one **core campus** on the same
+///   (`+off`) side as the launch complex, reading outward from the strip:
+///   runway → full-length parallel taxiway with evenly-spaced connectors → a
+///   **large apron** (`ConnectionKind::Apron`, auto-derived from the hangar
+///   row, which stands *on* it, ramp all around) → landside → launch complex.
+///   Nothing is authored between the runways. The angled secondary hangs off
+///   the core taxiway through three **curved link taxiways**
+///   ([`connections::spawn_authored_path`] fillets) that cross the primary
+///   strip — normal runway crossings, rendered under the runway's higher
+///   paving — and sweep tangentially onto the secondary's parallel-taxiway
+///   line. Run-up/holding aprons sit at both primary thresholds.
+/// - **Launch complex** (`+off`, behind the core) — two large **launchpads**
+///   with blast-clear rings, each flanked by a **flame diverter** and a
+///   **fuel/tank farm**, plus a **VAB**-scale assembly building (the enterable
+///   shipyard [`Facility::Vab`]). A **crawlerway**
+///   (`ConnectionKind::Crawlerway`) runs from the VAB to each pad — the future
+///   crawler-transporter route.
+/// - **Landside** (`ConnectionKind::Road`) — one curved service road: ops →
+///   east blockhouse → around the apron → across the VAB's doors → west
+///   blockhouse.
+///
+/// Called by the runway scenario after it installs the basin `BaseSite`.
+/// `pad_r = radius_m + E`; `sec_heading` is the second runway's takeoff heading
+/// (the secondary taxiway is laid out in its rotated frame). Layout is in
+/// runway-frame `(along, off)` metres from the runway centre, `+off` = the
+/// launch-complex side (`heading × center_dir`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_default_base(
     commands: &mut Commands,
@@ -121,6 +150,7 @@ pub(crate) fn spawn_default_base(
     basin_site_id: StructureId,
     center_dir: DVec3,
     heading: DVec3,
+    sec_heading: DVec3,
     pad_r: f64,
 ) {
     let mats = place::BaseMaterials::create(materials);
@@ -138,46 +168,34 @@ pub(crate) fn spawn_default_base(
         height_m: h,
     };
 
-    // Pads sit ~600 m off the centreline, 1.7 km apart, with a wide blast-clear
-    // ring — well off the strip. Big buildings (VAB, hangars) line the far edge
-    // of the basin; ops/blockhouses sit near the strip.
-    const PAD_ALONG: f64 = 850.0;
-    const PAD_OFF: f64 = 600.0;
+    // Launch-complex geometry (`+off` side), in runway-frame (along, off) metres.
+    const PAD_ALONG: f64 = 900.0;
+    const PAD_OFF: f64 = 640.0;
+    const VAB_OFF: f64 = 1080.0;
+    // Airside geometry, on the SAME (`+off`) side as the launch complex — one
+    // core campus reading outward from the strip: runway → parallel taxiway →
+    // large apron with the hangar row standing ON it → landside (ops /
+    // blockhouses) → launch complex (pads / VAB / tanks) behind. Nothing is
+    // authored between the runways; the angled secondary (`−off` side) is
+    // reached by the taxiway wrapping around the primary's `−along` threshold
+    // (a curved end-around — taxi to the secondary goes through the primary's
+    // system, never across a strip).
+    let pri_half_len: f64 = crate::runway::RUNWAY_HALF_LENGTH_M;
+    // Runway-edge station connectors end here: 1 m *inside* the strip edge, so
+    // the joint tucks under the runway's higher paving (seamless, no grass
+    // sliver) while nothing paved ever spans the strip itself.
+    let pri_edge_off: f64 = crate::runway::RUNWAY_HALF_WIDTH_M - 1.0;
+    const TWY_OFF: f64 = 190.0; // primary parallel taxiway centreline
+    /// Half the `ConnectionKind::Taxiway` strip width (44 m — see
+    /// `connections::ConnectionKind::style`), for abutting aprons to it.
+    const TWY_HALF_WIDTH: f64 = 22.0;
+    const HANGAR_OFF: f64 = 500.0; // hangar row, standing on the apron
+    const HANGAR_HALF_X: f64 = 30.0;
+    const HANGAR_HALF_Z: f32 = 20.0;
+    let vab_kind = building(68.0, 46.0, 96.0);
+    let ops_kind = building(16.0, 12.0, 12.0);
 
-    // Road structures: linked by the tarmac MST (runway ↔ pads ↔ buildings).
-    let road: &[(f64, f64, StructureKind)] = &[
-        // Two large launch pads with clearing.
-        (PAD_ALONG, PAD_OFF, launchpad(50.0)),
-        (-PAD_ALONG, PAD_OFF, launchpad(50.0)),
-        // Operations / terminal building near the runway centre.
-        (0.0, 300.0, building(16.0, 12.0, 12.0)),
-        // A blockhouse beside each pad (between strip and pad).
-        (PAD_ALONG, 330.0, building(10.0, 10.0, 8.0)),
-        (-PAD_ALONG, 330.0, building(10.0, 10.0, 8.0)),
-        // VAB-scale assembly building, set back on the far edge.
-        (0.0, 1040.0, building(68.0, 46.0, 96.0)),
-        // Two long hangars flanking it.
-        (520.0, 980.0, building(58.0, 24.0, 26.0)),
-        (-520.0, 980.0, building(58.0, 24.0, 26.0)),
-    ];
-
-    // Satellite structures: placed but kept off the road network (they cluster
-    // around their pad). Flame diverters just outboard of each pad, plus a small
-    // tank farm beyond.
-    let satellites: &[(f64, f64, StructureKind)] = &[
-        // Flame diverters / trenches (low, wide concrete) outboard of each pad.
-        (PAD_ALONG, 712.0, building(14.0, 44.0, 4.0)),
-        (-PAD_ALONG, 712.0, building(14.0, 44.0, 4.0)),
-        // Propellant tank farm beyond each pad (three tanks).
-        (PAD_ALONG - 42.0, 845.0, tank(9.0, 26.0)),
-        (PAD_ALONG, 875.0, tank(9.0, 26.0)),
-        (PAD_ALONG + 42.0, 845.0, tank(9.0, 26.0)),
-        (-PAD_ALONG + 42.0, 845.0, tank(9.0, 26.0)),
-        (-PAD_ALONG, 875.0, tank(9.0, 26.0)),
-        (-PAD_ALONG - 42.0, 845.0, tank(9.0, 26.0)),
-    ];
-
-    let mut place_one = |along: f64, off: f64, kind: StructureKind| {
+    let mut place_one = |along: f64, off: f64, kind: StructureKind| -> StructureId {
         place::place_structure(
             commands,
             meshes,
@@ -192,31 +210,202 @@ pub(crate) fn spawn_default_base(
             pad_r,
             kind,
             0.0,
-        );
+        )
     };
 
-    // Node 0 is the runway itself (runway centre), so the tarmac links the
-    // complex to the runway edge.
-    let mut nodes: Vec<(f64, f64, f64)> = vec![(0.0, 0.0, RUNWAY_EDGE_M)];
-    for &(along, off, kind) in road {
-        place_one(along, off, kind);
-        nodes.push((along, off, place::kind_bounding_m(&kind)));
-    }
-    for &(along, off, kind) in satellites {
-        place_one(along, off, kind);
+    // --- Launch complex ---
+    place_one(PAD_ALONG, PAD_OFF, launchpad(50.0));
+    place_one(-PAD_ALONG, PAD_OFF, launchpad(50.0));
+    let vab = place_one(0.0, VAB_OFF, vab_kind);
+    // Flame diverters just outboard of each pad.
+    place_one(PAD_ALONG, PAD_OFF + 112.0, building(14.0, 44.0, 4.0));
+    place_one(-PAD_ALONG, PAD_OFF + 112.0, building(14.0, 44.0, 4.0));
+    // Fuel / tank farm beyond each pad (three tanks each).
+    for side in [1.0, -1.0] {
+        for dx in [-42.0, 0.0, 42.0] {
+            place_one(side * PAD_ALONG + dx, PAD_OFF + 235.0, tank(9.0, 26.0));
+        }
     }
 
-    connections::spawn_authored(
-        commands,
-        meshes,
-        &mats,
-        root,
-        body_id,
-        basin_site_id,
-        center_dir,
-        heading,
-        pad_r,
-        &nodes,
+    // --- Landside buildings ---
+    // Ops/tower set well past the apron along the strip so it never sits on the
+    // paving.
+    place_one(1100.0, 300.0, ops_kind);
+    place_one(PAD_ALONG, PAD_OFF - 240.0, building(10.0, 10.0, 8.0));
+    place_one(-PAD_ALONG, PAD_OFF - 240.0, building(10.0, 10.0, 8.0));
+
+    // --- Hangars, standing on the core apron. The apron below is auto-derived
+    // from this row, so adding/moving hangars grows it to match. ---
+    let hangar_alongs = [-750.0, -250.0, 250.0, 750.0];
+    for &h_along in &hangar_alongs {
+        place_one(h_along, HANGAR_OFF, building(HANGAR_HALF_X as f32, HANGAR_HALF_Z, 22.0));
+    }
+
+    // The VAB is the enterable shipyard facility for the space-center hub.
+    registry.set_facility(vab, Facility::Vab);
+
+    // `place_one`'s last use is above, so its `commands`/`meshes`/`registry`
+    // borrows end here — freeing them for the connection spawners below.
+
+    // --- Taxiways. The core-side parallel taxiway runs the primary's full
+    // length, straight. The secondary's system hangs off it through three
+    // curved **link taxiways** sweeping across the V interior. Each crossing
+    // is split at the strip: a straight stub from the core taxiway stops at
+    // the near runway edge, and the curved link resumes at the far edge — no
+    // paving ever spans the runway; the strip + its markings stay untouched
+    // between the two ends (taxi across is over the runway's own asphalt).
+    // The link then curves tangentially onto the secondary's parallel-taxiway
+    // line: the first link, at the primary threshold, *is* that line's start
+    // and runs its full length; the other two merge into it at a hair-lower
+    // lift so the overlap renders as one strip. `sd` is the secondary strip
+    // direction in (along, off), `sn` its perpendicular toward the primary;
+    // `sp(s, t)` maps stations along the strip (`s` from the near threshold)
+    // + offsets toward the primary (`t`) into the base frame. ---
+    let sd = DVec2::new(sec_heading.dot(heading), sec_heading.dot(across));
+    let sn = DVec2::new(-sd.y, sd.x);
+    let sec_near = DVec2::new(
+        crate::runway::SEC_NEAR_ALONG_M,
+        -crate::runway::SEC_NEAR_ACROSS_M,
+    );
+    let sp = |s: f64, t: f64| sec_near + sd * s + sn * t;
+    const SEC_TWY_T: f64 = 170.0; // secondary parallel taxiway offset
+    // 1 m inside the secondary's strip edge (half-width 40), tucked under its
+    // paving like `pri_edge_off`.
+    const SEC_EDGE_T: f64 = 39.0;
+    const LINK_FILLET_M: f64 = 300.0; // sweep radius of the link taxiways
+    let sec_len = crate::runway::SECONDARY_LENGTH_M;
+    let q0 = sp(0.0, SEC_TWY_T);
+    // Intersection of the constant-`along` line at `c` with the secondary
+    // taxiway centreline — where a link dropping straight down from the core
+    // taxiway meets it.
+    let line_at = |c: f64| {
+        let s = (c - q0.x) / sd.x;
+        DVec2::new(c, q0.y + s * sd.y)
+    };
+    // Core parallel taxiway: straight, full length.
+    connections::spawn_authored_path(
+        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        connections::ConnectionKind::Taxiway,
+        &[
+            DVec2::new(pri_half_len - 30.0, TWY_OFF),
+            DVec2::new(-(pri_half_len - 30.0), TWY_OFF),
+        ],
+        0.0,
+        0.0,
+    );
+    // Link 1, at the primary threshold: resume at the far runway edge, sweep
+    // onto the secondary line and run it out to the far end.
+    let c1 = -(pri_half_len - 70.0);
+    connections::spawn_authored_path(
+        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        connections::ConnectionKind::Taxiway,
+        &[DVec2::new(c1, -pri_edge_off), line_at(c1), sp(sec_len, SEC_TWY_T)],
+        LINK_FILLET_M,
+        0.0,
+    );
+    // Links 2–3, midfield: same shape, ending just past tangency (the short
+    // straight tail hides under link 1's strip via the lower lift).
+    for c in [-1400.0, -700.0] {
+        let merge = line_at(c);
+        connections::spawn_authored_path(
+            commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+            connections::ConnectionKind::Taxiway,
+            &[
+                DVec2::new(c, -pri_edge_off),
+                merge,
+                merge + sd * (LINK_FILLET_M + 60.0),
+            ],
+            LINK_FILLET_M,
+            -0.006,
+        );
+    }
+    // Straight perpendicular connectors, all stopping at the near runway edge:
+    // the core-side halves of the three link crossings, a threshold connector
+    // at the east primary end (through the holding pad, for full-length
+    // departures), evenly spaced exits between them, and the secondary's
+    // thresholds + midfield.
+    let mut cn: Vec<(f64, f64, f64)> = Vec::new();
+    let mut ce: Vec<(usize, usize)> = Vec::new();
+    let mut stub = |a: DVec2, b: DVec2| {
+        cn.push((a.x, a.y, 0.0));
+        cn.push((b.x, b.y, 0.0));
+        ce.push((cn.len() - 2, cn.len() - 1));
+    };
+    for c in [c1, -2100.0, -1400.0, -700.0, 0.0, 700.0, 1400.0, 2100.0, 2430.0] {
+        stub(DVec2::new(c, TWY_OFF), DVec2::new(c, pri_edge_off));
+    }
+    for s in [60.0, sec_len * 0.5, sec_len - 60.0] {
+        stub(sp(s, SEC_TWY_T), sp(s, SEC_EDGE_T));
+    }
+    connections::spawn_authored_network(
+        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        connections::ConnectionKind::Taxiway, &cn, Some(&ce),
+    );
+
+    // --- The core apron (auto-generated from the hangar row): one large ramp
+    // the hangars stand ON — it spans the row plus a parking margin each end
+    // and fills from the parallel taxiway to behind the hangars' rear wall, so
+    // pavement surrounds them entirely like a real airport ramp. ---
+    const APRON_END_MARGIN_M: f64 = 70.0;
+    const APRON_BACK_M: f64 = 40.0; // pavement behind the hangar rear wall
+    let (row_min, row_max) = hangar_alongs
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(lo, hi), &a| (lo.min(a), hi.max(a)));
+    let apron_a0 = row_min - HANGAR_HALF_X - APRON_END_MARGIN_M;
+    let apron_a1 = row_max + HANGAR_HALF_X + APRON_END_MARGIN_M;
+    // Tuck the apron under the taxiway strip so they abut with no sliver gap
+    // (the taxiway's slightly higher lift renders over it).
+    let apron_off0 = TWY_OFF;
+    let apron_off1 = HANGAR_OFF + f64::from(HANGAR_HALF_Z) + APRON_BACK_M;
+    connections::spawn_authored_apron(
+        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        (apron_a0 + apron_a1) * 0.5,
+        (apron_off0 + apron_off1) * 0.5,
+        (apron_a1 - apron_a0) * 0.5,
+        (apron_off1 - apron_off0).abs() * 0.5,
+    );
+
+    // --- Run-up / holding aprons at each primary threshold: fill the whole
+    // band between the runway edge and the parallel taxiway (abutting both) —
+    // the paved holding pads real fields keep beside the runway ends. ---
+    let bay_inner = pri_edge_off;
+    let bay_outer = TWY_OFF - TWY_HALF_WIDTH;
+    for side in [-1.0, 1.0] {
+        connections::spawn_authored_apron(
+            commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+            side * (pri_half_len - 200.0),
+            (bay_inner + bay_outer) * 0.5,
+            140.0,
+            (bay_outer - bay_inner) * 0.5,
+        );
+    }
+
+    // --- Road (landside): one curved service road — ops → east blockhouse →
+    // around the apron corner → across the VAB's doors → west blockhouse. ---
+    connections::spawn_authored_path(
+        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        connections::ConnectionKind::Road,
+        &[
+            DVec2::new(1100.0, 300.0),               // ops
+            DVec2::new(PAD_ALONG, PAD_OFF - 240.0),  // east blockhouse
+            DVec2::new(1010.0, 760.0),               // swing wide of the apron
+            DVec2::new(0.0, VAB_OFF - 150.0),        // across the VAB's doors
+            DVec2::new(-1010.0, 760.0),
+            DVec2::new(-PAD_ALONG, PAD_OFF - 240.0), // west blockhouse
+        ],
+        120.0,
+        0.0,
+    );
+
+    // --- Crawlerway: VAB → each launchpad (explicit edges, not an MST) ---
+    let crawler_nodes: Vec<(f64, f64, f64)> = vec![
+        (0.0, VAB_OFF, place::kind_bounding_m(&vab_kind)),
+        (PAD_ALONG, PAD_OFF, 50.0),
+        (-PAD_ALONG, PAD_OFF, 50.0),
+    ];
+    connections::spawn_authored_network(
+        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        connections::ConnectionKind::Crawlerway, &crawler_nodes, Some(&[(0, 1), (0, 2)]),
     );
 }
 
@@ -271,8 +460,10 @@ pub(crate) fn compute_focus(
     let body_state = states.get(body_id)?;
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
 
-    if editor.mode == BaseEditorMode::PlaceBuildings
-        && let Some(site_id) = editor.active_site
+    if matches!(
+        editor.mode,
+        BaseEditorMode::PlaceBuildings | BaseEditorMode::SelectLaunch
+    ) && let Some(site_id) = editor.active_site
         && let Some(site) = registry.get(site_id)
     {
         let up_world = (body_state.orientation * site.anchor_dir).normalize();

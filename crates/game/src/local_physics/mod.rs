@@ -578,6 +578,7 @@ mod tests {
             dry_mass: 0.0,
             reactants: Vec::new(),
             power_draw_kw: 0.0,
+            gimbal_range_deg: 0.0,
         };
 
         let (shape, offset) =

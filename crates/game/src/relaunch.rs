@@ -67,6 +67,15 @@ pub struct RelaunchRequest(pub Option<RelaunchSpec>);
 #[derive(Resource, Default)]
 pub(crate) struct RelaunchInFlight(Option<RelaunchSpec>);
 
+impl RelaunchInFlight {
+    /// Whether a relaunch rebuild is mid-flight (blueprint parked between the
+    /// two phases). Read by the space-center hub to tell a VAB **Launch** (go
+    /// fly) from an Escape-out (return to the hub).
+    pub(crate) fn active(&self) -> bool {
+        self.0.is_some()
+    }
+}
+
 /// Run condition: no relaunch teardown/rebuild is in flight. Systems that
 /// measure or place the player craft (the deferred runway placement) gate on
 /// this so they never act on the outgoing craft during the swap window.

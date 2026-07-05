@@ -35,7 +35,15 @@ pub struct StructureId(pub u64);
 /// flatten path are kind-agnostic. New kinds (buildings, pads) extend this.
 #[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub enum StructureKind {
-    Runway,
+    /// A paved runway strip. Parametric so a base can carry several, each with
+    /// its own size and heading (the takeoff heading is the site's
+    /// `heading_tangent`). Half-extents are along the heading (`length`) and
+    /// across it (`width`); the strip drapes flush on its parent `BaseSite`
+    /// basin. Rendered + collided by [`crate::runway`].
+    Runway {
+        half_length_m: f32,
+        half_width_m: f32,
+    },
     /// A player-flattened building site. Owns the `FlattenTo` terrain pad;
     /// buildings placed on it drape on the levelled ground.
     BaseSite,
@@ -60,6 +68,26 @@ pub enum StructureKind {
         radius_m: f32,
         height_m: f32,
     },
+}
+
+/// An enterable facility a player reaches from the space-center hub, tagged onto
+/// the building [`StructureSite`] that represents it. The hub's hover picker maps
+/// a clicked facility building to its entry action. Only [`Facility::Vab`] is
+/// wired today; the rest are the seams the picker leaves open (runway/pad launch,
+/// tracking station, administration).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
+pub enum Facility {
+    /// Vehicle Assembly Building — opens the shipyard editor.
+    Vab,
+}
+
+impl Facility {
+    /// Human-readable name shown in the hub's hover callout.
+    pub fn label(self) -> &'static str {
+        match self {
+            Facility::Vab => "VEHICLE ASSEMBLY BUILDING",
+        }
+    }
 }
 
 /// How a structure meets the terrain.
@@ -94,6 +122,10 @@ pub struct StructureSite {
     /// deleting a site can take its buildings with it. `None` for top-level
     /// structures (runway, sites).
     pub parent_site: Option<StructureId>,
+    /// If this structure is an enterable [`Facility`] (the VAB, …), which one —
+    /// read by the space-center hub's click-to-enter. `None` for ordinary
+    /// structures. Set post-registration via [`StructureRegistry::set_facility`].
+    pub facility: Option<Facility>,
 }
 
 /// Every terrain-anchored structure, grouped by body.
@@ -134,8 +166,17 @@ impl StructureRegistry {
             placement,
             kind,
             parent_site,
+            facility: None,
         });
         id
+    }
+
+    /// Tag a registered structure as an enterable [`Facility`] (e.g. the default
+    /// base's VAB building). No-op if the id is unknown.
+    pub fn set_facility(&mut self, id: StructureId, facility: Facility) {
+        if let Some(site) = self.sites.values_mut().flatten().find(|s| s.id == id) {
+            site.facility = Some(facility);
+        }
     }
 
     /// All structures on a body. Read by the MFD navigation-display widget
@@ -244,6 +285,7 @@ impl Plugin for StructuresPlugin {
         app.init_resource::<StructureRegistry>()
             .register_type::<StructureId>()
             .register_type::<StructureKind>()
+            .register_type::<Facility>()
             .register_type::<StructurePlacement>();
     }
 }

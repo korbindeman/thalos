@@ -35,12 +35,10 @@ use thalos_input::shipyard::ShipyardInputPlugin;
 
 use self::core::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
 
-use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::EDITOR_LAYER;
 use crate::hud::HudPanel;
 use crate::loading::AppState;
 use crate::photo_mode::HideInPhotoMode;
-use crate::view::ViewMode;
 
 pub use ui::EditorTextFocus;
 
@@ -108,20 +106,19 @@ fn open_on_start(mut flag: ResMut<OpenShipyardOnStart>, mut editor: ResMut<Shipy
     }
 }
 
-/// React to open/close: flip the cameras, show/hide the build world, and
-/// hide/restore the flight overlays — both `HudPanel`s and the photo-mode
-/// (`HideInPhotoMode`) set, since the editor camera becomes the default UI
-/// camera and would otherwise draw any flight UI left visible (the navball
-/// leaked through when only `HudPanel`s were hidden). Sim pause is handled
-/// by `sim_clock::sync_sim_clock` reading [`ShipyardEditor`] directly.
+/// React to open/close: show/hide the build world and hide/restore the flight
+/// overlays — both `HudPanel`s and the photo-mode (`HideInPhotoMode`) set, since
+/// the editor camera becomes the default UI camera and would otherwise draw any
+/// flight UI left visible (the navball leaked through when only `HudPanel`s were
+/// hidden).
+///
+/// Camera activation is **not** owned here anymore: the single authority
+/// `view::apply_active_camera` selects the editor camera from
+/// [`GameContext::Vab`](crate::game_context::GameContext) (F6 UI-flow
+/// unification). Sim pause is handled by `sim_clock::sync_sim_clock` reading the
+/// same `GameContext`.
 fn apply_open_state(
     editor: Res<ShipyardEditor>,
-    mut view: ResMut<ViewMode>,
-    mut commands: Commands,
-    mut cameras: ParamSet<(
-        Query<(Entity, &mut Camera), Or<(With<MapCamera>, With<ShipCamera>)>>,
-        Query<(Entity, &mut Camera), With<scene::EditorCamera>>,
-    )>,
     mut visibilities: ParamSet<(
         Query<
             &mut Visibility,
@@ -144,36 +141,6 @@ fn apply_open_state(
         return;
     }
     let open = editor.open;
-
-    if open {
-        // The editor owns the screen: both scene cameras off (markers
-        // stripped so the close path can cleanly reassert them), hangar
-        // camera on and carrying `IsDefaultUiCamera` — bevy_ui renders to
-        // the default UI camera, and an inactive default means no UI at
-        // all. `view::apply_active_camera` stands down while we're open.
-        for (entity, mut camera) in cameras.p0().iter_mut() {
-            if camera.is_active {
-                camera.is_active = false;
-            }
-            commands
-                .entity(entity)
-                .remove::<(ActiveCamera, IsDefaultUiCamera)>();
-        }
-        for (entity, mut camera) in cameras.p1().iter_mut() {
-            camera.is_active = true;
-            commands.entity(entity).insert(IsDefaultUiCamera);
-        }
-    } else {
-        for (entity, mut camera) in cameras.p1().iter_mut() {
-            camera.is_active = false;
-            commands.entity(entity).remove::<IsDefaultUiCamera>();
-        }
-        // Hand the screen back: poke ViewMode's change tick so
-        // `view::apply_active_camera` (the owner of scene-camera activity
-        // and the ActiveCamera/IsDefaultUiCamera markers) reasserts the
-        // current view's camera.
-        view.set_changed();
-    }
 
     let build_target = if open {
         Visibility::Inherited

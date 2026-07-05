@@ -54,19 +54,22 @@ use bevy::winit::WinitPlugin;
 use std::sync::Arc;
 
 use thalos_body_render::{
-    BakeParams, CanopyStyle, GrassBladeLod, GrassClumpParams, GrassFieldParams, GrassMaterial,
-    GrassMaterialPlugin,
+    BakeParams, CanopyStyle, ConstantHeightSource, GpuGrassMaterial, GpuGrassMaterialPlugin,
+    GpuGrassParams, GpuGrassWindowInput, GrassBladeLod, GrassClumpParams, GrassFieldParams,
+    GrassMaterial, GrassMaterialPlugin,
     GrassParams, GrassProfile, GroundPatchMaterial, GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES,
     ImpostorAtlasLayout, ImpostorParams, LIGHT_AT_1AU, RockMaterial, RockMaterialPlugin,
     RockMeshData, RockMeshParams, ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorMaterial,
     TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin, TreeMeshParams, VegInstance,
-    build_foliage_atlas, build_foliage_material_atlas, build_grass_card_atlas,
+    build_foliage_atlas, build_foliage_material_atlas, build_gpu_grass_template,
+    build_gpu_grass_window, build_grass_card_atlas,
     build_grass_clump_mesh,
     build_grass_field_mesh, build_rock_mesh, build_rock_mesh_data, build_tree_mesh,
     build_tree_mesh_data, combine_impostor_tile_mesh, combine_rock_tile_mesh, fallback_shadow_map,
-    hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
-    tree_bounding_sphere,
+    gpu_grass_anchor, gpu_grass_style_table, hemioct_decode, impostor_bake_rotation,
+    make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
 };
+use thalos_body_render::GPU_GRASS_BAND_COUNT;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 960;
@@ -168,6 +171,7 @@ fn main() {
         TreeMaterialPlugin,
         TreeImpostorMaterialPlugin,
         GrassMaterialPlugin,
+        GpuGrassMaterialPlugin,
         GroundPatchMaterialPlugin,
         RockMaterialPlugin,
         PreviewShadowPlugin,
@@ -189,6 +193,11 @@ enum AssetKind {
     TreeImpostor,
     GrassClump(GrassClumpParams),
     GrassField(GrassFieldParams),
+    /// The GPU-generated grass field (`GpuGrassMaterial`): the template mesh +
+    /// a small synthetic control window over flat ground, so the
+    /// vertex-synthesized blades (bands 0–1) can be judged and the shader
+    /// smoke-tested headlessly.
+    GpuGrassField,
     /// A single procedural pebble / rock (`RockMaterial`), for shape iteration.
     Rock(RockMeshParams),
     /// A scattered patch of mixed pebbles among grass — the in-game look, where
@@ -227,6 +236,9 @@ impl Preview {
             // wants the whole scattered patch.
             AssetKind::Rock(_) => (self.distance * 1.6).clamp(1.0, 6.0),
             AssetKind::RockField => ROCK_FIELD_SIZE_M,
+            // The GPU field spans its confined control window (±150 m), so the
+            // ground must reach the window edge or the far blades float on sky.
+            AssetKind::GpuGrassField => 320.0,
             _ => (self.distance * 2.4).clamp(3.0, 40.0),
         }
     }
@@ -545,6 +557,45 @@ fn objects() -> Vec<Preview> {
                 distance: 10.0,
             }
         },
+        // --- GPU grass field ---
+        // The vertex-synthesized grass field (bands 0–1 over a synthetic flat
+        // window). `_3q` judges the fountain-clump read, `_top` the aerial
+        // coverage, `_side` the grazing eye-line. Note the distance fade is
+        // camera-anchored here (no craft), so band membership follows the eye.
+        // `_side` leads so the material's async pipeline compile lands before
+        // the later shots (the first capture of a fresh material can beat the
+        // compile and come out empty).
+        Preview {
+            name: "gpu_grass_field_side",
+            kind: AssetKind::GpuGrassField,
+            view: ViewKind::Side,
+            focus_y: 0.25,
+            distance: 5.0,
+        },
+        Preview {
+            name: "gpu_grass_field_top",
+            kind: AssetKind::GpuGrassField,
+            view: ViewKind::Top,
+            focus_y: 0.0,
+            distance: 12.0,
+        },
+        Preview {
+            name: "gpu_grass_field_3q",
+            kind: AssetKind::GpuGrassField,
+            view: ViewKind::ThreeQuarter,
+            focus_y: 0.2,
+            distance: 6.0,
+        },
+        // The mid/far bands (2–4) — the in-game "grass just stops" regression
+        // lived out here, invisible to the close-up shots. Camera far enough
+        // that bands out to the window edge are in frame.
+        Preview {
+            name: "gpu_grass_field_far",
+            kind: AssetKind::GpuGrassField,
+            view: ViewKind::ThreeQuarter,
+            focus_y: 0.35,
+            distance: 90.0,
+        },
         // --- Rocks / pebbles ---
         // A single stylized pebble, framed close from three-quarter + side so the
         // plane-cut facets, sharp edges, and baked cavity-AO read.
@@ -758,12 +809,14 @@ fn veg_params() -> GrassParams {
 /// Spawn each object's diorama: a sky-model-lit ground patch, a grass carpet
 /// around plants, and the object itself (trees tagged onto the shadow-caster
 /// layer so they cast into the sun-shadow pass).
+#[allow(clippy::too_many_arguments)]
 fn setup_scene(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut tree_materials: ResMut<Assets<TreeMaterial>>,
     mut grass_materials: ResMut<Assets<GrassMaterial>>,
+    mut gpu_grass_materials: ResMut<Assets<GpuGrassMaterial>>,
     mut ground_materials: ResMut<Assets<GroundPatchMaterial>>,
     mut rock_materials: ResMut<Assets<RockMaterial>>,
     impostor_rig: Res<ImpostorRig>,
@@ -888,6 +941,93 @@ fn setup_scene(
                 commands.spawn((
                     Mesh3d(meshes.add(build_grass_field_mesh(params))),
                     MeshMaterial3d(grass_material.clone()),
+                    transform,
+                ));
+            }
+            AssetKind::GpuGrassField => {
+                // A synthetic flat-ground control window (constant height,
+                // grass-dominant masks) confined to the diorama, and the
+                // template mesh whose blades the vertex shader synthesizes —
+                // the whole GPU path exercised headlessly.
+                let radius_m = 3_186_000.0;
+                let win_px: u32 = 256;
+                let win_half_m = 150.0;
+                let anchor = gpu_grass_anchor(bevy::math::DVec3::Y, radius_m);
+                let window = build_gpu_grass_window(&GpuGrassWindowInput {
+                    height_source: Arc::new(ConstantHeightSource::new(1200.0)),
+                    radius_m,
+                    anchor,
+                    scatter_regions: Arc::new(Vec::new()),
+                    size_px: win_px,
+                    half_m: win_half_m,
+                });
+                let extent = Extent3d {
+                    width: win_px,
+                    height: win_px,
+                    depth_or_array_layers: 1,
+                };
+                let height_window = images.add(Image::new(
+                    extent,
+                    TextureDimension::D2,
+                    window.heights.iter().flat_map(|h| h.to_le_bytes()).collect(),
+                    TextureFormat::R32Float,
+                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                ));
+                let aux_window = images.add(Image::new(
+                    extent,
+                    TextureDimension::D2,
+                    window.aux.clone(),
+                    TextureFormat::Rgba8Unorm,
+                    bevy::asset::RenderAssetUsages::RENDER_WORLD,
+                ));
+
+                let base = veg_params();
+                let mut gp = GpuGrassParams {
+                    sun_dir: base.sun_dir,
+                    // A steady breeze so the stills show the gust-field bend
+                    // variety (frozen at t = 0, waves still vary spatially).
+                    wind: Vec4::new(0.71, 0.0, 0.71, 0.05),
+                    // t, altitude collapse 0, sea level far below, enable 1.
+                    time_fade: Vec4::new(0.0, 0.0, -1.0e6, 1.0),
+                    sky_up: base.sky_up,
+                    sky_tau: base.sky_tau,
+                    // w = 0 → distance fade around the camera (no craft here).
+                    anchor: Vec4::ZERO,
+                    frame_east: anchor.east.as_vec3().extend(window.anchor_height_m),
+                    frame_north: anchor.north.as_vec3().extend(0.0),
+                    frame_up: anchor.dir.as_vec3().extend(0.0),
+                    window_meta: Vec4::new(
+                        (2.0 * win_half_m / win_px as f64) as f32,
+                        win_px as f32,
+                        win_half_m as f32,
+                        0.0,
+                    ),
+                    ..default()
+                };
+                let anchor_point = anchor.dir * (radius_m + window.anchor_height_m as f64);
+                let phase = anchor_point.map(|c| c.rem_euclid(4000.0));
+                gp.phase = Vec4::new(phase.x as f32, phase.y as f32, phase.z as f32, 0.0);
+                for i in 0..GPU_GRASS_BAND_COUNT {
+                    let (cx, cy) = anchor.band_cell[i];
+                    gp.band_cell[i] =
+                        UVec4::new(cx as u32, cy as u32, anchor.face as u32, 0);
+                    let (cu, cv) = anchor.band_cell_m[i];
+                    let (fx, fy) = anchor.band_frac[i];
+                    gp.band_geom[i] = Vec4::new(cu as f32, cv as f32, fx as f32, fy as f32);
+                }
+                gp.style = gpu_grass_style_table();
+                let material = gpu_grass_materials.add(GpuGrassMaterial {
+                    params: gp,
+                    sun_shadow_map_0: fallback.clone(),
+                    sun_shadow_map_1: fallback.clone(),
+                    sun_shadow_map_2: fallback.clone(),
+                    height_window,
+                    aux_window,
+                    ..default()
+                });
+                commands.spawn((
+                    Mesh3d(meshes.add(build_gpu_grass_template())),
+                    MeshMaterial3d(material),
                     transform,
                 ));
             }

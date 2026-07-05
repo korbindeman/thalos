@@ -13,8 +13,11 @@
 //! collect demands and apply the realized commands; this crate owns the
 //! policy (arbitration, control law, allocation) as testable functions.
 //!
-//! Scope today: attitude + throttle for ships. Warp arbitration, EVA, and
-//! RCS/gimbal effectors are designed-in extension points — new
+//! Scope today: attitude + throttle for ships, over three attitude effectors —
+//! reaction wheels, aero control surfaces, and **engine gimbal** (thrust
+//! vectoring, folded into the controller's `effector_authority` alongside the
+//! aero surfaces; see `docs/aerodynamics.md` *Thrust vectoring*). Warp
+//! arbitration, EVA, and RCS are designed-in extension points — new
 //! `DemandSource`s and effectors slot into the same arbitrate → control →
 //! allocate pipeline — but are not yet wired. See `docs/control.md`.
 

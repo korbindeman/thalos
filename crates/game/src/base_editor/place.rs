@@ -21,7 +21,7 @@ use thalos_body_render::{ShadowedStandardMaterial, shadowed};
 use thalos_physics_canonical::body_fixed::{body_fixed_pose_from_inertial, body_fixed_surface_velocity};
 use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
-use thalos_physics_local::ActiveLocalBubble;
+use thalos_physics_local::{ActiveLocalBubble, LocalPrimitiveShape, spawn_structure_collider};
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
@@ -42,6 +42,13 @@ const GRID_STEP_M: f64 = 2.0;
 const ROTATE_STEP: f32 = std::f32::consts::PI / 12.0;
 /// Thickness of the launchpad slab, metres.
 const LAUNCHPAD_SLAB_H: f32 = 0.5;
+/// Depth (m) of the launchpad's kinematic collider, extending *down* from the
+/// slab top. Deeper than the thin visual slab so the `BodyFixed → bubble`
+/// handoff can't drop a released craft through it, mirroring the runway slab's
+/// generous thickness (the pad is the sole ground once a `RunwaySite` exists —
+/// the generic terrain patch is skipped on that body, see
+/// `local_physics::terrain_patch`).
+const LAUNCHPAD_COLLIDER_H_M: f64 = 4.0;
 /// Margin the launched craft's lowest point clears the pad top by, metres.
 const LAUNCH_REST_MARGIN_M: f64 = 0.05;
 
@@ -127,7 +134,12 @@ pub(super) struct BaseMaterials {
     pad: Handle<ShadowedStandardMaterial>,
     ring: Handle<ShadowedStandardMaterial>,
     tank: Handle<ShadowedStandardMaterial>,
+    /// Dark asphalt — taxiways and aprons.
     pub(super) tarmac: Handle<ShadowedStandardMaterial>,
+    /// Light concrete — landside service roads.
+    pub(super) road: Handle<ShadowedStandardMaterial>,
+    /// Neutral gravel — the VAB→pad crawlerway.
+    pub(super) crawlerway: Handle<ShadowedStandardMaterial>,
 }
 
 impl BaseMaterials {
@@ -162,6 +174,18 @@ impl BaseMaterials {
             tarmac: materials.add(shadowed(StandardMaterial {
                 base_color: Color::srgb(0.14, 0.14, 0.16),
                 perceptual_roughness: 0.92,
+                metallic: 0.0,
+                ..default()
+            })),
+            road: materials.add(shadowed(StandardMaterial {
+                base_color: Color::srgb(0.34, 0.34, 0.36),
+                perceptual_roughness: 0.95,
+                metallic: 0.0,
+                ..default()
+            })),
+            crawlerway: materials.add(shadowed(StandardMaterial {
+                base_color: Color::srgb(0.33, 0.30, 0.26),
+                perceptual_roughness: 0.98,
                 metallic: 0.0,
                 ..default()
             })),
@@ -561,6 +585,11 @@ pub(super) fn kind_bounding_m(kind: &StructureKind) -> f64 {
         } => half_x_m.hypot(*half_z_m) as f64,
         StructureKind::Launchpad { radius_m } => *radius_m as f64,
         StructureKind::Tank { radius_m, .. } => *radius_m as f64,
+        // A runway is a long strip, not a disc; its across half-width is the
+        // right inset for a taxiway meeting its side. Connection endpoints on a
+        // runway are projected onto the nearest point of the strip separately
+        // (see `connections`), so this is only a fallback.
+        StructureKind::Runway { half_width_m, .. } => *half_width_m as f64,
         _ => 1.0,
     }
 }
@@ -745,7 +774,11 @@ fn spawn_structure_entity(
                     Visibility::Inherited,
                     CellCoord::ZERO,
                     ChildOf(root),
-                    RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
+                    // Receive-only, like the runway paving and tarmac: a flat
+                    // ground-flush slab that also casts self-shadow-acnes at
+                    // grazing sun (its top is its own nearest caster), and its
+                    // sub-metre rim shadow is sub-texel in every cascade.
+                    RenderLayers::layer(SHIP_LAYER),
                     placed,
                     Name::new("Launchpad"),
                 ))
@@ -761,6 +794,28 @@ fn spawn_structure_entity(
                 ChildOf(pad_entity),
                 Name::new("Launchpad Ring"),
             ));
+            // Solid kinematic collider so a craft placed on / launched from the
+            // pad has real ground under it. Without this the pad is visual-only,
+            // and once a `RunwaySite` exists on the body the generic terrain
+            // patch is skipped there (`local_physics::terrain_patch`), so a
+            // pad-launched craft would fall through the ground. A Y-axis cylinder
+            // matches the visual slab (`basis_body` has local Y = up); its top
+            // face coincides with the slab top and it extends `LAUNCHPAD_COLLIDER_H_M`
+            // down. Posed each frame by the executor's `sync_structure_collider_pose`.
+            let up = center_body.normalize();
+            let slab_top = center_body + up * (LAUNCHPAD_SLAB_H as f64 * 0.5);
+            let collider_center = slab_top - up * (LAUNCHPAD_COLLIDER_H_M * 0.5);
+            spawn_structure_collider(
+                commands,
+                body_id,
+                LocalPrimitiveShape::Cylinder {
+                    radius: radius_m as f64,
+                    height: LAUNCHPAD_COLLIDER_H_M,
+                },
+                collider_center,
+                basis_body,
+                "Launchpad collider slab",
+            );
         }
         StructureKind::Tank { radius_m, height_m } => {
             let mesh = meshes.add(Cylinder::new(radius_m, height_m));
@@ -845,6 +900,47 @@ fn launch_from_pad(
 
     let up = pad.anchor_dir;
     let heading = pad.heading_tangent;
+    place_on_launchpad(
+        &mut sim,
+        body_state,
+        body_id,
+        up,
+        heading,
+        radius_m,
+        elevation_m,
+        clearance_m,
+        &mut commands,
+        &mut active_bubble,
+    );
+    // The L-launch flies immediately, so resume to 1× (the placement core is
+    // warp-neutral). `spawn::apply_initial_warp` doesn't run here — this is a
+    // runtime teleport, not a `Loading → Running` edge.
+    sim.simulation.warp.reset();
+
+    editor.open = false;
+    info!("launched player ship onto launchpad {:?}", sel);
+}
+
+/// Place a craft **vertically** at rest on a launchpad and tear down the live
+/// Avian bubble so it rebuilds from the placed pose. Warp-neutral — the caller
+/// sets the time-warp level. `up`/`heading` are the pad's body-fixed
+/// anchor/takeoff tangent, `clearance_m` the craft's `-Y` (engine-end) extent,
+/// `elevation_m` the parent site's flatten. The vertical mirror of
+/// [`crate::runway::place_on_runway`]; shared by the base editor's L-launch and
+/// the launch-select flow.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn place_on_launchpad(
+    sim: &mut SimulationState,
+    body_state: &BodyState,
+    body_id: BodyId,
+    up: DVec3,
+    heading: DVec3,
+    radius_m: f64,
+    elevation_m: f64,
+    clearance_m: f64,
+    commands: &mut Commands,
+    active_bubble: &mut ActiveLocalBubble,
+) {
     let pad_top_r = radius_m + elevation_m + LAUNCHPAD_SLAB_H as f64;
     let position_body = up * (pad_top_r + clearance_m + LAUNCH_REST_MARGIN_M);
     let position = body_state.position + body_state.orientation * position_body;
@@ -862,13 +958,9 @@ fn launch_from_pad(
         });
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(body_id));
-    sim.simulation.warp.reset();
 
     // Tear down the live Avian bubble so the rebuild seeds from the placed pose.
-    crate::scenario_menu::clear_bubble(&mut commands, &mut active_bubble);
-
-    editor.open = false;
-    info!("launched player ship onto launchpad {:?}", sel);
+    crate::scenario_menu::clear_bubble(commands, active_bubble);
 }
 
 /// Re-place every structure in the body-fixed frame each frame, exactly like
@@ -908,7 +1000,7 @@ fn draw_placement_ghost(
     registry: Res<StructureRegistry>,
     bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
     placed: Query<&PlacedVisual>,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<crate::god_view::GodViewGizmos>,
 ) {
     if editor.mode != BaseEditorMode::PlaceBuildings {
         return;
@@ -997,7 +1089,13 @@ fn draw_placement_ghost(
 }
 
 /// Outline for the selected structure, by kind.
-fn draw_kind_outline(gizmos: &mut Gizmos, kind: &StructureKind, center: Vec3, rot: Quat, color: Color) {
+fn draw_kind_outline(
+    gizmos: &mut Gizmos<crate::god_view::GodViewGizmos>,
+    kind: &StructureKind,
+    center: Vec3,
+    rot: Quat,
+    color: Color,
+) {
     match kind {
         StructureKind::Building {
             half_x_m,
@@ -1024,7 +1122,13 @@ fn box_center_render(center_render: Vec3, orientation: DQuat, point_body: DVec3)
 }
 
 /// Wireframe box: `half` extents along the rotated local axes about `center`.
-fn draw_box(gizmos: &mut Gizmos, center: Vec3, rot: Quat, half: Vec3, color: Color) {
+fn draw_box(
+    gizmos: &mut Gizmos<crate::god_view::GodViewGizmos>,
+    center: Vec3,
+    rot: Quat,
+    half: Vec3,
+    color: Color,
+) {
     let signs = [
         Vec3::new(-1.0, -1.0, -1.0),
         Vec3::new(1.0, -1.0, -1.0),
@@ -1056,7 +1160,13 @@ fn draw_box(gizmos: &mut Gizmos, center: Vec3, rot: Quat, half: Vec3, color: Col
 }
 
 /// Circle of `radius` in the rotated local XZ plane (Y = local up) about `center`.
-fn draw_ring(gizmos: &mut Gizmos, center: Vec3, rot: Quat, radius: f32, color: Color) {
+fn draw_ring(
+    gizmos: &mut Gizmos<crate::god_view::GodViewGizmos>,
+    center: Vec3,
+    rot: Quat,
+    radius: f32,
+    color: Color,
+) {
     const SEGS: usize = 32;
     let mut prev = center + rot * Vec3::new(radius, 0.0, 0.0);
     for i in 1..=SEGS {

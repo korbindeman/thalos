@@ -120,15 +120,17 @@ impl AttitudeController {
     /// Drive the controller one frame and return the normalized body-frame
     /// torque command in `[-1, 1]`.
     ///
-    /// `aero_authority` is the per-axis aero control-moment authority (N·m) at
-    /// the current dynamic pressure (`0` in vacuum). The PD normalizes its
+    /// `effector_authority` is the per-axis attitude authority (N·m) of every
+    /// effector *other than the reaction wheels*: the aero control surfaces at
+    /// the current dynamic pressure, plus a rocket's engine gimbal at the
+    /// current throttle (both `0` in vacuum / at coast). The PD normalizes its
     /// desired torque by the **total** available authority
-    /// (`max_torque + aero_authority`) so that, when both effectors are driven
-    /// at full scale by the allocator, the realized torque equals the PD's
-    /// intended torque *exactly* — independent of how much of it the aero
-    /// surfaces vs. the wheels provide. Without this the command would either
-    /// over-actuate (normalize by `max_torque`, drive both) or starve the aero
-    /// surfaces (cap the total at `max_torque`).
+    /// (`max_torque + effector_authority`) so that, when the allocator drives
+    /// every effector at the resulting fraction, the realized torque equals the
+    /// PD's intended torque *exactly* — independent of how much of it the aero
+    /// surfaces, the gimbal, or the wheels provide. Without this the command
+    /// would either over-actuate (normalize by `max_torque`, drive all) or
+    /// starve the other effectors (cap the total at `max_torque`).
     ///
     /// `flight` engages the flight assist: `Some` means SAS is armed on a
     /// winged craft flying in atmosphere, switching `Hold` to the
@@ -141,7 +143,7 @@ impl AttitudeController {
         demand: AttitudeDemand,
         attitude: &AttitudeState,
         params: &ShipParameters,
-        aero_authority: DVec3,
+        effector_authority: DVec3,
         flight: Option<&FlightState>,
         dt_s: f64,
     ) -> DVec3 {
@@ -153,19 +155,19 @@ impl AttitudeController {
                 self.pitch_trim = 0.0;
                 DVec3::ZERO
             }
-            AttitudeDemand::Hold => self.assisted_hold(attitude, params, aero_authority, flight, dt_s),
+            AttitudeDemand::Hold => self.assisted_hold(attitude, params, effector_authority, flight, dt_s),
             AttitudeDemand::PointNose(dir) => {
                 // Pointing owns attitude; drop any captured hold so a later
                 // release back to Hold recaptures the resulting orientation.
                 self.hold_target = None;
                 self.plane_target = None;
                 self.pitch_trim = 0.0;
-                point_nose(dir, attitude, params, aero_authority)
+                point_nose(dir, attitude, params, effector_authority)
             }
             AttitudeDemand::Rate(cmd) => {
                 if cmd.length_squared() <= RATE_DEADZONE * RATE_DEADZONE {
                     // Centered stick: behave as Hold (SAS recapture path).
-                    self.assisted_hold(attitude, params, aero_authority, flight, dt_s)
+                    self.assisted_hold(attitude, params, effector_authority, flight, dt_s)
                 } else {
                     // Deflected: a direct full-authority deflection demand — the
                     // allocator drives both effectors at this fraction, so full
@@ -206,19 +208,19 @@ impl AttitudeController {
         &mut self,
         attitude: &AttitudeState,
         params: &ShipParameters,
-        aero_authority: DVec3,
+        effector_authority: DVec3,
         flight: Option<&FlightState>,
         dt_s: f64,
     ) -> DVec3 {
         match flight {
             Some(flight) => {
                 self.hold_target = None;
-                self.plane_hold(flight, attitude, params, aero_authority, dt_s)
+                self.plane_hold(flight, attitude, params, effector_authority, dt_s)
             }
             None => {
                 self.plane_target = None;
                 let target = *self.hold_target.get_or_insert(attitude.orientation);
-                self.hold(target, attitude, params, aero_authority)
+                self.hold(target, attitude, params, effector_authority)
             }
         }
     }
@@ -233,7 +235,7 @@ impl AttitudeController {
         flight: &FlightState,
         attitude: &AttitudeState,
         params: &ShipParameters,
-        aero_authority: DVec3,
+        effector_authority: DVec3,
         dt_s: f64,
     ) -> DVec3 {
         let pitch = flight.pitch();
@@ -251,7 +253,7 @@ impl AttitudeController {
         let bank_err = wrap_angle(target.bank_rad - bank);
         let omega = attitude.angular_velocity;
         let moi = params.moment_of_inertia;
-        let authority = params.max_torque + aero_authority;
+        let authority = params.max_torque + effector_authority;
         let omega_n = std::f64::consts::PI / SETTLE_TIME_S;
         let kd = moi * (2.0 * omega_n);
         let rate_gain = omega_n * 0.5;
@@ -288,7 +290,7 @@ impl AttitudeController {
         target: DQuat,
         attitude: &AttitudeState,
         params: &ShipParameters,
-        aero_authority: DVec3,
+        effector_authority: DVec3,
     ) -> DVec3 {
         let q = attitude.orientation;
         // Rotation that takes current → target, world frame. Take the
@@ -307,7 +309,7 @@ impl AttitudeController {
         // damping torque by the ship's orientation, which manifests as SAS
         // failing to settle and pointing modes spinning up.
         let omega_body = attitude.angular_velocity;
-        pd_to_normalized_torque(error_body, omega_body, params, aero_authority)
+        pd_to_normalized_torque(error_body, omega_body, params, effector_authority)
     }
 }
 
@@ -327,7 +329,7 @@ pub fn point_nose(
     target_nose_world: DVec3,
     attitude: &AttitudeState,
     params: &ShipParameters,
-    aero_authority: DVec3,
+    effector_authority: DVec3,
 ) -> DVec3 {
     let target_body = attitude.orientation.inverse() * target_nose_world;
 
@@ -345,7 +347,7 @@ pub fn point_nose(
     // this was ported from used it directly; the `orientation.inverse() *` added
     // in the port was a frame bug that misaimed the roll/yaw damping.
     let omega_body = attitude.angular_velocity;
-    pd_to_normalized_torque(error_axis, omega_body, params, aero_authority)
+    pd_to_normalized_torque(error_axis, omega_body, params, effector_authority)
 }
 
 /// Fraction of the available angular deceleration the stopping-rate cap
@@ -356,7 +358,7 @@ pub fn point_nose(
 const DECEL_MARGIN: f64 = 0.9;
 
 /// Critically-damped PD with a **deceleration-limited rate cap**, normalized
-/// by the **total** available authority (`max_torque + aero_authority`) to
+/// by the **total** available authority (`max_torque + effector_authority`) to
 /// `[-1, 1]`. Normalizing by the total — not just `max_torque` — keeps the
 /// realized closed-loop torque equal to the designed torque when the allocator
 /// drives both the reaction wheels and the aero surfaces at this same fraction.
@@ -378,12 +380,12 @@ fn pd_to_normalized_torque(
     error_body: DVec3,
     omega_body: DVec3,
     params: &ShipParameters,
-    aero_authority: DVec3,
+    effector_authority: DVec3,
 ) -> DVec3 {
     let omega_n = std::f64::consts::PI / SETTLE_TIME_S;
     let moi = params.moment_of_inertia;
     let kd = moi * (2.0 * omega_n);
-    let authority = params.max_torque + aero_authority;
+    let authority = params.max_torque + effector_authority;
     // (kp/kd) = ω_n/2 — the linear PD's implied desired rate per unit error.
     let rate_gain = omega_n * 0.5;
     DVec3::new(
@@ -433,6 +435,7 @@ mod tests {
             moment_of_inertia: DVec3::splat(1000.0),
             center_of_mass: DVec3::ZERO,
             max_torque: DVec3::splat(500.0),
+            gimbal_torque_full: DVec3::ZERO,
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
             dry_mass_kg: 1000.0,

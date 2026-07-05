@@ -155,10 +155,16 @@ impl Plugin for HudPlugin {
                         .chain(),
                 )
                     .after(crate::SimStage::Sync)
-                    // The HUD is part of the flight scene, not the shipyard
-                    // editor; its updates stand down while the editor is open
-                    // (its panels are hidden too — see `shipyard_editor`).
-                    .run_if(not_in_photo_mode.and_then(crate::shipyard_editor::editor_closed)),
+                    // The HUD is part of the flight scene, not the modal editors
+                    // / hub; its updates stand down outside `GameContext::Flight`
+                    // (the panels are hidden too), so a per-frame visibility setter
+                    // like `pfd_panel::sync_visibility` can't re-show the flight HUD
+                    // over the god-view. `flight_or_no_context` also keeps HUD
+                    // updates running during Loading / MainMenu, as the old
+                    // `*_closed` chain did.
+                    .run_if(
+                        not_in_photo_mode.and_then(crate::game_context::flight_or_no_context),
+                    ),
             )
             .add_systems(Update, input_gate::update_ui_pointer_gate)
             .add_systems(Update, hide_in_photo_mode);

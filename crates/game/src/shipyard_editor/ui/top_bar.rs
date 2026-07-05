@@ -144,6 +144,7 @@ pub(super) fn handle_actions(
     mut editor: ResMut<ShipyardEditor>,
     cache: Res<EditorStatsCache>,
     mut relaunch: ResMut<RelaunchRequest>,
+    mut launch_req: ResMut<crate::base_editor::SpaceportLaunchRequest>,
 ) {
     for (interaction, action) in &interactions {
         if !matches!(interaction, Interaction::Pressed) {
@@ -161,22 +162,16 @@ pub(super) fn handle_actions(
                     state.status = "Nothing to launch — build a ship first".into();
                     continue;
                 };
-                // Aircraft (any wing area) fly airborne over land; everything
-                // else launches into the parking orbit. Persist the design too.
-                let is_aircraft = matches!(
-                    &cache.stats,
-                    Some(Ok(stats)) if stats.wing_area_m2 > 0.0
-                );
-                let situation = if is_aircraft {
-                    SpawnSituation::Cruise
-                } else {
-                    SpawnSituation::ShipOrbit
-                };
+                // Rebuild the craft into an orbit hold, then drop into the
+                // in-world launch-point picker (`base_editor::launch_select`) so
+                // the player chooses a runway or a launchpad to launch from. The
+                // spaceport is built lazily on the first launch. Persist too.
                 state.save_requested = true;
                 relaunch.0 = Some(RelaunchSpec {
                     blueprint,
-                    situation,
+                    situation: SpawnSituation::ShipOrbit,
                 });
+                launch_req.arm = true;
                 editor.open = false;
                 state.status = "Launching…".into();
             }

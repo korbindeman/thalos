@@ -134,7 +134,10 @@ const ROCK_STRENGTH: f32 = 0.0;
 // colour's value (plus a faint warm/cool hue drift) at the tens-of-metres
 // scale, so the ground stops reading as one flat tint.
 const BREAKUP_SCALE: f32 = 0.05;     // 1/period_m → ~20 m base patches
-const BREAKUP_VALUE_AMT: f32 = 0.20; // ± fractional value variation
+const BREAKUP_VALUE_AMT: f32 = 0.15; // ± fractional value variation (trimmed
+                                     // 0.20 → 0.15 2026-07-03: now that the
+                                     // footprint fade keeps it visible from the
+                                     // air, full strength read as dark stains)
 // Warm/cool drift. Kept low: a large value pushed bright patches toward
 // red/brown, which read as muddy smears over the green. Stylized-vivid wants
 // clean value patchiness, not a brown wash.
@@ -237,21 +240,44 @@ const DETAIL_FADE_NEAR: f32 = 180.0;  // full detail within this range (m)
 const DETAIL_FADE_FAR: f32  = 1800.0; // no detail beyond this range (m)
 const DETAIL_COORD_PERIOD_M: f32 = 4000.0;
 
-// ── Grass-clump detail (the "fluffy grass at any distance" layer) ───────────
-// A value mottle + soft fluffy normal at the grass-tuft/clump scale, GATED on the
-// grass mask and reaching far past the blade clipmap (blades stop at ~340 m). So
-// the mid/far grassland reads as a textured grass surface instead of flat green,
-// AND the blade→albedo handoff disappears (the ground is already grassy there). The
-// NORMAL is what sells it under a grazing sun — light/dark tuft micro-contrast.
-// Coarser than the fine breakup (so clump features stay above sub-pixel further
-// out); full within `GRASS_DETAIL_HOLD_M`, then fades by `GRASS_DETAIL_FADE_M` so
-// it can't shimmer on the far field (the macro green carries it from there).
-const GRASS_DETAIL_SCALE: f32 = 0.6;            // 1/period_m → ~1.7 m base clumps
-const GRASS_DETAIL_OCTAVES: i32 = 3;
-const GRASS_DETAIL_VALUE_AMT: f32 = 0.22;       // ± value mottle (tuft light/dark)
-const GRASS_DETAIL_NORMAL_STRENGTH: f32 = 0.34; // fluffy facet tilt (the grazing read)
-const GRASS_DETAIL_HOLD_M: f32 = 1500.0;        // full grass texture within this range
-const GRASS_DETAIL_FADE_M: f32 = 3200.0;        // gone beyond (macro green carries)
+// ── Grass-field detail (the "fluffy grass at any distance" layer) ───────────
+// A TWO-SCALE value mottle + soft fluffy normal GATED on the grass mask,
+// carrying the grassland texture from the blade clipmap's edge (~340 m) out to
+// wherever each scale still resolves on screen. Scales fade INDIVIDUALLY by
+// pixel footprint (Nyquist guard — see `OCTAVE_FADE_*` / `fbm3_*_faded`), not
+// by camera distance, so an aerial camera keeps whichever scale it can still
+// resolve — tufts up close, tussock clusters on a low pass, the 20 m breakup +
+// 125 m moisture patches from cruise — and nothing shimmers (an octave
+// dissolves to its mean exactly as it stops resolving). The NORMAL is what
+// sells it under a grazing sun (light/dark tuft micro-contrast); the BRDF term
+// (`GRASS_FIELD_TRANSLUCENCY`) adds the backlit sheen a real field shows.
+// Amplitudes trimmed 2026-07-03 after the first screenshot pass: the initial
+// values (0.20/0.13 clump/tussock, 0.20 breakup) read as camouflage blotches
+// from the air rather than growth variation.
+const GRASS_CLUMP_SCALE: f32 = 0.6;             // 1/period_m → ~1.7 m tufts
+const GRASS_CLUMP_VALUE_AMT: f32 = 0.15;        // ± value mottle (tuft light/dark)
+const GRASS_CLUMP_NORMAL_STRENGTH: f32 = 0.30;  // fluffy facet tilt (grazing read)
+const GRASS_TUSSOCK_SCALE: f32 = 0.13;          // 1/period_m → ~7.7 m tussock clusters
+const GRASS_TUSSOCK_VALUE_AMT: f32 = 0.09;      // ± value mottle (aerial patchiness)
+const GRASS_TUSSOCK_NORMAL_STRENGTH: f32 = 0.20;
+// Statistical backlit sheen of a grass canopy: per-fragment translucency weight
+// fed into `shade_surface`'s foliage transmit lobe, scaled by the grass gate,
+// so a low sun rims distant fields the way it rims the near blades.
+const GRASS_FIELD_TRANSLUCENCY: f32 = 0.12;
+// Grass mottle → ambient occlusion: the dark between-tuft hollows see less sky
+// (root AO), which is what makes a field read dense rather than painted.
+const GRASS_AO_FROM_DETAIL: f32 = 0.45;
+
+// Per-octave screen-footprint (Nyquist) fade for the detail layers above and
+// the Step-2 breakup: an octave is fully present while the fragment's
+// body-space pixel footprint is below `OCTAVE_FADE_LO ×` its wavelength and
+// gone by `OCTAVE_FADE_HI ×` it. This replaces fixed camera-distance fades for
+// the *albedo* layers (which killed all mid-scale texture seen from the air —
+// a cruise-altitude camera resolves 20 m patches just fine); normal-perturbing
+// micro-relief keeps its distance fade (grazing-sun sparkle is footprint-safe
+// but still reads busy).
+const OCTAVE_FADE_LO: f32 = 0.12;
+const OCTAVE_FADE_HI: f32 = 0.45;
 
 // Bilinear roughness sample. Mirrors the `sample_attachment1` helper but
 // returns the red channel (the only one populated by the tile provider's
@@ -798,6 +824,74 @@ fn fbm3_perlin_grad(p_in: vec3<f32>, octaves: i32, period_in: f32) -> vec4<f32> 
     return vec4<f32>(sum * inv, grad * inv);
 }
 
+// ── Footprint-faded fBm variants ────────────────────────────────────────────
+// Same octave schedules as above, but each octave carries a visibility factor
+// from the fragment's body-space pixel footprint vs. that octave's wavelength
+// (the `OCTAVE_FADE_*` Nyquist window). Octaves are CENTRED (mean 0) and the
+// normalisation is fixed, so as octaves stop resolving the pattern smoothly
+// dissolves toward 0 — its true screen-space average — with no fade line and
+// no shimmer, at any view geometry (grazing ground view or aerial nadir).
+
+// Centred value-noise fBm with per-octave footprint fade. Returns ~[-1, 1],
+// → 0 as the footprint swallows the octaves.
+fn fbm3_value_faded(
+    p_in: vec3<f32>,
+    octaves: i32,
+    period_in: f32,
+    base_wavelength_m: f32,
+    footprint_m: f32,
+) -> f32 {
+    var p = p_in;
+    var period = period_in;
+    var wl = base_wavelength_m;
+    var amp = 0.5;
+    var sum = 0.0;
+    var norm = 0.0;
+    for (var o = 0; o < octaves; o = o + 1) {
+        let vis = 1.0 - smoothstep(wl * OCTAVE_FADE_LO, wl * OCTAVE_FADE_HI, footprint_m);
+        sum = sum + amp * vis * (value_noise_3d_periodic(p, period) - 0.5);
+        norm = norm + amp;
+        p = p * 2.0;
+        period = period * 2.0;
+        wl = wl * 0.5;
+        amp = amp * 0.5;
+    }
+    return 2.0 * sum / max(norm, 1.0e-5);
+}
+
+// Gradient (Perlin) fBm + analytic derivative with per-octave footprint fade.
+// Perlin octaves are already centred. Returns vec4(value, gradient w.r.t p_in).
+fn fbm3_perlin_grad_faded(
+    p_in: vec3<f32>,
+    octaves: i32,
+    period_in: f32,
+    base_wavelength_m: f32,
+    footprint_m: f32,
+) -> vec4<f32> {
+    var p = p_in;
+    var period = period_in;
+    var wl = base_wavelength_m;
+    var amp = 0.5;
+    var freq = 1.0;
+    var sum = 0.0;
+    var grad = vec3<f32>(0.0);
+    var norm = 0.0;
+    for (var o = 0; o < octaves; o = o + 1) {
+        let vis = 1.0 - smoothstep(wl * OCTAVE_FADE_LO, wl * OCTAVE_FADE_HI, footprint_m);
+        let vg = perlin3_periodic_grad(p, period);
+        sum = sum + amp * vis * vg.x;
+        grad = grad + amp * vis * freq * vg.yzw;
+        norm = norm + amp;
+        p = p * 2.0;
+        period = period * 2.0;
+        wl = wl * 0.5;
+        amp = amp * 0.5;
+        freq = freq * 2.0;
+    }
+    let inv = 1.0 / max(norm, 1.0e-5);
+    return vec4<f32>(sum * inv, grad * inv);
+}
+
 // `detail_height` value and gradient w.r.t. body-space metres. The fBm runs in
 // scaled coordinates (`p_body * DETAIL_SCALE`), so one more `DETAIL_SCALE`
 // factor folds into the gradient by the chain rule. Uses gradient (Perlin)
@@ -816,28 +910,33 @@ struct SurfaceDetail {
     normal_offset: vec3<f32>, // tangential perturbation for the lighting normal
 }
 
-fn surface_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> SurfaceDetail {
+fn surface_detail(
+    p_body: vec3<f32>,
+    geo_normal: vec3<f32>,
+    cam_dist: f32,
+    footprint_m: f32,
+) -> SurfaceDetail {
     var out: SurfaceDetail;
     out.tint = vec3<f32>(1.0);
     out.normal_offset = vec3<f32>(0.0);
 
-    // Far field pays nothing: no derivatives here, so the early-out is safe.
-    let fade = 1.0 - smoothstep(DETAIL_FADE_NEAR, DETAIL_FADE_FAR, cam_dist);
-    if (fade <= 0.0) {
-        return out;
+    // Step 2 — albedo breakup: patchy value variation + a subtle warm/cool hue
+    // drift, so the macro colour stops reading as one flat tint. Faded per
+    // octave by pixel footprint (not camera distance), so the ~20 m patchiness
+    // survives aerial views for as long as it actually resolves on screen.
+    let breakup_wl = 1.0 / BREAKUP_SCALE;
+    if (footprint_m < breakup_wl * OCTAVE_FADE_HI) {
+        let dv = fbm3_value_faded(
+            p_body * BREAKUP_SCALE,
+            3,
+            DETAIL_COORD_PERIOD_M * BREAKUP_SCALE,
+            breakup_wl,
+            footprint_m,
+        );
+        let value_mul = 1.0 + dv * BREAKUP_VALUE_AMT;
+        let hue = vec3<f32>(1.0 + dv * BREAKUP_HUE_AMT, 1.0, 1.0 - dv * BREAKUP_HUE_AMT);
+        out.tint = vec3<f32>(value_mul) * hue;
     }
-
-    // Step 2 — albedo breakup: patchy value variation + a subtle warm/cool
-    // hue drift, so the macro colour stops reading as one flat tint.
-    let v = fbm3_periodic(
-        p_body * BREAKUP_SCALE,
-        3,
-        DETAIL_COORD_PERIOD_M * BREAKUP_SCALE,
-    );
-    let dv = (v - 0.5) * 2.0;
-    let value_mul = 1.0 + dv * BREAKUP_VALUE_AMT;
-    let hue = vec3<f32>(1.0 + dv * BREAKUP_HUE_AMT, 1.0, 1.0 - dv * BREAKUP_HUE_AMT);
-    out.tint = mix(vec3<f32>(1.0), vec3<f32>(value_mul) * hue, fade);
 
     // Step 3 — micro-relief normal from the gradient of a detail height field,
     // projected tangent to the sphere so it tilts facets without changing the
@@ -845,44 +944,74 @@ fn surface_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> Su
     // can't fold the normal past the horizon. The gradient is evaluated
     // analytically in a single fBm pass (`detail_height_grad`) — the previous
     // four finite-difference taps were the dominant per-fragment cost here.
-    let grad = detail_height_grad(p_body).yzw;
-    let grad_t = grad - geo_normal * dot(grad, geo_normal);
-    var off = -grad_t * (DETAIL_NORMAL_STRENGTH * fade);
-    let off_len = length(off);
-    out.normal_offset = off * (0.8 / max(0.8, off_len));
+    // Keeps its camera-distance fade: a ~1.25 m relief normal is a close-up
+    // term, and normal perturbation reads busier at range than albedo mottle.
+    let fade = 1.0 - smoothstep(DETAIL_FADE_NEAR, DETAIL_FADE_FAR, cam_dist);
+    if (fade > 0.0) {
+        let grad = detail_height_grad(p_body).yzw;
+        let grad_t = grad - geo_normal * dot(grad, geo_normal);
+        var off = -grad_t * (DETAIL_NORMAL_STRENGTH * fade);
+        let off_len = length(off);
+        out.normal_offset = off * (0.8 / max(0.8, off_len));
+    }
     return out;
 }
 
-// Grass-clump detail for the VEGETATED ground (see the GRASS_DETAIL_* constants).
-// One gradient-noise eval gives BOTH the value mottle (`.x`) and the fluffy normal
-// (`.yzw`). `grass_w` is the grass coverage at this fragment (0 off grass / above
-// the treeline → early-out, so non-grass ground and the far field pay nothing).
-fn grass_far_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32, grass_w: f32) -> SurfaceDetail {
+// Grass-field detail for the VEGETATED ground (see the GRASS_CLUMP_* /
+// GRASS_TUSSOCK_* constants): the band-2 "grass as terrain shading" layer of
+// the vegetation cascade (docs/vegetation.md §5.0). Two gradient-noise scales
+// give BOTH the value mottle (`.x`) and the fluffy normal (`.yzw`); each scale
+// fades by pixel footprint, so the grassland stays textured from any altitude
+// at whichever scale still resolves. `grass_w` is the grass coverage at this
+// fragment (0 off grass / above the treeline → early-out, so non-grass ground
+// pays nothing; the footprint guard skips it once even the tussock scale is
+// sub-pixel).
+fn grass_field_detail(
+    p_body: vec3<f32>,
+    geo_normal: vec3<f32>,
+    grass_w: f32,
+    footprint_m: f32,
+) -> SurfaceDetail {
     var out: SurfaceDetail;
     out.tint = vec3<f32>(1.0);
     out.normal_offset = vec3<f32>(0.0);
 
-    let fade = (1.0 - smoothstep(GRASS_DETAIL_HOLD_M, GRASS_DETAIL_FADE_M, cam_dist))
-        * clamp(grass_w, 0.0, 1.0);
-    if (fade <= 0.0) {
+    let gate = clamp(grass_w, 0.0, 1.0);
+    let tussock_wl = 1.0 / GRASS_TUSSOCK_SCALE;
+    if (gate <= 1.0e-3 || footprint_m >= tussock_wl * OCTAVE_FADE_HI) {
         return out;
     }
 
-    let g = fbm3_perlin_grad(
-        p_body * GRASS_DETAIL_SCALE,
-        GRASS_DETAIL_OCTAVES,
-        DETAIL_COORD_PERIOD_M * GRASS_DETAIL_SCALE,
+    let clump = fbm3_perlin_grad_faded(
+        p_body * GRASS_CLUMP_SCALE,
+        2,
+        DETAIL_COORD_PERIOD_M * GRASS_CLUMP_SCALE,
+        1.0 / GRASS_CLUMP_SCALE,
+        footprint_m,
     );
-    // Value mottle: clumps of brighter (sunlit tuft tops) and darker (shaded
-    // between-tuft) grass — the grassy colour texture.
-    let dv = clamp(g.x, -1.0, 1.0);
-    out.tint = mix(vec3<f32>(1.0), vec3<f32>(1.0 + dv * GRASS_DETAIL_VALUE_AMT), fade);
-    // Soft fluffy normal: tilt facets so the low sun rakes the grass texture (the
-    // grazing-angle "fluffy" read). Tangent to the sphere; magnitude capped so a
-    // steep gradient can't fold the normal past the horizon.
-    let grad = g.yzw * GRASS_DETAIL_SCALE;
+    let tussock = fbm3_perlin_grad_faded(
+        p_body * GRASS_TUSSOCK_SCALE,
+        2,
+        DETAIL_COORD_PERIOD_M * GRASS_TUSSOCK_SCALE,
+        tussock_wl,
+        footprint_m,
+    );
+
+    // Value mottle: brighter sunlit tuft tops / darker shaded between-tuft
+    // hollows (clump scale), grouped into larger light/dark growth patches
+    // (tussock scale) — the aerial "lush field" texture.
+    let dv = clamp(clump.x, -1.0, 1.0) * GRASS_CLUMP_VALUE_AMT
+        + clamp(tussock.x, -1.0, 1.0) * GRASS_TUSSOCK_VALUE_AMT;
+    out.tint = mix(vec3<f32>(1.0), vec3<f32>(1.0 + dv), gate);
+
+    // Soft fluffy normal: tilt facets so a low sun rakes the grass texture (the
+    // grazing-angle "fluffy" read). Chain rule folds each scale back into
+    // body-metre gradients; tangent to the sphere; magnitude capped so a steep
+    // gradient can't fold the normal past the horizon.
+    let grad = clump.yzw * (GRASS_CLUMP_SCALE * GRASS_CLUMP_NORMAL_STRENGTH)
+        + tussock.yzw * (GRASS_TUSSOCK_SCALE * GRASS_TUSSOCK_NORMAL_STRENGTH);
     let grad_t = grad - geo_normal * dot(grad, geo_normal);
-    var off = -grad_t * (GRASS_DETAIL_NORMAL_STRENGTH * fade);
+    var off = -grad_t * gate;
     let off_len = length(off);
     out.normal_offset = off * (0.8 / max(0.8, off_len));
     return out;
@@ -994,7 +1123,14 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let frag_relative_position = -info.view_vector;
     let body_relative_position = quat_rotate(terrain_extras.debug.world_to_body_rot, frag_relative_position);
     let detail_p_body = terrain_extras.debug.view_phase.xyz + body_relative_position;
-    let detail = surface_detail(detail_p_body, geo_normal, cam_dist);
+    // Body-space size of one screen pixel at this fragment — the Nyquist input
+    // for the per-octave detail fades. Computed here, in uniform control flow,
+    // before any branch (derivative-builtin requirement).
+    let footprint_m = max(
+        length(dpdx(detail_p_body)),
+        length(dpdy(detail_p_body)),
+    );
+    let detail = surface_detail(detail_p_body, geo_normal, cam_dist, footprint_m);
 
     let altitude_m = sample_height(tile);
     let geo_slope_t = surface_slope(height_normal, geo_normal);
@@ -1009,8 +1145,13 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // Regolith micro-relief normal, set in the regolith branch and consumed by
     // the lighting-normal section below (the vegetated path uses `detail`).
     var regolith_normal_offset = vec3<f32>(0.0);
-    // Grass-clump fluffy normal, set in the vegetated branch (see `grass_far_detail`).
+    // Grass-field outputs, set in the vegetated branch (see `grass_field_detail`)
+    // and consumed by the dielectric lighting below: the fluffy normal, the
+    // normalized grass gate (drives the field translucency), and the between-tuft
+    // root-AO factor folded into the ambient cavity term.
     var grass_normal_offset = vec3<f32>(0.0);
+    var grass_gate = 0.0;
+    var grass_cavity = 1.0;
 
     var surface_rgb: vec3<f32>;
     if (style_regolith) {
@@ -1047,17 +1188,22 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         surface_rgb = material.albedo;
         if (!debug_on) {
             surface_rgb = surface_rgb * detail.tint;
-            // Grass-clump detail: textures the mid/far grassland so it reads as a
-            // fluffy grass surface (not flat green) and hides the blade→albedo line.
-            // Gated on the normalized grass mask, faded out above the treeline so
-            // alpine scree isn't grass-textured.
+            // Grass-field detail (band 2 of the vegetation cascade): textures the
+            // mid/far grassland so it reads as a fluffy grass surface (not flat
+            // green) and hides the blade→albedo line. Gated on the normalized
+            // grass mask, faded out above the treeline so alpine scree isn't
+            // grass-textured.
             let grass_w_frag = material_masks.r
                 / max(material_masks.r + material_masks.g + material_masks.b, 1e-3);
-            let grass_gate =
+            grass_gate =
                 grass_w_frag * (1.0 - smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m));
-            let gd = grass_far_detail(detail_p_body, geo_normal, cam_dist, grass_gate);
+            let gd = grass_field_detail(detail_p_body, geo_normal, grass_gate, footprint_m);
             surface_rgb = surface_rgb * gd.tint;
             grass_normal_offset = gd.normal_offset;
+            // Root AO: the dark between-tuft mottle also sees less sky. Kept off
+            // the direct sun (cavity feeds the ambient terms only, below).
+            let gd_luma = dot(gd.tint, vec3<f32>(0.2126, 0.7152, 0.0722));
+            grass_cavity = mix(1.0, min(gd_luma, 1.0), GRASS_AO_FROM_DETAIL);
         }
     }
     albedo = vec4<f32>(surface_rgb, albedo.a);
@@ -1206,6 +1352,12 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // `thalos::lighting` so the two can't drift.
         surf.style = SURFACE_DIELECTRIC;
 
+        // Grass-field backlit sheen: a statistical translucency for the blade
+        // canopy the ground stands in for at distance, so a low sun rims far
+        // fields the way it rims the near blades (shade_surface's transmit
+        // lobe; 0 off grass, so bare soil/rock/snow are untouched).
+        surf.translucency = GRASS_FIELD_TRANSLUCENCY * grass_gate;
+
         // Specular roughness from the sampled attachment, tightened in wet
         // hollows (material mask .a) so puddles and wet rock get a sharper
         // highlight while dry, rough ground stays matte. Clamped away from 0 to
@@ -1237,7 +1389,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // Cavity AO from the procedural detail breakup × the material mask's
         // occlusion, applied (inside `shade_surface`) to the ambient terms only.
         let detail_luma = dot(detail.tint, vec3<f32>(0.2126, 0.7152, 0.0722));
-        let cavity = clamp(mix(1.0, detail_luma, AO_FROM_DETAIL), AO_MIN, 1.0);
+        let cavity = clamp(
+            mix(1.0, detail_luma, AO_FROM_DETAIL) * grass_cavity,
+            AO_MIN,
+            1.0,
+        );
         // Large-scale valley AO: enclosed valley floors lose ambient light because
         // high surrounding terrain blocks the sky hemisphere — mul onto cavity so
         // both small-scale hollows and large-scale valleys compound correctly.

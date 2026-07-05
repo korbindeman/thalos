@@ -80,6 +80,23 @@ pub(crate) fn apply_local_forces(
     // `docs/surface.md`.
     let destroyed = sim.simulation.is_destroyed();
 
+    // Thrust-vectoring (engine gimbal) authority available this frame: the
+    // full-thrust geometry term scaled by the fraction of thrust actually
+    // firing, so it vanishes at zero throttle / out of fuel / coast — and a
+    // destroyed craft can't gimbal. The same value the fly-by-wire controller
+    // folded into its authority (`control_bus`), so what we realize here equals
+    // what it commanded. Added onto `max_torque` in `compute_angular_acceleration`.
+    let gimbal_effective = if destroyed {
+        DVec3::ZERO
+    } else {
+        params.gimbal_torque_full
+            * crate::fuel::active_thrust_fraction(
+                &params,
+                sim.simulation.ship_mass_kg(),
+                throttle.effective,
+            )
+    };
+
     // Linear: gravity + thrust only when Avian owns translation. Otherwise
     // explicitly zero so a stale value from the previous `Full` frame
     // doesn't drift Avian's pos/vel away from Kepler's authoritative state.
@@ -119,6 +136,7 @@ pub(crate) fn apply_local_forces(
         compute_angular_acceleration(
             sim.simulation.control(),
             &params,
+            gimbal_effective,
             rotation.0,
             angular_velocity.0,
             clock.delta_secs_f64(),
@@ -126,25 +144,29 @@ pub(crate) fn apply_local_forces(
     };
 }
 
-/// Convert the realized reaction-wheel torque command into a world-space
-/// angular acceleration for the Avian rigid body.
+/// Convert the realized attitude command into a world-space angular
+/// acceleration for the Avian rigid body.
 ///
-/// `control.torque_command` is now the *output of the fly-by-wire attitude
-/// controller* ([`crate::control_bus`]) — pointing, hold, or raw rate — so
-/// this just scales it by `max_torque` and divides by inertia. The former
-/// per-frame deadbeat SAS damper (`−I·ω/dt` when `sas_enabled`) lived here;
-/// it annihilated all angular velocity every frame and limit-cycled against
-/// continuous aero moments. SAS is now a proper critically-damped controller
-/// upstream, so `sas_enabled` no longer does anything here.
+/// `control.torque_command` is the *output of the fly-by-wire attitude
+/// controller* ([`crate::control_bus`]) — pointing, hold, or raw rate — a
+/// normalized `[-1, 1]` fraction. It is realized against the craft's total
+/// attitude authority: the reaction wheels (`max_torque`) plus the engine
+/// gimbal (`gimbal_effective`, the throttle-scaled thrust-vectoring torque —
+/// pitch/yaw only, zero at coast). Both are driven at the same fraction, which
+/// is exactly what the controller normalized its PD output against, so the
+/// realized torque equals the intended torque. The former per-frame deadbeat
+/// SAS damper (`−I·ω/dt`) lived here; SAS is now a proper controller upstream,
+/// so `sas_enabled` no longer does anything.
 pub(crate) fn compute_angular_acceleration(
     control: &thalos_physics_canonical::types::ControlInput,
     params: &thalos_physics_canonical::types::ShipParameters,
+    gimbal_effective: DVec3,
     rotation: DQuat,
     _angular_velocity_world: DVec3,
     _dt: f64,
 ) -> DVec3 {
     let inertia_body = params.moment_of_inertia;
-    let max_torque = params.max_torque;
+    let max_torque = params.max_torque + gimbal_effective;
     let cmd = control
         .torque_command
         .clamp(DVec3::splat(-1.0), DVec3::splat(1.0));

@@ -15,6 +15,8 @@ mod flight_config;
 mod flight_plan_view;
 mod freecam;
 mod fuel;
+mod game_context;
+mod god_view;
 mod graphics_settings;
 mod hud;
 mod input;
@@ -40,6 +42,7 @@ mod settings_menu;
 mod ship_view;
 mod shipyard_editor;
 mod sim_clock;
+mod space_center;
 mod sky_render;
 mod solar_system_state;
 mod spawn;
@@ -57,7 +60,9 @@ mod warp_to_maneuver;
 mod window_settings;
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
 use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DMat3, DQuat, DVec3};
@@ -66,6 +71,8 @@ use bevy::render::{
     RenderPlugin,
     settings::{Backends, RenderCreation, WgpuSettings},
 };
+use bevy::window::ExitCondition;
+use bevy::winit::WinitPlugin;
 use thalos_body_render::BodyRenderPlugin;
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
@@ -274,14 +281,24 @@ fn main() {
     // `just game shipyard` opens straight into the in-game ship editor: the
     // sim seeds the default parking orbit behind it (and stays paused while
     // the editor is open), so closing the editor drops into normal flight.
-    let open_shipyard = matches!(request.as_str(), "shipyard" | "editor" | "vab");
+    // Headless screenshot mode (`THALOS_SCREENSHOT`): the whole game boots
+    // off-screen (no window, no winit — driven by `ScheduleRunnerPlugin`, like
+    // `just preview`), renders one scripted camera pose to a PNG, and exits. Its
+    // presence forces the preset's scenario so the captured world is fully built,
+    // and never the start screen / shipyard. See `crate::screenshot`.
+    let screenshot_config = screenshot::ScreenshotConfig::from_env();
+    let headless = screenshot_config.is_some();
+
+    let open_shipyard = matches!(request.as_str(), "shipyard" | "editor" | "vab") && !headless;
     let auto_run = spawn::AutoRun::from_env();
     // Bare launch → start screen, behind the boot load of the placeholder
     // parking-orbit world. `THALOS_AUTO_RUN` skips the menu (straight into
     // orbit) so autonomous agents keep their one-shot launch flow.
     let wants_menu = matches!(request.as_str(), "" | "menu" | "title");
-    let menu_boot = wants_menu && !open_shipyard && !auto_run.enabled;
-    let situation = if open_shipyard || wants_menu {
+    let menu_boot = wants_menu && !open_shipyard && !auto_run.enabled && !headless;
+    let situation = if let Some(cfg) = &screenshot_config {
+        cfg.preset.spawn_situation()
+    } else if open_shipyard || wants_menu {
         SpawnSituation::ShipOrbit
     } else {
         SpawnSituation::from_request(&spawn_request)
@@ -371,28 +388,77 @@ fn main() {
     let window = window_settings::initial_window(&app_settings.window, &win_overrides);
     let wgpu_settings = wgpu_settings_from_env();
 
-    App::new()
-        // The shipyard editor is a separate scene: while it is open, no game
-        // logic runs. Gating the three simulation stages on `editor_closed`
-        // (on top of the pause gate) freezes physics, world sync, and the game
-        // camera so the editor owns the frame entirely — the flight world is
-        // suspended, not just hidden. See `crate::shipyard_editor`.
-        // The shipyard editor is a separate scene that hides the world, so it
-        // gates all three sets off. The base editor is an *in-world* overlay: it
-        // keeps the world visible and frozen (via `SimClock`, like a warp-0
-        // pause), so only the **Camera** set is gated for it — its god-view
-        // camera owns the view, but the render/terrain-streaming sync in `Sync`
-        // must keep running or the ground stops streaming and goes black.
+    // Headless screenshot mode renders off-screen with no window; a normal launch
+    // opens the configured primary window.
+    let window_plugin = if headless {
+        WindowPlugin {
+            primary_window: None,
+            exit_condition: ExitCondition::DontExit,
+            close_when_requested: false,
+            ..default()
+        }
+    } else {
+        WindowPlugin {
+            primary_window: Some(window),
+            ..default()
+        }
+    };
+    let mut default_plugins = DefaultPlugins
+        .build()
+        .disable::<bevy::transform::TransformPlugin>()
+        .set(window_plugin)
+        .set(RenderPlugin {
+            // 0.19: RenderCreation::Automatic takes a Box<WgpuSettings>.
+            render_creation: RenderCreation::Automatic(Box::new(wgpu_settings)),
+            ..default()
+        })
+        .set(AssetPlugin {
+            file_path: "../../assets".to_string(),
+            ..default()
+        })
+        .set(bevy::log::LogPlugin {
+            // Keep our own crates at INFO; silence Bevy's chatty
+            // startup-info categories so the terrain diagnostic and
+            // other game logs aren't buried. Override via RUST_LOG.
+            filter: "info,\
+                     wgpu=error,naga=warn,bevy_app=warn,\
+                     bevy_render=warn,bevy_diagnostic=warn,\
+                     bevy_winit=warn,\
+                     bevy_pbr=warn,bevy_asset=warn,\
+                     cosmic_text=warn,gilrs_core=warn,gilrs=warn,\
+                     offset_allocator=warn"
+                .to_string(),
+            ..default()
+        });
+    // No winit event loop in headless mode — `ScheduleRunnerPlugin` (added below)
+    // drives the frames instead.
+    if headless {
+        default_plugins = default_plugins.disable::<WinitPlugin>();
+    }
+
+    let mut app = App::new();
+    app
+        // The `SimStage` sets are gated by the `GameContext` sub-state (the
+        // single in-`Running` mode authority — see `crate::game_context` and
+        // `docs/ui_flow.md`), replacing the former `*_closed` boolean helpers:
+        // - **VAB** (`GameContext::Vab`) is a separate scene that hides the
+        //   world, so it gates *all three* sets off (`not_vab`) — physics, world
+        //   sync, and the game camera all freeze; the editor owns the frame.
+        // - The **base editor** and **space-center hub** are *in-world* overlays:
+        //   they keep the world visible and frozen (via `SimClock`, like a warp-0
+        //   pause), so only the **Camera** set is gated off for them
+        //   (`flight_or_no_context`) — their shared god-view camera owns the view,
+        //   but the terrain-streaming `Sync` must keep running or the ground goes
+        //   black. Outside `Running` (Loading / MainMenu) the helpers read as "no
+        //   modal", so `Sync`/`Camera` keep running behind the loading screen.
         .configure_sets(
             Update,
             (
                 SimStage::Physics
-                    .run_if(pause_menu::not_game_paused.and_then(shipyard_editor::editor_closed)),
-                SimStage::Sync.run_if(shipyard_editor::editor_closed),
+                    .run_if(pause_menu::not_game_paused.and_then(game_context::not_vab)),
+                SimStage::Sync.run_if(game_context::not_vab),
                 SimStage::Camera.run_if(
-                    pause_menu::not_game_paused
-                        .and_then(shipyard_editor::editor_closed)
-                        .and_then(base_editor::base_editor_closed),
+                    pause_menu::not_game_paused.and_then(game_context::flight_or_no_context),
                 ),
             )
                 .chain(),
@@ -410,38 +476,9 @@ fn main() {
             InputSettings::load_from_path("assets/input.ron")
                 .expect("Failed to load input bindings from assets/input.ron"),
         )
-        .add_plugins(
-            DefaultPlugins
-                .build()
-                .disable::<bevy::transform::TransformPlugin>()
-                .set(WindowPlugin {
-                    primary_window: Some(window),
-                    ..default()
-                })
-                .set(RenderPlugin {
-                    // 0.19: RenderCreation::Automatic takes a Box<WgpuSettings>.
-                    render_creation: RenderCreation::Automatic(Box::new(wgpu_settings)),
-                    ..default()
-                })
-                .set(AssetPlugin {
-                    file_path: "../../assets".to_string(),
-                    ..default()
-                })
-                .set(bevy::log::LogPlugin {
-                    // Keep our own crates at INFO; silence Bevy's chatty
-                    // startup-info categories so the terrain diagnostic and
-                    // other game logs aren't buried. Override via RUST_LOG.
-                    filter: "info,\
-                             wgpu=error,naga=warn,bevy_app=warn,\
-                             bevy_render=warn,bevy_diagnostic=warn,\
-                             bevy_winit=warn,\
-                             bevy_pbr=warn,bevy_asset=warn,\
-                             cosmic_text=warn,gilrs_core=warn,gilrs=warn,\
-                             offset_allocator=warn"
-                        .to_string(),
-                    ..default()
-                }),
-        )
+        // `default_plugins` is pre-built above (window / render / asset / log),
+        // with the window + winit disabled in headless screenshot mode.
+        .add_plugins(default_plugins)
         // `BodyRenderPlugin` adds the ground terrain stack
         // (`thalos_udlod::TerrainPlugin`, which adds `BigSpaceDefaultPlugins`
         // unconditionally) plus impostor materials and shared shading
@@ -487,6 +524,17 @@ fn main() {
         } else {
             loading::AppState::Running
         }))
+        // A bare menu boot defers the world entirely: no bodies, ship, or sky
+        // are spawned until the menu starts a scenario (see
+        // `loading::WorldState`). Scenario boots insert `Live`, which fires
+        // the same `OnEnter(WorldState::Live)` world-spawn chain on the first
+        // frame — identical to the old Startup timing, one frame later,
+        // behind the loading screen either way.
+        .insert_state(if menu_boot {
+            loading::WorldState::Absent
+        } else {
+            loading::WorldState::Live
+        })
         // Every spawn situation starts paused (warp 0×); `THALOS_AUTO_RUN`
         // resumes to 1× as soon as the loading screen clears (for agents).
         .insert_resource(auto_run)
@@ -513,6 +561,7 @@ fn main() {
         .add_plugins(sky_render::SkyRenderPlugin)
         .add_plugins(star_flare::LensFlarePlugin)
         .add_plugins(LoadingScreenPlugin)
+        .add_plugins(game_context::GameContextPlugin)
         .add_plugins(SpawnPlugin)
         .add_plugins(surface_settle::SurfaceSettlePlugin)
         .add_plugins(structures::StructuresPlugin)
@@ -568,7 +617,23 @@ fn main() {
         .add_plugins(relaunch::RelaunchPlugin)
         .add_plugins(shipyard_editor::ShipyardEditorPlugin)
         .add_plugins(base_editor::BaseEditorPlugin)
+        // Shared god-view camera (base editor + space-center hub) and the KSP-style
+        // space-center hub itself.
+        .add_plugins(god_view::GodViewPlugin)
+        .add_plugins(space_center::SpaceCenterPlugin)
         .add_plugins(BodyTreePanelPlugin)
-        .add_plugins(DebugPlugin)
-        .run();
+        .add_plugins(DebugPlugin);
+
+    // Headless screenshot: the fixed-step runner (no winit event loop) plus the
+    // off-screen capture driver + its resolved config, layered over the fully
+    // built game app.
+    if let Some(config) = screenshot_config {
+        app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
+            1.0 / 60.0,
+        )))
+        .add_plugins(screenshot::HeadlessScreenshotPlugin)
+        .insert_resource(config);
+    }
+
+    app.run();
 }

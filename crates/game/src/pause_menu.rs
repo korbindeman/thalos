@@ -29,9 +29,13 @@ struct PauseMenuRoot;
 #[derive(Component, Clone, Copy)]
 enum PauseMenuAction {
     Resume,
+    SpaceCenter,
     Shipyard,
     BaseEditor,
     Settings,
+    /// Leave the flight and return to the start screen (`AppState::MainMenu`) —
+    /// the only direct flight→menu route (previously reachable only via the hub).
+    MainMenu,
     Quit,
 }
 
@@ -174,6 +178,12 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                     })
                     .with_children(|buttons| {
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Resume, "RESUME");
+                        spawn_menu_button(
+                            buttons,
+                            &theme,
+                            PauseMenuAction::SpaceCenter,
+                            "SPACE CENTER",
+                        );
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Shipyard, "SHIPYARD");
                         spawn_menu_button(
                             buttons,
@@ -182,6 +192,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                             "SURFACE BASE",
                         );
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Settings, "SETTINGS");
+                        spawn_menu_button(buttons, &theme, PauseMenuAction::MainMenu, "MAIN MENU");
                         spawn_menu_button(buttons, &theme, PauseMenuAction::Quit, "QUIT");
                     });
             });
@@ -233,6 +244,7 @@ pub(crate) fn handle_escape_input(
     mut settings_menu: ResMut<SettingsMenu>,
     shipyard: Option<ResMut<crate::shipyard_editor::ShipyardEditor>>,
     base_editor: Option<ResMut<crate::base_editor::BaseEditor>>,
+    space_center: Option<ResMut<crate::space_center::SpaceCenter>>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
@@ -270,6 +282,21 @@ pub(crate) fn handle_escape_input(
         return;
     }
 
+    // The space-center hub. Escape must NOT dump to the start screen — the pause
+    // menu's MAIN MENU button is the deliberate exit now. When the hub was opened
+    // over a live flight (pause menu → SPACE CENTER), Escape backs out to that
+    // flight. When it is the session root (opened by PLAY, nothing flying), we
+    // fall through so Escape opens the pause menu over the hub instead (RESUME
+    // dismisses it; MAIN MENU leaves to the start screen).
+    if let Some(mut space_center) = space_center
+        && space_center.open
+        && !space_center.return_to_menu
+    {
+        space_center.open = false;
+        space_center.hovered = None;
+        return;
+    }
+
     if pause.active {
         pause.active = false;
         return;
@@ -300,6 +327,8 @@ fn handle_button_clicks(
     mut settings_menu: ResMut<SettingsMenu>,
     mut shipyard: ResMut<crate::shipyard_editor::ShipyardEditor>,
     mut base_editor: ResMut<crate::base_editor::BaseEditor>,
+    mut space_center: ResMut<crate::space_center::SpaceCenter>,
+    mut next_state: ResMut<NextState<crate::loading::AppState>>,
     mut close_requested: MessageWriter<WindowCloseRequested>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
@@ -309,6 +338,14 @@ fn handle_button_clicks(
         }
         match action {
             PauseMenuAction::Resume => pause.active = false,
+            PauseMenuAction::SpaceCenter => {
+                // Return to the hub from flight (KSP-style). Opened over a live
+                // flight, so EXIT/Escape returns to that flight, not the menu.
+                pause.active = false;
+                space_center.open = true;
+                space_center.hovered = None;
+                space_center.return_to_menu = false;
+            }
             PauseMenuAction::Shipyard => {
                 pause.active = false;
                 shipyard.open = true;
@@ -320,6 +357,14 @@ fn handle_button_clicks(
                 base_editor.active_site = None;
             }
             PauseMenuAction::Settings => settings_menu.open = true,
+            PauseMenuAction::MainMenu => {
+                // Return to the start screen — the direct flight→menu route.
+                // Mirrors the hub's EXIT-to-menu path: setting the app state is
+                // enough; `OnEnter(MainMenu)` shows the menu and `sim_clock`
+                // freezes the still-loaded flight world behind it.
+                pause.active = false;
+                next_state.set(crate::loading::AppState::MainMenu);
+            }
             PauseMenuAction::Quit => {
                 pause.active = false;
                 if let Ok(window) = primary_window.single() {

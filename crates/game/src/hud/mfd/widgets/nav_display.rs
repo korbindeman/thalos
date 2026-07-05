@@ -239,7 +239,7 @@ pub(crate) fn update(
     // Project every runway on the dominant body into the ground plane.
     let mut runways: Vec<ProjectedRunway> = Vec::new();
     for site in structures.sites_on(dominant) {
-        if site.kind != StructureKind::Runway {
+        if !matches!(site.kind, StructureKind::Runway { .. }) {
             continue;
         }
         let surf = runway_surface_inertial(site, body_radius_m, bs.position, bs.orientation);

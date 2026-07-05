@@ -44,6 +44,7 @@
 
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
+use bevy::light::NotShadowCaster;
 use bevy::math::{DMat3, DQuat, DVec3, Vec3, Vec3A};
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
@@ -66,6 +67,7 @@ use crate::coords::SHIP_LAYER;
 use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
+use crate::rendering::terrain_residency::TerrainRebuildRequest;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
@@ -82,40 +84,60 @@ use crate::spawn::SpawnSituation;
 // spaceplane can take off and land here without running out of strip.
 
 const RUNWAY_LENGTH_M: f64 = 5000.0;
-const RUNWAY_HALF_LENGTH_M: f64 = RUNWAY_LENGTH_M * 0.5;
+pub(crate) const RUNWAY_HALF_LENGTH_M: f64 = RUNWAY_LENGTH_M * 0.5;
 const RUNWAY_WIDTH_M: f64 = 90.0;
-const RUNWAY_HALF_WIDTH_M: f64 = RUNWAY_WIDTH_M * 0.5;
+pub(crate) const RUNWAY_HALF_WIDTH_M: f64 = RUNWAY_WIDTH_M * 0.5;
 
-/// Paved strip footprint half-extents `(half_along, half_across)` in metres,
-/// along the takeoff heading and across it. Consumed by the grass scatter layer
-/// to clear blades off the paving (the [`StructureKind::Runway`](crate::structures::StructureKind::Runway)
-/// site carries only its anchor/heading, not its size).
-pub fn runway_footprint() -> (f64, f64) {
-    (RUNWAY_HALF_LENGTH_M, RUNWAY_HALF_WIDTH_M)
-}
+// ---------------------------------------------------------------------------
+// Secondary runway (a shorter crosswind strip angled off the primary)
+// ---------------------------------------------------------------------------
+//
+// The base presents two runways in a **V**: the primary, plus a shorter
+// crosswind strip that diverges from near the primary's `−along` threshold at
+// `SECONDARY_HEADING_OFFSET_DEG` toward the empty (`+across`) side, opposite
+// the launch complex — the classic main-plus-diagonal layout (Dulles' 12/30
+// beside its parallels). The strips never intersect (the secondary starts
+// offset to the side and only fans further away), and the shared V corner is
+// where the taxiway system joins the two (see
+// [`crate::base_editor::spawn_default_base`] — no run-around past the runway
+// end, no runway crossing). The heading divergence gives each strip its own
+// true-heading designator numbers, so no L/R suffix pair is needed. It is a
+// plain parametric `StructureKind::Runway` registry entry that renders +
+// collides through the exact same generalized path as the primary.
+pub(crate) const SECONDARY_LENGTH_M: f64 = 3600.0;
+const SECONDARY_WIDTH_M: f64 = 80.0;
+/// Heading divergence of the secondary strip, rotated toward `+across` (the
+/// side it sits on) so the pair fans apart with along, never converging.
+pub(crate) const SECONDARY_HEADING_OFFSET_DEG: f64 = 30.0;
+/// The secondary's near threshold (the V corner), in the primary's runway
+/// frame: just short of the primary's `−along` threshold, offset to the empty
+/// (`+across`) side far enough that the strips and their taxiways stay clear
+/// of the primary strip.
+pub(crate) const SEC_NEAR_ALONG_M: f64 = -2400.0;
+pub(crate) const SEC_NEAR_ACROSS_M: f64 = 420.0;
 
 /// Flat margin levelled around the painted strip (the "shoulder" of the pad).
 /// The terrain inside `runway + this` is flattened to `E`.
 const RUNWAY_PAD_MARGIN_M: f64 = 50.0;
-/// The base is one wide flat **basin** the whole spaceport sits inside: the
-/// runway near one edge, and a launch complex (two pads with clearing, tank
-/// farms, flame diverters, a VAB and hangars — see
-/// [`crate::base_editor::spawn_default_base`]) filling the rest. Everything
-/// drapes coplanar on the basin at its single elevation `E`.
+/// The base is one wide flat **basin** the whole spaceport sits inside: the two
+/// separated runways plus the launch/airport complex (pads, tank farms, flame
+/// diverters, VAB, hangars, aprons — see [`crate::base_editor::spawn_default_base`])
+/// filling the space between and beside them. Everything drapes coplanar on the
+/// basin at its single elevation `E`.
 ///
-/// Half-length of the basin along the runway (the strip plus an apron at each
-/// end). The 5 km runway dominates, so the complex (laid out within ≲1 km of
-/// the centre) has room to spare along this axis.
-const BASIN_HALF_ALONG_M: f64 = RUNWAY_HALF_LENGTH_M + 200.0;
-/// Half-width of the basin across the runway. Wide enough to clear the launch
-/// complex laid out beside the strip; the basin is *offset* (below) toward that
-/// side, so the runway sits near one edge and the complex fills the width.
-const BASIN_HALF_ACROSS_M: f64 = 720.0;
-/// How far the basin centre is offset across the runway, toward the launch
-/// complex side (`heading × center_dir`, matching `spawn_default_base`'s `+off`
-/// direction). Keeps the runway just inside the near edge and the flattened
-/// area from being wasted on the empty side of the strip.
-const BASIN_OFFSET_ACROSS_M: f64 = 540.0;
+/// Half-length of the basin along the runway (the strip plus generous apron/
+/// clearway at each end).
+const BASIN_HALF_ALONG_M: f64 = RUNWAY_HALF_LENGTH_M + 400.0;
+/// Half-width of the basin across the runway. Wide enough to clear the angled
+/// secondary runway (whose far end reaches ~2.2 km off to the `+across` side)
+/// and the launch complex (~1.1 km off to the `-across` side) with a green
+/// margin, so both runways sit fully inside cleared, flattened ground.
+const BASIN_HALF_ACROSS_M: f64 = 1900.0;
+/// The basin is offset toward the airside (the `+across` / secondary-runway
+/// side, i.e. **negative** along `complex_across`): the angled secondary fans
+/// much further out on that side than the launch complex does on its side, so
+/// a centred basin would waste half a kilometre of flattening behind the pads.
+const BASIN_OFFSET_ACROSS_M: f64 = -500.0;
 /// Wide blend from the basin back to natural terrain. The basin levels to the
 /// *mean* terrain over its footprint (balanced cut/fill — see
 /// `finish_runway_spawn`), so the edge height is only ~half the basin's relief;
@@ -143,6 +165,17 @@ const RUNWAY_TOP_SEGMENTS_LEN: usize = 120;
 const RUNWAY_TOP_SEGMENTS_W: usize = 4;
 /// Subdivision length for marking strips (kept fine so dashes read cleanly).
 const RUNWAY_MARKING_SEG_LEN_M: f64 = 25.0;
+
+// --- Runway designator numbers (painted from the real ICAO font) ---
+/// Height of the number block along the runway (m). Aviation numbers are large
+/// — read from short final, filling a good half of the strip width. The
+/// across-width follows the glyph aspect.
+const NUM_DIGIT_H_M: f64 = 45.0;
+/// Distance from the threshold to the near (baseline) edge of the number (m).
+const NUM_THRESHOLD_MARGIN_M: f64 = 90.0;
+/// Pixel height the ICAO glyphs are rasterized at (resolution of the decal
+/// texture; the quad is metric, so this is just texture crispness).
+const NUM_RASTER_PX_H: u32 = 512;
 
 /// Light the jet engines once the cruise aircraft is placed. Mirrors
 /// [`enable_runway_engines`] but triggers on the cruise scenario (no runway
@@ -292,17 +325,22 @@ const APPROACH_SINK_M_S: f64 = 4.7;
 const RUNWAY_VIS_RADIUS_FACTOR: f64 = 4.0;
 
 /// The chosen runway, in the body-fixed frame. Inserted once by
-/// [`finish_runway_spawn`]; kept around for UI / future reference.
+/// [`build_spaceport`]; kept around for UI / future reference, and used as the
+/// "spaceport already built?" key by the launch-select flow.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct RunwaySite {
     pub body_id: BodyId,
-    /// Unit body-fixed direction to the runway centre.
+    /// Unit body-fixed direction to the (primary) runway centre.
     pub center_dir: DVec3,
-    /// Unit body-fixed tangent along the takeoff heading at the centre.
+    /// Unit body-fixed tangent along the primary takeoff heading at the centre.
     pub heading_tangent: DVec3,
     /// Flat platform elevation (m above the body reference radius). The whole
     /// runway top is this constant radius — level, not draped.
     pub elevation_m: f64,
+    /// The [`BaseSite`](crate::structures::StructureKind::BaseSite) basin the
+    /// spaceport sits on. The launch-select flow opens the god-view focused on
+    /// this site and hit-tests the runways/launchpads registered under it.
+    pub basin_id: crate::structures::StructureId,
 }
 
 /// Marker on the runway platform entity (a root-grid big_space child).
@@ -391,6 +429,7 @@ fn finish_runway_spawn(
         ResMut<TerrainFlattenRegistry>,
         ResMut<crate::structures::StructureRegistry>,
         ResMut<ActiveLocalBubble>,
+        ResMut<TerrainRebuildRequest>,
     ),
     root: Res<RealSpaceRoot>,
     ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
@@ -408,11 +447,12 @@ fn finish_runway_spawn(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ShadowedStandardMaterial>>,
+    mut images: ResMut<Assets<Image>>,
 ) {
     if !placement.pending || !situation.is_runway() {
         return;
     }
-    let (mut flatten_registry, mut structure_registry, mut active_bubble) = registries;
+    let (mut flatten_registry, mut structure_registry, mut active_bubble, mut rebuild) = registries;
     let body_id = sim.simulation.dominant_body();
     let Some(height_source) = height_sources.get(body_id) else {
         return; // terrain not resident yet — retry next frame
@@ -420,42 +460,131 @@ fn finish_runway_spawn(
     let hs = height_source.as_ref();
 
     // How far to lift the parked craft so it rests on the surface. Computed
-    // before building anything, so a craft whose geometry isn't ready yet just
-    // retries instead of double-spawning the runway.
+    // before building anything, so a craft whose gear/geometry isn't ready yet
+    // just retries instead of double-spawning the spaceport.
     let park_clearance_m = if matches!(*situation, SpawnSituation::Runway) {
         let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
             return; // ship not spawned yet — retry
         };
         let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
-        // Rest the craft on its landing gear. Measure the wheel-contact depth
-        // from the gear parts — *not* visual meshes, which aren't spawned yet at
-        // this loading-time placement (a visual measurement saw only the fuselage
-        // and buried the gear). Then drop the craft by the static suspension sag
-        // so the gear spawns already *loaded* (grounded → WoW aero gate on);
-        // spawning at zero compression left the gear unsupported for a frame and
-        // the craft tipped before the spring engaged. The suspension self-trims
-        // from this equilibrium. A craft with no gear falls back to the
-        // visual-mesh extent and rests on its belly.
-        match crate::local_physics::gear_contact_geometry(parts, gear_q, host_nodes) {
-            Some((depth_m, wheel_count)) => {
-                let body = &sim.system.bodies[body_id];
-                let g = body.gm / (body.radius_m * body.radius_m);
-                let mass = sim.simulation.ship_mass_kg().max(1.0);
-                let k = gear_tuning.k_spring.max(1.0);
-                let sag = mass * g / (wheel_count.max(1) as f64 * k);
-                (depth_m - sag).max(0.0)
-            }
-            None => {
-                match craft_ground_clearance(ship_entity, ship_gt, &children_q, &mesh_q, &meshes) {
-                    Some(c) => c + RUNWAY_GEAR_REST_MARGIN_M,
-                    None => return, // craft geometry not ready yet — retry
-                }
-            }
+        match measure_runway_clearance(
+            &sim, body_id, ship_entity, ship_gt, &children_q, &mesh_q, &meshes, parts, gear_q,
+            host_nodes, gear_tuning,
+        ) {
+            Some(c) => c,
+            None => return, // craft gear/geometry not ready yet — retry
         }
     } else {
         0.0
     };
 
+    // Build the spaceport site — basin flatten, both runways (primary + angled
+    // secondary) with their geometry/colliders, and the default base — without
+    // placing any craft. Shared with the launch-select flow, which builds the
+    // same site lazily and then lets the player pick a launch point on it.
+    let SpaceportBuild {
+        basin_id: _basin_id,
+        site,
+        body_state,
+        body_radius_m,
+    } = build_spaceport(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        &mut images,
+        &mut structure_registry,
+        &mut flatten_registry,
+        &mut rebuild,
+        &mut sim,
+        hs,
+        root.entity,
+        body_id,
+    );
+
+    match *situation {
+        SpawnSituation::Runway => {
+            place_on_runway(
+                &mut sim,
+                &body_state,
+                &site,
+                body_radius_m,
+                RUNWAY_HALF_LENGTH_M,
+                park_clearance_m,
+            );
+            // Hold the freshly-parked craft on the strip. The brakes latch
+            // defaults off (airborne spawns must not start with the spoilers
+            // out), so the parked placement is the one spot that engages it.
+            commands.insert_resource(crate::local_physics::ParkingBrake { engaged: true });
+        }
+        SpawnSituation::RunwayApproach => {
+            place_approach(&mut sim, &body_state, &site, body_radius_m)
+        }
+        _ => {}
+    }
+
+    // Both runway scenarios rest the craft on its wheels, so force the gear
+    // down — `GearState` is a persistent resource, and a respawn after the
+    // player retracted gear in flight would otherwise spawn the aircraft
+    // belly-down on the strip.
+    commands.insert_resource(crate::local_physics::GearState { down: true });
+
+    commands.insert_resource(site);
+    placement.pending = false;
+    // The placement just teleported the canonical craft. Any live Avian bubble
+    // was seeded from the *pre-placement* state (the placeholder orbit), and
+    // the authority-edge snap can miss a bubble whose spawn commands haven't
+    // flushed yet — the render craft (and the camera + tile streamer behind
+    // it) would then coast the stale orbit while the canonical stats sit
+    // parked. Tear the bubble down like every other ship teleport does;
+    // `spawn_player_avian_body` rebuilds it next frame seeded from the placed
+    // state.
+    crate::scenario_menu::clear_bubble(&mut commands, &mut active_bubble);
+    // The surface state + flatten pad are installed and the aircraft is placed:
+    // let the settle gate start timing the tile stream at the (now-known) site
+    // and release the loading screen's placement gate.
+    settle.mark_placed();
+    tracker.complete(crate::loading::step::PLACEMENT);
+}
+
+/// Result of [`build_spaceport`]: the flattened base site plus the primary
+/// runway, ready for a craft to be placed on (dev runway park) or for the
+/// player to pick a launch point on (launch-select flow).
+pub(crate) struct SpaceportBuild {
+    /// The `BaseSite` basin every runway/launchpad drapes on — the launch-select
+    /// god-view focuses on it and hit-tests its child launch points.
+    pub basin_id: crate::structures::StructureId,
+    /// The primary runway (also the [`RunwaySite`] resource the game inserts).
+    pub site: RunwaySite,
+    /// Body state at the morning boot epoch this build seats the world at, so a
+    /// caller placing a craft uses the same epoch the geometry was posed at.
+    pub body_state: BodyState,
+    pub body_radius_m: f64,
+}
+
+/// Build the spaceport at the fixed site: flatten the basin, register + render +
+/// collide both runways (primary + angled secondary), and author the default
+/// base (launchpads, buildings, tanks, tarmac) on the basin. Seats the world at
+/// the morning boot epoch. **Does not place or measure any craft** — the caller
+/// decides what to do next (park a craft, or open the launch-select god-view).
+///
+/// Shared by the dev runway scenario ([`finish_runway_spawn`]) and the
+/// launch-select flow's lazy site build, so both produce the identical
+/// spaceport. Not idempotent — the caller must guard against building twice
+/// (e.g. on the [`RunwaySite`] resource already existing).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_spaceport(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ShadowedStandardMaterial>,
+    images: &mut Assets<Image>,
+    structure_registry: &mut crate::structures::StructureRegistry,
+    flatten_registry: &mut TerrainFlattenRegistry,
+    rebuild: &mut TerrainRebuildRequest,
+    sim: &mut SimulationState,
+    hs: &dyn HeightSource,
+    root_entity: Entity,
+    body_id: BodyId,
+) -> SpaceportBuild {
     let body_radius_m = sim.system.bodies[body_id].radius_m;
 
     // Fixed body-fixed site (constant lat/lon + heading), instead of the old
@@ -480,11 +609,12 @@ fn finish_runway_spawn(
         );
     }
 
-    // The base is one wide flat basin the spaceport sits inside, *offset* toward
-    // the launch-complex side of the runway (`heading × center_dir`, the same
-    // `+off` direction `spawn_default_base` lays the complex along) so the runway
-    // sits near the near edge and the complex fills the width — no flattened area
-    // wasted on the empty side of the strip.
+    // The base is one wide flat basin the spaceport sits inside, centred on the
+    // primary runway (`BASIN_OFFSET_ACROSS_M = 0`): the secondary runway sits off
+    // to the `+across` side and the launch/airport complex to the `-across`
+    // (`+off`) side, so the basin straddles both. `complex_across` (`+off`) is
+    // kept for the (currently zero) offset and matches `spawn_default_base`'s
+    // `+off` layout direction.
     let complex_across = heading_tangent.cross(center_dir).normalize();
     let basin_center_dir =
         (center_dir * body_radius_m + complex_across * BASIN_OFFSET_ACROSS_M).normalize();
@@ -548,43 +678,64 @@ fn finish_runway_spawn(
         None,
     );
     if let Some(basin) = structure_registry.get(basin_id).copied() {
-        crate::structures::apply_structure_flatten(&basin, body_radius_m, &mut flatten_registry);
+        crate::structures::apply_structure_flatten(&basin, body_radius_m, flatten_registry);
     }
-    // The runway is the first structure on the basin — it drapes on the level
-    // ground (the basin provides the flatten), at the basin's elevation `E`.
+    // The runways are the first structures on the basin — they drape on the
+    // level ground (the basin provides the flatten), at the basin's elevation
+    // `E`. Register the primary strip (centred) plus the **angled** secondary:
+    // its near threshold sits at the V corner (`SEC_NEAR_*`, near the primary's
+    // `−along` threshold on the empty `+across` side) and the strip runs out at
+    // `SECONDARY_HEADING_OFFSET_DEG`, fanning away so the two never intersect.
+    // Both are plain parametric `StructureKind::Runway` registry entries and
+    // render through the same generalized geometry path — the editor can add
+    // more the same way.
+    let sec_heading = {
+        let a = SECONDARY_HEADING_OFFSET_DEG.to_radians();
+        // Rotate toward `+across` (the side the secondary sits on) so the strips
+        // fan apart with along, never converging.
+        (heading_tangent * a.cos() + across * a.sin()).normalize()
+    };
+    // Centre = the near threshold plus half a length down the angled heading.
+    let sec_center_offset = heading_tangent * SEC_NEAR_ALONG_M
+        + across * SEC_NEAR_ACROSS_M
+        + sec_heading * (SECONDARY_LENGTH_M * 0.5);
+    let sec_center_dir = (center_dir * body_radius_m + sec_center_offset).normalize();
     structure_registry.register(
         body_id,
         center_dir,
         heading_tangent,
         crate::structures::StructurePlacement::Drape,
-        crate::structures::StructureKind::Runway,
+        crate::structures::StructureKind::Runway {
+            half_length_m: RUNWAY_HALF_LENGTH_M as f32,
+            half_width_m: RUNWAY_HALF_WIDTH_M as f32,
+        },
+        Some(basin_id),
+    );
+    structure_registry.register(
+        body_id,
+        sec_center_dir,
+        sec_heading,
+        crate::structures::StructurePlacement::Drape,
+        crate::structures::StructureKind::Runway {
+            half_length_m: (SECONDARY_LENGTH_M * 0.5) as f32,
+            half_width_m: (SECONDARY_WIDTH_M * 0.5) as f32,
+        },
         Some(basin_id),
     );
 
+    // The primary runway backs the parked-craft spawn + gear collider skip.
     let site = RunwaySite {
         body_id,
         center_dir,
         heading_tangent,
         elevation_m,
-    };
-    let frame = RunwayFrame {
-        body_id,
-        center_dir,
-        heading: heading_tangent,
-        across,
-        body_radius_m,
-        elevation_m,
+        basin_id,
     };
 
     let lat_deg = center_dir.y.clamp(-1.0, 1.0).asin().to_degrees();
     let lon_deg = center_dir.z.atan2(center_dir.x).to_degrees();
     info!(
-        "runway: {} on {} at lat {:.1}°, lon {:.1}° — basin levelled to mean {:.0} m (terrain {:.0}..{:.0} m), {:.0} m × {:.0} m",
-        if matches!(*situation, SpawnSituation::Runway) {
-            "parked"
-        } else {
-            "on approach"
-        },
+        "runway: spaceport on {} at lat {:.1}°, lon {:.1}° — basin levelled to mean {:.0} m (terrain {:.0}..{:.0} m), {:.0} m × {:.0} m",
         sim.system.bodies[body_id].name,
         lat_deg,
         lon_deg,
@@ -607,74 +758,135 @@ fn finish_runway_spawn(
     let epoch = Epoch(sim.simulation.sim_time());
     let body_state = sim.ephemeris.state(body_id, epoch);
 
-    spawn_runway_geometry(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &frame,
-        (body_radius_m * RUNWAY_VIS_RADIUS_FACTOR) as f32,
-        root.entity,
-        &body_state,
-    );
-    spawn_runway_collider(&mut commands, &frame, &body_state);
+    // Render + collide every runway on the **shared basin plane** (normal
+    // `center_dir`, at `E`): the primary (centred, `center_offset = 0`) and the
+    // secondary (offset `across·SEP` within the same plane, `sec_heading`). Both
+    // are flat strips flush with the one flattened basin; each gets its own
+    // coplanar slab collider. Using the basin plane for the offset strip (rather
+    // than its own tangent plane) is what keeps it from sinking into the ground.
+    let swap_radius_m = (body_radius_m * RUNWAY_VIS_RADIUS_FACTOR) as f32;
+    // `pair_side` is 0 for both: the 30° heading divergence gives each strip its
+    // own true-heading designator numbers, so no L/R suffix pair is needed.
+    for (hdg, center_offset, pair_side, half_len, half_wid) in [
+        (heading_tangent, DVec3::ZERO, 0i8, RUNWAY_HALF_LENGTH_M, RUNWAY_HALF_WIDTH_M),
+        (
+            sec_heading,
+            sec_center_offset,
+            0i8,
+            SECONDARY_LENGTH_M * 0.5,
+            SECONDARY_WIDTH_M * 0.5,
+        ),
+    ] {
+        let frame = RunwayFrame {
+            body_id,
+            center_dir,
+            heading: hdg,
+            across: center_dir.cross(hdg).normalize(),
+            body_radius_m,
+            elevation_m,
+            center_offset,
+            pair_side,
+            half_length_m: half_len,
+            half_width_m: half_wid,
+        };
+        spawn_runway_geometry(
+            commands,
+            meshes,
+            materials,
+            images,
+            &frame,
+            swap_radius_m,
+            root_entity,
+            &body_state,
+        );
+        spawn_runway_collider(commands, &frame, &body_state);
+    }
 
     // Author the rest of the default base on the basin: launchpads + support
     // buildings (coplanar with the runway at `E`) and their connecting tarmac.
     crate::base_editor::spawn_default_base(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        &mut structure_registry,
-        root.entity,
+        commands,
+        meshes,
+        materials,
+        structure_registry,
+        root_entity,
         body_id,
         basin_id,
         center_dir,
         heading_tangent,
+        sec_heading,
         body_radius_m + elevation_m,
     );
 
-    match *situation {
-        SpawnSituation::Runway => {
-            place_parked(
-                &mut sim,
-                &body_state,
-                &site,
-                body_radius_m,
-                park_clearance_m,
-            );
-            // Hold the freshly-parked craft on the strip. The brakes latch
-            // defaults off (airborne spawns must not start with the spoilers
-            // out), so the parked placement is the one spot that engages it.
-            commands.insert_resource(crate::local_physics::ParkingBrake { engaged: true });
-        }
-        SpawnSituation::RunwayApproach => {
-            place_approach(&mut sim, &body_state, &site, body_radius_m)
-        }
-        _ => {}
+    // Re-bake any already-resident terrain so the basin flatten installed above
+    // reaches tiles that streamed in *un-flattened*. The flatten handle is read
+    // per tile-pixel at bake time, so tiles baked after this point come out
+    // level — but the loading-pass callers only run once the height source is
+    // resident, by which point the coarse low-LOD ancestor tiles covering the
+    // whole planet (streamed at the placeholder-craft view before the flatten
+    // existed) are already resident and stay natural. UDLOD's vertex-stage LOD
+    // blend/morph mixes those coarse ancestors with the fine flattened tiles,
+    // pulling the rendered ground ~decimetres off the flat plane in the
+    // LOD-transition bands — subtle near the basin centre (natural ≈ the mean
+    // `E`), enough to z-fight the flush aprons/taxiways. A rebuild despawns +
+    // re-streams every resident tile with the flatten in place, so the whole
+    // surface renders flat. Mirrors `base_editor::pick`, which rebuilds for the
+    // same reason after a runtime flatten. A no-op if nothing is resident yet
+    // (then the first bake is already flattened).
+    rebuild.request(body_id);
+
+    SpaceportBuild {
+        basin_id,
+        site,
+        body_state,
+        body_radius_m,
     }
+}
 
-    // Both runway scenarios rest the craft on its wheels, so force the gear
-    // down — `GearState` is a persistent resource, and a respawn after the
-    // player retracted gear in flight would otherwise spawn the aircraft
-    // belly-down on the strip.
-    commands.insert_resource(crate::local_physics::GearState { down: true });
-
-    commands.insert_resource(site);
-    placement.pending = false;
-    // The placement just teleported the canonical craft. Any live Avian bubble
-    // was seeded from the *pre-placement* state (the placeholder orbit), and
-    // the authority-edge snap can miss a bubble whose spawn commands haven't
-    // flushed yet — the render craft (and the camera + tile streamer behind
-    // it) would then coast the stale orbit while the canonical stats sit
-    // parked. Tear the bubble down like every other ship teleport does;
-    // `spawn_player_avian_body` rebuilds it next frame seeded from the placed
-    // state.
-    crate::scenario_menu::clear_bubble(&mut commands, &mut active_bubble);
-    // The surface state + flatten pad are installed and the aircraft is placed:
-    // let the settle gate start timing the tile stream at the (now-known) site
-    // and release the loading screen's placement gate.
-    settle.mark_placed();
-    tracker.complete(crate::loading::step::PLACEMENT);
+/// Measure how far to lift a parked craft so its gear (or belly) rests on the
+/// flat runway pad. Returns the gear-contact depth minus the static suspension
+/// sag (so the gear spawns already loaded at equilibrium — no settle / tip /
+/// jump when live physics takes over); a gearless craft falls back to its lowest
+/// visual-mesh point plus a sliver. `None` while the craft's gear parts / meshes
+/// aren't resident yet, so the caller retries. Shared by the dev runway park
+/// ([`finish_runway_spawn`]) and the launch-select runway placement.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn measure_runway_clearance(
+    sim: &SimulationState,
+    body_id: BodyId,
+    ship_entity: Entity,
+    ship_gt: &GlobalTransform,
+    children_q: &Query<&Children>,
+    mesh_q: &Query<(&GlobalTransform, &Mesh3d)>,
+    meshes: &Assets<Mesh>,
+    parts: &crate::local_physics::PartColliderQuery,
+    gear_q: &Query<
+        (&Gear, &SurfaceMount),
+        (With<Part>, Without<crate::shipyard_editor::core::EditorPart>),
+    >,
+    host_nodes: &Query<&AttachNodes>,
+    gear_tuning: &crate::local_physics::GearTuning,
+) -> Option<f64> {
+    // Rest the craft on its landing gear. Measure the wheel-contact depth from
+    // the gear parts — *not* visual meshes, which aren't spawned yet at
+    // loading-time placement (a visual measurement saw only the fuselage and
+    // buried the gear). Then drop the craft by the static suspension sag so the
+    // gear spawns already *loaded* (grounded → WoW aero gate on); spawning at
+    // zero compression left the gear unsupported for a frame and the craft tipped
+    // before the spring engaged. A craft with no gear falls back to the
+    // visual-mesh extent and rests on its belly.
+    match crate::local_physics::gear_contact_geometry(parts, gear_q, host_nodes) {
+        Some((depth_m, wheel_count)) => {
+            let body = &sim.system.bodies[body_id];
+            let g = body.gm / (body.radius_m * body.radius_m);
+            let mass = sim.simulation.ship_mass_kg().max(1.0);
+            let k = gear_tuning.k_spring.max(1.0);
+            let sag = mass * g / (wheel_count.max(1) as f64 * k);
+            Some((depth_m - sag).max(0.0))
+        }
+        None => craft_ground_clearance(ship_entity, ship_gt, children_q, mesh_q, meshes)
+            .map(|c| c + RUNWAY_GEAR_REST_MARGIN_M),
+    }
 }
 
 /// Light the jet engines once the runway aircraft is placed.
@@ -813,20 +1025,40 @@ fn footprint_stats(
 // Geometry
 // ---------------------------------------------------------------------------
 
-/// The body-fixed runway frame at the fixed pad elevation `E`. Projects a
-/// `(along, across)` runway coordinate onto a level (constant-radius) point.
+/// The body-fixed runway frame on the **shared basin tangent plane**. All
+/// runways on the basin reference the *same* plane (normal `center_dir`, at
+/// elevation `E`), so they lie flush with the single flattened terrain — a strip
+/// is positioned within that plane by `center_offset`, not given its own tangent
+/// plane at its own centre (which, offset across the sphere, would tilt away from
+/// the flattened ground and sink the strip into it).
 struct RunwayFrame {
     body_id: BodyId,
+    /// Basin tangent-plane normal (the shared "up" for every runway on the
+    /// basin). NOT the strip's own centre direction when it is offset.
     center_dir: DVec3,
     heading: DVec3,
     across: DVec3,
     body_radius_m: f64,
     elevation_m: f64,
+    /// In-plane offset (world metres) of this strip's centre from the plane
+    /// origin (`center_dir·(R+E)`) — zero for the primary, `across·SEP` for the
+    /// offset secondary. Keeps every strip on the one basin plane.
+    center_offset: DVec3,
+    /// Which side of a parallel-runway pair this strip is on, for the L/R
+    /// designator suffix: `-1` = the `−across` side, `+1` = the `+across` side,
+    /// `0` = a lone runway (no suffix). The suffix flips L↔R between the two
+    /// thresholds (as in real "07L / 25R").
+    pair_side: i8,
+    /// Half-length along the heading (m) — per-runway, so the primary and the
+    /// secondary strip share one geometry path.
+    half_length_m: f64,
+    /// Half-width across the heading (m).
+    half_width_m: f64,
 }
 
 impl RunwayFrame {
     fn center_surface(&self) -> DVec3 {
-        self.center_dir * (self.body_radius_m + self.elevation_m)
+        self.center_dir * (self.body_radius_m + self.elevation_m) + self.center_offset
     }
 
     /// Body-fixed offset (from the pad centre) of a runway coordinate, plus the
@@ -881,10 +1113,12 @@ fn flat_runway_material(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_runway_geometry(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ShadowedStandardMaterial>,
+    images: &mut Assets<Image>,
     frame: &RunwayFrame,
     swap_radius_m: f32,
     parent: Entity,
@@ -924,10 +1158,16 @@ fn spawn_runway_geometry(
             },
             cell,
             Visibility::Inherited,
-            // Also on the caster layer: the paved strip writes into the custom
-            // sun-shadow cascade (F6 — "runway cast"), so its curb lip shadows
-            // and it occludes the ground under it consistently at low sun.
-            RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
+            // RECEIVE-ONLY, like the terrain it sits flush on and the tarmac.
+            // A km-scale flat surface that both casts into and receives from
+            // the cascade maps self-shadow-acnes at grazing sun: the depth the
+            // plane spans across ONE shadow texel (texel × cot elevation)
+            // exceeds the sampler's hard-capped bias/offset, so the strip
+            // shadowed itself in texel-grid blocks and stripes. Its own cast
+            // shadow is a 12 cm curb lip — sub-texel in every cascade — so
+            // casting bought nothing. The bias model in `thalos::shadow`
+            // assumes dominant flat receivers stay out of the maps; keep it so.
+            RenderLayers::layer(SHIP_LAYER),
             ChildOf(parent),
             RunwayVisual {
                 body_id: frame.body_id,
@@ -955,26 +1195,32 @@ fn spawn_runway_geometry(
         MeshMaterial3d(asphalt.clone()),
         Transform::IDENTITY,
         Visibility::Inherited,
-        RenderLayers::from_layers(&[SHIP_LAYER, SHADOW_CASTER_LAYER]),
+        // Receive-only for the same reason as the top mesh: the skirt's top
+        // edge is coplanar with the paving, so as a caster it re-introduced
+        // the same self-shadow acne along the strip edges.
+        RenderLayers::layer(SHIP_LAYER),
         ChildOf(runway_entity),
         Name::new("Runway Edge Skirt"),
     ));
 
     spawn_runway_posts(commands, meshes, materials, frame, runway_entity);
+    spawn_runway_numbers(commands, meshes, materials, images, frame, runway_entity);
 }
 
 fn build_top_mesh(frame: &RunwayFrame) -> Mesh {
     let nl = RUNWAY_TOP_SEGMENTS_LEN;
     let nw = RUNWAY_TOP_SEGMENTS_W;
+    let length = 2.0 * frame.half_length_m;
+    let width = 2.0 * frame.half_width_m;
     let mut positions = Vec::with_capacity((nl + 1) * (nw + 1));
     let mut normals = Vec::with_capacity((nl + 1) * (nw + 1));
     let mut uvs = Vec::with_capacity((nl + 1) * (nw + 1));
     let mut indices = Vec::with_capacity(nl * nw * 6);
     for i in 0..=nl {
-        let along = -RUNWAY_HALF_LENGTH_M + RUNWAY_LENGTH_M * (i as f64 / nl as f64);
+        let along = -frame.half_length_m + length * (i as f64 / nl as f64);
         let v = i as f32 / nl as f32;
         for j in 0..=nw {
-            let across_m = -RUNWAY_HALF_WIDTH_M + RUNWAY_WIDTH_M * (j as f64 / nw as f64);
+            let across_m = -frame.half_width_m + width * (j as f64 / nw as f64);
             let u = j as f32 / nw as f32;
             let (off, up) = frame.level(along, across_m, RUNWAY_ASPHALT_LIFT_M);
             positions.push([off.x as f32, off.y as f32, off.z as f32]);
@@ -1004,8 +1250,8 @@ fn build_top_mesh(frame: &RunwayFrame) -> Mesh {
 /// only the short above-ground band is visible. Four flat quads suffice: the
 /// strip is a true flat plane, so its perimeter is an exact rectangle.
 fn build_skirt_mesh(frame: &RunwayFrame) -> Mesh {
-    let half_l = RUNWAY_HALF_LENGTH_M;
-    let half_w = RUNWAY_HALF_WIDTH_M;
+    let half_l = frame.half_length_m;
+    let half_w = frame.half_width_m;
     let top = RUNWAY_ASPHALT_LIFT_M;
     let bot = RUNWAY_ASPHALT_LIFT_M - RUNWAY_SKIRT_DEPTH_M;
     // Perimeter corners (along, across), counter-clockwise around the strip.
@@ -1052,8 +1298,8 @@ fn build_markings_mesh(frame: &RunwayFrame) -> Mesh {
     let mut u = Vec::new();
     let mut idx = Vec::new();
 
-    let half_w = RUNWAY_HALF_WIDTH_M;
-    let half_l = RUNWAY_HALF_LENGTH_M;
+    let half_w = frame.half_width_m;
+    let half_l = frame.half_length_m;
 
     // Side edge lines (1 m wide, set in 1.5 m from the edge).
     let edge_c = half_w - 1.5;
@@ -1131,7 +1377,217 @@ fn build_markings_mesh(frame: &RunwayFrame) -> Mesh {
         }
     }
 
+    // Note: the runway designator *numbers* are not part of this white paint
+    // mesh — they are painted from the real ICAO font as textured decal quads,
+    // see `spawn_runway_numbers`.
+
     build_mesh(p, n, u, idx)
+}
+
+/// True compass heading (deg, 0 = north, 90 = east) of the runway's takeoff
+/// direction (`frame.heading`), computed in the local ENU frame at the runway
+/// centre. Thalos spins about +Y, so +Y is the north-pole axis.
+fn runway_heading_deg(frame: &RunwayFrame) -> f64 {
+    let up = frame.center_dir;
+    let pole = DVec3::Y;
+    let north = (pole - up * pole.dot(up))
+        .try_normalize()
+        .unwrap_or_else(|| {
+            // At a pole the tangent north is undefined; pick any tangent.
+            let seed = if up.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
+            (seed - up * seed.dot(up)).normalize()
+        });
+    let east = up.cross(north).normalize();
+    let h = frame.heading;
+    h.dot(east).atan2(h.dot(north)).to_degrees().rem_euclid(360.0)
+}
+
+/// Runway designator digit (01–36) from a compass heading, rounded to the
+/// nearest 10°. Matches the HUD's `hud::mfd::runway_number` convention.
+fn runway_designator(heading_deg: f64) -> u8 {
+    let mut n = (heading_deg.rem_euclid(360.0) / 10.0).round() as i32;
+    if n <= 0 {
+        n += 36;
+    } else if n > 36 {
+        n -= 36;
+    }
+    n as u8
+}
+
+/// Embedded ICAO runway-designator font (the aviation typeface for runway
+/// numbers). Rasterized to an alpha decal painted on the strip.
+const ICAO_FONT: &[u8] = include_bytes!("../../../assets/fonts/ICAORWYID.ttf");
+
+/// Paint the two runway designator numbers (one at each threshold), from the
+/// real ICAO font. Each is an alpha texture rasterized from the font and applied
+/// to a small quad lying on the runway plane, oriented so it reads upright on
+/// approach (the far end rotated 180°). Spawned as children of the runway
+/// entity, so they inherit its body-fixed transform.
+fn spawn_runway_numbers(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<ShadowedStandardMaterial>,
+    images: &mut Assets<Image>,
+    frame: &RunwayFrame,
+    parent: Entity,
+) {
+    let heading_deg = runway_heading_deg(frame);
+    // L/R suffix for a parallel-runway pair. At the near (`rot180 == false`)
+    // threshold the strip on the pilot's left (the `+across` side, `pair_side >
+    // 0`) is "L"; the far threshold is approached from the opposite side, so it
+    // flips. A lone runway (`pair_side == 0`) gets no suffix.
+    let suffix = |rot180: bool| -> &'static str {
+        match frame.pair_side {
+            0 => "",
+            s => {
+                let left = if rot180 { s < 0 } else { s > 0 };
+                if left { "L" } else { "R" }
+            }
+        }
+    };
+    // (designator text, along-centre of the number block, rotate-180-for-far-end)
+    let ends = [
+        (
+            format!("{:02}{}", runway_designator(heading_deg), suffix(false)),
+            -frame.half_length_m + NUM_THRESHOLD_MARGIN_M + NUM_DIGIT_H_M * 0.5,
+            false,
+        ),
+        (
+            format!("{:02}{}", runway_designator(heading_deg + 180.0), suffix(true)),
+            frame.half_length_m - NUM_THRESHOLD_MARGIN_M - NUM_DIGIT_H_M * 0.5,
+            true,
+        ),
+    ];
+    for (text, along_center, rot180) in ends {
+        let Some((w, h, pixels)) = rasterize_designator(&text) else {
+            continue;
+        };
+        let image = images.add(image_from_alpha_rgba8(w, h, pixels));
+        // White paint, masked by the glyph coverage (alpha), receiving the sun
+        // shadow like the rest of the strip. Matches the marking paint's tone
+        // (`flat_runway_material`) so the digits read as bright as the
+        // threshold bar.
+        let material = materials.add(shadowed(StandardMaterial {
+            base_color: Color::srgb(0.92, 0.92, 0.92),
+            base_color_texture: Some(image),
+            perceptual_roughness: 0.8,
+            metallic: 0.0,
+            alpha_mode: AlphaMode::Mask(0.5),
+            double_sided: true,
+            cull_mode: None,
+            ..default()
+        }));
+        // Quad sized to the glyph aspect: fixed along-height, width follows the
+        // rasterized aspect ratio so the digits keep the font's proportions.
+        let half_along = NUM_DIGIT_H_M * 0.5;
+        let half_across = half_along * (w as f64 / h as f64);
+        let mesh = meshes.add(build_number_quad(frame, along_center, half_along, half_across, rot180));
+        commands.spawn((
+            Mesh3d(mesh),
+            MeshMaterial3d(material),
+            Transform::IDENTITY,
+            Visibility::Inherited,
+            RenderLayers::layer(SHIP_LAYER),
+            ChildOf(parent),
+            Name::new("Runway Number"),
+        ));
+    }
+}
+
+/// A flat quad on the runway plane for a designator decal, centred across the
+/// strip at `along_center`, with the glyph texture UV-mapped so the top of the
+/// digits points down-runway (`rot180` flips it 180° for the far threshold).
+fn build_number_quad(
+    frame: &RunwayFrame,
+    along_center: f64,
+    half_along: f64,
+    half_across: f64,
+    rot180: bool,
+) -> Mesh {
+    let s = if rot180 { -1.0 } else { 1.0 };
+    // (u, v, along-sign, across-sign): v=0 (image top) → +along (down-runway).
+    let verts = [
+        (0.0f32, 0.0f32, 1.0f64, -1.0f64),
+        (1.0, 0.0, 1.0, 1.0),
+        (0.0, 1.0, -1.0, -1.0),
+        (1.0, 1.0, -1.0, 1.0),
+    ];
+    let mut positions = Vec::with_capacity(4);
+    let mut normals = Vec::with_capacity(4);
+    let mut uvs = Vec::with_capacity(4);
+    for (u, v, a_sign, c_sign) in verts {
+        let along = along_center + s * a_sign * half_along;
+        let across = s * c_sign * half_across;
+        let (off, up) = frame.level(along, across, RUNWAY_MARKING_LIFT_M);
+        positions.push([off.x as f32, off.y as f32, off.z as f32]);
+        normals.push([up.x as f32, up.y as f32, up.z as f32]);
+        uvs.push([u, v]);
+    }
+    // Wind the front face UP (`heading × across = up`): the digits previously
+    // wound face-down and shaded through the back-face path — ambient-only,
+    // reading as a dark smudge instead of white paint.
+    build_mesh(positions, normals, uvs, vec![0, 1, 2, 1, 3, 2])
+}
+
+/// Rasterize a runway designator string (e.g. "07", "25R") from the ICAO font
+/// into an RGBA8 image: white (RGB = 0xE6) with the glyph coverage in the alpha
+/// channel. Returns `(width, height, pixels)`, tightly fit to the glyphs. `None`
+/// if the font fails to load.
+fn rasterize_designator(text: &str) -> Option<(u32, u32, Vec<u8>)> {
+    use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
+    let font = FontRef::try_from_slice(ICAO_FONT).ok()?;
+    let scale = PxScale::from(NUM_RASTER_PX_H as f32);
+    let scaled = font.as_scaled(scale);
+
+    let advance: f32 = text.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
+    let w = advance.ceil().max(1.0) as u32;
+    let h = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32;
+
+    // White pixels, alpha 0 (transparent) — the glyph coverage fills alpha.
+    let mut pixels = vec![0u8; (w * h * 4) as usize];
+    for px in pixels.chunks_exact_mut(4) {
+        px[0] = 230;
+        px[1] = 230;
+        px[2] = 230;
+    }
+
+    let baseline = scaled.ascent();
+    let mut pen_x = 0.0f32;
+    for ch in text.chars() {
+        let id = font.glyph_id(ch);
+        let glyph = id.with_scale_and_position(scale, ab_glyph::point(pen_x, baseline));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let bounds = outlined.px_bounds();
+            outlined.draw(|gx, gy, coverage| {
+                let x = bounds.min.x as i32 + gx as i32;
+                let y = bounds.min.y as i32 + gy as i32;
+                if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                    let i = ((y as u32 * w + x as u32) * 4) as usize;
+                    let a = (coverage * 255.0).clamp(0.0, 255.0) as u8;
+                    pixels[i + 3] = pixels[i + 3].max(a);
+                }
+            });
+        }
+        pen_x += scaled.h_advance(id);
+    }
+    Some((w, h, pixels))
+}
+
+/// Wrap RGBA8 pixels in a Bevy `Image` (mirrors `navball::markers::image_from_rgba8`).
+fn image_from_alpha_rgba8(width: u32, height: u32, pixels: Vec<u8>) -> Image {
+    use bevy::asset::RenderAssetUsages;
+    use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
+    Image::new(
+        Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        pixels,
+        TextureFormat::Rgba8UnormSrgb,
+        RenderAssetUsages::default(),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1199,11 +1655,11 @@ fn spawn_runway_posts(
     let green = materials.add(post_material(Color::srgb(0.1, 0.8, 0.2)));
     let red = materials.add(post_material(Color::srgb(0.9, 0.15, 0.1)));
 
-    let edge = RUNWAY_HALF_WIDTH_M + POST_EDGE_OFFSET_M;
-    let stations = (RUNWAY_LENGTH_M / POST_SPACING_M).floor() as i32;
+    let edge = frame.half_width_m + POST_EDGE_OFFSET_M;
+    let stations = (2.0 * frame.half_length_m / POST_SPACING_M).floor() as i32;
     for i in 0..=stations {
-        let along = -RUNWAY_HALF_LENGTH_M + POST_SPACING_M * i as f64;
-        if along > RUNWAY_HALF_LENGTH_M + 1.0 {
+        let along = -frame.half_length_m + POST_SPACING_M * i as f64;
+        if along > frame.half_length_m + 1.0 {
             break;
         }
         let (mesh, mat, height) = if i == 0 {
@@ -1255,8 +1711,8 @@ const RUNWAY_SLAB_HALF_THICKNESS_M: f64 = 50.0;
 /// a placeholder — the bubble may not exist yet during the loading-screen
 /// install). See `docs/surface_local.md` §3.
 fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_state: &BodyState) {
-    let half_along = RUNWAY_HALF_LENGTH_M + RUNWAY_PAD_MARGIN_M;
-    let half_across = RUNWAY_HALF_WIDTH_M + RUNWAY_PAD_MARGIN_M;
+    let half_along = frame.half_length_m + RUNWAY_PAD_MARGIN_M;
+    let half_across = frame.half_width_m + RUNWAY_PAD_MARGIN_M;
     // Runway-local tangent frame: X = across, Y = up (center_dir), Z = heading.
     let basis_body_quat = DQuat::from_mat3(&DMat3::from_cols(
         frame.across,
@@ -1414,11 +1870,17 @@ pub(crate) fn craft_extent_below(
 /// from the equilibrium pose. Stationary-while-warping is the same `BodyFixed`
 /// state the generic stable-landing collapse uses, so time-warp on the runway
 /// is stable for free.
-fn place_parked(
+///
+/// **Warp-neutral**: leaves the time-warp level alone (the dev runway spawn
+/// wants the paused-on-spawn default that `spawn::apply_initial_warp` sets on
+/// `Loading → Running`). The launch-select caller sets warp to 1× itself, since
+/// it places the craft *after* that edge has already fired.
+pub(crate) fn place_on_runway(
     sim: &mut SimulationState,
     body_state: &BodyState,
     site: &RunwaySite,
     body_radius_m: f64,
+    half_length_m: f64,
     clearance_m: f64,
 ) {
     let surface_radius = body_radius_m + site.elevation_m;
@@ -1427,7 +1889,10 @@ fn place_parked(
     // Park inset from the threshold end, on the flat runway plane. Up is the
     // plane normal (`center_dir`), not the local radial, so the craft sits
     // parallel to the flat strip and every wheel reads the same compression.
-    let along = -(RUNWAY_HALF_LENGTH_M - PARK_THRESHOLD_INSET_M);
+    // `half_length_m` is the *chosen* strip's half-length (the launch-select
+    // flow can park on the shorter secondary runway), so the inset stays on the
+    // paved strip + its collider regardless of which runway was picked.
+    let along = -(half_length_m - PARK_THRESHOLD_INSET_M);
     let up_body = site.center_dir;
     // The paved (drive) surface at the parked station — the same flat plane the
     // collider's top face and the asphalt mesh use.

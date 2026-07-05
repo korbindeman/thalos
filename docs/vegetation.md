@@ -89,6 +89,80 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > follow-up — and a **near-mesh quality pass** ("close trees read poorly": flat
 > leaf-cluster cards / thin canopy — a mesh/atlas art task, §10).
 >
+> **Grass redesign decision (2026-07-03).** The shipped grass clipmap tops out
+> at **340 m** (three rings; the "~1–1.5 km" reach above was never extended),
+> Phase 1d (the terrain handoff) was never implemented, and the CPU
+> megamesh-per-tile model is the confirmed memory failure: the game **runs out
+> of memory with grass enabled** (grass tiles + rebuild churn on top of the
+> ~450-mesh-tile tree fleet). Aerially the grass reads as a small noisy card
+> disc with a visible coverage ring at its edge. After a survey of shipped
+> horizon-grass systems (Ghost of Tsushima GDC 2021 per-frame GPU generation;
+> MSFS greenness-derived grass; HZD ecotope placement; hexaquo/AMD/Far Cry 5),
+> the plan is restructured around the **four-band cascade** (§5.0) with two
+> commitments, in order:
+>
+> 1. **Band 2 first — grass as terrain shading** (§5.0 band 2; elevates and
+>    broadens Phase 1d): a landcover-driven grass detail layer *inside*
+>    `body_terrain.wgsl` (albedo breakup + detail normal + grass-statistics
+>    roughness/AO through the spine BRDF) from ~250 m to the horizon. This is
+>    what makes fields read lush from the air; near-zero memory.
+> 2. **GPU per-frame generation replaces the CPU megamesh tiles** (Phase 5
+>    pulled forward, §13) — for **every scatter layer**, grass first, then the
+>    tree impostor band, shrubs, rocks. Geometry is regenerated each frame from
+>    deterministic seeds + resident control data (the GPU height/mask atlas the
+>    gate already mirrors); nothing persistent per blade/quad. Memory becomes
+>    O(visible), the revision-rebuild machinery dissolves (next frame simply
+>    regenerates), and the OOM class is deleted rather than tuned.
+>
+> Until the GPU path lands, the shipped CPU rings stay as-is (band 0–1
+> stand-ins); do not extend their reach — that scales the broken memory curve.
+>
+> **Status (2026-07-04):** band 2 (grass-as-terrain-shading) **landed** —
+> two-scale footprint-faded field detail + `shade_surface` transmit lobe in
+> `body_terrain.wgsl`/`lighting.wgsl`, user-verified in-game (amplitudes
+> trimmed once). **GPU grass slices 1 + 1.5 landed, preview-verified /
+> game-UNVERIFIED**: the vertex-synthesized grass field
+> (`body_render::ground::gpu_grass` + `game::rendering::gpu_grass`) replaces
+> the **entire CPU grass clipmap** behind `GraphicsSettings::gpu_grass`
+> (default on; off = full CPU fallback). One template mesh (slot-encoding
+> vertices, ~780 k blades over **five** density bands to **340 m** — band 4
+> is the card-scale far ring, so the CPU card ring parks too; a
+> screen-space minimum blade width, `GG_MIN_WIDTH_RAD`, keeps the far
+> bands from stochastically rasterizing away — sub-pixel blades were the
+> in-game "grass just stops" bug), blades
+> derived per frame in the vertex shader from body-global cell hashes + a
+> CPU-filled 768² height/mask control window (async, rebuilt on ~25 m
+> drift / terrain revision); per-blade memory and the rebuild-churn
+> machinery are gone. Altitude collapse raised to 250–500 m AGL (was
+> 150–300) so climb-out keeps a live sward below.
+>
+> **The high-fidelity blade pass (2026-07-04, the Ghost-of-Tsushima recipe;
+> preview-verified / game-UNVERIFIED).** All in `gpu_grass.wgsl`:
+> - **Wind**: a scrolling two-octave value-noise **gust field** bends whole
+>   Bézier blades from the root (visible rolling waves, arc-length-ish
+>   preserved), per-style stiffness ± per-blade jitter; the shared
+>   `grass_displace` sway stays on as reduced tip flutter.
+> - **Shading**: rounded cross-blade normal blended toward the terrain
+>   normal with distance (near = individual blades, far = one cohesive
+>   lawn), specular sheen lobe, t-weighted translucency, root ambient
+>   occlusion — both root-darkening and AO **fade with band** so far blades
+>   converge on the terrain's own `vegetation_color` (the MSFS rule; this
+>   is what killed the polka-dot far field).
+> - **View-dependent widening** (up to +90 % edge-on) so blades never thin
+>   to nothing while the camera moves.
+> - **Clump coherence**: per-clump facing/height/hue over per-blade jitter;
+>   clump footprint ≥ 45 % of the band's cell so coarse bands interleave
+>   (the carpet fix). Medium-scale (~9 m) mottle patches + moisture-driven
+>   **dry-straw blade mix** (luminance-normalized straw hue).
+> - **Grass types are data**: the WGSL profile consts are gone — styles
+>   (dry / lush / lawn) live in the `GpuGrassParams::style` uniform table,
+>   authored via `GrassStyle` (a `GrassProfile` + dry_mix/sheen/stiffness)
+>   in `gpu_grass.rs::gpu_grass_style_table`. Every fill site must install
+>   the table (zeroed styles = zero-size blades).
+> Slice 2 stays: compute cull/compact + `draw_indirect`, then the tree
+> impostor band onto the same path. Exercised headlessly in `just preview`
+> (`gpu_grass_field_{side,top,3q}` over a synthetic flat window).
+
 > No silent rewrites — when a phase lands, fold its notes here and update the
 > roadmap.
 >
@@ -379,6 +453,38 @@ instead of approximating biome from the grass-mask channel + altitude.
 ---
 
 ## 5. LOD and the representation cascade
+
+### 5.0 The four-band cascade (redesign 2026-07-03)
+
+Every vegetation layer is one instance of the same four-band structure, and
+**all four bands are driven by the one landcover function**
+(`thalos::landcover` / its CPU mirror) — the MSFS lesson: grass density and
+color are *derived from* the field that colors the far ground, so a descending
+camera watches the same pixels grow blades and there is no boundary to hide.
+
+| Band | Range (grass) | Representation | Memory |
+|---|---|---|---|
+| 0 | 0 → ~80 m | full per-blade geometry, GPU-generated per frame | none persistent |
+| 1 | ~80 → ~300 m | degraded blades / cards, coverage-conserving thinning | none persistent |
+| 2 | ~250 m → horizon | **terrain shading**: grass detail layer in `body_terrain.wgsl` | zero |
+| 3 | aerial/orbital | landcover tint in the terrain albedo (already shipped) | zero |
+
+- **Bands 0–1 are generated, never stored** (Ghost of Tsushima model): a
+  compute pass per tile hashes blade seeds, samples the resident height/mask
+  atlas, culls (distance/frustum/occlusion) in the same dispatch, and appends
+  survivors to an instance buffer for one `draw_indirect`. GoT ships ~83k
+  visible blades in ~2.5 ms on PS4 hardware; that is the budget envelope.
+- **Band 2 is a material pass, not objects.** Past the card ring the terrain
+  shader itself carries grass *statistics*: albedo breakup, a detail normal,
+  root-AO, and grass-tuned roughness/translucency through `shade_surface` —
+  so far grass inherits shadows, aerial recession, and sky ambient by
+  construction (the one-world principle applied to grass).
+- **Band transitions are coverage- and color-exact.** The classic aerial
+  failure — a visible disc around the camera — is a coverage/brightness step
+  at a band boundary. Band 1 thinning widens survivors (constant coverage),
+  band 1→2 cross-fades over an overlap zone, and both sample the same
+  landcover color and the same wind field (a boundary invisible at rest still
+  shows in motion if only one side moves).
 
 ### 5.1 The constant-coverage rule (the one that prevents bald ground)
 
@@ -788,9 +894,27 @@ sends screenshots (agents do not launch it).
 - **4b** Option B instanced material for shrub/tree density.
 - **4c** GPU-driven culling + indirect draw.
 
-### Phase 5 — GPU-generated grass (generation rewrite)
+### Phase 5 — GPU-generated vegetation (generation rewrite) **← pulled forward (2026-07-03); slice 1 landed 2026-07-04**
+- **Slice 1 ✅ (vertex-synthesized field, preview-verified/game-unverified):**
+  `ground::gpu_grass` — template mesh + per-frame vertex generation from
+  body-global cell hashes + a scrolling height/mask control window; replaces
+  the CPU blade rings 0–1 (see the status note in the header). Cheap and
+  simple, at the cost of always running the full template through the vertex
+  stage (~2.3 M verts; rejected blades collapse to degenerate strips).
+- **Slice 2 (next):** compute pass generates + culls (distance/frustum/
+  occlusion) + compacts instances → `draw_indexed_indirect`; extend the bands
+  through the card ring to ~340 m and retire the CPU card tiles.
 - Compute-shader blade emission per visible cell; density/LOD/clump from
   distance + height source. Clipmap/coverage/handoff/anchoring/wind carry over.
+- **Scope broadened to the whole stack:** the compute-generate → cull →
+  compact → `draw_indirect` node is designed to host every scatter layer.
+  Order: grass blades/cards (deletes the grass OOM), then the tree impostor
+  band (one quad per tree is the ideal compute payload; deletes the coarse
+  impostor tile meshes), then shrubs/rocks. Near tree *mesh* tiles (LOD0–2)
+  stay CPU-batched for now — they are few and need real meshes — but their
+  count/reach should shrink as the impostor band moves closer.
+- Sequenced **after** band 2 (the §5.0 terrain-shading layer, formerly Phase
+  1d), which is the visual win and needs no new infrastructure.
 
 ### Cross-cutting (as needed)
 - Procedural library generation (space colonization) — gate of Phase 2a.

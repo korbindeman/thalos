@@ -146,6 +146,21 @@ const SHADOW_MAX_ALTITUDE_M: f32 = 50_000.0;
 /// vantage are a few pixels tall anyway; beyond the cap they'd be sub-pixel.
 const SHADOW_MAX_FOOTPRINT_SCALE: f32 = 32.0;
 
+/// Hysteresis for the QUANTIZED footprint scale (power-of-two steps): grow
+/// immediately (coverage is correctness), shrink only once the raw requirement
+/// drops below this fraction of the current step (comfortably inside the next
+/// step down, so a camera hovering at a boundary doesn't strobe texel sizes).
+/// A continuously-varying footprint rescaled every cascade's texel grid every
+/// frame the camera moved — re-rasterizing every shadow edge = global shimmer.
+const SHADOW_FOOTPRINT_SHRINK_FRACTION: f32 = 0.42;
+
+/// Re-anchor distance for the texel-snap's body-fixed reference point. The
+/// snap phase is computed relative to a point that CO-ROTATES with the body
+/// (see the snap note in `update_sun_shadow_camera`); once the cascade centre
+/// drifts this far from it, re-anchor (a one-frame sub-texel phase jump).
+/// Keeps the f32 relative coordinates small and precise.
+const SNAP_ANCHOR_REACH_M: f64 = 8_000.0;
+
 /// Default shadow darkening strength (0 = off, 1 = black). Higher values give
 /// hard cliff/ridge contrast; ambient fill keeps shadowed ground from going pure black.
 const SHADOW_STRENGTH: f32 = 0.88;
@@ -169,15 +184,29 @@ pub struct SunShadowState {
     pub block: ShadowCascadeBlock,
 }
 
-/// Optional override for the sun-shadow cascade centre, in the physics inertial
-/// frame (same frame as `ship_state().position`). When `Some`, the cascade
-/// centres there and the camera-altitude gate is bypassed — so the base editor's
-/// god view follows the panned focus across the whole base, instead of leaving
-/// shadows in a box around the (possibly off-screen) parked craft. `None` ⇒
-/// centre on the craft + gate as normal.
+/// The active god-view focus, in the physics inertial frame (same frame as
+/// `ship_state().position`), or `None` when no god-view mode is driving. It is
+/// the single shared "look at *this* surface point, not the player craft" signal
+/// that keeps two subsystems coherent while the camera is decoupled from the
+/// craft:
 ///
-/// **Sole writer:** the base editor (`base_editor::camera`), which sets it to the
-/// god-view focus each frame while open and clears it on close.
+/// - the **sun-shadow cascade** centres here (and bypasses the camera-altitude
+///   gate) — so the god view follows the panned focus across the whole base
+///   instead of leaving shadows in a box around the (possibly off-screen or
+///   orbiting) craft;
+/// - the **surface scatter** (grass / trees / rocks) centres here too, via
+///   [`scatter_view_center`](crate::freecam::scatter_view_center) — so vegetation
+///   builds around what the camera is looking at rather than the craft, which in
+///   the space-center hub is an unused placeholder up in orbit.
+///
+/// `None` ⇒ both centre on the craft (shadows gate as normal).
+///
+/// **Writers:** the god-view consumers via
+/// [`drive_god_view`](crate::god_view::drive_god_view) — the base editor
+/// (`base_editor::camera`) and the space-center hub (`space_center::camera`) —
+/// each frame while open, plus the headless spaceport screenshot preset
+/// (`screenshot::pose_camera`); cleared by `god_view::clear_shadow_focus` when
+/// every god-view mode is closed.
 #[derive(Resource, Default)]
 pub struct ShadowFocusOverride {
     pub center_world: Option<DVec3>,
@@ -433,12 +462,17 @@ fn update_sun_shadow_camera(
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
     origin: Res<crate::rendering::RenderOrigin>,
     focus_override: Res<ShadowFocusOverride>,
+    height_sources: Res<thalos_physics_local::HeightSourceRegistry>,
     mut shadow_cams: Query<
         (&mut Transform, &mut Camera, &mut Projection, &SunShadowCascade),
         Without<ShipCamera>,
     >,
     mut state: ResMut<SunShadowState>,
     mut frame: Local<u64>,
+    // Body-fixed texel-snap anchor (see the snap note below) + the current
+    // quantized footprint step (power-of-two, with shrink hysteresis).
+    mut snap_anchor: Local<Option<(BodyId, DVec3)>>,
+    mut footprint_step: Local<f32>,
 ) {
     *frame = frame.wrapping_add(1);
     let log_now = *frame % 15 == 0;
@@ -526,16 +560,36 @@ fn update_sun_shadow_camera(
             .unwrap_or_else(|| sim.simulation.ship_state().position);
         let radial = player_inertial - body_state.position;
         let r = radial.length();
-        let up_radial = if r > 1.0e-3 { (radial / r).as_vec3() } else { Vec3::Y };
-        let player_alt = (r - body_radius_m as f64) as f32;
+        let radial_dir = if r > 1.0e-3 { radial / r } else { DVec3::Y };
+        let up_radial = radial_dir.as_vec3();
+        // Project the centre to the TRUE ground below the craft, not the datum
+        // sphere: `r − body_radius` is altitude above the REFERENCE radius, so
+        // at an elevated site it buried the centre by the full terrain
+        // elevation. Cascade 0's ±400 m box (in the near-vertical light plane
+        // of a low sun) then missed the surface outright, and every
+        // near-craft fragment fell through to the metres-per-texel far
+        // cascades — the "pixelated shadow right at the craft" bug. A missing
+        // height sample (cold tiles) falls back to the datum, which merely
+        // reproduces the old centring until tiles stream in.
+        let dir_body = (body_state.orientation.inverse() * radial_dir).as_vec3();
+        let terrain_h = height_sources
+            .get(active_id)
+            .and_then(|hs| {
+                hs.sample_height_m(dir_body, crate::local_physics::PHYSICS_QUERY_TILE_LOD_M)
+            })
+            .unwrap_or(0.0) as f64;
+        let player_alt = (r - body_radius_m as f64 - terrain_h) as f32;
         let player_render = (player_inertial - origin.position).as_vec3();
         // Craft-local mode centres the (single) cascade on the craft itself —
         // projecting to a ground point tens/hundreds of km below would throw
         // the box away from the only caster that matters up here.
-        let center = if craft_local {
-            player_render
+        let (center, center_inertial) = if craft_local {
+            (player_render, player_inertial)
         } else {
-            player_render - up_radial * player_alt
+            (
+                player_render - up_radial * player_alt,
+                player_inertial - radial_dir * player_alt as f64,
+            )
         };
         let up = if sun_dir.dot(Vec3::Y).abs() > 0.99 {
             Vec3::Z
@@ -559,9 +613,27 @@ fn update_sun_shadow_camera(
             1.0
         } else {
             let cam_dist = (cam_pos - player_render).length();
-            let required_half_m = cam_dist + altitude.max(0.0) * 2.0;
-            (required_half_m / CASCADE_HALF_EXTENTS_M[CASCADE_COUNT - 1])
-                .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE)
+            let cam_agl = (altitude - terrain_h as f32).max(0.0);
+            let required_half_m = cam_dist + cam_agl * 2.0;
+            let raw = (required_half_m / CASCADE_HALF_EXTENTS_M[CASCADE_COUNT - 1])
+                .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
+            // QUANTIZE to power-of-two steps with shrink hysteresis: a
+            // continuously-varying footprint rescaled every cascade's texel
+            // grid every frame the camera moved, re-rasterizing every shadow
+            // edge (global shimmer). Grow immediately — coverage is
+            // correctness; shrink only once raw demand is comfortably inside
+            // the lower step.
+            let quantized = raw
+                .log2()
+                .ceil()
+                .exp2()
+                .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
+            if quantized > *footprint_step
+                || raw < *footprint_step * SHADOW_FOOTPRINT_SHRINK_FRACTION
+            {
+                *footprint_step = quantized;
+            }
+            *footprint_step
         };
         // ── Up-sun depth slack ────────────────────────────────────────────────
         // The cascade box is square in the LIGHT plane, but its intersection
@@ -592,6 +664,40 @@ fn update_sun_shadow_camera(
         let eye_dbg = center + sun_dir * SHADOW_BACK_DISTANCE_M;
         let sun_dbg = sun_dir;
 
+        // ── Texel-snap reference (stable CSM on a ROTATING planet) ──────────
+        // Snapping the centre to a grid in RENDER space assumed a static
+        // world. Here the whole shadow world (terrain, trees, structures, the
+        // parked craft) CO-ROTATES with the body at hundreds of m/s, and the
+        // floating origin moves with the camera — so a render-space grid slid
+        // under the casters with a fresh sub-texel phase every simulated
+        // frame, re-rasterizing every shadow edge (the "shadow flickers the
+        // moment the sim unpauses" bug; paused, nothing moved, so it looked
+        // stable). Compute the snap phase RELATIVE TO A BODY-FIXED ANCHOR
+        // instead: the grid then translates with the rotating ground, casters
+        // keep their rasterization phase frame-to-frame, and the only residual
+        // drift is the (slow, physical) sun motion. Re-anchor on multi-km
+        // drift — a one-frame sub-texel phase jump. Craft-local mode glues the
+        // grid to the craft (snap_rel = 0): the hull is the only caster there.
+        let snap_rel = if craft_local {
+            Vec3::ZERO
+        } else {
+            let center_bf =
+                body_state.orientation.inverse() * (center_inertial - body_state.position);
+            let anchor_bf = match *snap_anchor {
+                Some((b, a))
+                    if b == active_id && (a - center_bf).length() < SNAP_ANCHOR_REACH_M =>
+                {
+                    a
+                }
+                _ => {
+                    *snap_anchor = Some((active_id, center_bf));
+                    center_bf
+                }
+            };
+            let anchor_inertial = body_state.position + body_state.orientation * anchor_bf;
+            (center_inertial - anchor_inertial).as_vec3()
+        };
+
         // Craft-local mode runs only the crisp near cascade; the far cascades'
         // matrices are zeroed (the shader's `clip.w <= 0` skip sentinel) and
         // their cameras deactivated, so their stale depth maps are never read.
@@ -616,11 +722,13 @@ fn update_sun_shadow_camera(
             fars[i] = far;
             // Texel-snap the cascade centre to ITS shadow-map grid in the light
             // plane, so the ortho frustum slides in whole-texel steps and shadow
-            // edges stop crawling as the camera moves (stable CSM). Each cascade
-            // snaps to its own (coarser, near→far) grid.
+            // edges stop crawling as the centre drifts (stable CSM). Each cascade
+            // snaps to its own (coarser, near→far) grid. The phase comes from
+            // `snap_rel` — the centre RELATIVE to a body-fixed anchor — so the
+            // grid co-moves with the rotating ground (see the snap note above).
             let texel = (2.0 * half) / SHADOW_MAP_SIZE as f32;
-            let cr = center.dot(light_right);
-            let cu = center.dot(light_up);
+            let cr = snap_rel.dot(light_right);
+            let cu = snap_rel.dot(light_up);
             let snap = ((cr / texel).round() * texel - cr) * light_right
                 + ((cu / texel).round() * texel - cu) * light_up;
             let center_i = center + snap;

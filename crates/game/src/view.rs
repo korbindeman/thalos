@@ -1,8 +1,13 @@
 //! View mode: map (far-scale orbit view) vs. ship (1:1 scale ship view).
 //!
-//! M toggles between the two. Each view has its own camera entity with a
-//! fixed `RenderLayers` set; switching views flips which camera is
-//! [`ActiveCamera`](crate::camera::ActiveCamera) (and `Camera::is_active`).
+//! M toggles between the two (within [`GameContext::Flight`]). Each view has its
+//! own camera entity with a fixed `RenderLayers` set. Which camera is active is
+//! owned by the **single authority** [`apply_active_camera`] — a pure function of
+//! `(GameContext, ViewMode)` that also selects the shipyard editor camera in
+//! [`GameContext::Vab`](crate::game_context::GameContext) and holds the ship
+//! camera for the hub / base editor (their god-view drives it). It sets
+//! `Camera::is_active`, [`ActiveCamera`](crate::camera::ActiveCamera) (ship/map
+//! only), and `IsDefaultUiCamera` (the active camera).
 //!
 //! Mesh-based overlays opt in by carrying [`HideInShipView`] or
 //! [`HideInMapView`]. Observers in this module forward those tags onto
@@ -19,7 +24,9 @@ use thalos_input::game::GameInputIntent;
 
 use crate::camera::{ActiveCamera, MapCamera, ShipCamera};
 use crate::coords::{MAP_LAYER, SHIP_LAYER};
+use crate::game_context::GameContext;
 use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
+use crate::shipyard_editor::scene::EditorCamera;
 
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ViewMode {
@@ -144,52 +151,66 @@ fn propagate_view_render_layers(
     }
 }
 
-/// Flip [`ActiveCamera`] + `Camera::is_active` to track the current
-/// [`ViewMode`]. Replaces the per-frame visibility-flip mechanism.
+/// The **single authority** over which scene camera is active and carries the
+/// UI / [`ActiveCamera`] markers — a pure function of `(GameContext, ViewMode)`.
+/// The VAB owns its editor camera; the hub / base editor own the ship camera
+/// (their god-view drives its transform); Flight picks ship or map per
+/// [`ViewMode`]. This replaced the former split authority (`view` owned
+/// ship/map, `shipyard_editor::apply_open_state` owned the editor camera).
 ///
-/// Filtered to scene cameras only. The active scene camera also carries
-/// `IsDefaultUiCamera`, so the Bevy-UI HUD renders on whichever view is live.
+/// Runs every frame with change-guarded writes, so a `GameContext` transition or
+/// a `ViewMode` toggle is reflected without an explicit change-poke.
+///
+/// `IsDefaultUiCamera` follows whichever camera is active so the Bevy-UI HUD /
+/// editor UI renders to it. `ActiveCamera` (the flight-camera / freecam marker)
+/// is applied to the active **ship/map** camera only, never the editor camera.
 fn apply_active_camera(
     view: Res<ViewMode>,
-    shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
+    ctx: Option<Res<State<GameContext>>>,
     mut commands: Commands,
     mut cameras: Query<
         (
             Entity,
             &mut Camera,
-            Option<&MapCamera>,
-            Option<&ShipCamera>,
+            Has<MapCamera>,
+            Has<ShipCamera>,
+            Has<EditorCamera>,
             Has<ActiveCamera>,
+            Has<IsDefaultUiCamera>,
         ),
-        Or<(With<MapCamera>, With<ShipCamera>)>,
+        Or<(With<MapCamera>, With<ShipCamera>, With<EditorCamera>)>,
     >,
 ) {
-    // While the shipyard editor is open it owns the screen: both scene
-    // cameras stay inactive (its `apply_open_state` flips them) and the
-    // editor camera renders instead. Reasserting the ViewMode camera here
-    // would leave two active order-0 window cameras fighting.
-    if shipyard.as_deref().map(|s| s.open).unwrap_or(false) {
-        return;
-    }
-    if !view.is_changed() {
-        return;
-    }
-    for (entity, mut camera, map, ship, active) in &mut cameras {
-        let should_be_active = match *view {
-            ViewMode::Map => map.is_some(),
-            ViewMode::Ship => ship.is_some(),
-        };
-        if camera.is_active != should_be_active {
-            camera.is_active = should_be_active;
+    let ctx = ctx.map(|c| *c.get()).unwrap_or(GameContext::Flight);
+    let (want_ship, want_map, want_editor) = match ctx {
+        GameContext::Vab => (false, false, true),
+        // The hub / base editor render through the ship camera; their god-view
+        // (`crate::god_view`) drives its transform.
+        GameContext::SpaceCenter | GameContext::BaseEditor => (true, false, false),
+        GameContext::Flight => match *view {
+            ViewMode::Map => (false, true, false),
+            ViewMode::Ship => (true, false, false),
+        },
+    };
+    for (entity, mut camera, is_map, is_ship, is_editor, has_active, has_ui) in &mut cameras {
+        let should = (is_ship && want_ship) || (is_map && want_map) || (is_editor && want_editor);
+        if camera.is_active != should {
+            camera.is_active = should;
         }
-        if should_be_active && !active {
-            commands
-                .entity(entity)
-                .insert((ActiveCamera, IsDefaultUiCamera));
-        } else if !should_be_active && active {
-            commands
-                .entity(entity)
-                .remove::<(ActiveCamera, IsDefaultUiCamera)>();
+        // The active window camera is the default UI camera (bevy_ui renders to
+        // it, and an inactive default means no UI at all).
+        if should && !has_ui {
+            commands.entity(entity).insert(IsDefaultUiCamera);
+        } else if !should && has_ui {
+            commands.entity(entity).remove::<IsDefaultUiCamera>();
+        }
+        // `ActiveCamera` is the flight-scene marker (freecam + camera drivers);
+        // the editor camera is not a flight camera, so it never carries it.
+        let want_active = should && !is_editor;
+        if want_active && !has_active {
+            commands.entity(entity).insert(ActiveCamera);
+        } else if !want_active && has_active {
+            commands.entity(entity).remove::<ActiveCamera>();
         }
     }
 }

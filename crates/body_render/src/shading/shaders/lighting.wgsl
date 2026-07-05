@@ -661,8 +661,24 @@ fn shade_surface(
     let env_spec = dfg.x * DIELECTRIC_F0 + dfg.y;
     let ambient_spec = sky.sky_radiance * env_spec * spec_occ * ambient_shadow;
 
+    // Statistical foliage-canopy transmit: a surface standing in for a grass /
+    // leaf layer (terrain grassland past the blade clipmap sets `translucency`
+    // per fragment from its grass mask) gets the same warm backlit lobe
+    // `shade_foliage` gives real blades, so the geometry→shading handoff keeps
+    // its low-sun rim. Zero-cost for every opaque caller (all pass 0).
+    var transmit = vec3<f32>(0.0);
+    if (s.translucency > 0.0) {
+        let daylight = sun_daylight(dot(s.geo_normal_ws, sun_dir_ws));
+        let lt_dir = normalize(sun_dir_ws + s.normal_ws * 0.30);
+        let back = pow(clamp(dot(view_dir_ws, -lt_dir), 0.0, 1.0), 2.5);
+        let warm = vec3<f32>(1.30, 1.05, 0.50); // green → yellow/orange shift (shade_foliage's)
+        transmit = s.albedo * warm
+            * (back * s.translucency * sky.sun_scale * direct_shadow * daylight)
+            * sky.sun_color;
+    }
+
     let moon = moonlight_radiance(scene, s.albedo, s.normal_ws, s.geo_normal_ws, sun_dir_ws);
-    return direct + ambient_diffuse + ambient_spec + s.emissive + moon;
+    return direct + ambient_diffuse + ambient_spec + transmit + s.emissive + moon;
 }
 
 // ── Foliage wrap-diffuse shading ──────────────────────────────────────────────

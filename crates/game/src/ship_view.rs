@@ -80,7 +80,14 @@ impl Plugin for ShipViewPlugin {
         };
         app.insert_resource(catalog)
             .add_plugins(ShipyardPlugin)
-            .add_systems(Startup, spawn_player_ship)
+            // World-keyed, not Startup: a bare menu boot defers the world
+            // (`WorldState::Absent`), and the menu sets the chosen scenario's
+            // `SpawnSituation` + vessel kind *before* flipping `Live`, so this
+            // builds the right blueprint (or EVA-skips) when it fires.
+            .add_systems(
+                OnEnter(crate::loading::WorldState::Live),
+                spawn_player_ship,
+            )
             .add_systems(
                 Update,
                 (
@@ -227,6 +234,9 @@ pub(crate) fn build_player_ship(
         moment_of_inertia: stats.moment_of_inertia_kg_m2,
         center_of_mass: stats.center_of_mass_m,
         max_torque: DVec3::splat(stats.max_reaction_torque_n_m),
+        // Filled live each frame by `staging::recompute_ship_inertia` (same as
+        // max_torque / MOI — it tracks the CoM as fuel burns); ZERO until then.
+        gimbal_torque_full: DVec3::ZERO,
         thrust_n: 0.0,
         mass_flow_kg_per_s: 0.0,
         dry_mass_kg: stats.dry_mass_kg,
@@ -374,6 +384,28 @@ pub(crate) fn build_player_ship(
             if let Some(kids) = attachments.get(&e) {
                 queue.extend(kids.iter().copied());
             }
+        }
+        // Seat the PlayerShip root into the BigSpace hierarchy *here*, in the
+        // same exclusive-world step that attaches its parts — not lazily via
+        // `attach_player_ship_to_big_space` (Update), which lands the root's
+        // `CellCoord` a frame *after* this reparent. `Grid::tag_low_precision_roots`
+        // only marks a low-precision child as a `LowPrecisionRoot` on the frame its
+        // `ChildOf` changes, and only if the parent is already a valid high-precision
+        // parent (has a `CellCoord`). If the root is still un-seated on that frame the
+        // parts miss the tag and are never re-evaluated (the query re-fires only on
+        // `Changed<ChildOf>`/`Added<Transform>`), so they render un-propagated and trip
+        // the big_space hierarchy validator ("child of a Non-root high precision spatial
+        // entity …"). Boot craft happened to win this race; the runtime relaunch /
+        // VAB-launch path loses it. Seating the root before the children attach makes it
+        // a valid parent immediately. Idempotent with the Update fallback (whose
+        // `Without<CellCoord>` filter skips an already-seated root).
+        if let Some(real_root) = world
+            .get_resource::<crate::rendering::real_space::RealSpaceRoot>()
+            .map(|r| r.entity)
+        {
+            world
+                .entity_mut(player_ship)
+                .insert((CellCoord::ZERO, ChildOf(real_root)));
         }
         for part in &to_reparent {
             world.entity_mut(player_ship).add_child(*part);

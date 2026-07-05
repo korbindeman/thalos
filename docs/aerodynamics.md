@@ -314,6 +314,51 @@ the lateral grip that would trip the craft over its main gear. Tire grip
 (`GearTuning::mu` = 0.8) is a dry-tire value: a skidding craft slides before
 the contact force grows a tipping moment.
 
+## Thrust vectoring (engine gimbal)
+
+A wingless rocket has **no aero control authority** (`pitch_control = yaw_control =
+0` in the bluff-body config) — only its weathervane restoring moment and its
+reaction wheels. On a launch-mass stack the wheels are hopelessly weak: a ~150 t,
+~20 m rocket has a pitch/yaw MOI ≈ 5×10⁶ kg·m², so a 40 kN·m command pod buys
+≈ 0.5°/s² — and at max-q the aero weathervane restoring moment (≈ 10⁵ N·m at a few
+degrees AoA) *overpowers* the wheels entirely. Reaction wheels cannot fly a
+gravity turn. Real launch vehicles steer by **vectoring the engine thrust**, and
+so does Thalos.
+
+**Authoring.** `EngineSpec::gimbal_range_deg` (degrees; `0` = fixed bell) is the
+peak thrust-vector deflection from the nose axis. Jets and upper-stage verniers
+can leave it `0`; booster and vacuum main engines carry a few degrees (`assets/
+parts.ron`: Zephyr 6°, Boreas 5°, Typhon 8°).
+
+**Model.** `staging::recompute_ship_inertia` aggregates every gimballed engine
+into `ShipParameters::gimbal_torque_full` = Σ `thrust · sin(range) · arm`, the
+attitude torque **at full thrust**, where `arm` is the engine's axial distance to
+the live CoM. Pitch and yaw share it (an axisymmetric bell gimbals both ways);
+roll stays `0` (a centred engine can't roll the stack — roll remains a
+reaction-wheel / future-RCS job). It is recomputed every frame, so the arm tracks
+the CoM as fuel burns.
+
+**Effective authority scales with throttle.** The gimbal only steers while there
+is exhaust to vector: `fuel::active_thrust_fraction` gates the full-thrust term by
+the fraction of thrust actually firing (zero at idle throttle, out of fuel, and
+during coast). That single helper feeds both consumers so they can't disagree:
+
+- the fly-by-wire controller adds `gimbal_torque_full · throttle` to its **effector
+  authority** (`thalos_control::attitude`, the same `effector_authority` slot the
+  aero surfaces use), so the PD normalizes its command by the real total; and
+- `local_physics::forces::compute_angular_acceleration` realizes the same
+  `command · (max_torque + gimbal_effective)`, so the torque produced equals the
+  torque the controller intended (the "drive every effector at one fraction,
+  normalize by the total" rule the allocator already uses for wheels + surfaces).
+
+**Gameplay.** This makes the ascent flyable: lift off under SAS (the quaternion
+`Hold` pins the vertical attitude), pitch a few degrees off the pad, then hold
+surface **Prograde** (`navigation`, which resolves through the Surface velocity
+frame) and ride the gravity turn to orbit — the gimbal has the authority to set
+the pitch program, while the weathervane keeps AoA small in between. The
+reference vehicle is `ships/atlas.ron` (a two-stage methalox rocket, ~10 km/s Δv,
+both stages gimballed); guarded by `blueprint::tests::atlas_sample_is_an_orbital_rocket`.
+
 ## Scope and roadmap
 
 **Aircraft.** `aero::build_ship_aero_config` aggregates the blueprint's `Wing`
@@ -349,7 +394,9 @@ can't erase the difference between a big and a small aileron.
 **Spacecraft (rockets, capsules).** A bluff-body config (reference area
 `ShipStats::frontal_area_m2`, Cd a blunt-body constant), `CL_α = 0`, with
 weathervane restoring + damping so it aligns nose-to-wind (prograde) instead of
-tumbling. Trimming a blunt capsule heatshield-forward instead is future work.
+tumbling. Attitude authority comes from the reaction wheels plus **engine gimbal**
+(see *Thrust vectoring* above) — the gimbal is what makes a controllable ascent
+possible. Trimming a blunt capsule heatshield-forward instead is future work.
 
 **Planes from the construction editor (future).** When `docs/construction.md`'s
 wing **Modules** exist, the same `wing_aero_panels` aggregation generalises
@@ -406,7 +453,16 @@ for directions). Both groups start disabled.
 - `crates/game/src/hud/flight_config_panel.rs` — the capability-gated
   flaps/brakes HUD pills.
 - `crates/game/src/fuel.rs` — `air_breathing_thrust_factor` (jet density
-  lapse) inside `refresh_active_propulsion`.
+  lapse) inside `refresh_active_propulsion`; `active_thrust_fraction` (the
+  throttle gate the gimbal authority scales by).
+- `crates/game/src/staging.rs` — `recompute_ship_inertia` aggregates every
+  gimballed engine into `ShipParameters::gimbal_torque_full`.
+- `crates/game/src/local_physics/forces.rs` — `compute_angular_acceleration`
+  realizes `command · (max_torque + gimbal_effective)`; `apply_local_forces`
+  computes the throttle-scaled `gimbal_effective`.
+- `crates/control/src/attitude.rs` — the controller normalizes by
+  `max_torque + effector_authority`, where `effector_authority` = aero
+  surfaces + engine gimbal (fed from `control_bus::realize_control`).
 - `crates/shipyard/src/stats.rs` — `ShipBlueprint::wing_aero_panels` +
   `WingAeroPanel` (per-wing aerodynamic geometry incl. sweep/thickness and
   the `AeroSurfaceWindow` control-surface windows with body-frame centroids

@@ -13,13 +13,16 @@
 mod body_lod;
 mod clouds;
 mod generation;
+mod gpu_grass;
 mod grass;
 pub(crate) mod ground_terrain;
 mod lighting;
 mod map_terrain;
 mod materials;
 pub(crate) mod real_space;
-mod rocks;
+// Scattered pebble/rock decoration is disabled — no rocks on the surface.
+// Re-enable by uncommenting this and the `RockScatterPlugin` registration below.
+// mod rocks;
 mod scene_depth;
 mod spawn;
 pub(crate) mod ssao;
@@ -62,7 +65,7 @@ use real_space::{
     attach_player_ship_to_big_space, attach_ship_camera_to_big_space, setup_big_space,
     update_real_space_body_positions,
 };
-use scene_depth::{SceneDepthPlugin, setup_scene_depth_image};
+use scene_depth::SceneDepthPlugin;
 use spawn::spawn_bodies;
 use terrain_residency::TerrainResidencyPlugin;
 use trails::{draw_orbits, recompute_orbit_trails};
@@ -105,8 +108,10 @@ impl Plugin for RenderingPlugin {
             .add_plugins(map_terrain::MapTerrainPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
             .add_plugins(grass::GrassRenderPlugin)
+            .add_plugins(gpu_grass::GpuGrassPlugin)
             .add_plugins(vegetation::VegetationRenderPlugin)
-            .add_plugins(rocks::RockScatterPlugin)
+            // Rocks/pebbles disabled — see `mod rocks` above.
+            // .add_plugins(rocks::RockScatterPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
             .insert_resource(RenderFrame::default())
@@ -122,23 +127,25 @@ impl Plugin for RenderingPlugin {
                 (
                     configure_gizmos,
                     setup_big_space,
-                    // `spawn_bodies` reads `SceneDepthImage` to seed each
-                    // body's permanent `BodySky` material. The resource is
-                    // inserted by `setup_scene_depth_image` via Commands,
-                    // so we need an explicit `.after` to force a deferred-
-                    // command flush before this runs.
-                    spawn_bodies
-                        .after(setup_big_space)
-                        .after(setup_scene_depth_image),
                     attach_ship_camera_to_big_space
                         .after(setup_big_space)
                         .after(crate::camera::spawn_camera),
-                    attach_player_ship_to_big_space
-                        .after(setup_big_space)
-                        .after(crate::ship_view::spawn_player_ship),
-                    focus_camera_on_homeworld.after(spawn_bodies),
                     load_reference_cloud_sources,
                 ),
+            )
+            // World spawn is keyed to `WorldState::Live`, not `Startup`: a
+            // scenario boot inserts `Live` so this fires on the first frame
+            // (after `Startup`, so `setup_big_space` / `setup_scene_depth_image`
+            // commands — which `spawn_bodies` reads — are already flushed); a
+            // bare menu boot stays `Absent` and spawns nothing until the menu
+            // starts a scenario. The chain gives `focus_camera_on_homeworld` a
+            // sync point so it sees the bodies `spawn_bodies` just queued. The
+            // player ship gets its BigSpace attach from the per-frame
+            // `attach_player_ship_to_big_space` pass below, same as
+            // relaunch-built craft.
+            .add_systems(
+                OnEnter(crate::loading::WorldState::Live),
+                (spawn_bodies, focus_camera_on_homeworld).chain(),
             )
             .add_systems(
                 Update,

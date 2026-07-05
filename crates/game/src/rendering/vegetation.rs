@@ -51,7 +51,7 @@ use crate::coords::SHIP_LAYER;
 use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
 use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
@@ -725,8 +725,11 @@ fn drive_veg_tiles(
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     bake: Res<ImpostorBake>,
     freecam: Res<FreeCam>,
+    scatter_focus: Res<ShadowFocusOverride>,
+    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut commands: Commands,
+    mut diag: Local<u32>,
 ) {
     let Some(library) = library else {
         return;
@@ -734,9 +737,13 @@ fn drive_veg_tiles(
     let Some(states) = solar.states.as_deref() else {
         return;
     };
+    let focus_some = scatter_focus.center_world.is_some();
+    let camera_decoupled = crate::game_context::god_view_active(game_ctx.as_deref());
     let cam_pos = scatter_view_center(
         &freecam,
         ship_cam_q.single().ok(),
+        scatter_focus.center_world,
+        camera_decoupled,
         sim.simulation.ship_state().position,
     );
 
@@ -801,6 +808,33 @@ fn drive_veg_tiles(
         .sample_height_m(cam_dir.as_vec3(), TREE_GROUND_LOD_M)
         .unwrap_or(0.0) as f64;
     let agl = cam_r - (radius_m + ground_h);
+    // DIAGNOSTIC (remove once base-view vegetation is verified): why do trees not
+    // build in the no-ship god-view? Report the scatter centre state each ~1.5 s.
+    *diag = diag.wrapping_add(1);
+    if *diag % 90 == 1 {
+        // Split empty (cleared/wrong-biome) vs tree-bearing tiles, and the
+        // distance to the nearest tree-bearing one — the decisive signal for
+        // "trees don't build" vs "trees build but are far / cleared".
+        let nonempty = veg.tiles.values().filter(|t| t.entity.is_some()).count();
+        let nearest_tree_km = veg
+            .tiles
+            .iter()
+            .filter(|(_, t)| t.entity.is_some())
+            .filter_map(|(rk, _)| veg.lattices.get(rk.ring as usize)?.frame(rk.key))
+            .map(|(center, _)| center.angle_between(cam_dir) * radius_m)
+            .fold(f64::INFINITY, f64::min)
+            / 1000.0;
+        info!(
+            target: "thalos::veg",
+            "veg drive: focus_override={focus_some} decoupled={camera_decoupled} \
+             body={body_id} ground_h_m={ground_h:.0} agl_m={agl:.0} tiles={} \
+             nonempty={nonempty} nearest_tree_km={nearest_tree_km:.2} \
+             in_flight={} bake_ready={}",
+            veg.tiles.len(),
+            veg.in_flight.len(),
+            bake.ready,
+        );
+    }
     if agl > TREE_DESPAWN_AGL_M {
         if !veg.tiles.is_empty() || !veg.in_flight.is_empty() {
             despawn_all(&mut veg, &mut commands);

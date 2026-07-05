@@ -6,16 +6,27 @@ land into a level pad, then click-and-place / edit buildings on it. It is the
 first realization of the player-placement gameplay that `surface_local.md` §6.4
 designed for and deferred. Code lives in `crates/game/src/base_editor/`.
 
-> **Status (2026-06-29).** Compiles clean; **not yet runtime-verified** by a
+> **Status (2026-07-04).** Compiles clean; **not yet runtime-verified** by a
 > `just game` launch. Implemented: site pick + live flatten, building + launchpad
-> place/select/move(drag)/delete/rotate, keyboard sizing, **auto-connections
-> (tarmac MST)**, an **authored default base** (the runway scenario spawns a wide
-> flat *basin* holding a small spaceport — the runway plus a launch complex of
-> two pads, tank farms, flame diverters, a VAB and hangars, all coplanar), and
-> **spawning** (craft seat on a runway horizontal / a launchpad vertical).
+> place/select/move(drag)/delete/rotate, keyboard sizing, a **typed
+> auto-connection network** (taxiways / aprons / roads / crawlerways — MST or
+> explicit edges, plus **curved fillet paths**), and an **authored default base**
+> (the runway scenario spawns a wide flat *basin* holding a spaceport — **two
+> numbered runways in a V** (a 5 km primary plus an angled crosswind secondary,
+> each with its own true-heading designator numbers), one **core campus** on the
+> launch-complex side (runway → full-length parallel taxiway with connectors →
+> a **large apron auto-derived from the hangar row standing on it** → landside →
+> pads/VAB), threshold holding pads, the secondary reached through three
+> **curved link taxiways** that cross the primary strip (each crossing split at
+> the runway edges — stub stops at one side, curve resumes at the other, no
+> paving under the strip) and sweep tangentially onto its parallel taxiway (no
+> buildings between the strips), a launch complex of two pads
+> with tank farms / flame diverters, a VAB, ops + blockhouses, a curved landside
+> road, and VAB→pad crawlerways, all coplanar), plus **spawning** (craft seat on
+> a runway horizontal / a launchpad vertical).
 > Deferred follow-ups (see *Not built yet*): the shipyard create-craft→fly flow,
-> a slider inspector, road/resource connection types, disk persistence, scoped
-> tile invalidation.
+> a slider inspector, user-drawn routing + crawler animation, disk persistence,
+> scoped tile invalidation.
 
 ## The base model — a flat basin
 
@@ -31,20 +42,35 @@ instead of forming an all-fill plateau); the editor's pick-a-site flatten still
 uses `max + margin` for a small player-chosen pad.
 
 **The default base** (authored by the runway scenario, `runway::finish_runway_spawn`
-→ `base_editor::spawn_default_base`) is a small spaceport. The basin is a single
-wide flat area **offset toward the launch-complex side of the runway** (so the
-strip sits near one edge and the flattened ground isn't wasted on the empty
-side), sized to hold the whole layout. The runway is the *first structure on the
-basin* — it stops computing its own pad and drapes on the basin at `E`. Beside it
-the complex carries **two large launchpads** with clearing around them, each
-flanked by a **flame diverter** (a low concrete trench stand-in) and a small
-**propellant tank farm** (`StructureKind::Tank` cylinders); a **VAB**-scale
-assembly building and a pair of **hangars** line the far edge, with an operations
-building and per-pad blockhouses near the strip. A tarmac MST links the runway,
-pads, big buildings and blockhouses (the satellite tanks/diverters stay off the
-road network). Everything drapes coplanar on the basin at `E`. The surface
-scenarios (`runway`/`landing`/`final`) present this whole base; the in-world
-editor edits/extends the same `StructureRegistry` records.
+→ `base_editor::spawn_default_base`) is a spaceport with **two numbered runways
+in a V**: the primary 5 km strip plus a shorter crosswind secondary that
+diverges from near the primary's `−along` threshold at
+`SECONDARY_HEADING_OFFSET_DEG` (30°) toward the empty side, opposite the launch
+complex — the classic main-plus-diagonal layout (Dulles' 12/30 beside its
+parallels). The basin is a single wide flat area offset toward the airside
+(`BASIN_OFFSET_ACROSS_M`) and sized to clear both strips plus the complex.
+`runway::build_spaceport` registers the two runways: the primary (centred) plus
+the angled secondary (near threshold at `SEC_NEAR_ALONG_M`/`SEC_NEAR_ACROSS_M`,
+fanning away so the strips never intersect) on the shared basin plane; both are
+plain parametric `StructureKind::Runway { half_length_m, half_width_m }`
+registry entries that render + collide through one generalized geometry path
+(`runway.rs`), each painted with its designator (01–36; the heading divergence
+gives each strip its own numbers, so no L/R suffix — `RunwayFrame::pair_side`
+stays `0`, the lone-runway case) at both ends, from its true compass heading
+(`runway_heading_deg` → `runway_designator`), rendered from the real **ICAO
+runway font** (`assets/fonts/ICAORWYID.ttf`, rasterized with `ab_glyph` to an
+alpha decal quad — `rasterize_designator` / `spawn_runway_numbers`). `spawn_default_base` then lays
+out everything else on the basin (coplanar `Drape` at `E`) as **one core
+campus** on the launch-complex side of the primary — nothing is authored
+between the runways: a **large apron auto-derived from the hangar row**, with
+the **row of hangars standing on it** (ramp all around); behind it an
+operations building and per-pad blockhouses; then **two launchpads** with
+blast-clear rings, each flanked by a **flame diverter** and a **fuel/tank
+farm** (`StructureKind::Tank` cylinders); and a **VAB**-scale assembly building
+(tagged the enterable `Facility::Vab`). The paving between all of it is
+generated as a **typed connection network** (below). The surface scenarios
+(`runway`/`landing`/`final`) present this whole base; the in-world editor
+edits/extends the same `StructureRegistry` records.
 
 ## Why in-world (not a hangar scene)
 
@@ -152,23 +178,57 @@ craft (editor **L** for a launchpad; the scenario seating for the runway).
 
 ## Auto-connections (`connections.rs`)
 
-A single combined **tarmac** mesh connects every building / launchpad along a
-**minimum spanning tree** (Prim's; n is small) — the least paving that links them
-all. Each edge is a flat strip from one structure's footprint edge to the next's
-(inset by their bounding radii), built in the site's local tangent frame and
-carried by a `ConnectionVisual` anchored every frame like the structures (ungated,
-so it persists in flight). The in-editor `rebuild_connections` regenerates it when
-the active site's `structures_rev` bumps (place / delete / move); the authored
-default base builds its tarmac once at spawn via `spawn_authored` (sharing the
-`BaseMaterials::tarmac` material + the same MST/strip code). One type (tarmac) for
-now; roads / resource lines + user-drawn routing extend the same seam.
+Connections are a **typed network**: every paved link is one `ConnectionKind` —
+**Taxiway**, **Apron**, **Road**, or **Crawlerway** — each with its own width,
+material, and ground lift (`ConnectionKind::style` / `::material`). Line networks
+(taxiway / road / crawlerway) are flat strips of the kind's width along a set of
+edges — either a **minimum spanning tree** (Prim's; n is small) or explicit
+`(from, to)` edges. An **apron** is a filled rectangle (a hangar parking pad).
+Every mesh is built in the site's local tangent frame and carried by a
+`ConnectionVisual` anchored each frame like the structures (ungated, so it
+persists in flight).
+
+- **Editor** (`rebuild_connections`) — regenerates one taxiway MST over all the
+  active site's structures when `structures_rev` bumps (place / delete / move).
+- **Authored default base** (`spawn_default_base`) — builds several typed
+  networks at spawn via `spawn_authored_network` (explicit edges),
+  `spawn_authored_apron`, and `spawn_authored_path` (**curved fillet paths**: a
+  waypoint polyline whose corners are rounded into circular arcs —
+  `fillet_path` — then extruded to the kind's width by `build_path_mesh`).
+  Airside is a real airport layout: the **core parallel taxiway** runs the
+  primary's full length (straight), and the angled secondary's system hangs
+  off it through three **curved link taxiways** sweeping across the V interior
+  — each crossing is **split at the runway edges** (the core-side stub stops
+  at one edge, the curve resumes at the other; no paving ever spans the strip,
+  and both ends tuck 1 m under the runway's higher paving so the joints are
+  seamless), then curves tangentially onto the secondary's parallel-taxiway
+  line (the threshold link *is* that line's start; the midfield links merge
+  into it at a hair-lower lift — `spawn_authored_path`'s `lift_bias_m`).
+  Straight perpendicular connectors: the core-side halves of the link
+  crossings, a threshold connector at the east primary end (through the
+  **holding pads**, which fill the band between runway edge and taxiway),
+  evenly-spaced exits between them, and near/midfield/far connectors on the
+  secondary. The **core apron is
+  auto-derived from the hangar row** — one large ramp the hangars stand *on*
+  (it spans the row plus a parking margin and fills from the taxiway to behind
+  the hangars' rear wall). Landside is one curved **road** path (ops →
+  blockhouse → around the apron → across the VAB's doors → blockhouse), and the
+  VAB→pad **crawlerway** rides explicit edges.
+
+Adding a new infrastructure type (a utility pipe run, a rail spur) is a new
+`ConnectionKind` variant plus a style/material — the routers and mesh builders
+are kind-agnostic. The future **crawler-transporter** animation rides the
+`Crawlerway` geometry this already lays down.
 
 ## Terrain data model (`structures.rs`)
 
 Buildings ride the existing `StructureSite`/`StructureRegistry`/
 `apply_structure_flatten` layer (the runway's home). This slice grew it:
 
-- `StructureKind` gained `BaseSite` (owns the flatten pad), `Building { … }`,
+- `StructureKind::Runway { half_length_m, half_width_m }` is **parametric**, so a
+  base carries several runways (each its own size + heading), all rendered +
+  collided through one generalized path in `runway.rs`.
+- `StructureKind` also gained `BaseSite` (owns the flatten pad), `Building { … }`,
   `Launchpad { radius_m }`, and `Tank { radius_m, height_m }` (a vertical
   cylinder — the tank-farm stand-in; authored today, editable via the generic
   select/move/delete paths).
@@ -270,24 +330,72 @@ persistence (a gitignored `user/bases.ron`, loaded during `AppState::Loading`
 so sites bake flattened pre-stream à la the runway) is a clean follow-up; design
 it so loaded sites never need the runtime invalidation path.
 
+## Launch-point selection (fly from base)
+
+The shipyard/VAB **LAUNCH** is the default flight flow's entry: design a craft →
+pick where to launch it → fly. Implemented as a **launch-point picker** — a third
+base-editor mode, `BaseEditorMode::SelectLaunch`, living in
+`base_editor/launch_select.rs`. It reuses the base editor's shared `god_view`
+camera + `SimClock`-pause gating + cursor→body-fixed pick math; the existing
+place/pick systems early-return on their mode, and the palette collapses to a
+one-line hint (`ui::sync_overlay_for_mode`).
+
+Flow (all game-**UNVERIFIED**):
+
+1. The shipyard's `top_bar.rs` **LAUNCH** sets `RelaunchRequest{ShipOrbit}` (rebuild
+   the craft into an orbit hold) **and** `base_editor::SpaceportLaunchRequest.arm`.
+2. `begin_launch_flow` (gated on `relaunch_idle`, so it waits for the rebuild) opens
+   the picker: **Case A** — the spaceport is already built (`RunwaySite` present, e.g.
+   after PLAY→space-center) → open the god-view immediately; **Case B** — first launch
+   → a brief **PLACEMENT-only** loading pass runs `runway::build_spaceport`, then the
+   picker opens on `OnEnter(Running)`. (No SETTLE step — the craft is in orbit, so a
+   settle gate keyed on its body-fixed point never resolves; the site's ground streams
+   in live under the god-view.)
+3. `update_launch_pick` raycasts the pad sphere and hit-tests **each** `Runway`
+   (per-site `half_length_m`/`half_width_m` rectangle — both crossing runways are
+   pickable) and each `Launchpad` (radius circle); a left-click latches the target.
+   `apply_launch_placement` measures clearance (retrying until the rebuilt craft's
+   meshes/gear are resident) and places it: a **runway** via `runway::place_on_runway`
+   (horizontal on gear, parked inset from *its* threshold — `place_on_runway` now takes
+   `half_length_m`; brakes+gear set; a `LaunchRelightEngines` one-shot lights the jets
+   for throttle-only flight, since `enable_runway_engines` is `is_runway()`-gated), a
+   **launchpad** via `place::place_on_launchpad` (vertical nose-up). Then warp→1× (the
+   cores are warp-neutral) and the picker closes back to flight.
+
+Shared cores were extracted so both the dev runway scenario and the picker produce the
+identical result: `runway::build_spaceport` (site build minus craft place),
+`measure_runway_clearance`, `place_parked`→`place_on_runway`, and
+`place::place_on_launchpad` (from the L-key `launch_from_pad`). `RunwaySite` gained a
+`basin_id` field (idempotency key + picker `active_site`).
+
+Composes with the space-center hub: a VAB LAUNCH queues a relaunch, so
+`space_center::restore_after_facility`'s `relaunching` branch drops to flight rather
+than reopening the hub, and `begin_launch_flow` then opens the picker.
+
 ## Not built yet (ordered follow-ups)
 
-1. **Shipyard "fly from base" flow** — the big one: the shipyard's **Launch**
-   picks a base + a spawnable structure (runway/pad), builds the craft from the
-   blueprint (`relaunch`/`ship_view::build_player_ship`), and seats it at that
-   structure's spawn pose via a unified `spawn_craft_at`. Today spawning relocates
-   the *current* craft (editor **L** for pads; the scenario seating for runways);
-   runways aren't yet selectable-for-spawn in the editor (they're not `PlacedVisual`).
+1. **Launch-picker polish** — the picker (above) is in. Remaining: pre-highlight the
+   sensible default by craft type (aircraft→runway, rocket→pad); smooth the ~2–3 frame
+   flash of the orbit-hold view between VAB-close and picker-open (the relaunch takes 2
+   frames); and a proper "launching…" overlay during the retry-until-clearance wait.
 2. **Slider inspector** — a `HudTheme` slider panel that live-edits a *selected*
    structure's footprint. The picker palette exists; today only the *pending*
    footprint resizes (keyboard), not a placed structure.
-3. **More connection types** — roads / resource lines as distinct
-   `ConnectionVisual` kinds, and user-drawn routing (vs. the automatic MST).
+3. **More connection types** — the typed network (taxiway / apron / road /
+   crawlerway) is in; still open are resource/pipe lines, rail, **user-drawn
+   routing** (vs. the automatic MST), and animating a **crawler** along the
+   `Crawlerway` geometry. Taxiways currently reach the runways via two fixed
+   complex-side exit nodes near the primary strip; per-runway exit taxiways
+   (using the passed `_sec_heading`) are the natural refinement.
 4. **Disk persistence** (above) — the authored default base re-spawns each run;
    player-built bases are in-session only.
 5. **Scoped-AABB tile invalidation** (above).
-6. **Structure colliders** — static `Collider::cuboid`/`cylinder` posed like the
-   runway, so EVA/craft collide with buildings + launchpads (today visual only).
+6. **Structure colliders** — **launchpads** now get a kinematic `Cylinder`
+   collider in `spawn_structure_entity` (posed like the runway via
+   `sync_structure_collider_pose`) — required so a pad-launched craft doesn't fall
+   through once a `RunwaySite` makes `local_physics::terrain_patch` skip the generic
+   ground patch on that body. **Buildings + tanks** are still visual-only (EVA/craft
+   pass through them); give them the same treatment next.
 7. **Far-distance hide** — mirror `runway::sync_runway_visibility` so structures
    don't poke through the orbital impostor when zoomed way out.
 8. **Launchpad polish** — countdown / hold-down clamp, measured per-craft pad

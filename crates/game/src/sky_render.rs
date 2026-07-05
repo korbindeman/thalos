@@ -129,7 +129,13 @@ impl Plugin for SkyRenderPlugin {
             .add_plugins(MaterialPlugin::<GalaxyMaterial>::default())
             .init_resource::<CelestialBackdropVisibility>()
             .register_type::<CelestialBackdropVisibility>()
-            .add_systems(Startup, dispatch_sky_generation)
+            // Deferred with the rest of the world: the star-field bake is
+            // world content, so a bare menu boot (`WorldState::Absent`)
+            // skips it until a scenario start flips the world live.
+            .add_systems(
+                OnEnter(crate::loading::WorldState::Live),
+                dispatch_sky_generation,
+            )
             .add_systems(Update, finalize_sky_generation)
             .add_systems(
                 Update,

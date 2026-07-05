@@ -43,7 +43,7 @@ use crate::coords::SHIP_LAYER;
 use crate::freecam::{FreeCam, scatter_view_center};
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::SunShadowState;
+use crate::rendering::sun_shadow::{ShadowFocusOverride, SunShadowState};
 use crate::rendering::types::{CameraExposure, PlayerShip};
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
@@ -305,6 +305,8 @@ fn drive_rock_tiles(
     height_sources: Res<HeightSourceRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     freecam: Res<FreeCam>,
+    scatter_focus: Res<ShadowFocusOverride>,
+    game_ctx: Option<Res<State<crate::game_context::GameContext>>>,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut commands: Commands,
 ) {
@@ -317,6 +319,8 @@ fn drive_rock_tiles(
     let cam_pos = scatter_view_center(
         &freecam,
         ship_cam_q.single().ok(),
+        scatter_focus.center_world,
+        crate::game_context::god_view_active(game_ctx.as_deref()),
         sim.simulation.ship_state().position,
     );
 

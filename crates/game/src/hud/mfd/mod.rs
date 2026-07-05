@@ -361,7 +361,7 @@ fn update_flight_context(
         altitude_m = (ship.position - bs.position).length() - body_radius_m;
         let mut best = f64::INFINITY;
         for site in structures.sites_on(dominant) {
-            if site.kind != StructureKind::Runway {
+            if !matches!(site.kind, StructureKind::Runway { .. }) {
                 continue;
             }
             let surf = runway_surface_inertial(site, body_radius_m, bs.position, bs.orientation);

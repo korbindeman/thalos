@@ -2,10 +2,14 @@
 /stage-bakes
 # Rendered output of the procedural-object previewer (`just preview`).
 /tools/preview/out/
+# Headless whole-scene captures (`just screenshot` / THALOS_SCREENSHOT).
+/tools/screenshots/
 # Baked procedural textures (`cargo run -p thalos_texgen --example bake`).
 /tools/texgen/out/
 # Per-user runtime settings written by the game (window mode, UI scale, …).
 /user/
+# Runtime grass-churn diagnostic log (THALOS_GRASS_LOG, default grass_churn.jsonl).
+/grass_churn.jsonl
 Cargo.lock
 .DS_Store
 .cargo/config

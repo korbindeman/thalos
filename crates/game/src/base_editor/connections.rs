@@ -1,21 +1,27 @@
-//! Auto-connections: tarmac strips linking the structures on a site.
+//! Auto-connections: the typed paved network linking the structures on a site.
 //!
-//! When the active site's structure set changes, this rebuilds a single combined
-//! tarmac mesh that connects every building / launchpad on the pad along a
-//! minimum spanning tree (so the network is connected with the least paving).
-//! The mesh is built in the site's local tangent frame and anchored every frame
-//! like the structures themselves (a root-grid big_space child posed in f64), so
-//! it stays put at high warp and persists when the editor closes.
+//! A base's fixed features (runways, hangars, pads, buildings) are *placed*; the
+//! paving that links them is generated. This module owns that generation as a
+//! **typed network**: every connection is one [`ConnectionKind`] — a taxiway, an
+//! apron, a road, or a crawlerway — each with its own width, colour, and ground
+//! lift. Line networks (taxiway / road / crawlerway) are strips along a set of
+//! edges (a minimum spanning tree, or explicit edges); an apron is a filled
+//! rectangle (a parking pad in front of a hangar).
 //!
-//! Foundation slice: one connection type (tarmac). Roads / resource lines and
-//! user-drawn routing are follow-ups; the MST + strip mesh here is the seam they
-//! extend. Rebuild triggers on the *count* of structures changing (place /
-//! delete), which is all the foundation editor can do to a site.
+//! The meshes are built in the site's local tangent frame and anchored every
+//! frame like the structures themselves (a root-grid big_space child posed in
+//! f64), so they stay put at high warp and persist when the editor closes.
+//!
+//! Extensibility: adding a new connection type (a utility pipe run, a rail spur)
+//! is a new [`ConnectionKind`] variant with a style — the router (`spawn_authored_*`
+//! for the authored base, `rebuild_connections` for the editor) and the mesh
+//! builders below are kind-agnostic. The future VAB→pad *crawler* animation rides
+//! the [`ConnectionKind::Crawlerway`] geometry this already lays down.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
-use bevy::math::{DMat3, DQuat, DVec3};
+use bevy::math::{DMat3, DQuat, DVec2, DVec3};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
@@ -33,12 +39,82 @@ use crate::structures::{StructureId, StructurePlacement, StructureRegistry};
 use super::place::{BaseMaterials, kind_bounding_m};
 use super::{BaseBuildState, BaseEditor, BaseEditorMode, base_editor_open};
 
-/// Tarmac strip width, metres.
-const STRIP_W: f64 = 3.0;
-/// Lift above the pad surface so the tarmac reads on the ground without z-fight.
-const STRIP_LIFT_M: f32 = 0.06;
+/// A kind of paved connection. Each carries its own width / colour / lift so the
+/// network reads as distinct facility types. New variants extend the base's
+/// infrastructure vocabulary (utility roads, rail, pipe runs, …).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum ConnectionKind {
+    /// Wide airside pavement linking runways to aprons/hangars. Dark asphalt.
+    Taxiway,
+    /// A filled parking pad (in front of a hangar). Dark asphalt, filled rect.
+    Apron,
+    /// Narrow landside service road linking buildings. Light concrete.
+    Road,
+    /// Very wide gravel haul-way from the assembly building to the launch pads —
+    /// the future crawler-transporter route. Neutral gravel.
+    Crawlerway,
+}
 
-/// The combined tarmac mesh for one site, anchored at the site centre.
+/// Base lift (m) for the paving band, matched to the runway asphalt
+/// (`runway::RUNWAY_ASPHALT_LIFT_M` = 0.12) — the proven "reads as paving on the
+/// ground, not a floating lip" value. The old ~4 cm lift lost to depth-buffer
+/// imprecision at the Space Center god-view distance and to the basin's residual
+/// cut/fill height jitter (the runway skirt drops a full 0.6 m for the same
+/// reason), so the pavement z-fought the flattened tiles and short lawn grass
+/// poked through. Connections carry no skirt, so the surface itself has to clear
+/// the ground outright. Each kind sits a hair above/below its neighbours (below)
+/// so overlapping pavement sorts cleanly.
+const CONNECTION_LIFT_BASE_M: f32 = 0.12;
+
+/// Visual style of a connection kind.
+struct ConnectionStyle {
+    /// Strip width (m) for line networks (ignored by aprons, which are sized
+    /// explicitly).
+    width_m: f64,
+    /// Lift above the pad surface (m) so the paving reads on the ground without
+    /// z-fighting. Overlapping kinds are separated by a small delta so the more
+    /// prominent airside pavement reads over what it crosses (taxiway over road).
+    lift_m: f32,
+}
+
+impl ConnectionKind {
+    fn style(self) -> ConnectionStyle {
+        match self {
+            // Wide, prominent airside pavement — a taxiway is roughly half a
+            // runway's width and must read clearly, not as a thin line. Sits at
+            // the top of the paving band so it reads over roads/crawlerways it
+            // crosses.
+            ConnectionKind::Taxiway => ConnectionStyle {
+                width_m: 44.0,
+                lift_m: CONNECTION_LIFT_BASE_M,
+            },
+            ConnectionKind::Apron => ConnectionStyle {
+                width_m: 0.0,
+                lift_m: CONNECTION_LIFT_BASE_M - 0.01,
+            },
+            ConnectionKind::Road => ConnectionStyle {
+                width_m: 10.0,
+                lift_m: CONNECTION_LIFT_BASE_M - 0.02,
+            },
+            ConnectionKind::Crawlerway => ConnectionStyle {
+                width_m: 40.0,
+                lift_m: CONNECTION_LIFT_BASE_M - 0.03,
+            },
+        }
+    }
+
+    /// The shared material for this connection kind, from [`BaseMaterials`].
+    fn material(self, mats: &BaseMaterials) -> Handle<ShadowedStandardMaterial> {
+        match self {
+            // Taxiways and aprons are the same dark asphalt as the tarmac.
+            ConnectionKind::Taxiway | ConnectionKind::Apron => mats.tarmac.clone(),
+            ConnectionKind::Road => mats.road.clone(),
+            ConnectionKind::Crawlerway => mats.crawlerway.clone(),
+        }
+    }
+}
+
+/// One connection mesh for a site, anchored at the site centre.
 #[derive(Component)]
 struct ConnectionVisual {
     site_id: StructureId,
@@ -47,8 +123,8 @@ struct ConnectionVisual {
     basis_body: DQuat,
 }
 
-/// Tracks what the connection mesh was last built for, so it only rebuilds when
-/// the active site's structure set changes.
+/// Tracks what the editor's auto-taxiway mesh was last built for, so it only
+/// rebuilds when the active site's structure set changes.
 #[derive(Resource, Default)]
 struct ConnectionsState {
     built: Option<(StructureId, u32)>,
@@ -64,7 +140,7 @@ impl Plugin for BaseEditorConnectionsPlugin {
             // Same anchoring contract as `place::update_placed_transforms`: in
             // `SimStage::Sync` after `sync_solar_system_state` so it reads the
             // current-frame body pose (a bare unordered `Update` jittered the
-            // tarmac at warp > 1×). Sync still runs while the editor is open.
+            // paving at warp > 1×). Sync still runs while the editor is open.
             .add_systems(
                 Update,
                 update_connection_transforms
@@ -143,8 +219,12 @@ fn rebuild_connections(
         return; // nothing to connect
     }
 
+    // The editor's generic auto-connection is a taxiway MST over everything on
+    // the site (the foundation behaviour). The authored base builds richer typed
+    // networks via `spawn_authored_*`.
     let edges = minimum_spanning_tree(&nodes);
-    let Some(mesh) = build_connection_mesh(&nodes, &edges) else {
+    let style = ConnectionKind::Taxiway.style();
+    let Some(mesh) = build_strip_mesh(&nodes, &edges, style.width_m, style.lift_m) else {
         return;
     };
 
@@ -153,10 +233,10 @@ fn rebuild_connections(
     let material = state
         .material
         .get_or_insert_with(|| {
-            // Shadow-receiving (F6): the tarmac darkens under structures and
+            // Shadow-receiving (F6): the taxiway darkens under structures and
             // the craft like the flattened ground it paves over.
             materials.add(shadowed(StandardMaterial {
-                base_color: Color::srgb(0.14, 0.14, 0.16),
+                base_color: Color::srgb(0.13, 0.13, 0.15),
                 perceptual_roughness: 0.92,
                 metallic: 0.0,
                 ..default()
@@ -164,23 +244,17 @@ fn rebuild_connections(
         })
         .clone();
 
-    commands.spawn((
-        Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(material),
-        Transform::default(),
-        Visibility::Inherited,
-        CellCoord::ZERO,
-        ChildOf(root.entity),
-        RenderLayers::layer(SHIP_LAYER),
-        NotShadowCaster,
-        ConnectionVisual {
-            site_id,
-            body_id,
-            center_body,
-            basis_body,
-        },
-        Name::new("Base Connections"),
-    ));
+    spawn_connection_entity(
+        &mut commands,
+        &mut meshes,
+        material,
+        root.entity,
+        body_id,
+        site_id,
+        center_body,
+        basis_body,
+        mesh,
+    );
 }
 
 struct Node {
@@ -224,11 +298,11 @@ fn minimum_spanning_tree(nodes: &[Node]) -> Vec<(usize, usize)> {
     edges
 }
 
-/// Build the combined tarmac mesh in the site-local frame (X = along/heading,
-/// Y = up, Z = across). Each edge is a flat strip from one structure's edge to
-/// the next's, inset by their bounding radii so the tarmac meets the footprints
-/// rather than overlapping them.
-fn build_connection_mesh(nodes: &[Node], edges: &[(usize, usize)]) -> Option<Mesh> {
+/// Build a strip network mesh in the site-local frame (X = along/heading, Y =
+/// up, Z = across). Each edge is a flat strip of `width_m` from one node's edge
+/// to the next's, inset by their bounding radii so the paving meets the
+/// footprints rather than overlapping them.
+fn build_strip_mesh(nodes: &[Node], edges: &[(usize, usize)], width_m: f64, lift_m: f32) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -248,25 +322,170 @@ fn build_connection_mesh(nodes: &[Node], edges: &[(usize, usize)]) -> Option<Mes
         let p1 = (b.along - dir.0 * b.bounding, b.across - dir.1 * b.bounding);
         let seg = ((p1.0 - p0.0), (p1.1 - p0.1));
         if (seg.0 * seg.0 + seg.1 * seg.1).sqrt() < 1e-2 {
-            continue; // footprints touch — no tarmac between them
+            continue; // footprints touch — no paving between them
         }
         let perp = (-dir.1, dir.0);
-        let hw = STRIP_W * 0.5;
-        let base = positions.len() as u32;
-        let corners = [
-            (p0.0 + perp.0 * hw, p0.1 + perp.1 * hw),
-            (p0.0 - perp.0 * hw, p0.1 - perp.1 * hw),
-            (p1.0 + perp.0 * hw, p1.1 + perp.1 * hw),
-            (p1.0 - perp.0 * hw, p1.1 - perp.1 * hw),
-        ];
-        for (cx, cz) in corners {
-            positions.push([cx as f32, STRIP_LIFT_M, cz as f32]);
+        let hw = width_m * 0.5;
+        push_quad(
+            &mut positions,
+            &mut normals,
+            &mut uvs,
+            &mut indices,
+            lift_m,
+            [
+                (p0.0 + perp.0 * hw, p0.1 + perp.1 * hw),
+                (p0.0 - perp.0 * hw, p0.1 - perp.1 * hw),
+                (p1.0 + perp.0 * hw, p1.1 + perp.1 * hw),
+                (p1.0 - perp.0 * hw, p1.1 - perp.1 * hw),
+            ],
+        );
+    }
+
+    finish_mesh(positions, normals, uvs, indices)
+}
+
+/// Build a filled apron rectangle centred at `(along, across)` in the site frame
+/// with the given half-extents (m).
+fn build_apron_mesh(along: f64, across: f64, half_along: f64, half_across: f64, lift_m: f32) -> Option<Mesh> {
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut normals: Vec<[f32; 3]> = Vec::new();
+    let mut uvs: Vec<[f32; 2]> = Vec::new();
+    let mut indices: Vec<u32> = Vec::new();
+    // Corner order matters: `push_quad` winds `[0,2,1, 1,2,3]`, so the pair
+    // sharing `along0` must run `+across → −across` for the face to point up
+    // (the previous order wound it downward — a backface-culled, invisible
+    // apron).
+    push_quad(
+        &mut positions,
+        &mut normals,
+        &mut uvs,
+        &mut indices,
+        lift_m,
+        [
+            (along - half_along, across + half_across),
+            (along - half_along, across - half_across),
+            (along + half_along, across + half_across),
+            (along + half_along, across - half_across),
+        ],
+    );
+    finish_mesh(positions, normals, uvs, indices)
+}
+
+/// Tessellate a waypoint polyline into a dense centreline, replacing each
+/// interior corner with a circular fillet of (up to) `radius_m` — the curved
+/// taxiway/road geometry. The radius is clamped so an arc never eats more than
+/// half of either adjacent segment (two nearby corners each keep their own
+/// fillet). Points are `(along, across)` in the site frame.
+fn fillet_path(points: &[DVec2], radius_m: f64) -> Vec<DVec2> {
+    let mut out: Vec<DVec2> = Vec::with_capacity(points.len() * 8);
+    let Some((&first, rest)) = points.split_first() else {
+        return out;
+    };
+    out.push(first);
+    for i in 1..points.len().saturating_sub(1) {
+        let (a, p, b) = (points[i - 1], points[i], points[i + 1]);
+        let u = (p - a).normalize_or_zero(); // incoming direction
+        let v = (b - p).normalize_or_zero(); // outgoing direction
+        if u == DVec2::ZERO || v == DVec2::ZERO {
+            continue;
+        }
+        // Turn angle at the corner (0 = straight through).
+        let turn = (-u).dot(v).clamp(-1.0, 1.0).acos();
+        let turn = std::f64::consts::PI - turn;
+        if turn < 1.0e-3 {
+            out.push(p);
+            continue;
+        }
+        // Tangent distance from the corner to the arc's start/end, clamped to
+        // half of each adjacent segment; the effective radius follows.
+        let t_max = 0.5 * (p - a).length().min((b - p).length());
+        let half_tan = (turn * 0.5).tan();
+        let t = (radius_m * half_tan).min(t_max);
+        let r_eff = t / half_tan;
+        let start = p - u * t;
+        let end = p + v * t;
+        // Arc centre sits perpendicular to the incoming direction, on the side
+        // the path turns toward.
+        let side = u.perp_dot(v).signum();
+        let center = start + DVec2::new(-u.y, u.x) * (side * r_eff);
+        let a0 = (start - center).to_angle();
+        let steps = (turn / 0.12).ceil().max(1.0) as usize; // ~7° per step
+        for k in 0..=steps {
+            let ang = a0 + side * turn * (k as f64 / steps as f64);
+            out.push(center + DVec2::from_angle(ang) * r_eff);
+        }
+        let _ = end; // the final arc sample lands on `end`
+    }
+    if let Some(&last) = rest.last() {
+        out.push(last);
+    }
+    out
+}
+
+/// Extrude a tessellated centreline into a flat strip of `width_m` (a triangle
+/// strip with one vertex pair per point; directions are averaged at interior
+/// points, so the fillets' small angle steps join smoothly).
+fn build_path_mesh(center: &[DVec2], width_m: f64, lift_m: f32) -> Option<Mesh> {
+    if center.len() < 2 {
+        return None;
+    }
+    let hw = width_m * 0.5;
+    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(center.len() * 2);
+    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(center.len() * 2);
+    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(center.len() * 2);
+    let mut indices: Vec<u32> = Vec::with_capacity((center.len() - 1) * 6);
+    for (i, p) in center.iter().enumerate() {
+        let dir_in = if i > 0 {
+            (center[i] - center[i - 1]).normalize_or_zero()
+        } else {
+            DVec2::ZERO
+        };
+        let dir_out = if i + 1 < center.len() {
+            (center[i + 1] - center[i]).normalize_or_zero()
+        } else {
+            DVec2::ZERO
+        };
+        let dir = (dir_in + dir_out).normalize_or(if dir_in != DVec2::ZERO { dir_in } else { dir_out });
+        let perp = DVec2::new(-dir.y, dir.x);
+        for side in [1.0, -1.0] {
+            let q = *p + perp * (hw * side);
+            positions.push([q.x as f32, lift_m, q.y as f32]);
             normals.push([0.0, 1.0, 0.0]);
             uvs.push([0.0, 0.0]);
         }
-        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
+        if i > 0 {
+            let b = (2 * i) as u32;
+            indices.extend_from_slice(&[b - 2, b, b - 1, b - 1, b, b + 1]);
+        }
     }
+    finish_mesh(positions, normals, uvs, indices)
+}
 
+/// Push one flat quad (Y-up) at `lift` from four `(along, across)` corners
+/// ordered so `[0,2,1, 1,2,3]` winds consistently.
+fn push_quad(
+    positions: &mut Vec<[f32; 3]>,
+    normals: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    indices: &mut Vec<u32>,
+    lift: f32,
+    corners: [(f64, f64); 4],
+) {
+    let base = positions.len() as u32;
+    for (cx, cz) in corners {
+        positions.push([cx as f32, lift, cz as f32]);
+        normals.push([0.0, 1.0, 0.0]);
+        uvs.push([0.0, 0.0]);
+    }
+    indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
+}
+
+fn finish_mesh(
+    positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
+    uvs: Vec<[f32; 2]>,
+    indices: Vec<u32>,
+) -> Option<Mesh> {
     if indices.is_empty() {
         return None;
     }
@@ -278,44 +497,23 @@ fn build_connection_mesh(nodes: &[Node], edges: &[(usize, usize)]) -> Option<Mes
     Some(mesh)
 }
 
-/// Build a one-shot tarmac mesh connecting authored structures (the default
-/// base). `nodes` are `(along, across, bounding)` in the site tangent frame at
-/// `center_dir`/`heading`/`pad_r`. Single spawn (no rev tracking); shares the
-/// `site_id` so the editor's `rebuild_connections` replaces it if that base is
-/// later edited.
+/// Spawn a connection mesh entity anchored at the site centre. Shared by the
+/// editor rebuild and the authored spawners.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn spawn_authored(
+fn spawn_connection_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
-    mats: &BaseMaterials,
+    material: Handle<ShadowedStandardMaterial>,
     root: Entity,
     body_id: BodyId,
     site_id: StructureId,
-    center_dir: DVec3,
-    heading: DVec3,
-    pad_r: f64,
-    nodes: &[(f64, f64, f64)],
+    center_body: DVec3,
+    basis_body: DQuat,
+    mesh: Mesh,
 ) {
-    if nodes.len() < 2 {
-        return;
-    }
-    let across = heading.cross(center_dir).normalize();
-    let node_vec: Vec<Node> = nodes
-        .iter()
-        .map(|&(a, c, b)| Node {
-            along: a,
-            across: c,
-            bounding: b,
-        })
-        .collect();
-    let edges = minimum_spanning_tree(&node_vec);
-    let Some(mesh) = build_connection_mesh(&node_vec, &edges) else {
-        return;
-    };
-    let basis_body = DQuat::from_mat3(&DMat3::from_cols(heading, center_dir, across));
     commands.spawn((
         Mesh3d(meshes.add(mesh)),
-        MeshMaterial3d(mats.tarmac.clone()),
+        MeshMaterial3d(material),
         Transform::default(),
         Visibility::Inherited,
         CellCoord::ZERO,
@@ -325,14 +523,160 @@ pub(super) fn spawn_authored(
         ConnectionVisual {
             site_id,
             body_id,
-            center_body: center_dir * pad_r,
+            center_body,
             basis_body,
         },
-        Name::new("Base Connections"),
+        Name::new("Base Connection"),
     ));
 }
 
-/// Anchor the connection mesh in the body-fixed frame each frame, like
+/// Body-fixed anchor basis + centre for a site's connection meshes (all built in
+/// the site-local `(heading, up, across)` frame).
+fn site_anchor(center_dir: DVec3, heading: DVec3, pad_r: f64) -> (DVec3, DQuat) {
+    let across = heading.cross(center_dir).normalize();
+    let basis = DQuat::from_mat3(&DMat3::from_cols(heading, center_dir, across));
+    (center_dir * pad_r, basis)
+}
+
+/// Build a typed line network (taxiway / road / crawlerway) over authored nodes.
+/// `nodes` are `(along, across, bounding)` in the site tangent frame at
+/// `center_dir`/`heading`/`pad_r`. `edges` are explicit index pairs, or `None`
+/// to link them all with a minimum spanning tree. Single spawn (no rev tracking);
+/// shares the `site_id` so the editor's `rebuild_connections` replaces it if that
+/// base is later edited.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_authored_network(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &BaseMaterials,
+    root: Entity,
+    body_id: BodyId,
+    site_id: StructureId,
+    center_dir: DVec3,
+    heading: DVec3,
+    pad_r: f64,
+    kind: ConnectionKind,
+    nodes: &[(f64, f64, f64)],
+    edges: Option<&[(usize, usize)]>,
+) {
+    if nodes.len() < 2 {
+        return;
+    }
+    let node_vec: Vec<Node> = nodes
+        .iter()
+        .map(|&(a, c, b)| Node {
+            along: a,
+            across: c,
+            bounding: b,
+        })
+        .collect();
+    let mst;
+    let edges = match edges {
+        Some(e) => e,
+        None => {
+            mst = minimum_spanning_tree(&node_vec);
+            &mst
+        }
+    };
+    let style = kind.style();
+    let Some(mesh) = build_strip_mesh(&node_vec, edges, style.width_m, style.lift_m) else {
+        return;
+    };
+    let (center_body, basis_body) = site_anchor(center_dir, heading, pad_r);
+    spawn_connection_entity(
+        commands,
+        meshes,
+        kind.material(mats),
+        root,
+        body_id,
+        site_id,
+        center_body,
+        basis_body,
+        mesh,
+    );
+}
+
+/// Build an authored apron (a filled parking rectangle) at `(along, across)` in
+/// the site frame with the given half-extents.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_authored_apron(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &BaseMaterials,
+    root: Entity,
+    body_id: BodyId,
+    site_id: StructureId,
+    center_dir: DVec3,
+    heading: DVec3,
+    pad_r: f64,
+    along: f64,
+    across: f64,
+    half_along: f64,
+    half_across: f64,
+) {
+    let style = ConnectionKind::Apron.style();
+    let Some(mesh) = build_apron_mesh(along, across, half_along, half_across, style.lift_m) else {
+        return;
+    };
+    let (center_body, basis_body) = site_anchor(center_dir, heading, pad_r);
+    spawn_connection_entity(
+        commands,
+        meshes,
+        ConnectionKind::Apron.material(mats),
+        root,
+        body_id,
+        site_id,
+        center_body,
+        basis_body,
+        mesh,
+    );
+}
+
+/// Build an authored **curved path** (taxiway / road / …): a waypoint polyline
+/// whose interior corners are rounded into circular fillets of (up to)
+/// `fillet_radius_m`, extruded to the kind's width. This is how the airside
+/// taxiways read as real curved pavement instead of sharp zig-zag strips.
+///
+/// `lift_bias_m` nudges the strip's ground lift: a path that merges
+/// tangentially into another (a link taxiway joining a parallel taxiway) sits
+/// a few millimetres *lower*, so the overlap region renders as the one main
+/// strip instead of z-fighting.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn spawn_authored_path(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    mats: &BaseMaterials,
+    root: Entity,
+    body_id: BodyId,
+    site_id: StructureId,
+    center_dir: DVec3,
+    heading: DVec3,
+    pad_r: f64,
+    kind: ConnectionKind,
+    points: &[DVec2],
+    fillet_radius_m: f64,
+    lift_bias_m: f32,
+) {
+    let style = kind.style();
+    let center = fillet_path(points, fillet_radius_m);
+    let Some(mesh) = build_path_mesh(&center, style.width_m, style.lift_m + lift_bias_m) else {
+        return;
+    };
+    let (center_body, basis_body) = site_anchor(center_dir, heading, pad_r);
+    spawn_connection_entity(
+        commands,
+        meshes,
+        kind.material(mats),
+        root,
+        body_id,
+        site_id,
+        center_body,
+        basis_body,
+        mesh,
+    );
+}
+
+/// Anchor the connection meshes in the body-fixed frame each frame, like
 /// `place::update_placed_transforms` (in `SimStage::Sync` after
 /// `sync_solar_system_state`, so it reads the current-frame body pose).
 fn update_connection_transforms(

@@ -57,6 +57,29 @@ pub enum AppState {
     Running,
 }
 
+/// Whether the game world — celestial-body entities, the player ship
+/// visuals, the procedural sky — has been spawned. A bare menu boot starts
+/// [`Absent`]: the start screen is a lightweight UI over an empty scene
+/// (nothing simulates or streams behind it), and the world is built only
+/// when the player picks PLAY / a scenario — the menu flips this to
+/// [`Live`], and the world-spawn systems (registered on
+/// `OnEnter(WorldState::Live)` across `rendering`, `ship_view`,
+/// `sky_render`) run behind that action's loading pass. A `just game
+/// <scenario>` boot inserts [`Live`] directly, so the same `OnEnter` fires
+/// on the first frame and the boot is unchanged.
+///
+/// One-way: nothing ever sets it back to `Absent` (the world is never torn
+/// down; returning to the menu from flight keeps the world live and the
+/// menu routes through the existing live-world paths).
+#[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
+pub enum WorldState {
+    /// No world entities exist (bare menu boot, before the first start).
+    #[default]
+    Absent,
+    /// The world has been (or is being) spawned.
+    Live,
+}
+
 /// Where the current loading pass goes when it completes. Inserted by
 /// `main.rs` (start screen for a bare launch, `Running` otherwise); the
 /// start screen sets it to `Running` before re-entering `Loading`.
@@ -255,15 +278,25 @@ impl LoadingTracker {
     }
 }
 
+/// The once-per-process world-load steps (bake installs + initial terrain).
+/// Registered by the first loading pass that spawns the world: a scenario
+/// boot's [`steps_for`]`(…, boot: true)`, or the start screen's first start
+/// after a deferred (world-[`Absent`](WorldState::Absent)) menu boot.
+pub fn world_load_steps() -> [StepDesc; 2] {
+    [
+        StepDesc::new(step::BODIES, "Celestial bodies", 3.0),
+        StepDesc::new(step::TERRAIN, "Surface terrain", 1.0),
+    ]
+}
+
 /// Build the step set for loading into `situation`. `boot` includes the
-/// world-load steps (bake installs + initial terrain), which only happen
-/// once per process; a runtime re-load (start screen → runway) passes
-/// `boot = false` and gets only the scenario steps.
+/// world-load steps ([`world_load_steps`]), which only happen once per
+/// process; a runtime re-load (start screen → runway with a live world)
+/// passes `boot = false` and gets only the scenario steps.
 pub fn steps_for(situation: SpawnSituation, boot: bool) -> Vec<StepDesc> {
     let mut steps = Vec::new();
     if boot {
-        steps.push(StepDesc::new(step::BODIES, "Celestial bodies", 3.0));
-        steps.push(StepDesc::new(step::TERRAIN, "Surface terrain", 1.0));
+        steps.extend(world_load_steps());
     }
     if situation.has_deferred_placement() {
         steps.push(StepDesc::new(step::PLACEMENT, "Placing craft", 1.0));
@@ -314,8 +347,22 @@ impl Plugin for LoadingScreenPlugin {
 }
 
 /// Register the boot load's steps from the startup [`SpawnSituation`].
-fn register_boot_steps(situation: Res<SpawnSituation>, mut tracker: ResMut<LoadingTracker>) {
-    tracker.begin(steps_for(*situation, true));
+///
+/// A bare menu boot ([`LoadDestination`] = [`AppState::MainMenu`]) defers the
+/// world ([`WorldState::Absent`]) — no bodies bake, no terrain streams — so it
+/// registers **no steps** and the screen reveals into the menu on the first
+/// update. The world-load steps run later, when the menu starts a scenario
+/// (`main_menu::apply_menu_action` begins the boot step set itself).
+fn register_boot_steps(
+    situation: Res<SpawnSituation>,
+    dest: Res<LoadDestination>,
+    mut tracker: ResMut<LoadingTracker>,
+) {
+    if dest.0 == AppState::MainMenu {
+        tracker.begin(Vec::new());
+    } else {
+        tracker.begin(steps_for(*situation, true));
+    }
 }
 
 // Visual palette — kept local to this module so the loading screen can

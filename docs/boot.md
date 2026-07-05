@@ -77,29 +77,54 @@ warning rather than hanging (a stalled bake task or placement).
 Shown when no scenario is named: bare `just game` (the justfile default
 mode is now `menu`), `THALOS_SPAWN=menu`, or a bare `cargo run`. Skipped
 by: an explicit scenario, `just game shipyard`, and **`THALOS_AUTO_RUN`**
-(truthy) — agents keep a one-shot launch into orbit. The boot load runs
-first with the placeholder parking-orbit world; the menu appears fully
-loaded, opaque over the world (a live-world backdrop needs per-state HUD
-hiding first — deliberate follow-up).
+(truthy) — agents keep a one-shot launch into orbit.
 
-Scenario starts reuse the existing in-place machinery; **no process
-restart**:
+**A bare menu boot defers the world** (`loading::WorldState`, default
+`Absent`): no celestial bodies, player ship, or star-field are spawned, no
+terrain streams, and `register_boot_steps` registers an **empty** step set,
+so the menu reveals on the first update — a static UI over an empty scene.
+The world-spawn systems (`rendering::spawn_bodies` +
+`focus_camera_on_homeworld`, `ship_view::spawn_player_ship`,
+`sky_render::dispatch_sky_generation`) are registered on
+`OnEnter(WorldState::Live)` instead of `Startup`; a `just game <scenario>`
+boot inserts `Live` at build, so the same chain fires on the first frame's
+state transition (after `Startup`, still behind the loading screen) and the
+scenario boot is unchanged. While the menu is up, `WinitSettings` is
+swapped to reactive mode (~30 Hz idle / instant on input), so an idle menu
+costs near-zero CPU/GPU; the continuous game loop is restored on exit.
+`WorldState` is **one-way** — the world is never torn down; a menu
+re-entered from flight keeps it live.
 
-- **Orbit / Landing / Final approach / EVA** — same-craft (the boot
-  placeholder is the right rocket): `scenario_menu::respawn_into` (the
-  destruction picker's path) seats the craft, then straight to `Running`.
-- **Cruise** — craft swap to the Meridian: queues a
-  `relaunch::RelaunchRequest` (the shipyard Launch path), which tears down
-  the old craft, places cruise, and rebuilds from the blueprint.
-- **Runway / Runway approach** — craft swap **plus** the deferred
-  terrain-aware placement: re-arms `runway::RunwayPlacement` and the
-  settle gate (`SurfaceSettle::arm`), registers a fresh `[placement(,
-  settle)]` tracker pass, and re-enters `Loading` so site build + park +
-  tile settle happen behind the loading screen exactly like a
-  `just game runway` boot.
-- **SHIPYARD** — arms `OpenShipyardOnStart` and starts the orbit scenario;
-  the editor opens on entry to `Running` (it must never open during a
-  load — it gates off the very systems that complete one).
+Scenario starts route on `WorldState`; **no process restart** either way:
+
+- **World absent** (the first start after a bare menu boot): every start is
+  literally a boot triggered at runtime. `apply_menu_action` writes
+  `SpawnSituation`, seats the sim where no terrain is needed
+  (`respawn_into` for orbit / EVA), arms the boot deferred-placement flags
+  for the rest (`DescentPlacement` for the descents + cruise,
+  `RunwayPlacement` + settle for the runway pair), registers the **boot**
+  step set (`steps_for(start, true)` — world load + placement), flips
+  `WorldState::Live`, and re-enters `Loading` with destination `Running`.
+  No craft swap: `spawn_player_ship` hasn't run yet and builds the chosen
+  scenario's own blueprint when the world spawns. PLAY prepends
+  `world_load_steps()` to its spaceport-build pass the same way.
+- **World live** (menu re-entered from flight):
+  - **Orbit / Landing / Final approach / EVA** — same-craft:
+    `scenario_menu::respawn_into` (the destruction picker's path) seats the
+    craft, then straight to `Running`.
+  - **Cruise** — craft swap to the Meridian: queues a
+    `relaunch::RelaunchRequest` (the shipyard Launch path), which tears down
+    the old craft, places cruise, and rebuilds from the blueprint.
+  - **Runway / Runway approach** — craft swap **plus** the deferred
+    terrain-aware placement: re-arms `runway::RunwayPlacement` and the
+    settle gate (`SurfaceSettle::arm`), registers a fresh `[placement(,
+    settle)]` tracker pass, and re-enters `Loading` so site build + park +
+    tile settle happen behind the loading screen exactly like a
+    `just game runway` boot.
+- **SHIPYARD** — arms `OpenShipyardOnStart` and starts the orbit scenario
+  (through either route above); the editor opens on entry to `Running` (it
+  must never open during a load — it gates off the very systems that
+  complete one).
 - **SETTINGS** — opens the native Bevy-UI settings overlay in place.
 
 Escape on the menu only closes the settings overlay; the pause-menu Escape

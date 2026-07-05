@@ -136,6 +136,14 @@ pub struct EngineSpec {
     pub dry_mass: f32,
     pub reactants: Vec<ReactantRatio>,
     pub power_draw_kw: f32,
+    /// Peak thrust-vector deflection (degrees) the engine can gimbal from the
+    /// nose axis. `0` (the default, e.g. jets and fixed bells) means no
+    /// thrust vectoring. A gimballed engine steers the craft in pitch/yaw
+    /// under power: the effective attitude torque is `thrust · sin(range) ·
+    /// arm` about the CoM, wired into the fly-by-wire allocator alongside the
+    /// reaction wheels. See `docs/aerodynamics.md` *Thrust vectoring*.
+    #[serde(default)]
+    pub gimbal_range_deg: f32,
     /// Whitelisted resource storage this part may carry.
     #[serde(default)]
     pub storage: Vec<ResourceStorageSpec>,

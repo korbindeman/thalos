@@ -262,7 +262,7 @@ fn draw_pick_ghost(
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
-    mut gizmos: Gizmos,
+    mut gizmos: Gizmos<crate::god_view::GodViewGizmos>,
 ) {
     if editor.mode != BaseEditorMode::PickSite {
         return;

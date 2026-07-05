@@ -40,6 +40,16 @@ preview:
 preview-window:
     cargo run -p thalos_body_render --example object_preview -- --window
 
+# Headless screenshot: boots the game off-screen (no window), builds the world
+# for the preset, poses the camera, and writes a PNG to tools/screenshots/, then
+# exits — agent-runnable like `just preview`, but of a whole composed scene.
+# `just screenshot` does the spaceport aerial; override the framing without
+# recompiling via env vars, e.g. (PowerShell):
+#   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
+# Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP.
+screenshot preset="spaceport-aerial":
+    $env:THALOS_SCREENSHOT='{{preset}}'; cargo run -p thalos_game
+
 # Build everything
 build:
     cargo build --workspace

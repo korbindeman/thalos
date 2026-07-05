@@ -63,6 +63,8 @@
                 (resource: Lox,     mass_fraction: 0.78260869),
             ],
             power_draw_kw: 0.0,
+            // Thrust-vectored booster engine: steers the ascent in pitch/yaw.
+            gimbal_range_deg: 6.0,
         )),
         "boreas": Engine((
             display_name: "Boreas",
@@ -76,6 +78,25 @@
                 (resource: Lox,     mass_fraction: 0.78260869),
             ],
             power_draw_kw: 0.0,
+            gimbal_range_deg: 5.0,
+        )),
+        // Heavy sea-level first-stage booster: high thrust for a good pad
+        // TWR, a lower (sea-level-optimized) Isp than the vacuum Boreas, and a
+        // wide gimbal range for ascent steering. The workhorse under an
+        // orbital-class stack (see `ships/atlas.ron`).
+        "typhon": Engine((
+            display_name: "Typhon",
+            optimized_for: Atmosphere,
+            diameter: 4.0,
+            thrust: 2400000.0,
+            isp: 305.0,
+            dry_mass: 2200.0,
+            reactants: [
+                (resource: Methane, mass_fraction: 0.21739131),
+                (resource: Lox,     mass_fraction: 0.78260869),
+            ],
+            power_draw_kw: 0.0,
+            gimbal_range_deg: 8.0,
         )),
         "mistral_jet": Engine((
             display_name: "Mistral Jet Nacelle",

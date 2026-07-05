@@ -201,11 +201,27 @@ themselves), and the game's camera post stack (AgX tonemap + bloom + SMAA),
 minus the sensor-sim grain / chromatic aberration that only muddy small asset
 shots. So when iterating on a procedural asset's *geometry/material*, run `just
 preview` and **Read the output PNGs directly** instead of round-tripping a
-screenshot through the user. (Whole-scene composition, terrain,
-lighting-in-context, and "does it feel right" still need a real `just game`
-run — that stays the user's call.) Extend the gallery by adding an entry to
+screenshot through the user. Extend the gallery by adding an entry to
 `object_preview.rs`; a larger composed scene (a patch of grass, a mountain
 ringed by trees) is the planned next phase.
+
+**Whole *game* scenes, too, you can now capture headlessly** — `just
+screenshot` (`crate::screenshot::HeadlessScreenshotPlugin`, activated by the
+`THALOS_SCREENSHOT` env var). This boots the **real game binary** with no window
+and no winit (a `ScheduleRunnerPlugin` frame loop, same as `just preview`),
+builds the world for a named **preset** (today `spaceport-aerial`, which boots
+the `runway` scenario so the whole spaceport + settled terrain come up behind the
+loading screen), poses the *actual* `ShipCamera` at a scripted god-view over the
+pad — reusing the real camera keeps the scene-depth / atmosphere / SSAO /
+sun-shadow render graph coupled — hides the HUD, renders one frame off-screen to
+`tools/screenshots/*.png`, and exits. So an agent can now see the composed
+in-game world (lighting-in-context, terrain, base layout, shadows), not just
+isolated assets — **Read the PNG directly**. Frame it without recompiling via
+`THALOS_SCREENSHOT_{AZIMUTH,ELEVATION,DISTANCE,SIZE,OUT,WARMUP}` (angles in
+degrees around the pad, 90° elevation = top-down). Add a preset by extending
+`ScreenshotPreset`. Still the user's call: interactive "does it feel right",
+live behaviour, and any framing that needs a specific in-flight moment — the tool
+captures a static, scripted vantage of a fresh spawn, not a play session.
 
 **Getting data out of a running session: write it to a file.** When you need
 runtime numbers rather than a picture, don't reach for live inspection — have
@@ -508,14 +524,23 @@ Key modules:
   step set for a load; producers update their step by id; the reveal fires
   when all registered steps complete, including deferred craft placement).
   A bare `just game` boots to the **start screen** (`main_menu.rs`:
-  scenario picker / SHIPYARD / SETTINGS / QUIT) over the placeholder
-  parking-orbit world; naming a scenario (`just game runway`) or setting
-  `THALOS_AUTO_RUN` skips it. Menu scenario starts reuse the respawn /
-  relaunch machinery in place — the runway pair re-arms its deferred
-  placement + settle gate and re-enters `Loading`. `SpawnSituation` is
-  therefore **mutable at runtime**; deferred placements are explicitly
-  armed (`DescentPlacement`, `RunwayPlacement`), never keyed off the
-  situation with a `Local<bool>`.
+  scenario picker / SHIPYARD / SETTINGS / QUIT) with the **world deferred**
+  (`loading::WorldState::Absent`): no bodies / ship / sky spawn, no terrain
+  streams, the boot loading pass registers zero steps (near-instant menu),
+  and the winit loop is throttled to reactive mode while the menu is up.
+  The world-spawn systems hang off `OnEnter(WorldState::Live)` instead of
+  `Startup`; naming a scenario (`just game runway`) or setting
+  `THALOS_AUTO_RUN` skips the menu and inserts `Live` (same chain, first
+  frame, boot unchanged). The menu's first start after a deferred boot *is*
+  a boot: it arms the boot placement flags, registers the boot step set,
+  flips `Live`, and re-enters `Loading` (no craft swap needed —
+  `spawn_player_ship` builds the chosen scenario's blueprint directly).
+  With the world already live (menu re-entered from flight), scenario
+  starts reuse the respawn / relaunch machinery in place — the runway pair
+  re-arms its deferred placement + settle gate and re-enters `Loading`.
+  `SpawnSituation` is therefore **mutable at runtime**; deferred placements
+  are explicitly armed (`DescentPlacement`, `RunwayPlacement`), never keyed
+  off the situation with a `Local<bool>`.
 - **Spawn situation is a flag: ship in orbit, EVA on the
   surface, a landing approach over land, a final approach over
   flat land, or one of two surface-runway scenarios.** `main.rs` reads
@@ -839,24 +864,79 @@ Key modules:
   (reusing the persistent `TerrainFlattenRegistry` handle). Tab toggles placing
   a building vs a **launchpad** (a craft can be placed on it with **L**, reusing
   the runway's parked-placement helpers — runway spawn is horizontal-on-gear, a
-  launchpad spawn is **vertical** nose-up), and a tarmac **auto-connection** mesh
-  (an MST over the site's structures) regenerates as structures change. The
-  **default base is a small spaceport on a flat basin**: `runway::finish_runway_spawn`
-  registers a wide `BaseSite` basin — *offset toward the launch-complex side* of
-  the runway, sized to hold the whole layout — and the runway drapes on it (no
-  longer its own pad), then `base_editor::spawn_default_base` authors the complex
-  coplanar on it: two large launchpads with clearing, per-pad flame diverters +
-  tank farms (`Tank` cylinders), a VAB-scale building and hangars on the far edge,
-  blockhouses/ops near the strip, and a tarmac MST linking the road structures —
-  so the surface scenarios present a whole base. Spawn
-  points are **intrinsic** to runways/launchpads (the shipyard create-craft→fly
-  flow is the next step). The base's flattened ground reads as a **grass lawn**
+  launchpad spawn is **vertical** nose-up), and a **typed auto-connection
+  network** (`base_editor::connections`: `ConnectionKind` = taxiway / apron /
+  road / crawlerway, each its own width+material; line networks are MST or
+  explicit-edge strips, aprons are filled rects) regenerates as structures
+  change. Runways are now **parametric + multi-instance**
+  (`StructureKind::Runway { half_length_m, half_width_m }`, rendered + collided
+  from the registry by `runway.rs`, with **ICAO-font designator numbers 01–36
+  painted from the true compass heading**; every runway lies on the
+  one shared basin tangent plane via `RunwayFrame::center_offset`, so an offset
+  strip stays flush with the flattened ground). The
+  **default base is a spaceport on a flat basin**: `runway::build_spaceport`
+  registers a wide `BaseSite` basin, registers **two runways in a V** (the 5 km
+  primary + an angled crosswind secondary diverging 30° from near the primary's
+  threshold, on the side opposite the launch complex; the divergence gives each
+  strip its own designator numbers, so no L/R suffix pair) draping on it,
+  then `base_editor::spawn_default_base` authors the rest coplanar as **one
+  core campus** on the launch-complex side (nothing between the runways): two
+  launchpads with clearing, per-pad flame diverters + tank/fuel farms (`Tank`
+  cylinders), a VAB-scale building, a row of hangars standing on a **large
+  apron auto-derived from the hangar row**, blockhouses/ops, and the typed
+  networks — a straight full-length core parallel taxiway plus three **curved
+  link taxiways** (`connections::spawn_authored_path`, waypoint polylines with
+  circular corner fillets) that cross the primary strip **split at the runway
+  edges** (stub stops at one side, curve resumes at the other — no paving under
+  the strip) and sweep tangentially onto the secondary's parallel taxiway,
+  straight connectors + threshold **holding pads**, a curved landside road, and
+  VAB→pad crawlerways — so the surface scenarios present a whole base. Spawn
+  points are **intrinsic** to runways/launchpads, and the **create-craft→fly
+  flow** is wired: the shipyard/VAB **LAUNCH** rebuilds the craft into an orbit
+  hold then drops into an in-world **launch-point picker** — a
+  `BaseEditorMode::SelectLaunch` god-view (`base_editor/launch_select.rs`) where
+  clicking a runway lands the craft horizontal-on-gear and a launchpad lands it
+  vertical-nose-up, via the shared placement cores (`runway::place_on_runway` /
+  `place::place_on_launchpad`). The spaceport is built lazily on the first launch
+  (`runway::build_spaceport`, extracted from `finish_runway_spawn`) behind a brief
+  loading pass, and persists thereafter. Every **launchpad now carries its own
+  kinematic collider** (`spawn_structure_entity`) — required because a
+  `RunwaySite` makes `local_physics::terrain_patch` skip the generic ground patch
+  on that body, so a pad-launched craft would otherwise fall through. The base's
+  flattened ground reads as a **grass lawn**
   (thick short `GrassProfile::lawn`) with its paved/built footprints (runway,
   launchpads, buildings, tanks) **cleared** — the building-terrain scatter layer:
   `body_render::ground::scatter`'s `ScatterRegion`/`ScatterTreatment`/`classify_scatter`,
   derived from the `StructureRegistry` by `rendering::grass` and honoured by the
   grass tile builder (the seam future base trees/props extend). See
   `docs/base_building.md` *Ground scatter*.
+- `space_center/` — the **KSP-style Space Center hub**: the god-view overview you
+  land in when you press **PLAY** on the start screen. Like the base editor it is
+  an **in-world modal mode** (a `sim_clock` pause source, `space_center_closed`
+  gates only the **Camera** `SimStage`), not an `AppState`. It is the *hub* the
+  facility editors hang off: a `space_center::ui` panel offers **EDIT BASE** (→
+  base editor on the existing basin) and **VAB** (→ shipyard editor), plus a
+  **building-selection framework** (`space_center::select`) — left-click raycasts
+  the pad sphere for the nearest selectable structure, outlines it, and entering
+  an already-selected **facility** building opens it. Facilities are tagged on the
+  `StructureSite` via `structures::Facility` (only `Vab` wired today; the seam for
+  runway/pad launch, tracking station, admin). Entry: start-screen PLAY (a
+  **clean start** — builds the spaceport *base only*, `runway::build_spaceport`
+  with **no craft parked**, behind the loading screen via
+  `HubSpaceportBuild`/`finish_hub_spaceport`, then opens the hub on reveal), or
+  the in-flight pause menu's **SPACE CENTER** button. The only way to fly is to
+  launch a craft yourself from the **VAB** (→ `base_editor::launch_select`'s
+  pick-a-runway/pad flow) — nothing is loaded on the pad by default. **EXIT /
+  Escape** from a PLAY-opened hub returns to the **main menu**
+  (`SpaceCenter::return_to_menu`, since nothing is flying yet); from a
+  pause-menu-opened hub it returns to that flight. `ReturnToSpaceCenter` makes a
+  facility entered *from* the hub return to the hub on close (a VAB **Launch**,
+  which queues a `RelaunchRequest`, instead drops to flight). The god-view camera
+  is the **shared** `god_view` module (`GodViewOrbit` + `drive_god_view`),
+  extracted from the base editor so both modes share the exact 3/4 orbit/zoom/pan
+  feel and one shadow-focus override. Start screen (`main_menu`) is now the usual
+  **PLAY / SETTINGS / QUIT** with the direct-scenario shortcuts tucked in a
+  collapsible **QUICK START / DEV** submenu.
 - `settings` — **unified settings persistence**. All user preferences live in
   one `settings.ron` (`AppSettings { window, graphics, units }` — a section per
   domain). Storage location switches on build profile (Bevy 0.19's
@@ -1222,6 +1302,13 @@ Each major system has a unified spec doc.
   in-place scenario starts, and the runtime-scenario invariants
   (explicitly-armed deferred placements, per-ship engine lighting,
   `relaunch_idle`).
+- `ui_flow.md` — the screen/mode flow and its **in-flight unification**: the
+  `GameContext` sub-state (`SpaceCenter | Vab | BaseEditor | Flight`, nested under
+  `AppState::Running`) that replaces the cross-referencing `.open` booleans as the
+  single in-game mode authority (one camera/HUD/pause/Escape owner, a return-stack,
+  `ViewMode` demoted to Flight-only). Migration is staged shadow→flip→invert like
+  `regimes.md`; **Phase 1 (shadow) landed 2026-07-04** in `game_context.rs` —
+  `GameContext` is derived from the booleans and not yet consumed.
 - `surface.md` — surface gameplay in two parts: **on foot (EVA)**
   (ground physics, body-fixed pose, the `HeightSource` interface,
   surface map view) and **landing & impact destruction** (landed-ship

@@ -103,6 +103,31 @@ pub struct ThrottleState {
     pub effective: f64,
 }
 
+/// The throttle fraction that is *actually producing thrust* this frame — the
+/// effective throttle, gated to `0` unless the craft has a live engine and
+/// fuel above dry mass (the same condition
+/// [`crate::local_physics::forces::apply_local_forces`] uses to apply thrust).
+///
+/// Engine-gimbal (thrust-vectoring) authority scales with this: it is the
+/// factor on [`ShipParameters::gimbal_torque_full`] both the fly-by-wire
+/// controller ([`crate::control_bus`]) and the realized torque
+/// ([`crate::local_physics::forces::compute_angular_acceleration`]) apply, so
+/// gimbal steering vanishes at zero throttle, out of fuel, and during coast —
+/// exactly when there is no exhaust to vector. Single-sourced here so those two
+/// call sites can never disagree about how much authority the gimbal has.
+pub(crate) fn active_thrust_fraction(
+    params: &thalos_physics_canonical::types::ShipParameters,
+    ship_mass_kg: f64,
+    throttle_effective: f64,
+) -> f64 {
+    let t = throttle_effective.clamp(0.0, 1.0);
+    if t > 0.0 && params.thrust_n > 0.0 && ship_mass_kg > params.dry_mass_kg {
+        t
+    } else {
+        0.0
+    }
+}
+
 pub struct FuelPlugin;
 
 impl Plugin for FuelPlugin {

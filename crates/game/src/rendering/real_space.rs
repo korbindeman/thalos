@@ -53,15 +53,18 @@ pub(super) fn attach_ship_camera_to_big_space(
     }
 }
 
-/// Seat a [`PlayerShip`] root into the BigSpace hierarchy. Runs at startup
-/// for the boot-spawned craft **and every frame in `Update`** for craft built
-/// at runtime (the editor's Launch relaunch, the start screen's craft-swap
-/// scenario starts): `ship_view::build_player_ship` spawns a bare root, and
-/// without the `CellCoord` + `ChildOf` insert the canonical→render sync
-/// (`ship_view::update_player_ship_world_position`) never matches it — the
-/// craft visually freezes in the inertial frame while the planet sails away.
-/// The `Without<CellCoord>` filter makes the per-frame pass a no-op once
-/// every root is attached.
+/// Fallback seat of a [`PlayerShip`] root into the BigSpace hierarchy, once per
+/// frame in `Update`. The **primary** seat now happens at build time, inside
+/// `ship_view::build_player_ship`'s part-reparent closure, so the root already
+/// carries `CellCoord` + `ChildOf(root)` the instant its parts attach — that is
+/// required for `Grid::tag_low_precision_roots` to tag the parts as
+/// `LowPrecisionRoot` on their reparent frame (an un-seated root loses that race
+/// permanently; see the closure comment). Without the seat the canonical→render
+/// sync (`ship_view::update_player_ship_world_position`) also never matches the
+/// root — the craft visually freezes in the inertial frame while the planet
+/// sails away. This pass stays as a safety net for any PlayerShip spawned
+/// without going through that closure; its `Without<CellCoord>` filter makes it
+/// a no-op once every root is attached.
 pub(super) fn attach_player_ship_to_big_space(
     mut commands: Commands,
     root: Res<RealSpaceRoot>,

@@ -94,6 +94,12 @@ pub struct GraphicsSettings {
     /// clipmap is parked (no tiles built, live tiles despawned); the terrain
     /// albedo still carries the grass colour, so the ground reads green.
     pub grass: bool,
+    /// Generate the near/mid grass blades on the GPU (the zero-persistent-memory
+    /// vegetation path — `rendering::gpu_grass`, see `docs/vegetation.md` §13).
+    /// When on, the CPU blade rings park and only the far card ring builds
+    /// tiles; when off, the CPU clipmap covers the whole reach (the pre-rewrite
+    /// behaviour, as a fallback). Draws nothing unless `grass` is also on.
+    pub gpu_grass: bool,
     /// Multisample anti-aliasing level for the main 3D view. `Off` keeps SMAA;
     /// a multisampled level replaces it. See [`MsaaSetting`].
     pub msaa: MsaaSetting,
@@ -104,6 +110,7 @@ impl Default for GraphicsSettings {
         Self {
             clouds: true,
             grass: true,
+            gpu_grass: true,
             // Default off so the first run keeps the verified SMAA path; the
             // MSAA depth-resolve path is opt-in from the Graphics tab until it
             // has been runtime-verified.

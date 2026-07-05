@@ -238,11 +238,26 @@ pub fn realize_control(
         player_aero_environment(&sim, &active, &tuning, &kin, &ship_aero, assist_armed);
     let attitude = *sim.simulation.attitude();
     let params = *sim.simulation.ship_params();
+    // Engine-gimbal authority: the full-thrust thrust-vectoring torque scaled
+    // by the fraction of thrust actually firing (zero at coast). Folded into
+    // the controller's non-wheel effector authority so its PD normalizes by the
+    // real total; the same value is realized in `apply_local_forces`, so the
+    // command the controller emits produces exactly the torque it intended.
+    // The effective throttle is read from the sim's `ControlInput` (set by the
+    // fuel gate to the same value as `ThrottleState::effective`) so this stays
+    // within Bevy's 16-system-param limit without a separate throttle resource.
+    let throttle_effective = sim.simulation.control().throttle;
+    let gimbal_effective = params.gimbal_torque_full
+        * crate::fuel::active_thrust_fraction(
+            &params,
+            sim.simulation.ship_mass_kg(),
+            throttle_effective,
+        );
     let torque = controller.0.update(
         arb.attitude,
         &attitude,
         &params,
-        aero_authority,
+        aero_authority + gimbal_effective,
         flight.as_ref(),
         clock.delta_secs_f64(),
     );

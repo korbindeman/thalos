@@ -217,9 +217,16 @@ later:
   `bridge`/`warp_to_maneuver`; it can become a `DemandSource`.
 - **EVA.** The on-foot controller owns its own kinematics and has no
   reaction-wheel torque; a jetpack would slot in as a new source/effector.
-- **RCS / engine gimbal.** New effectors are new branches in
-  `allocate` (and a dynamic-pressure blend between aero and wheels lives
-  there too); new command authority is a new `DemandSource`.
+- **Engine gimbal — wired.** Thrust vectoring is a third attitude effector:
+  a rocket's gimballed engines contribute `gimbal_torque_full · throttle` of
+  pitch/yaw authority, folded into the controller's `effector_authority`
+  (alongside the aero surfaces) and realized in
+  `local_physics::forces::compute_angular_acceleration`. It is what makes a
+  launch-vehicle ascent steerable — see `docs/aerodynamics.md` *Thrust
+  vectoring*. Roll stays on the reaction wheels.
+- **RCS.** A new translation/attitude effector: a new branch in `allocate`
+  (and a dynamic-pressure blend between aero and wheels lives there too);
+  new command authority is a new `DemandSource`.
 
 See `docs/aerodynamics.md` for the aero force model the control surfaces
 drive, and `docs/simulation.md` for the authority/integration context.

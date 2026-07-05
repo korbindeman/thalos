@@ -60,34 +60,33 @@ impl Plugin for SimClockPlugin {
 /// - destruction scenario picker (`ScenarioMenu::open`)
 /// - start screen (`AppState::MainMenu`)
 /// - freecam (`FreeCam::active`)
-/// - shipyard editor (`ShipyardEditor::open`)
-/// - base editor (`BaseEditor::open`)
+/// - a modal in-game context — VAB / base editor / space-center hub — via the
+///   `GameContext` sub-state (`game_context::context_freezes_sim`), replacing
+///   the former `ShipyardEditor`/`BaseEditor`/`SpaceCenter` boolean reads
 /// - warp pause (`warp.speed() == 0`)
 ///
 /// Loading is deliberately **not** a pause source: the deferred surface
 /// placements settle the craft and stream tiles behind the loading screen,
-/// which needs sim time advancing (see `crate::surface_settle`).
+/// which needs sim time advancing (see `crate::surface_settle`). The sub-state
+/// is absent there, so `context_freezes_sim` reads `false`.
 pub(crate) fn sync_sim_clock(
     time: Res<Time<Real>>,
     pause: Res<GamePause>,
     scenario: Res<ScenarioMenu>,
     app_state: Res<State<AppState>>,
     freecam: Option<Res<FreeCam>>,
-    shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
-    base_editor: Option<Res<crate::base_editor::BaseEditor>>,
+    game_context: Option<Res<State<crate::game_context::GameContext>>>,
     sim: Res<SimulationState>,
     mut clock: ResMut<SimClock>,
 ) {
     let wall_delta_s = time.delta_secs_f64();
     let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
-    let shipyard_open = shipyard.as_deref().map(|s| s.open).unwrap_or(false);
-    let base_editor_open = base_editor.as_deref().map(|e| e.open).unwrap_or(false);
+    let context_freezes = crate::game_context::context_freezes_sim(game_context.as_deref());
     let paused = pause.active
         || scenario.open
         || *app_state.get() == AppState::MainMenu
         || freecam_active
-        || shipyard_open
-        || base_editor_open
+        || context_freezes
         || sim.simulation.warp.speed() == 0.0;
 
     *clock = SimClock {

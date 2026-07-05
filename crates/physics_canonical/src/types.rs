@@ -57,6 +57,16 @@ pub struct ShipParameters {
     /// `moment_of_inertia` is already expressed about this point.
     pub center_of_mass: DVec3,
     pub max_torque: DVec3,
+    /// Attitude torque (N·m) the gimballed engines produce **at full thrust**,
+    /// per body axis (`x` pitch, `z` yaw; `y` roll is ~0 — a centred bell
+    /// can't roll). The *effective* authority scales with the current thrust
+    /// fraction (throttle), so gimbal steering vanishes at zero throttle and
+    /// during coast — the game applies `gimbal_torque_full · throttle` on top
+    /// of `max_torque` in both the controller's authority sum and the realized
+    /// torque. Aggregated from each gimballed engine's `thrust · sin(range) ·
+    /// CoM arm` (`thalos_game::staging`). Zero for aircraft / fixed-bell
+    /// rockets. See `docs/aerodynamics.md` *Thrust vectoring*.
+    pub gimbal_torque_full: DVec3,
     pub thrust_n: f64,
     pub mass_flow_kg_per_s: f64,
     /// Dry mass — the floor under which `Simulation::ship_mass_kg` cannot
@@ -93,6 +103,8 @@ impl Default for ShipParameters {
             moment_of_inertia: DVec3::ONE,
             center_of_mass: DVec3::ZERO,
             max_torque: DVec3::ZERO,
+            // No thrust vectoring until a real ship pushes its gimbal geometry.
+            gimbal_torque_full: DVec3::ZERO,
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
             dry_mass_kg: MIN_SHIP_MASS_KG,
@@ -118,6 +130,7 @@ impl ShipParameters {
             moment_of_inertia: DVec3::new(15.0, 1.5, 15.0),
             center_of_mass: DVec3::ZERO,
             max_torque: DVec3::ZERO,
+            gimbal_torque_full: DVec3::ZERO,
             thrust_n: 0.0,
             mass_flow_kg_per_s: 0.0,
             dry_mass_kg: 90.0,

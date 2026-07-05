@@ -371,6 +371,11 @@ pub struct Engine {
     /// Continuous electrical draw while the engine is firing, kW.
     /// 0 for chemical engines.
     pub power_draw_kw: f32,
+    /// Peak thrust-vector deflection (degrees) from the nose axis; `0` = fixed
+    /// bell (no gimbal). Aggregated into `ShipParameters::gimbal_torque_full`
+    /// (thrust × sin(range) × CoM arm) so a gimballed engine steers the craft
+    /// in pitch/yaw under power. See `docs/aerodynamics.md` *Thrust vectoring*.
+    pub gimbal_range_deg: f32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

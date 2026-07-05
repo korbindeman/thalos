@@ -303,6 +303,9 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
     // part. Self-inertia is orientation/CoM-independent, so it's resolved here
     // before the ship CoM is known; the parallel-axis term is added below.
     let mut bodies: Vec<(f64, DVec3, DVec3)> = Vec::new();
+    // (rated thrust N, gimbal range rad, body-frame Y) per gimballed engine.
+    // The moment arm needs the ship CoM, so it's finished in a second pass.
+    let mut gimbal_engines: Vec<(f64, f64, f64)> = Vec::new();
 
     for part in parts.iter() {
         if let Some(pod) = part.get::<CommandPod>() {
@@ -316,6 +319,15 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
             .get::<Transform>()
             .map(|t| t.translation.as_dvec3())
             .unwrap_or(DVec3::ZERO);
+        if let Some(engine) = part.get::<Engine>() {
+            if engine.gimbal_range_deg > 0.0 {
+                gimbal_engines.push((
+                    engine.thrust as f64,
+                    (engine.gimbal_range_deg as f64).to_radians(),
+                    position.y,
+                ));
+            }
+        }
         let self_inertia = live_part_self_inertia(part, mass);
         total_mass += mass;
         weighted_center += position * mass;
@@ -332,9 +344,20 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
         moment_of_inertia += self_inertia + parallel_axis_inertia(mass, position - center_of_mass);
     }
 
+    // Thrust-vectoring authority at full thrust: each gimballed engine produces
+    // `thrust · sin(range)` of side force at its bell, times its axial arm to
+    // the CoM. Pitch and yaw share it (an axisymmetric bell gimbals both ways);
+    // roll stays 0 — a centred engine can't roll the stack. Scaled by the live
+    // throttle where it's consumed, so it vanishes at zero thrust and coast.
+    let gimbal_pitch_yaw: f64 = gimbal_engines
+        .iter()
+        .map(|&(thrust, range_rad, y)| thrust * range_rad.sin() * (y - center_of_mass.y).abs())
+        .sum();
+
     let mut params = *sim.simulation.ship_params();
     params.moment_of_inertia = moment_of_inertia;
     params.max_torque = DVec3::splat(max_torque);
+    params.gimbal_torque_full = DVec3::new(gimbal_pitch_yaw, 0.0, gimbal_pitch_yaw);
     sim.simulation.set_ship_params(params);
 }
 

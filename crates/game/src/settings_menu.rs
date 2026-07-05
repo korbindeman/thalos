@@ -131,6 +131,8 @@ struct CloudsControl;
 #[derive(Component)]
 struct GrassControl;
 #[derive(Component)]
+struct GpuGrassControl;
+#[derive(Component)]
 struct MsaaControl;
 #[derive(Component)]
 struct ResetGraphicsControl;
@@ -548,6 +550,22 @@ fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settin
 
     spacer(b);
 
+    spawn_checkbox_row(
+        b,
+        theme,
+        "GPU grass generation",
+        settings.gpu_grass,
+        GpuGrassControl,
+    );
+    note(
+        b,
+        theme,
+        "Generates near/mid blades on the GPU each frame (no stored grass geometry). \
+         Off falls back to the CPU-built blade tiles.",
+    );
+
+    spacer(b);
+
     let index = MsaaSetting::ALL
         .iter()
         .position(|m| *m == settings.msaa)
@@ -938,6 +956,7 @@ fn apply_graphics_controls(
     mut menu: ResMut<SettingsMenu>,
     clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
     grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
+    gpu_grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GpuGrassControl>)>,
     msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
@@ -949,6 +968,11 @@ fn apply_graphics_controls(
     for checkbox in &grass_q {
         if settings.grass != checkbox.checked {
             settings.grass = checkbox.checked;
+        }
+    }
+    for checkbox in &gpu_grass_q {
+        if settings.gpu_grass != checkbox.checked {
+            settings.gpu_grass = checkbox.checked;
         }
     }
     for cycle in &msaa_q {

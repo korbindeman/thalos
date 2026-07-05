@@ -26,6 +26,7 @@ use bevy::prelude::*;
 use thalos_udlod::prelude::{TerrainMaterialPlugin, TerrainPlugin};
 
 mod body_material;
+mod gpu_grass;
 mod ground_patch;
 mod height_source;
 mod landcover;
@@ -50,6 +51,13 @@ mod water_material;
 pub use body_material::{
     BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT,
     ShadowCascadeBlock, TerrainShadingStyle,
+};
+pub use gpu_grass::{
+    GPU_GRASS_BAND_COUNT, GPU_GRASS_BANDS, GPU_GRASS_REACH_M, GPU_GRASS_SNAP_SLACK_M,
+    GPU_GRASS_WINDOW_HALF_M, GPU_GRASS_WINDOW_SIZE_PX, GpuGrassAnchor, GpuGrassBand,
+    GpuGrassMaterial, GpuGrassMaterialPlugin, GpuGrassParams, GpuGrassWindow,
+    GpuGrassWindowInput, GrassStyle, build_gpu_grass_template, build_gpu_grass_window,
+    gpu_grass_anchor, gpu_grass_style_table,
 };
 pub use ground_patch::{GroundPatchMaterial, GroundPatchMaterialPlugin};
 pub use height_source::{
@@ -134,6 +142,10 @@ impl Plugin for ThalosTerrainPlugin {
         // Impostors are already prepass-safe (degenerate POSITION → standard
         // prepass draws nothing).
         app.add_plugins(MaterialPlugin::<GrassMaterial>::default());
+        // The GPU-generated grass field (bands 0–1 of the vegetation cascade —
+        // vertex-synthesized blades, no persistent geometry; see gpu_grass.rs).
+        // Vertex-displacing with no prepass shader, like the CPU grass.
+        app.add_plugins(MaterialPlugin::<GpuGrassMaterial>::default());
         app.add_plugins(MaterialPlugin::<TreeMaterial>::default());
         app.add_plugins(MaterialPlugin::<RockMaterial>::default());
         // Far-band tree impostors render through the forward pipeline too; the
@@ -144,6 +156,7 @@ impl Plugin for ThalosTerrainPlugin {
         sky_material::embed_body_sky_shader(app);
         water_material::embed_body_water_shader(app);
         vegetation::embed_grass_shader(app);
+        gpu_grass::embed_gpu_grass_shader(app);
         tree_material::embed_tree_shader(app);
         rock_material::embed_rock_shader(app);
         tree_impostor::embed_tree_impostor_shaders(app);
