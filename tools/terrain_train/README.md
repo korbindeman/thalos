@@ -34,3 +34,19 @@ cargo run -p thalos_terrain_train -- prepare-dem \
   --native-mpp 19.072880418585456 --target-mpp 40 \
   --patch-size 256 --stride 128
 ```
+
+SLDEM2015 uses a 2.8 GB PDS FLOAT image. The manifest pins three 2° latitude
+strips as HTTP byte ranges, keeping each fetch below 48 MB. `prepare-sldem`
+verifies a strip, crops its longitude window, decodes PDS `PC_REAL`
+little-endian kilometres into metres, and routes it through the same
+validation/index/preview path:
+
+```bash
+cargo run -p thalos_terrain_train -- prepare-sldem \
+  --input terrain_data/raw/sldem/lat24_26_strip.f32le \
+  --output terrain_data/processed/sldem_s0/train \
+  --source-id sldem_mare_contact_train --split train \
+  --sha256 5f77d6761ee1f2f294b818724a88ea8fb12d8d9ca1f4c174b9dc5b14d364e2ec \
+  --native-mpp 236.901 --target-mpp 236.901 \
+  --patch-size 256 --stride 256 --source-width 46080 --crop-x 45312
+```

@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -24,6 +24,13 @@ pub struct PrepareOptions {
     pub target_metres_per_pixel: f32,
     pub patch_size: usize,
     pub stride: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SldemStripOptions {
+    pub prepare: PrepareOptions,
+    pub source_width: usize,
+    pub crop_x: usize,
 }
 
 #[derive(Serialize)]
@@ -52,19 +59,81 @@ pub fn prepare(options: &PrepareOptions) -> Result<usize, Box<dyn std::error::Er
         )
         .into());
     }
-    if options.patch_size == 0 || options.stride == 0 {
-        return Err("patch-size and stride must be positive".into());
-    }
-    if options.native_metres_per_pixel <= 0.0 || options.target_metres_per_pixel <= 0.0 {
-        return Err("pixel scales must be positive".into());
-    }
-
+    validate_options(options)?;
     let source = read_float_tiff(&options.input)?;
     let raster = resample(
         &source,
         options.native_metres_per_pixel,
         options.target_metres_per_pixel,
     );
+    prepare_raster(options, raster, actual_hash)
+}
+
+pub fn prepare_sldem_strip(
+    options: &SldemStripOptions,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let prepare = &options.prepare;
+    let actual_hash = sha256_file(&prepare.input)?;
+    if actual_hash != prepare.expected_sha256.to_lowercase() {
+        return Err(format!(
+            "{} SHA-256 mismatch: expected {}, got {}",
+            prepare.input.display(),
+            prepare.expected_sha256,
+            actual_hash
+        )
+        .into());
+    }
+    validate_options(prepare)?;
+    if options.source_width == 0 || options.crop_x + prepare.patch_size > options.source_width {
+        return Err("SLDEM source width/crop does not contain one complete patch".into());
+    }
+    let mut bytes = Vec::new();
+    File::open(&prepare.input)?.read_to_end(&mut bytes)?;
+    let row_bytes = options.source_width * 4;
+    if bytes.is_empty() || !bytes.len().is_multiple_of(row_bytes) {
+        return Err(format!(
+            "SLDEM strip size {} is not a whole number of {}-sample rows",
+            bytes.len(),
+            options.source_width
+        )
+        .into());
+    }
+    let height = bytes.len() / row_bytes;
+    let mut values = Vec::with_capacity(prepare.patch_size * height);
+    for row in bytes.chunks_exact(row_bytes) {
+        let crop = &row[options.crop_x * 4..(options.crop_x + prepare.patch_size) * 4];
+        for sample in crop.as_chunks::<4>().0 {
+            values.push(f32::from_le_bytes(*sample) * 1_000.0);
+        }
+    }
+    let source = Raster {
+        width: prepare.patch_size,
+        height,
+        values,
+    };
+    let raster = resample(
+        &source,
+        prepare.native_metres_per_pixel,
+        prepare.target_metres_per_pixel,
+    );
+    prepare_raster(prepare, raster, actual_hash)
+}
+
+fn validate_options(options: &PrepareOptions) -> Result<(), Box<dyn std::error::Error>> {
+    if options.patch_size == 0 || options.stride == 0 {
+        return Err("patch-size and stride must be positive".into());
+    }
+    if options.native_metres_per_pixel <= 0.0 || options.target_metres_per_pixel <= 0.0 {
+        return Err("pixel scales must be positive".into());
+    }
+    Ok(())
+}
+
+fn prepare_raster(
+    options: &PrepareOptions,
+    raster: Raster,
+    actual_hash: String,
+) -> Result<usize, Box<dyn std::error::Error>> {
     if raster.width < options.patch_size || raster.height < options.patch_size {
         return Err(format!(
             "resampled raster {}x{} is smaller than patch size {}",

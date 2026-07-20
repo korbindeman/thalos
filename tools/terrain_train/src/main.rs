@@ -40,8 +40,8 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "smoke".into());
-    if command == "prepare-dem" {
-        return prepare_dem(args.collect());
+    if command == "prepare-dem" || command == "prepare-sldem" {
+        return prepare_dem(args.collect(), command == "prepare-sldem");
     }
     let flag = args.next().unwrap_or_else(|| "--config".into());
     if flag != "--config" {
@@ -67,7 +67,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn prepare_dem(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+fn prepare_dem(
+    arguments: Vec<String>,
+    sldem_strip: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     if !arguments.len().is_multiple_of(2) {
         return Err("prepare-dem options must be --name value pairs".into());
     }
@@ -83,7 +86,7 @@ fn prepare_dem(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
             .copied()
             .ok_or_else(|| format!("missing prepare-dem option {name}").into())
     };
-    let options = dem::PrepareOptions {
+    let prepare = dem::PrepareOptions {
         input: required("--input")?.into(),
         output: required("--output")?.into(),
         source_id: required("--source-id")?.into(),
@@ -94,11 +97,19 @@ fn prepare_dem(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>>
         patch_size: required("--patch-size")?.parse()?,
         stride: required("--stride")?.parse()?,
     };
-    let count = dem::prepare(&options)?;
+    let count = if sldem_strip {
+        dem::prepare_sldem_strip(&dem::SldemStripOptions {
+            prepare: prepare.clone(),
+            source_width: required("--source-width")?.parse()?,
+            crop_x: required("--crop-x")?.parse()?,
+        })?
+    } else {
+        dem::prepare(&prepare)?
+    };
     println!(
         "prepared {count} verified {} patches in {}",
-        options.split,
-        options.output.display()
+        prepare.split,
+        prepare.output.display()
     );
     Ok(())
 }

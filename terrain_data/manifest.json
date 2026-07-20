@@ -7,13 +7,59 @@
       "id": "sldem2015_global",
       "role": "global_macro_teacher",
       "catalog_url": "https://pgda.gsfc.nasa.gov/products/54",
-      "download_root": "http://imbrium.mit.edu/DATA/SLDEM2015/",
+      "download_root": "https://imbrium.mit.edu/DATA/SLDEM2015/",
       "citation": "Barker et al. 2016, Icarus 273, 346-355, doi:10.1016/j.icarus.2015.07.039",
       "coverage": "60S to 60N",
-      "native_resolution": "512 pixels per degree",
-      "license_status": "verify exact selected artifacts before download or derived-weight distribution",
-      "artifacts": [],
-      "pin_status": "selection_required"
+      "native_resolution": "128 pixels per degree selected for the 250 m macro scale",
+      "license_status": "public NASA/PDS-linked scientific product; confirm derived-weight distribution terms before release",
+      "source_artifact": {
+        "url": "https://imbrium.mit.edu/DATA/SLDEM2015/GLOBAL/FLOAT_IMG/SLDEM2015_128_60S_60N_000_360_FLOAT.IMG",
+        "label_url": "https://imbrium.mit.edu/DATA/SLDEM2015/GLOBAL/FLOAT_IMG/SLDEM2015_128_60S_60N_000_360_FLOAT.LBL",
+        "bytes": 2831155200,
+        "shape_yx": [15360, 46080],
+        "sample_type": "PC_REAL float32 little-endian kilometres",
+        "record_bytes": 184320,
+        "map_scale_metres_per_pixel": 236.901
+      },
+      "artifacts": [
+        {
+          "id": "sldem_mare_contact_train",
+          "split": "train",
+          "byte_range_inclusive": [802160640, 849346559],
+          "source_rows": [4352, 4608],
+          "latitude_bounds": [24.0, 26.0],
+          "source_crop_x": 45312,
+          "longitude_bounds_east": [354.0, 356.0],
+          "local_path": "terrain_data/raw/sldem/lat24_26_strip.f32le",
+          "sha256": "5f77d6761ee1f2f294b818724a88ea8fb12d8d9ca1f4c174b9dc5b14d364e2ec",
+          "bytes": 47185920
+        },
+        {
+          "id": "sldem_copernicus_validation",
+          "split": "validation",
+          "byte_range_inclusive": [1179648000, 1226833919],
+          "source_rows": [6400, 6656],
+          "latitude_bounds": [8.0, 10.0],
+          "source_crop_x": 43392,
+          "longitude_bounds_east": [339.0, 341.0],
+          "local_path": "terrain_data/raw/sldem/lat08_10_strip.f32le",
+          "sha256": "c1b364dabf4ba7b2df328a1df0449ced6463ea94dbe2dc6fe4dff1a4fa19c182",
+          "bytes": 47185920
+        },
+        {
+          "id": "sldem_tycho_holdout",
+          "split": "holdout",
+          "byte_range_inclusive": [2406481920, 2453667839],
+          "source_rows": [13056, 13312],
+          "latitude_bounds": [-44.0, -42.0],
+          "source_crop_x": 44480,
+          "longitude_bounds_east": [347.5, 349.5],
+          "local_path": "terrain_data/raw/sldem/lat42_44s_strip.f32le",
+          "sha256": "c2e7b87dd8dc21c5d6ed945ec33fc5e9c22676e4a993cf914385721ec019904a",
+          "bytes": 47185920
+        }
+      ],
+      "pin_status": "three_disjoint_http_ranges_pinned"
     },
     {
       "id": "kaguya_tc_usgs_dtms",
