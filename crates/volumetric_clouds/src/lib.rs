@@ -45,7 +45,10 @@ use bevy::shader::load_shader_library;
 
 pub use crate::compute::CameraMatrices;
 pub use crate::config::CloudsConfig;
-pub use crate::images::{COVERAGE_HEIGHT, COVERAGE_WIDTH};
+pub use crate::images::{
+    COVERAGE_HEIGHT, COVERAGE_WIDTH, CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH,
+    cloud_target_memory,
+};
 
 use crate::compute::CloudsComputePlugin;
 use crate::images::build_images;

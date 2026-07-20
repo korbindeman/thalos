@@ -16,7 +16,9 @@ use bevy::prelude::*;
 ///     .run();
 /// ```
 pub struct CloudsConfig {
-    /// Number of raymarching steps. More steps reduces noise but requires more computational power
+    /// Hard cap on view-ray steps. The marcher still exits at the shell edge or
+    /// once transmittance is exhausted; raising this mainly extends grazing
+    /// horizon rays. CLOUD-0 exposes it as a capture-quality control.
     pub clouds_raymarch_steps_count: u32,
     /// Number of raymarching steps for shadowing.
     /// More steps reduces noise but requires more computational power
@@ -88,7 +90,9 @@ impl Default for CloudsConfig {
     fn default() -> Self {
         let sun_dir = Vec3::new(-0.7, 0.5, 0.75).normalize();
         Self {
-            clouds_raymarch_steps_count: 12,
+            // The shader historically used a fixed 60-step cap. Keep that as
+            // the default now that the public knob actually controls the loop.
+            clouds_raymarch_steps_count: 60,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
             clouds_bottom_height: 1250.0,

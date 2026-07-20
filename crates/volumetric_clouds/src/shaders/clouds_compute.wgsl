@@ -50,7 +50,7 @@ const INV_PI = 0.31830987;
 const CLOUD_STEP_M = 280.0;       // coarsest step (long horizon segments)
 const MIN_STEP_M = 64.0;          // finest step (short band crossings)
 const TARGET_BAND_STEPS = 20.0;   // target samples across one band crossing
-const MAX_RAY_STEPS = 60u;        // keeps worst-case reach ≈ 16.8 km
+const MAX_RAY_STEPS_CAP = 96u;    // compile-time safety cap; config selects ≤ this
 const MAX_CLOUD_DIST = 25000.0;   // metres; clouds whose entry is past this are dropped
 const CLOUD_FADE_START = 13000.0; // metres; begin hazing clouds toward the cap
 // Per-column base-height undulation amount, in fractions of the band thickness
@@ -379,15 +379,16 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     var transmittance = 1.0;
 
     // March-exhaustion fade: a ray travelling far *inside* the deck uses all
-    // MAX_RAY_STEPS and stops mid-cloud; the entry-distance haze below never
+    // its configured step cap and stops mid-cloud; the entry-distance haze below never
     // fires for it (entry was close), so without this the stop front reads
     // as a sharp tonal seam arc across the deck. Dissolve density over the
     // last third of the marched reach instead.
-    let march_span = f32(MAX_RAY_STEPS) * ray.step_distance;
+    let ray_step_limit = clamp(config.clouds_raymarch_steps_count, 1u, MAX_RAY_STEPS_CAP);
+    let march_span = f32(ray_step_limit) * ray.step_distance;
     let reach_fade_begin = ray.start + 0.65 * march_span;
     let reach_end = ray.start + march_span;
 
-    for (var step: u32 = 0u; step < MAX_RAY_STEPS; step++) {
+    for (var step: u32 = 0u; step < ray_step_limit; step++) {
         if (dir_length > ray.end) { break; }
         let world_position = ray_origin + dir_length * ray_dir;
 
@@ -582,7 +583,12 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
                 // the ramp starts well above that.
                 let rel_err = abs(hist_dist - result.dist) / max(result.dist, 1.0);
                 let agree = 1.0 - smoothstep(0.15, 0.5, rel_err);
-                let w = MOVING_REPROJECTION_STRENGTH * agree;
+                // The public temporal-strength control gates *both* the
+                // steady same-pixel path and this moving-view path. Previously
+                // setting it to zero still kept 90% motion history, so a
+                // temporal-disabled diagnostic capture was impossible.
+                let w = MOVING_REPROJECTION_STRENGTH * agree
+                    * clamp(config.reprojection_strength, 0.0, 1.0);
                 if (w > 0.01) {
                     let hist = sample_history_bilinear(rr);
                     return CloudsOutput(mix(col, hist, w), result.dist);

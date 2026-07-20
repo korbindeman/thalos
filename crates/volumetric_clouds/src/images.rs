@@ -6,12 +6,57 @@ use bevy::{
 };
 
 pub const IMAGE_SIZE: u32 = 1920;
+pub const RENDER_WIDTH: u32 = 1920;
+pub const RENDER_HEIGHT: u32 = 1080;
 
 /// Resolution of the planet-fixed equirect coverage (weather) map. Texel size
 /// at the equator is ~2·π·R / 512 ≈ 39 km for a 3186 km body — weather-scale
 /// structure; the cloud base-shape atlas provides everything finer.
 pub const COVERAGE_WIDTH: u32 = 512;
 pub const COVERAGE_HEIGHT: u32 = 256;
+
+/// Persistent GPU allocation owned by the current cloud renderer. CLOUD-0
+/// publishes this alongside timings so later low-resolution/format work has an
+/// exact memory baseline instead of an estimate copied into documentation.
+#[derive(Debug, Clone, Copy)]
+pub struct CloudTargetMemory {
+    pub render_bytes: u64,
+    pub distance_bytes: u64,
+    pub history_bytes: u64,
+    pub history_distance_bytes: u64,
+    pub base_atlas_bytes: u64,
+    pub worley_bytes: u64,
+    pub coverage_bytes: u64,
+    pub total_bytes: u64,
+}
+
+pub const fn cloud_target_memory() -> CloudTargetMemory {
+    let render_pixels = RENDER_WIDTH as u64 * RENDER_HEIGHT as u64;
+    let render_bytes = render_pixels * 16; // RGBA32F
+    let distance_bytes = render_pixels * 4; // R32F
+    let history_bytes = render_bytes;
+    let history_distance_bytes = distance_bytes;
+    let base_atlas_bytes = IMAGE_SIZE as u64 * IMAGE_SIZE as u64 * 16; // RGBA32F
+    let worley_bytes = 32 * 32 * 32 * 16; // RGBA32F 3-D
+    let coverage_bytes = COVERAGE_WIDTH as u64 * COVERAGE_HEIGHT as u64; // R8
+    let total_bytes = render_bytes
+        + distance_bytes
+        + history_bytes
+        + history_distance_bytes
+        + base_atlas_bytes
+        + worley_bytes
+        + coverage_bytes;
+    CloudTargetMemory {
+        render_bytes,
+        distance_bytes,
+        history_bytes,
+        history_distance_bytes,
+        base_atlas_bytes,
+        worley_bytes,
+        coverage_bytes,
+        total_bytes,
+    }
+}
 
 pub struct CloudImages {
     pub cloud_render_image: Handle<Image>,
@@ -26,8 +71,8 @@ pub struct CloudImages {
 pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
     let mut cloud_render_image = Image::new_fill(
         Extent3d {
-            width: 1920,
-            height: 1080,
+            width: RENDER_WIDTH,
+            height: RENDER_HEIGHT,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -73,8 +118,8 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
     // read by the game's `body_sky` composite for true depth occlusion.
     let mut cloud_distance_image = Image::new_fill(
         Extent3d {
-            width: 1920,
-            height: 1080,
+            width: RENDER_WIDTH,
+            height: RENDER_HEIGHT,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -95,8 +140,8 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
     // artifacts in motion.
     let mut history_image = Image::new_fill(
         Extent3d {
-            width: 1920,
-            height: 1080,
+            width: RENDER_WIDTH,
+            height: RENDER_HEIGHT,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
@@ -109,8 +154,8 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
 
     let mut history_distance_image = Image::new_fill(
         Extent3d {
-            width: 1920,
-            height: 1080,
+            width: RENDER_WIDTH,
+            height: RENDER_HEIGHT,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,

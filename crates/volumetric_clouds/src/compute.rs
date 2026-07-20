@@ -3,7 +3,11 @@ use bevy::{
     ecs::system::ResMut,
     prelude::*,
     render::{
-        Extract, Render, RenderApp, RenderSystems,
+        Extract,
+        Render,
+        RenderApp,
+        RenderSystems,
+        diagnostic::{RecordDiagnostics, begin_diagnostics_frame},
         extract_resource::ExtractResourcePlugin,
         render_asset::RenderAssets,
         render_resource::{
@@ -24,17 +28,11 @@ use std::borrow::Cow;
 use crate::config::CloudsConfig;
 
 use super::{
-    images::IMAGE_SIZE,
+    images::{IMAGE_SIZE, RENDER_HEIGHT, RENDER_WIDTH},
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
 const WORKGROUP_SIZE: u32 = 8;
-/// Height of the cloud render + sky textures (see `images::build_images`). The
-/// `update` pass only writes those (1920×1080); only `init` needs the full
-/// `IMAGE_SIZE²` atlas grid. Dispatching the square grid for `update` wasted
-/// ~44% of the raymarch threads off the bottom of the render target.
-const RENDER_HEIGHT: u32 = 1080;
-
 /// Camera basis fed to the cloud raymarch, in the **body-fixed frame** of the
 /// active cloud body: `translation` is the camera position relative to the
 /// planet centre, rotated into body-fixed coordinates (so it co-rotates with
@@ -126,7 +124,9 @@ fn prepare_textures_bind_group(
     let cloud_distance_view = gpu_images.get(&clouds_image.cloud_distance_image).unwrap();
     let coverage_view = gpu_images.get(&clouds_image.coverage_image).unwrap();
     let history_view = gpu_images.get(&clouds_image.history_image).unwrap();
-    let history_distance_view = gpu_images.get(&clouds_image.history_distance_image).unwrap();
+    let history_distance_view = gpu_images
+        .get(&clouds_image.history_distance_image)
+        .unwrap();
 
     let bind_group = render_device.create_bind_group(
         None,
@@ -266,9 +266,17 @@ fn run_clouds_compute(
     };
 
     {
+        let diagnostics = ctx.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
         let mut pass = ctx
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor::default());
+        let pass_name = match *state {
+            CloudsState::Init => "volumetric_clouds_init",
+            CloudsState::Update => "volumetric_clouds",
+            CloudsState::Loading => "volumetric_clouds_loading",
+        };
+        let pass_span = diagnostics.pass_span(&mut pass, pass_name);
 
         pass.set_bind_group(0, &uniform_bind_group.0, &[]);
         pass.set_bind_group(1, &texture_bind_group.0, &[]);
@@ -280,7 +288,11 @@ fn run_clouds_compute(
                     .get_compute_pipeline(pipeline.init_pipeline)
                     .unwrap();
                 pass.set_pipeline(init_pipeline);
-                pass.dispatch_workgroups(IMAGE_SIZE / WORKGROUP_SIZE, IMAGE_SIZE / WORKGROUP_SIZE, 1);
+                pass.dispatch_workgroups(
+                    IMAGE_SIZE / WORKGROUP_SIZE,
+                    IMAGE_SIZE / WORKGROUP_SIZE,
+                    1,
+                );
             }
             CloudsState::Update => {
                 let update_pipeline = pipeline_cache
@@ -288,12 +300,13 @@ fn run_clouds_compute(
                     .unwrap();
                 pass.set_pipeline(update_pipeline);
                 pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
+                    RENDER_WIDTH / WORKGROUP_SIZE,
                     RENDER_HEIGHT / WORKGROUP_SIZE,
                     1,
                 );
             }
         }
+        pass_span.end(&mut pass);
     }
 
     // Snapshot this frame's output into the history textures the next
@@ -348,7 +361,12 @@ impl Plugin for CloudsComputePlugin {
         // `camera_driver` runs), so the dispatch records before the per-view
         // sky pass that samples the cloud textures — matching the old
         // `add_node_edge(CloudsLabel, CameraDriverLabel)`.
-        render_app.add_systems(RenderGraph, run_clouds_compute.in_set(RenderGraphSystems::Begin));
+        render_app.add_systems(
+            RenderGraph,
+            run_clouds_compute
+                .in_set(RenderGraphSystems::Begin)
+                .after(begin_diagnostics_frame),
+        );
 
         render_app.add_systems(
             ExtractSchedule,

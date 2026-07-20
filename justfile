@@ -66,6 +66,9 @@ preview-window:
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP.
+# Cloud probes additionally accept _CAMERA_ALTITUDE, _LOOK_ELEVATION,
+# _SUN_ELEVATION, _CLOUD_QUALITY (low/baseline/high/reference),
+# _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL).
 screenshot preset="spaceport-aerial":
     $env:THALOS_SCREENSHOT='{{preset}}'; cargo run -p thalos_game
 
@@ -77,6 +80,12 @@ screenshot preset="spaceport-aerial":
 # WORLD_TRANSECT probe modes. See crates/terrain/examples/world_map.rs.
 map:
     cargo run --release -p thalos_terrain --example world_map
+
+# CLOUD-0's repeatable five-view baseline. Each preset writes a PNG and a
+# same-named JSONL report under tools/screenshots/. Use the single-preset
+# `screenshot` recipe with overrides for 1440p, temporal-off, or quality sweeps.
+cloud-baseline:
+    $presets = @('cloud-runway', 'cloud-cruise', 'cloud-interior', 'cloud-limb', 'cloud-sunset'); foreach ($preset in $presets) { $env:THALOS_SCREENSHOT = $preset; cargo run -p thalos_game; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 
 # Build everything
 build:
