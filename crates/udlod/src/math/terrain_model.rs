@@ -51,6 +51,14 @@ pub struct TerrainModel {
 }
 
 impl TerrainModel {
+    /// The `[min, max]` height range (m) the height attachment's UNORM
+    /// encoding spans. Needed by external samplers of the height atlas (the
+    /// `body_render` sky/ocean pass) to decode texels the same way
+    /// `thalos_udlod::attachments::decode_height_m` does.
+    pub fn height_range(&self) -> (f32, f32) {
+        (self.min_height, self.max_height)
+    }
+
     pub fn is_spherical(&self) -> bool {
         match self.kind {
             TerrainKind::PLANAR { .. } => false,

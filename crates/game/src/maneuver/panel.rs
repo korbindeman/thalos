@@ -11,12 +11,11 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use super::state::{ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode};
-use crate::hud::theme::{HudTheme, panel_frame};
+use crate::hud::theme::{HudTheme, hud_button as spawn_button, panel_frame};
 use crate::pause_menu::GamePause;
 use crate::photo_mode::PhotoMode;
 use crate::rendering::SimulationState;
 use crate::scenario_menu::ScenarioMenu;
-use crate::ui_widgets::spawn_button;
 use crate::view::ViewMode;
 
 // ── Markers ─────────────────────────────────────────────────────────────────
@@ -126,7 +125,7 @@ fn spawn_header(panel: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 BackgroundColor(theme.panel_bg),
                 BorderColor::all(theme.panel_border),
                 Interaction::None,
-                crate::ui_widgets::UiButton::default(),
+                thalos_ui::UiButton::default(),
                 DeleteButton,
             ))
             .with_children(|c| {

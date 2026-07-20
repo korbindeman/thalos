@@ -14,13 +14,15 @@
 //!   station, admin) via the [`Facility`](crate::structures::Facility) tag.
 //!
 //! Entry points: the start screen's **PLAY** (which loads the spaceport world
-//! and opens the hub on reveal via [`OpenSpaceCenterOnStart`]), and the in-flight
-//! pause menu's **SPACE CENTER** button. Escape closes it back to flight (owned
-//! by `pause_menu::handle_escape_input`).
+//! and reveals into the hub via
+//! [`InitialContext`](crate::game_context::InitialContext)), and the in-flight
+//! pause menu's **SPACE CENTER** button. Both set `GameContext::SpaceCenter`;
+//! Escape / EXIT back out via the [`ContextHistory`](crate::game_context::ContextHistory)
+//! return stack (owned by `pause_menu::handle_escape_input` / the hub's EXIT).
 //!
-//! When a facility is entered *from* the hub, [`ReturnToSpaceCenter`] is armed so
-//! closing that facility drops back into the hub rather than into flight
-//! ([`restore_after_facility`]) — the KSP scene loop.
+//! When a facility (VAB / base editor) is entered *from* the hub, the hub is
+//! pushed on that return stack, so closing the facility pops straight back into
+//! the hub — the KSP scene loop, now a stack pop rather than an edge-latched flag.
 
 mod camera;
 mod select;
@@ -32,6 +34,7 @@ use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::base_editor::{BaseEditor, BaseEditorMode};
+use crate::game_context::{ContextHistory, GameContext, enter_context};
 use crate::loading::{AppState, LoadingTracker, step};
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::RealSpaceRoot;
@@ -49,9 +52,10 @@ const FOCUS_HEIGHT_LOD_M: f32 = 2.0;
 
 /// The space-center hub. A sim-clock pause source.
 ///
-/// **Sole writer of `open`:** the start screen's PLAY (via
-/// [`OpenSpaceCenterOnStart`]), the pause menu's SPACE CENTER button + Escape,
-/// the hub's own EXIT, and [`restore_after_facility`].
+/// `open` is a **derived mirror** of [`GameContext::SpaceCenter`] (Phase 3): its
+/// sole writer is `game_context::mirror_context_to_booleans`. The hub is entered
+/// by setting `NextState<GameContext>` (PLAY via [`InitialContext`], the pause
+/// menu's SPACE CENTER button, the hub's own EXIT / Escape via [`ContextHistory`]).
 #[derive(Resource, Debug, Default, Clone)]
 pub struct SpaceCenter {
     pub open: bool,
@@ -60,19 +64,7 @@ pub struct SpaceCenter {
     /// labelled with a floating callout; a left-click on an enterable
     /// [`Facility`] building enters it. `None` when nothing is under the cursor.
     pub hovered: Option<StructureId>,
-    /// Where **EXIT / Escape** goes: `true` when the hub is the session root
-    /// (opened by PLAY, no craft flying yet) → back to the main menu; `false`
-    /// when opened over a live flight (pause menu) → back to that flight.
-    pub return_to_menu: bool,
 }
-
-/// Open the hub the instant PLAY's world load reveals. Mirrors
-/// [`crate::shipyard_editor::OpenShipyardOnStart`]: the hub must **not** open
-/// during `AppState::Loading` (it gates the `Camera` `SimStage` off, and the
-/// terrain systems that complete the load want the flight camera streaming), so
-/// the open is deferred to `OnEnter(Running)`.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct OpenSpaceCenterOnStart(pub bool);
 
 /// Armed by the start screen's PLAY to build the spaceport behind the loading
 /// pass (the base only — **no craft is placed**; the player launches one from
@@ -82,12 +74,6 @@ pub struct OpenSpaceCenterOnStart(pub bool);
 pub struct HubSpaceportBuild {
     pub pending: bool,
 }
-
-/// Set when a facility (VAB / base editor) is entered *from* the hub, so closing
-/// it returns to the hub rather than to flight. **Sole writer:** the hub's enter
-/// helpers and [`restore_after_facility`].
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct ReturnToSpaceCenter(pub bool);
 
 /// Run condition: the hub is open.
 pub fn space_center_open(sc: Option<Res<SpaceCenter>>) -> bool {
@@ -99,36 +85,20 @@ pub struct SpaceCenterPlugin;
 impl Plugin for SpaceCenterPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SpaceCenter>()
-            .init_resource::<OpenSpaceCenterOnStart>()
             .init_resource::<HubSpaceportBuild>()
-            .init_resource::<ReturnToSpaceCenter>()
             .add_plugins(camera::SpaceCenterCameraPlugin)
             .add_plugins(select::SpaceCenterSelectPlugin)
             .add_plugins(ui::SpaceCenterUiPlugin)
-            .add_systems(OnEnter(AppState::Running), open_on_start)
             // PLAY's spaceport build (base only) runs behind the loading screen.
             .add_systems(
                 Update,
                 finish_hub_spaceport.run_if(in_state(AppState::Loading)),
             )
-            .add_systems(Update, (apply_open_state, restore_after_facility))
+            .add_systems(Update, apply_open_state)
             // Enforce HUD-hidden every frame the hub is open, so a facility's
             // close-restore (which un-hides the HUD) can't leave it flashing over
             // the hub during a facility→hub handoff.
             .add_systems(Update, enforce_hud_hidden.run_if(space_center_open));
-    }
-}
-
-/// Open the hub on entry to `Running` when PLAY armed it — after the world (and
-/// its spaceport) has loaded, never during it. One-shot (re-armed by the start
-/// screen's PLAY). PLAY is the session root, so Escape/EXIT returns to the main
-/// menu (`return_to_menu`).
-fn open_on_start(mut flag: ResMut<OpenSpaceCenterOnStart>, mut sc: ResMut<SpaceCenter>) {
-    if flag.0 {
-        sc.open = true;
-        sc.hovered = None;
-        sc.return_to_menu = true;
-        flag.0 = false;
     }
 }
 
@@ -189,40 +159,6 @@ fn finish_hub_spaceport(
     build.pending = false;
     tracker.complete(step::PLACEMENT);
     info!("space center: spaceport built (no craft placed)");
-}
-
-/// Reopen the hub when a facility entered *from* it closes (the KSP scene loop).
-/// Edge-detected on the facility open→closed transition so a facility opened from
-/// flight (return flag clear) drops back to flight as before. A VAB **Launch**
-/// (which closes the editor *and* queues a relaunch to flight) is distinguished
-/// from an Escape-out: it clears the flag and drops to flight instead of the hub.
-fn restore_after_facility(
-    mut return_flag: ResMut<ReturnToSpaceCenter>,
-    shipyard: Res<ShipyardEditor>,
-    base: Res<BaseEditor>,
-    relaunch_request: Res<crate::relaunch::RelaunchRequest>,
-    relaunch_in_flight: Res<crate::relaunch::RelaunchInFlight>,
-    mut sc: ResMut<SpaceCenter>,
-    mut facility_was_open: Local<bool>,
-) {
-    let facility_open = shipyard.open || base.open;
-    let relaunching = relaunch_request.0.is_some() || relaunch_in_flight.active();
-    // A VAB Launch means "go fly": disarm the return-to-hub flag the moment a
-    // relaunch is queued, not only when its window happens to overlap the
-    // facility-close edge below. The edge-only check raced the launch flow —
-    // VAB close → relaunch frames → the SelectLaunch picker opens (also a
-    // "facility") — and when the edge fell outside the relaunch window the
-    // stale flag survived into the picker session, whose close then bounced
-    // the freshly placed flight straight back into the hub.
-    if relaunching && return_flag.0 {
-        return_flag.0 = false;
-    }
-    if *facility_was_open && !facility_open && return_flag.0 && !sc.open {
-        sc.open = true;
-        sc.hovered = None;
-        return_flag.0 = false;
-    }
-    *facility_was_open = facility_open;
 }
 
 /// React to the open/close *edge*: force ship view (the god-view is a 3D view, so
@@ -407,32 +343,31 @@ pub(crate) fn kind_name(kind: &StructureKind) -> &'static str {
     }
 }
 
-/// Enter a facility from the hub: open it, arm the return-to-hub flag, and close
-/// the hub. Only the VAB (→ shipyard) is wired today.
+/// Enter a facility from the hub: push the hub on the return stack and switch to
+/// the facility's context (the derived-mirror handles the actual open/close).
+/// Escape / EXIT from the facility pops back to the hub. Only the VAB (→ shipyard)
+/// is wired today.
 pub(crate) fn enter_facility(
     facility: Facility,
-    sc: &mut SpaceCenter,
-    shipyard: &mut ShipyardEditor,
-    return_flag: &mut ReturnToSpaceCenter,
+    next: &mut NextState<GameContext>,
+    history: &mut ContextHistory,
 ) {
-    match facility {
-        Facility::Vab => shipyard.open = true,
-    }
-    return_flag.0 = true;
-    sc.open = false;
-    sc.hovered = None;
+    let target = match facility {
+        Facility::Vab => GameContext::Vab,
+    };
+    enter_context(next, history, GameContext::SpaceCenter, target);
     info!("space center: entering {facility:?}");
 }
 
 /// Enter the base editor from the hub, on the existing base site if there is one
-/// (straight to placing buildings) or picking a new site otherwise.
+/// (straight to placing buildings) or picking a new site otherwise. Pushes the
+/// hub on the return stack so Escape backs out to it.
 pub(crate) fn enter_base_editor(
-    sc: &mut SpaceCenter,
     base: &mut BaseEditor,
-    return_flag: &mut ReturnToSpaceCenter,
+    next: &mut NextState<GameContext>,
+    history: &mut ContextHistory,
     base_site: Option<StructureId>,
 ) {
-    base.open = true;
     if let Some(id) = base_site {
         base.mode = BaseEditorMode::PlaceBuildings;
         base.active_site = Some(id);
@@ -440,8 +375,6 @@ pub(crate) fn enter_base_editor(
         base.mode = BaseEditorMode::PickSite;
         base.active_site = None;
     }
-    return_flag.0 = true;
-    sc.open = false;
-    sc.hovered = None;
+    enter_context(next, history, GameContext::SpaceCenter, GameContext::BaseEditor);
     info!("space center: entering base editor");
 }

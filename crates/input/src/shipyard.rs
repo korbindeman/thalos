@@ -12,6 +12,13 @@ pub struct ShipyardContext;
 #[action_output(bool)]
 pub struct PrimaryAction;
 
+/// Build-camera orbit button (right mouse). Kept separate from
+/// [`PrimaryAction`] (left mouse) so placing / selecting parts and orbiting the
+/// camera never contend for the same button.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct OrbitAction;
+
 #[derive(InputAction)]
 #[action_output(Vec2)]
 pub struct CameraMotionAction;
@@ -29,6 +36,8 @@ pub struct ShipyardInputIntent {
     pub primary_pressed: bool,
     pub primary_started: bool,
     pub primary_released: bool,
+    /// Held: the camera-orbit (right mouse) button is down.
+    pub orbit_pressed: bool,
     pub camera_motion: Vec2,
     pub camera_wheel: Vec2,
     pub precision_slow: bool,
@@ -73,6 +82,14 @@ fn spawn_shipyard_input(mut commands: Commands, settings: Res<InputSettings>) {
                 Bindings::spawn(section.bindings("primary")),
             ),
             (
+                Action::<OrbitAction>::new(),
+                ActionSettings {
+                    consume_input: false,
+                    ..default()
+                },
+                Bindings::spawn(section.bindings("orbit")),
+            ),
+            (
                 Action::<CameraMotionAction>::new(),
                 ActionSettings {
                     consume_input: false,
@@ -107,6 +124,7 @@ fn consume_input() -> ActionSettings {
 fn collect_shipyard_intent(
     mut intent: ResMut<ShipyardInputIntent>,
     primary: Query<(&Action<PrimaryAction>, &ActionEvents)>,
+    orbit: Query<&Action<OrbitAction>>,
     motion: Query<&Action<CameraMotionAction>>,
     wheel: Query<&Action<CameraWheelAction>>,
     scroll: Res<AccumulatedMouseScroll>,
@@ -125,6 +143,7 @@ fn collect_shipyard_intent(
             .single()
             .map(|(_, events)| events.contains(ActionEvents::COMPLETE))
             .unwrap_or(false),
+        orbit_pressed: orbit.single().map(|action| **action).unwrap_or(false),
         camera_motion: motion.single().map(|action| **action).unwrap_or(Vec2::ZERO),
         camera_wheel: crate::camera_scroll_delta(
             wheel.single().map(|action| **action).unwrap_or(Vec2::ZERO),

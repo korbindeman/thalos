@@ -20,7 +20,10 @@ pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
 };
 pub use map_ocean::{MapOceanMaterial, MapOceanParams};
-pub use proc_impostor::{bake_impostor_albedo_cube, blank_impostor_cube};
+pub use proc_impostor::{
+    COAST_ATLAS_HEIGHT_RANGE_M, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
+    blank_coast_cube, blank_impostor_cube,
+};
 pub use material::{
     PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle,
     PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetWaterParams,

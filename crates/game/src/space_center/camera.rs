@@ -30,7 +30,13 @@ impl Plugin for SpaceCenterCameraPlugin {
         // `drive_camera` is chained after it and gated to run only while open.
         app.add_systems(
             Update,
-            (reset_orbit_on_open, drive_camera.run_if(hub_owns_camera)).chain(),
+            (
+                reset_orbit_on_open,
+                drive_camera
+                    .run_if(hub_owns_camera)
+                    .in_set(god_view::GodViewCameraSet),
+            )
+                .chain(),
         );
     }
 }
@@ -55,20 +61,15 @@ fn hub_owns_camera(
 /// would snap the camera back to the default pad-centred establishing view
 /// constantly — discarding the user's orbit/zoom/pan — when hovering a building
 /// should leave the camera untouched.
-/// Initial god-view boom for the hub, metres. The kilometre-scale spaceport
-/// (a 5 km runway basin) needs a wide establishing shot — the shared god-view
-/// default (`DEFAULT_DISTANCE_M`, ~500 m) frames only a corner of it, deep inside
-/// the tree-cleared basin, so PLAY looked bare. Matches the headless
-/// spaceport-aerial screenshot framing.
-const HUB_ESTABLISHING_DISTANCE_M: f32 = 4000.0;
-
 fn reset_orbit_on_open(
     sc: Res<SpaceCenter>,
     mut orbit: ResMut<GodViewOrbit>,
     mut was_open: Local<bool>,
 ) {
     if sc.open && !*was_open {
-        orbit.reset_framed(HUB_ESTABLISHING_DISTANCE_M);
+        // The one canonical god-view framing over a base (`god_view`), shared
+        // with the base editor and the launch-point picker.
+        orbit.reset_over_base();
     }
     *was_open = sc.open;
 }

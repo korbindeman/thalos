@@ -9,6 +9,7 @@ thalos_physics_canonical = { path = "../physics_canonical" }
 thalos_control = { path = "../control" }
 thalos_world = { path = "../world" }
 thalos_input = { path = "../input" }
+thalos_ui = { path = "../ui" }
 thalos_body_render = { path = "../body_render" }
 thalos_terrain = { path = "../terrain" }
 thalos_physics_local = { path = "../physics_local" }
@@ -28,6 +29,10 @@ rayon = "1.12"
 # filterable without the FLOAT32_FILTERABLE wgpu feature). Already in the lock
 # graph transitively; pinned here for the explicit conversion in `spawn.rs`.
 half = "2"
+# TEMP (mem_diag GPU-leak hunt): feature-unify wgpu's `counters` onto
+# bevy_render's wgpu 29 so `get_internal_counters()` reports real buffer /
+# texture / memory-allocation counts. Remove together with the mem_diag module.
+wgpu = { version = "29", default-features = false, features = ["counters"] }
 
 [dev-dependencies]
 image = { version = "0.25", default-features = false, features = ["png"] }

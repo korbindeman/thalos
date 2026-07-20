@@ -107,6 +107,11 @@ fn fragment(in: VertexOutput) -> FragOutput {
         sun_flux,
         params.color_depth,
         1.0e6,
+        // Far shore sentinels: no shore interaction at map scale.
+        1.0e6,
+        1.0e9,
+        vec3<f32>(0.0, 0.0, 1.0),
+        1.0e9,
     );
 
     // True hit depth so the hardware depth buffer sorts this against the terrain.

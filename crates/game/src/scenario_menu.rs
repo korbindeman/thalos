@@ -1,10 +1,11 @@
 //! Post-destruction scenario picker.
 //!
 //! When the player craft is destroyed (`Simulation::is_destroyed`), the game is
-//! force-paused and this modal overlay offers the same four start scenarios the
-//! game boots into (`just game [mode]`): ship in orbit, landing approach, final
-//! approach, or on-foot EVA. Picking one repairs the craft and respawns the
-//! player **in place** — no process relaunch — and unpauses.
+//! force-paused and this modal overlay offers the same start scenarios the
+//! game boots into (`just game [mode]`): ship in orbit (equatorial or polar),
+//! landing approach, final approach, cruise, or on-foot EVA. Picking one
+//! repairs the craft and respawns the player **in place** — no process
+//! relaunch — and unpauses.
 //!
 //! Pause coupling lives in [`crate::sim_clock`] and [`crate::pause_menu`]:
 //! `ScenarioMenu::open` is folded into `SimClock` (freezes canonical/local sim
@@ -31,11 +32,16 @@ use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_world::BodyId;
 
-use crate::hud::theme::{HudTheme, panel_frame};
+use thalos_ui::{self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens};
+
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::player_controller::EvaMode;
 use crate::rendering::{PlayerShip, SimulationState};
-use crate::spawn::{Homeworld, SpawnSituation, compute_descent_state, orbit_respawn_state};
+use crate::spawn::{
+    Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
+    polar_orbit_respawn_state,
+    place_craft,
+};
 
 /// Whether the destruction scenario picker is shown (and the game halted).
 ///
@@ -64,7 +70,7 @@ pub struct ScenarioMenuPlugin;
 impl Plugin for ScenarioMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScenarioMenu>()
-            .add_systems(Startup, setup.after(crate::hud::theme::init_theme))
+            .add_systems(Startup, setup.after(thalos_ui::init_ui_theme))
             // Open/close tracks destruction. Runs before the physics gate so the
             // pause run-conditions see a coherent value within the frame.
             .add_systems(
@@ -76,18 +82,12 @@ impl Plugin for ScenarioMenuPlugin {
             // updates `Interaction` on wall-clock time regardless.
             .add_systems(
                 Update,
-                (
-                    handle_button_clicks,
-                    update_visibility,
-                    update_detail,
-                    update_button_visuals,
-                )
-                    .chain(),
+                (handle_button_clicks, update_visibility, update_detail).chain(),
             );
     }
 }
 
-fn setup(mut commands: Commands, theme: Res<HudTheme>) {
+fn setup(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((
             Node {
@@ -115,135 +115,49 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
             Name::new("ScenarioMenu"),
         ))
         .with_children(|root| {
-            // Panel background from the shared frame; the border is overridden
-            // warn-tinted below so this reads as a failure, not a pause.
-            let (bg, _border) = panel_frame(&theme);
             root.spawn((
                 Node {
-                    width: Val::Px(300.0),
+                    width: Val::Px(320.0),
+                    // Warn-tinted hairline so it reads as a failure state, not
+                    // the ordinary pause menu (drawn over the glass stroke).
                     border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(4.0)),
-                    padding: UiRect::axes(Val::Px(18.0), Val::Px(16.0)),
-                    flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Stretch,
-                    row_gap: Val::Px(10.0),
-                    ..default()
+                    ..ui::panel_node()
                 },
-                bg,
-                // Warn-tinted edge so it reads as a failure state, not the
-                // ordinary pause menu.
-                BorderColor::all(theme.text_warn),
+                theme.glass_heavy(),
+                BorderColor::all(tokens::DANGER.with_alpha(0.55)),
                 Name::new("ScenarioMenuPanel"),
             ))
             .with_children(|panel| {
+                let mut title = theme.title("VESSEL DESTROYED");
+                title.2 = TextColor(tokens::DANGER);
+                panel.spawn((title, Name::new("ScenarioMenuTitle")));
                 panel.spawn((
-                    Text::new("VESSEL DESTROYED"),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(18.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_warn),
-                    Name::new("ScenarioMenuTitle"),
-                ));
-                panel.spawn((
-                    Text::new(""),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(12.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
+                    theme.mono_dim(""),
                     ScenarioMenuDetail,
                     Name::new("ScenarioMenuDetail"),
                 ));
-                panel.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(1.0),
-                        ..default()
-                    },
-                    BackgroundColor(theme.panel_border),
-                    Name::new("ScenarioMenuDivider"),
-                ));
+                spawn_divider(panel);
                 panel
                     .spawn(Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
+                        row_gap: Val::Px(SPACE_XS + 2.0),
                         align_items: AlignItems::Stretch,
                         ..default()
                     })
                     .with_children(|buttons| {
-                        spawn_scenario_button(
-                            buttons,
-                            &theme,
-                            SpawnSituation::ShipOrbit,
-                            "RELAUNCH — SHIP IN ORBIT",
-                        );
-                        spawn_scenario_button(
-                            buttons,
-                            &theme,
-                            SpawnSituation::Landing,
-                            "RELAUNCH — LANDING APPROACH",
-                        );
-                        spawn_scenario_button(
-                            buttons,
-                            &theme,
-                            SpawnSituation::FinalApproach,
-                            "RELAUNCH — FINAL APPROACH",
-                        );
-                        spawn_scenario_button(
-                            buttons,
-                            &theme,
-                            SpawnSituation::Cruise,
-                            "RELAUNCH — CRUISE (15,000 FT)",
-                        );
-                        spawn_scenario_button(
-                            buttons,
-                            &theme,
-                            SpawnSituation::Eva,
-                            "DISEMBARK — ON FOOT (EVA)",
-                        );
+                        for (situation, label, desc) in [
+                            (SpawnSituation::ShipOrbit, "RELAUNCH", "ship in orbit"),
+                            (SpawnSituation::PolarOrbit, "RELAUNCH", "ship in polar orbit"),
+                            (SpawnSituation::Landing, "RELAUNCH", "landing approach"),
+                            (SpawnSituation::FinalApproach, "RELAUNCH", "final approach"),
+                            (SpawnSituation::Cruise, "RELAUNCH", "cruise · 15,000 ft"),
+                            (SpawnSituation::Eva, "DISEMBARK", "on foot (EVA)"),
+                        ] {
+                            spawn_menu_row(buttons, &theme, ScenarioButton(situation), label, desc);
+                        }
                     });
             });
-        });
-}
-
-fn spawn_scenario_button(
-    parent: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
-    situation: SpawnSituation,
-    label: &str,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(30.0),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
-                padding: UiRect::left(Val::Px(12.0)),
-                justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(theme.panel_bg),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
-            ScenarioButton(situation),
-            Name::new(format!("ScenarioButton{label}")),
-        ))
-        .with_children(|c| {
-            c.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(theme.text_primary),
-            ));
         });
 }
 
@@ -378,10 +292,11 @@ pub(crate) fn respawn_into(
         }
         SpawnSituation::ShipOrbit => {
             let (state, attitude) = orbit_respawn_state(sim, homeworld);
-            sim.simulation.set_ship_state(state);
-            sim.simulation.set_attitude(attitude);
-            sim.simulation
-                .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+            place_craft(sim, coast_placement(state, attitude), None);
+        }
+        SpawnSituation::PolarOrbit => {
+            let (state, attitude) = polar_orbit_respawn_state(sim, homeworld);
+            place_craft(sim, coast_placement(state, attitude), None);
         }
         SpawnSituation::Landing | SpawnSituation::FinalApproach | SpawnSituation::Cruise => {
             // Terrain is resident (we just crashed on it), so this resolves on
@@ -392,18 +307,12 @@ pub(crate) fn respawn_into(
                     warn!("respawn: terrain not resident for {situation:?}; using orbit");
                     orbit_respawn_state(sim, homeworld)
                 });
-            sim.simulation.set_ship_state(state);
-            sim.simulation.set_attitude(attitude);
-            sim.simulation
-                .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+            place_craft(sim, coast_placement(state, attitude), None);
         }
         SpawnSituation::Runway | SpawnSituation::RunwayApproach => {
             warn!("respawn: runway scenarios are one-shot at startup; using orbit");
             let (state, attitude) = orbit_respawn_state(sim, homeworld);
-            sim.simulation.set_ship_state(state);
-            sim.simulation.set_attitude(attitude);
-            sim.simulation
-                .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+            place_craft(sim, coast_placement(state, attitude), None);
         }
     }
 
@@ -423,37 +332,3 @@ pub(crate) fn clear_bubble(commands: &mut Commands, active: &mut ActiveLocalBubb
     }
 }
 
-fn update_button_visuals(
-    theme: Res<HudTheme>,
-    mut buttons: Query<
-        (
-            &Interaction,
-            &mut BorderColor,
-            &mut BackgroundColor,
-            &Children,
-        ),
-        With<ScenarioButton>,
-    >,
-    mut text_q: Query<&mut TextColor>,
-) {
-    for (interaction, mut border, mut bg, children) in &mut buttons {
-        let (border_color, bg_color, label_color) = match interaction {
-            Interaction::Pressed => (theme.text_primary, theme.panel_border, theme.text_primary),
-            Interaction::Hovered => (theme.text_accent, theme.panel_bg, theme.text_accent),
-            Interaction::None => (theme.panel_border, theme.panel_bg, theme.text_primary),
-        };
-        let new_border = BorderColor::all(border_color);
-        if border.top != new_border.top {
-            *border = new_border;
-        }
-        if bg.0 != bg_color {
-            bg.0 = bg_color;
-        }
-        if let Some(&child) = children.first()
-            && let Ok(mut tc) = text_q.get_mut(child)
-            && tc.0 != label_color
-        {
-            tc.0 = label_color;
-        }
-    }
-}

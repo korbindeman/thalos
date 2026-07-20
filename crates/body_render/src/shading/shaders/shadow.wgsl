@@ -19,9 +19,15 @@
 //   a long stretch of surface). Together these kill low-sun acne while keeping
 //   the flat-ground base bias small enough that contact shadows stay attached
 //   (no peter-panning).
-// - `sun_shadow_factor(pos, ...)` — for receivers with no meaningful surface
-//   normal (tree foliage, grass blades). Same walk, but a larger constant
-//   depth bias (`NO_NORMAL_BIAS_SCALE`) stands in for the missing offset.
+// - `sun_shadow_factor(pos, ...)` — for FRAGMENT-stage receivers with no
+//   meaningful surface normal (tree foliage, rocks, ground patch). Same walk,
+//   but a larger constant depth bias (`NO_NORMAL_BIAS_SCALE`) stands in for
+//   the missing offset.
+// - `sun_shadow_factor_vert(pos, ...)` — the PER-VERTEX variant of the above
+//   (grass / GPU grass compute their shadow at the blade vertex and
+//   interpolate). Identical contract, but keeps the cheap point-sampled 3×3
+//   kernel instead of the filtered tent — interpolation across the blade
+//   already smooths it, and it runs at grass vertex counts.
 //
 // The three depth maps are passed as FUNCTION PARAMETERS: WGSL permits
 // handle-typed (`texture_*`) arguments as long as the call site binds them to
@@ -109,12 +115,75 @@ fn is_ortho_projection(clip_from_view: mat4x4<f32>) -> bool {
 // `[1 - strength, 1]`, or a NEGATIVE sentinel if the point is outside this
 // cascade's box (the caller falls through to the next, coarser cascade). `inset`
 // shrinks inner cascades so an edge fragment hands off cleanly; `fade` edge-
-// softens the outermost cascade (nothing covers beyond it). 3×3 PCF.
+// softens the outermost cascade (nothing covers beyond it).
+//
+// FILTERED PCF: a separable-tent kernel over a 4×4 texel neighbourhood, exactly
+// equivalent to averaging 3×3 *hardware-bilinear* comparison taps at texel-
+// spaced offsets (per-axis texel weights `[1−f, 1, 1, f] / 3` around the
+// fractional sample position `f`). The old point-sampled 3×3 flipped a whole
+// texel per compare — every shadow edge was a hard staircase at shadow-map
+// texel size, and any sub-texel edge motion (sun stepping, warp) popped a full
+// texel at once. The tent turns edges into smooth ~3-texel gradients with the
+// same `textureLoad` machinery (no comparison-sampler binding needed in any
+// material). Fragment-stage receivers use this; per-vertex receivers (grass)
+// keep the cheap point kernel below — interpolation across the blade already
+// smooths them, and they run per-vertex at grass counts.
 //
 // Reverse-z: a caster closer to the sun has a LARGER stored depth, so the
 // receiver is shadowed when `stored > frag_depth + bias`. Uses `textureLoad`
 // (no derivatives), so it is valid in both the fragment and vertex stages.
 fn cascade_factor(
+    world_pos: vec3<f32>,
+    vp: mat4x4<f32>,
+    bias: f32,
+    strength: f32,
+    tex: texture_depth_2d,
+    inset: f32,
+    fade: bool,
+) -> f32 {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    if (clip.w <= 0.0) {
+        return -1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if (any(ndc.xy < vec2<f32>(-inset)) || any(ndc.xy > vec2<f32>(inset)) ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    let dims = vec2<f32>(textureDimensions(tex));
+    // Texel-space position with the half-texel centre offset; `base` is the
+    // upper-left of the centre 2×2, `f` the fractional position inside it.
+    let pos = uv * dims - vec2<f32>(0.5);
+    let base = vec2<i32>(floor(pos));
+    let f = pos - floor(pos);
+    // Separable tent weights over the 4 texel columns/rows [base-1 .. base+2].
+    // `var` (not `let`) so the loop can index them dynamically (naga restricts
+    // dynamic indexing of let-bound composites).
+    var wx = vec4<f32>(1.0 - f.x, 1.0, 1.0, f.x) / 3.0;
+    var wy = vec4<f32>(1.0 - f.y, 1.0, 1.0, f.y) / 3.0;
+    var lit = 0.0;
+    for (var j = 0; j < 4; j = j + 1) {
+        for (var i = 0; i < 4; i = i + 1) {
+            let texel = base + vec2<i32>(i - 1, j - 1);
+            let stored = textureLoad(tex, texel, 0);
+            lit = lit + wx[i] * wy[j] * select(1.0, 0.0, stored > ndc.z + bias);
+        }
+    }
+    var edge_fade = 1.0;
+    if (fade) {
+        let edge = max(abs(ndc.x), abs(ndc.y));
+        edge_fade = 1.0 - smoothstep(0.85, 1.0, edge);
+    }
+    return 1.0 - strength * (1.0 - lit) * edge_fade;
+}
+
+// Point-sampled 3×3 variant of [`cascade_factor`] — the pre-filtering kernel,
+// kept for PER-VERTEX receivers (grass / GPU grass), where the result is
+// interpolated across the blade anyway and the 16-load tent would nearly
+// double the heaviest vertex workload in the game. Same walk, same bias
+// contract.
+fn cascade_factor_point(
     world_pos: vec3<f32>,
     vp: mat4x4<f32>,
     bias: f32,
@@ -151,11 +220,11 @@ fn cascade_factor(
     return 1.0 - strength * (1.0 - lit) * edge_fade;
 }
 
-// Directional sun-shadow factor for receivers WITHOUT a usable surface normal
-// (foliage, grass blades): walk the cascades near→far and use the tightest one
-// that contains the point. `gate.x == 0` (inactive pass) early-outs to fully
-// lit. Unrolled because WGSL can't index a list of texture bindings; the three
-// maps are passed in near→far.
+// Directional sun-shadow factor for FRAGMENT receivers WITHOUT a usable
+// surface normal (tree foliage, rocks): walk the cascades near→far and use the
+// tightest one that contains the point. `gate.x == 0` (inactive pass)
+// early-outs to fully lit. Unrolled because WGSL can't index a list of texture
+// bindings; the three maps are passed in near→far.
 fn sun_shadow_factor(
     world_pos: vec3<f32>,
     block: ShadowCascadeBlock,
@@ -182,6 +251,45 @@ fn sun_shadow_factor(
     }
     if (f < 0.0) {
         f = cascade_factor(
+            world_pos, block.view_proj[2],
+            cascade_bias_m(block.params[2].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[2].x,
+            s, tex2, 1.0, true,
+        );
+    }
+    if (f < 0.0) {
+        return 1.0;
+    }
+    return f;
+}
+
+// PER-VERTEX variant of [`sun_shadow_factor`] (see the entry-point notes at the
+// top): same cascade walk and bias contract, point-sampled 3×3 kernel. Used by
+// the grass paths, which evaluate at blade vertices and interpolate.
+fn sun_shadow_factor_vert(
+    world_pos: vec3<f32>,
+    block: ShadowCascadeBlock,
+    tex0: texture_depth_2d,
+    tex1: texture_depth_2d,
+    tex2: texture_depth_2d,
+) -> f32 {
+    let s = block.gate.x;
+    if (s <= 0.0) {
+        return 1.0;
+    }
+    var f = cascade_factor_point(
+        world_pos, block.view_proj[0],
+        cascade_bias_m(block.params[0].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[0].x,
+        s, tex0, 0.98, false,
+    );
+    if (f < 0.0) {
+        f = cascade_factor_point(
+            world_pos, block.view_proj[1],
+            cascade_bias_m(block.params[1].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[1].x,
+            s, tex1, 0.98, false,
+        );
+    }
+    if (f < 0.0) {
+        f = cascade_factor_point(
             world_pos, block.view_proj[2],
             cascade_bias_m(block.params[2].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[2].x,
             s, tex2, 1.0, true,

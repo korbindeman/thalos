@@ -44,7 +44,9 @@ pub use field_surface::FieldSurface;
 pub use generic_terrestrial_field::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
-pub use procedural::ProceduralSurface;
+pub use procedural::{
+    GENERATOR_VERSION, MacroBiome, ProceduralSurface, climate_cold_lift_m, climate_warmth,
+};
 pub use query::{
     BakedSurface, FlattenHandle, FlattenRegion, FlattenedSurface, Region, SurfaceQuery, SurfaceRef,
     TerrainFlatten, flatten_handle, nearest_flatten, surface_height_m, surface_height_range_m,

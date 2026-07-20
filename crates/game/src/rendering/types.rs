@@ -91,6 +91,36 @@ pub struct ShipMarker;
 #[derive(Component)]
 pub struct PlayerShip;
 
+/// The craft the player is currently controlling — the **N-craft accessor seam**.
+///
+/// Today the game has exactly one [`PlayerShip`]; this resource simply names it
+/// by entity. Its purpose is architectural: it is the single sanctioned answer to
+/// "which craft is active", so consumers read `active.0` (an `Option<Entity>`,
+/// `None` during the respawn/relaunch rebuild window) instead of assuming exactly
+/// one craft via `q.single()` — a call that *panics* the moment a second craft
+/// entity exists. When N craft land, this picks the active one and nothing else
+/// changes. New per-craft state should be a **component on this entity**, not a
+/// new global resource (see `docs/architecture_cleanup.md` §E).
+///
+/// **Sole writer:** [`track_active_craft`].
+#[derive(Resource, Default)]
+pub struct ActiveCraft(pub Option<Entity>);
+
+/// Sole writer of [`ActiveCraft`]: mirror the (currently single) [`PlayerShip`]
+/// entity into it each frame, `None` when no craft exists (the respawn/relaunch
+/// rebuild window). Centralises the one `q.single()` so every other consumer can
+/// take the active craft by id without its own single-craft assumption; when N
+/// craft exist this is where "which is active" is decided.
+pub fn track_active_craft(
+    ships: Query<Entity, With<PlayerShip>>,
+    mut active: ResMut<ActiveCraft>,
+) {
+    let current = ships.iter().next();
+    if active.0 != current {
+        active.0 = current;
+    }
+}
+
 /// Marker for the directional light that simulates sunlight toward the focus body.
 #[derive(Component)]
 pub(super) struct SunLight;

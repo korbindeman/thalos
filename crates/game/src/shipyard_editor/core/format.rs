@@ -166,26 +166,4 @@ pub fn format_mass_kg(kg: f64) -> String {
     }
 }
 
-pub fn format_thrust(newtons: f64) -> String {
-    if newtons.abs() >= 999_500.0 {
-        format!("{:.2} MN", newtons / 1_000_000.0)
-    } else if newtons.abs() >= 999.5 {
-        format!("{:.1} kN", newtons / 1_000.0)
-    } else {
-        format!("{:.0} N", newtons)
-    }
-}
 
-pub fn format_duration_s(seconds: f64) -> String {
-    if seconds < 60.0 {
-        format!("{:.0}s", seconds)
-    } else if seconds < 3600.0 {
-        let minutes = (seconds / 60.0).floor();
-        let secs = seconds - minutes * 60.0;
-        format!("{minutes:.0}m {secs:.0}s")
-    } else {
-        let hours = (seconds / 3600.0).floor();
-        let minutes = ((seconds - hours * 3600.0) / 60.0).floor();
-        format!("{hours:.0}h {minutes:.0}m")
-    }
-}

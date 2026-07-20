@@ -29,7 +29,7 @@ use crate::player_controller::EvaMode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
 use crate::scenario_menu::ScenarioMenu;
 use crate::shipyard_editor::ShipyardEditor;
-use crate::ui_widgets::{ScrollableColumn, UiButton};
+use thalos_ui::{ScrollableColumn, UiButton};
 use crate::view::ViewMode;
 
 /// Default framing distance (metres) when the ship row is clicked. Matches the
@@ -329,7 +329,7 @@ fn spawn_body_row(
     });
 }
 
-/// Small bordered debug button (`drop`/`aim`). Like `ui_widgets::spawn_button`
+/// Small bordered debug button (`drop`/`aim`). Like `thalos_ui::spawn_button`
 /// but its label carries [`DropLabel`] so `update_row_visuals` can swap the
 /// text; `style_buttons` still owns its colour via [`UiButton`].
 fn spawn_drop_button(row: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, body_id: BodyId) {
@@ -499,7 +499,7 @@ fn update_row_visuals(
 
 /// Marker on the drop-button label so `update_row_visuals` can disambiguate it
 /// from the name-button labels (whose colour it owns; the drop label's colour
-/// is owned by `ui_widgets::style_buttons` via [`UiButton`]).
+/// is owned by `thalos_ui::style_buttons` via [`UiButton`]).
 #[derive(Component)]
 struct DropLabel;
 

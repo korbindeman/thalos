@@ -1,23 +1,27 @@
-//! Native Bevy-UI front-end for the in-game shipyard editor.
+//! Native Bevy-UI front-end for the in-game shipyard editor, built entirely
+//! from the shared UI kit (`thalos_ui`):
 //!
-//! KSP-style layout, all styled from [`HudTheme`]:
-//!
-//! - **Top bar** — ship name field, build stats readout, mirror/snap/layout
-//!   toggles, save / new / exit.
-//! - **Left** — scrollable parts palette (by category) + saved-ship list.
+//! - **Top bar** — ship name field, live build stats, mirror/snap/layout
+//!   toggles, HANGAR / SAVE / NEW, ▶ LAUNCH, EXIT.
+//! - **Left** — scrollable parts palette (by category).
 //! - **Right** — parametric inspector for the selection (sliders write the
 //!   part components live; the core rebuilds meshes/recomputes mass).
 //! - **Right-inner** — per-stage Δv/fuel staging readout.
-//! - **Bottom** — status line + pending-part hint.
+//! - **Hangar** — a modal overlay listing saved craft (load / delete); see
+//!   [`hangar`].
 //!
-//! Everything drives the editor core exactly like the standalone egui
-//! binary does: by reading and writing `crate::shipyard_editor::core::EditorState`.
+//! There is no persistent status bar: core status messages
+//! (`EditorState::status`) surface as transient toasts, and the
+//! pending-placement state shows as a floating hint pill under the top bar.
+//!
+//! Everything drives the editor core by reading and writing
+//! `crate::shipyard_editor::core::EditorState`.
 
+mod hangar;
 mod inspector;
 mod palette;
 mod staging_panel;
 mod top_bar;
-pub mod widgets;
 
 use bevy::picking::Pickable;
 use bevy::prelude::*;
@@ -28,18 +32,15 @@ use thalos_shipyard::{
     SurfaceMount, SymmetryGroup,
 };
 
-use crate::hud::theme::{HudTheme, panel_frame};
-
-pub use widgets::EditorTextFocus;
+use thalos_ui::{
+    self as ui, ButtonVariant, ToastArea, ToastKind, UiTheme, spawn_button, spawn_toast, tokens,
+};
 
 use super::{ShipyardEditor, editor_open};
 
 /// Root node of the whole editor UI; visibility tracks [`ShipyardEditor`].
 #[derive(Component)]
 struct ShipyardUiRoot;
-
-#[derive(Component)]
-struct StatusText;
 
 #[derive(Component)]
 struct PendingHintRow;
@@ -69,24 +70,22 @@ pub struct EditorUiPlugin;
 
 impl Plugin for EditorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<EditorTextFocus>()
-            .init_resource::<EditorStatsCache>()
+        app.init_resource::<EditorStatsCache>()
+            .init_resource::<hangar::HangarOpen>()
             .add_systems(
                 Startup,
-                setup_editor_ui.after(crate::hud::theme::init_theme),
+                (setup_editor_ui, hangar::setup).after(thalos_ui::init_ui_theme),
             )
-            .add_systems(Update, sync_root_visibility)
+            .add_systems(Update, (sync_root_visibility, hangar::sync_visibility))
             .add_systems(
                 Update,
                 (
                     refresh_stats_cache,
-                    widgets::drive_sliders,
-                    widgets::update_slider_visuals.after(widgets::drive_sliders),
-                    widgets::scroll_scrollables,
-                    widgets::style_editor_buttons,
-                    widgets::focus_text_field_on_click,
-                    update_status_bar,
+                    update_pending_hint,
+                    surface_status_toasts,
                     handle_cancel_pending,
+                    hangar::rebuild_list,
+                    hangar::handle_clicks,
                 )
                     .run_if(editor_open),
             )
@@ -96,11 +95,8 @@ impl Plugin for EditorUiPlugin {
                     top_bar::handle_actions,
                     top_bar::update_toggle_latches,
                     top_bar::update_stats_text.after(refresh_stats_cache),
-                    top_bar::apply_name_input,
-                    top_bar::update_name_display,
+                    top_bar::sync_ship_name,
                     palette::handle_part_clicks,
-                    palette::handle_saved_ship_clicks,
-                    palette::rebuild_saved_ships,
                 )
                     .run_if(editor_open),
             )
@@ -109,7 +105,7 @@ impl Plugin for EditorUiPlugin {
                 (
                     inspector::rebuild_inspector,
                     inspector::apply_param_bindings
-                        .after(widgets::drive_sliders)
+                        .after(thalos_ui::drive_sliders)
                         .before(inspector::refresh_sliders_from_model),
                     inspector::refresh_sliders_from_model,
                     inspector::update_info_text,
@@ -121,7 +117,7 @@ impl Plugin for EditorUiPlugin {
     }
 }
 
-fn setup_editor_ui(mut commands: Commands, theme: Res<HudTheme>, catalog: Res<PartCatalog>) {
+fn setup_editor_ui(mut commands: Commands, theme: Res<UiTheme>, catalog: Res<PartCatalog>) {
     commands
         .spawn((
             Node {
@@ -146,68 +142,55 @@ fn setup_editor_ui(mut commands: Commands, theme: Res<HudTheme>, catalog: Res<Pa
             palette::spawn(root, &theme, &catalog);
             inspector::spawn(root, &theme);
             staging_panel::spawn(root, &theme);
-            spawn_status_bar(root, &theme);
+            spawn_pending_pill(root, &theme);
         });
 }
 
-fn spawn_status_bar(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
-    let (bg, border) = panel_frame(theme);
+/// A floating hint pill under the top bar, shown while a palette part is
+/// armed and waiting for a placement click.
+fn spawn_pending_pill(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
     root.spawn((
         Node {
             position_type: PositionType::Absolute,
-            left: Val::Px(272.0),
-            right: Val::Px(500.0),
-            bottom: Val::Px(12.0),
-            border: UiRect::all(Val::Px(1.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
-            padding: UiRect::axes(Val::Px(12.0), Val::Px(6.0)),
-            flex_direction: FlexDirection::Row,
-            align_items: AlignItems::Center,
-            column_gap: Val::Px(12.0),
+            top: Val::Px(64.0),
+            left: Val::Px(0.0),
+            right: Val::Px(0.0),
+            justify_content: JustifyContent::Center,
             ..default()
         },
-        bg,
-        border,
-        Interaction::None,
-        Name::new("ShipyardStatusBar"),
+        Pickable {
+            is_hoverable: false,
+            should_block_lower: false,
+        },
+        Visibility::Hidden,
+        PendingHintRow,
+        Name::new("ShipyardPendingPill"),
     ))
-    .with_children(|bar| {
-        bar.spawn((
-            Text::new(""),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(11.0),
-                ..default()
-            },
-            TextColor(theme.text_dim),
+    .with_children(|row| {
+        row.spawn((
             Node {
-                flex_grow: 1.0,
-                ..default()
-            },
-            StatusText,
-        ));
-        bar.spawn((
-            Node {
-                flex_direction: FlexDirection::Row,
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(999.0)),
+                padding: UiRect::axes(Val::Px(ui::SPACE_LG), Val::Px(4.0)),
                 align_items: AlignItems::Center,
-                column_gap: Val::Px(8.0),
+                column_gap: Val::Px(ui::SPACE_MD),
                 ..default()
             },
-            Visibility::Hidden,
-            PendingHintRow,
+            BackgroundColor(Color::srgba(0.02, 0.025, 0.032, 0.92)),
+            BorderColor::all(tokens::ACCENT.with_alpha(0.6)),
         ))
-        .with_children(|row| {
-            row.spawn((
-                Text::new("PENDING — click a node or surface"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(11.0),
-                    ..default()
-                },
-                TextColor(theme.text_accent),
-                PendingHintText,
-            ));
-            widgets::spawn_button(row, theme, CancelPendingButton, "CANCEL", 10.0, 22.0);
+        .with_children(|pill| {
+            let mut text = theme.small("");
+            text.2 = TextColor(tokens::ACCENT);
+            pill.spawn((text, PendingHintText));
+            spawn_button(
+                pill,
+                theme,
+                CancelPendingButton,
+                "CANCEL",
+                ButtonVariant::Bare,
+                20.0,
+            );
         });
     });
 }
@@ -266,19 +249,13 @@ fn refresh_stats_cache(
     cache.blueprint = blueprint;
 }
 
-fn update_status_bar(
+/// Show the pending pill while a part is armed, with mount-aware wording.
+fn update_pending_hint(
     state: Res<EditorState>,
     catalog: Res<PartCatalog>,
-    mut status: Query<&mut Text, With<StatusText>>,
     mut pending_row: Query<&mut Visibility, With<PendingHintRow>>,
-    mut hint_text: Query<&mut Text, (With<PendingHintText>, Without<StatusText>)>,
+    mut hint_text: Query<&mut Text, With<PendingHintText>>,
 ) {
-    if let Ok(mut text) = status.single_mut()
-        && **text != state.status
-    {
-        **text = state.status.clone();
-    }
-
     let pending_visible = state.pending.is_some();
     for mut vis in &mut pending_row {
         let target = if pending_visible {
@@ -313,6 +290,44 @@ fn update_status_bar(
             }
         }
     }
+}
+
+/// Surface `EditorState::status` changes as transient toasts. Status writes
+/// are event-like (saved / loaded / placed / failed), so a change edge is a
+/// meaningful notification; identical repeats stay silent. The editor keeps a
+/// single toast slot — a new message replaces the previous pill instead of
+/// stacking.
+fn surface_status_toasts(
+    mut commands: Commands,
+    state: Res<EditorState>,
+    theme: Res<UiTheme>,
+    area: Query<(Entity, Option<&Children>), With<ToastArea>>,
+    mut last: Local<String>,
+) {
+    if !state.is_changed() || state.status == *last {
+        return;
+    }
+    *last = state.status.clone();
+    if state.status.is_empty() {
+        return;
+    }
+    let Ok((area_entity, children)) = area.single() else {
+        return;
+    };
+    if let Some(children) = children {
+        for child in children.iter() {
+            commands.entity(child).despawn();
+        }
+    }
+    let lower = state.status.to_ascii_lowercase();
+    let kind = if lower.contains("failed") || lower.contains("error") {
+        ToastKind::Warn
+    } else if lower.starts_with("saved") || lower.starts_with("loaded") {
+        ToastKind::Success
+    } else {
+        ToastKind::Info
+    };
+    spawn_toast(&mut commands, area_entity, &theme, state.status.clone(), kind);
 }
 
 fn handle_cancel_pending(

@@ -16,8 +16,8 @@
                 length: 4.0,
             ),
             resources: {
-                Methane: 21563.893,
                 Lox: 28701.592,
+                Methane: 21563.893,
             },
         ),
         (
@@ -39,8 +39,8 @@
                 length: 8.0,
             ),
             resources: {
-                Methane: 43127.785,
                 Lox: 57403.184,
+                Methane: 43127.785,
             },
         ),
         (
@@ -50,18 +50,6 @@
         ),
     ],
     connections: [
-        (
-            parent: 0,
-            parent_node: "bottom",
-            child: 1,
-            child_node: "top",
-        ),
-        (
-            parent: 3,
-            parent_node: "bottom",
-            child: 4,
-            child_node: "top",
-        ),
         (
             parent: 2,
             parent_node: "bottom",
@@ -78,6 +66,18 @@
             parent: 4,
             parent_node: "bottom",
             child: 5,
+            child_node: "top",
+        ),
+        (
+            parent: 0,
+            parent_node: "bottom",
+            child: 1,
+            child_node: "top",
+        ),
+        (
+            parent: 3,
+            parent_node: "bottom",
+            child: 4,
             child_node: "top",
         ),
     ],

@@ -24,9 +24,10 @@ use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, GpuAtlasHeightMirrorComponent,
-    GpuAtlasMirrorHandle, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
-    TerrainShadingStyle, rendered_height_range,
+    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock,
+    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS,
+    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, TerrainShadingStyle,
+    rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
@@ -38,6 +39,7 @@ use thalos_world::{BodyDefinition, BodyId};
 use std::collections::HashMap;
 
 use super::SCREEN_MARKER_RADIUS;
+use super::tile_cache::TileCacheRegistry;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::player_controller::{EvaMode, PlayerControllerState};
@@ -67,6 +69,13 @@ impl TerrainFlattenRegistry {
             .entry(body_id)
             .or_insert_with(flatten_handle)
             .clone()
+    }
+
+    /// Read-only lookup for consumers that must not create a handle (e.g. the
+    /// per-frame material driver mirroring pads to the GPU). `None` simply
+    /// means "no flattening on this body yet".
+    pub fn get(&self, body_id: BodyId) -> Option<&FlattenHandle> {
+        self.handles.get(&body_id)
     }
 }
 
@@ -169,6 +178,38 @@ struct TierConfig {
     tile_texture_size: u32,
     load_slots: u32,
     load_queue: u32,
+}
+
+impl TierConfig {
+    /// Resolution for the *appearance* attachments (albedo / roughness /
+    /// material), as opposed to height.
+    ///
+    /// Height carries the silhouette — it is the geometry, it is what the
+    /// collider and the shader's normal derivation read, and it is the one
+    /// attachment anything physical depends on — so it keeps the full grid. The
+    /// other three are the macro-colour anchor and the material masks, and at
+    /// half the linear resolution they are visually indistinguishable at the
+    /// distances their tier is used at.
+    ///
+    /// **This is a memory trade, not a synthesis one.** Those three are 10 of the
+    /// 14 bytes per texel; at quarter the texels the atlas drops from ~14 B to
+    /// ~6.5 B per height-texel-equivalent — better than a 2× cut in the dominant
+    /// memory cost of the whole terrain system (the near tier is the biggest
+    /// allocation in the game). Synthesis gets *slightly* more expensive, not
+    /// less: the provider now evaluates a second, coarser grid rather than
+    /// encoding everything from one. That grid is cheap — it is band-limited to
+    /// its own resolution, so its `tile_lod_m` is coarser and the detail cascade
+    /// resolves fewer octaves per sample — but it is not free, and pretending
+    /// otherwise would misattribute where the near-field win comes from.
+    ///
+    /// Evaluating it separately (rather than box-filtering the height grid down)
+    /// is what keeps the borders correct: each attachment's border texels must be
+    /// bit-identical with its neighbour tile's, which means they have to come from
+    /// that grid's own `stitched_pixel_coordinate`, not from a downsample of a
+    /// differently-bordered grid.
+    fn detail_texture_size(&self) -> u32 {
+        (self.tile_texture_size / 2).max(64)
+    }
 }
 
 impl TerrainTier {
@@ -399,6 +440,13 @@ pub(crate) fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig 
         morph_range: TERRAIN_MORPH_RANGE,
         blend_range: TERRAIN_BLEND_RANGE,
         precision_threshold_distance: TERRAIN_PRECISION_THRESHOLD_M / body_radius_m.max(1.0),
+        // Standing on a surface, roughly half the near tiles fall behind the
+        // camera; synthesizing them is pure waste (upstream's distance-only
+        // selection has no notion of where the view is looking). Deferring them
+        // is hole-free: the pinned root LODs always leave a resident ancestor, so
+        // a deferred tile just draws coarser until the camera turns toward it.
+        // The map view turns this off — it sees the whole body at once.
+        cull_behind_view: true,
         ..TerrainViewConfig::default()
     }
 }
@@ -451,16 +499,18 @@ pub(crate) fn build_terrain_config(model: TerrainModel, tier: TerrainTier) -> Te
         // that the game intentionally does not request.
         format: AttachmentFormat::Rg16,
     })
+    // The three appearance attachments below bake at `detail_texture_size` —
+    // half of height's grid. See `TierConfig::detail_texture_size`.
     .add_attachment(AttachmentConfig {
         name: "albedo".to_string(),
-        texture_size: tc.tile_texture_size,
+        texture_size: tc.detail_texture_size(),
         border_size: TILE_BORDER_SIZE,
         mip_level_count: TILE_MIP_LEVELS,
         format: AttachmentFormat::Rgba8,
     })
     .add_attachment(AttachmentConfig {
         name: "roughness".to_string(),
-        texture_size: tc.tile_texture_size,
+        texture_size: tc.detail_texture_size(),
         border_size: TILE_BORDER_SIZE,
         mip_level_count: TILE_MIP_LEVELS,
         // thalos_udlod has no single-channel 8-bit format; the source
@@ -469,12 +519,15 @@ pub(crate) fn build_terrain_config(model: TerrainModel, tier: TerrainTier) -> Te
     })
     .add_attachment(AttachmentConfig {
         name: "material".to_string(),
-        texture_size: tc.tile_texture_size,
+        texture_size: tc.detail_texture_size(),
         border_size: TILE_BORDER_SIZE,
         mip_level_count: TILE_MIP_LEVELS,
         // R = grass/vegetation, G = soil/peat, B = exposed rock, A = wetness.
         // These masks drive near-ground material blending; the albedo atlas
         // remains the macro/body-colour anchor for orbital continuity.
+        // (Grass *placement* does not read this attachment — it re-derives the
+        // same gate on the CPU in `body_render::ground::vegetation` — so the
+        // half-res bake here only affects shading, not where blades land.)
         format: AttachmentFormat::Rgba8,
     })
 }
@@ -525,9 +578,14 @@ pub(crate) fn spawn_body_terrain(
     flatten: FlattenHandle,
     tier: TerrainTier,
     sun_shadow_maps: [Handle<Image>; CASCADE_COUNT],
+    tile_cache: &mut TileCacheRegistry,
 ) -> Entity {
     let radius_m = body.radius_m as f32;
     let tc = tier.config();
+    // The tile cache keys on the *live* flatten handle (its content is hashed per
+    // tile request, not snapshotted here) — the provider reads it per tile pixel,
+    // so a pad installed after this spawn still changes what later tiles bake.
+    let cache_flatten = flatten.clone();
     // The construction site is the one place that names the concrete generation
     // type: wrap it as `Arc<dyn SurfaceQuery>` so the provider and the
     // height-range query see only the black-box seam. The flatten decorator sits
@@ -588,6 +646,12 @@ pub(crate) fn spawn_body_terrain(
             ))
         }
     };
+    // Memoize the synthesizing provider: in RAM (surviving the despawn/respawn
+    // that flatten-invalidation and residency-tier swaps perform) and on disk
+    // (surviving the process). See `rendering::tile_cache` — this is what turns a
+    // cold ~15 s surface site into a warm one.
+    let provider = tile_cache.wrap_provider(body.id, provider, &config, Some(cache_flatten));
+
     let mut tile_atlas = TileAtlas::with_provider(&config, provider);
     pin_root_tiles(&mut tile_atlas);
     let view_config = body_terrain_view_config(body.radius_m);
@@ -1152,6 +1216,25 @@ pub(super) fn update_body_terrain_atmosphere(
         Option<Res<super::ssao::AoImage>>,
         Res<super::ssao::SsaoConfig>,
     ),
+    flatten_registry: Res<TerrainFlattenRegistry>,
+    // ADR-0006: resident-height-tile lookup inputs for the sky material's
+    // analytic-ocean branch. .0 finds each body's udlod terrain entity + its
+    // `TileAtlas` (lod count, height decode range, attachment-0 UV layout);
+    // .1 supplies the per-(terrain, view) tile tree's window size.
+    tile_lookup_io: (
+        Query<(
+            Entity,
+            &BodyTerrain,
+            &thalos_body_render::udlod::prelude::TileAtlas,
+        )>,
+        Option<
+            Res<
+                thalos_body_render::udlod::terrain_view::TerrainViewComponents<
+                    thalos_body_render::udlod::prelude::TileTree,
+                >,
+            >,
+        >,
+    ),
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
@@ -1204,6 +1287,48 @@ pub(super) fn update_body_terrain_atmosphere(
                 + transform.translation.as_dvec3()
         })
         .unwrap_or_else(|_| sim.simulation.ship_state().position);
+
+    // ADR-0006: per-body height-tile lookup parameters for the sky material's
+    // ocean branch, which samples signed sea height from the same udlod atlas
+    // the terrain mesh displaces from. Bodies without a terrain (or whose
+    // tile tree hasn't spawned yet) keep `tile_lookup.x = 0` — the shader
+    // falls back to the coast atlas, and the material's bind-group prepare
+    // also force-disables the flag if the render-world resources are missing.
+    let (terrain_atlas_q, tile_trees) = &tile_lookup_io;
+    let mut tile_lookup_by_body: std::collections::HashMap<BodyId, (Entity, Vec4, Vec4)> =
+        std::collections::HashMap::new();
+    for (terrain_entity, terrain, atlas) in terrain_atlas_q {
+        // Attachment 0 is the height attachment by construction
+        // (`build_terrain_config` adds it first); verify by name anyway so a
+        // future re-ordering fails safe (coast-atlas fallback) instead of
+        // decoding albedo texels as heights.
+        let Some(height_cfg) = atlas.attachment_configs().first() else {
+            continue;
+        };
+        if height_cfg.name != "height" {
+            continue;
+        }
+        let Some(tree_size) = tile_trees.as_ref().and_then(|trees| {
+            trees
+                .iter()
+                .find(|((t, _view), _)| *t == terrain_entity)
+                .map(|(_, tree)| tree.tree_size())
+        }) else {
+            continue;
+        };
+        let texture = height_cfg.texture_size as f32;
+        let border = height_cfg.border_size as f32;
+        let center = texture - 2.0 * border;
+        let (min_h, max_h) = atlas.model().height_range();
+        tile_lookup_by_body.insert(
+            terrain.body_id,
+            (
+                terrain_entity,
+                Vec4::new(1.0, atlas.lod_count() as f32, tree_size as f32, center),
+                Vec4::new(center / texture, border / texture, min_h, max_h),
+            ),
+        );
+    }
 
     // Per-body sky data: sun direction, flux, planet center, radius.
     let mut sky_by_body: std::collections::HashMap<BodyId, BodySkyExtra> =
@@ -1286,6 +1411,10 @@ pub(super) fn update_body_terrain_atmosphere(
             }
             None => (Vec4::ZERO, Vec4::ZERO),
         };
+        let (tile_lookup, tile_atlas_uv) = tile_lookup_by_body
+            .get(&i)
+            .map(|(_, lookup, uv)| (*lookup, *uv))
+            .unwrap_or((Vec4::ZERO, Vec4::ZERO));
         sky_by_body.insert(
             i,
             BodySkyExtra {
@@ -1300,6 +1429,8 @@ pub(super) fn update_body_terrain_atmosphere(
                 cloud_band_radii,
                 ocean,
                 ocean_color_depth,
+                tile_lookup,
+                tile_atlas_uv,
             },
         );
     }
@@ -1379,6 +1510,55 @@ pub(super) fn update_body_terrain_atmosphere(
             world_to_body_q.z,
             world_to_body_q.w,
         );
+        // Analytic vertex-stage pad flatten (the structural "structures render
+        // above the ground" invariant — see `FlattenRegionGpu` in body_render).
+        // Mirror this body's flatten pads into the material every frame so the
+        // terrain vertex shader pins the rendered ground to the exact pad plane
+        // at every LOD / morph / bake state. No handle or zero pads disables
+        // the override (and the map terrain, updated elsewhere, never sets it).
+        // `THALOS_FLATTEN_VERTEX=0` zeroes the block — a live A/B diagnostic
+        // lever for attributing base-ground artifacts to this override vs the
+        // baked tiles.
+        static VERTEX_FLATTEN_ENABLED: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| {
+                !matches!(
+                    std::env::var("THALOS_FLATTEN_VERTEX").as_deref(),
+                    Ok("0") | Ok("false") | Ok("off")
+                )
+            });
+        if !*VERTEX_FLATTEN_ENABLED {
+            mat.extras.flatten = FlattenBlock::default();
+            continue;
+        }
+        mat.extras.flatten = flatten_registry
+            .get(terrain.body_id)
+            .and_then(|handle| handle.read().ok().map(|regions| {
+                if regions.len() <= MAX_FLATTEN_REGIONS {
+                    FlattenBlock::pack(regions.iter().map(|r| &r.flatten))
+                } else {
+                    // More pads than uniform slots: keep those nearest the
+                    // camera — only pads near the view can show LOD error.
+                    let cam_dir_body = states
+                        .get(terrain.body_id)
+                        .map(|bs| bs.orientation.inverse() * (camera_inertial - bs.position))
+                        .and_then(|v| v.try_normalize())
+                        .unwrap_or(DVec3::Y);
+                    let mut sorted: Vec<_> = regions.iter().collect();
+                    sorted.sort_by(|a, b| {
+                        b.flatten
+                            .center_dir
+                            .dot(cam_dir_body)
+                            .total_cmp(&a.flatten.center_dir.dot(cam_dir_body))
+                    });
+                    FlattenBlock::pack(
+                        sorted
+                            .into_iter()
+                            .take(MAX_FLATTEN_REGIONS)
+                            .map(|r| &r.flatten),
+                    )
+                }
+            }))
+            .unwrap_or_default();
     }
 
     // Use real (wall-clock) elapsed seconds for wave scroll — canonical sim
@@ -1411,6 +1591,13 @@ pub(super) fn update_body_terrain_atmosphere(
             continue;
         };
         mat.atmosphere_extra = *extra;
+        // ADR-0006: point the material at this body's live terrain entity so
+        // its bind-group prepare can resolve the height atlas + tile tree in
+        // the render world. Refreshed every frame, so terrain despawn/respawn
+        // (residency tiers, flatten invalidation) can never leave it stale.
+        mat.terrain_entity = tile_lookup_by_body
+            .get(&sky.body_id)
+            .map(|(entity, _, _)| *entity);
         // Sky-dome dev overrides (`< 0` keep the authored value).
         if tuning.strength >= 0.0 {
             mat.atmosphere.atmos_geom.z = tuning.strength;

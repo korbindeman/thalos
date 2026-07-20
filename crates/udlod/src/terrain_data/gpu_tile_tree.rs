@@ -29,6 +29,22 @@ pub struct GpuTileTree {
 }
 
 impl GpuTileTree {
+    /// The GPU storage buffer holding the flat `TileTreeEntry` array
+    /// (`[side][lod][x][y]`, row-major — the same indexing
+    /// `thalos_udlod::functions::lookup_tile_tree_entry` performs). Exposed so
+    /// external fullscreen passes (the `body_render` sky/ocean pass) can bind
+    /// the tile tree and resolve the resident height tile per pixel.
+    pub fn tile_tree_buffer(&self) -> &Buffer {
+        &self.tile_tree_buffer
+    }
+
+    /// The GPU storage buffer of per-`(side, lod)` tree-window origins
+    /// (`array<vec2<u32>>`, indexed `side * lod_count + lod`). Companion to
+    /// [`Self::tile_tree_buffer`] for external tile-tree walks.
+    pub fn origins_buffer(&self) -> &Buffer {
+        &self.origins_buffer
+    }
+
     fn new(device: &RenderDevice, tile_tree: &TileTree) -> Self {
         let tile_tree_buffer = StaticBuffer::empty_sized(
             None,

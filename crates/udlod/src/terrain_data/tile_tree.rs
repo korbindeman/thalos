@@ -185,9 +185,33 @@ pub struct TileTree {
     /// in. Identity when the terrain is not parented under a rotated grid.
     pub(crate) view_world_rotation: DQuat,
     pub(crate) approximate_height: f32,
+    /// Body-fixed forward (look) direction of the view, refreshed each frame in
+    /// [`Self::compute_requests`]. Used by the behind-view streaming cull.
+    view_forward: DVec3,
+    /// See [`TerrainViewConfig::cull_behind_view`].
+    cull_behind_view: bool,
 }
 
+/// Lower bound on the per-tile screen-space-error subdivision scale (see
+/// [`TileProvider::subdivision_scale`](crate::terrain_data::TileProvider::subdivision_scale)).
+/// Clamps how much flat terrain may pull in its refinement so a mis-tuned
+/// provider can never collapse detail entirely — worst case a flat region
+/// refines at ~55% of the distance threshold.
+const SSE_MIN_SCALE: f64 = 0.55;
+
+/// A tile whose direction from the view is more than this far off the forward
+/// axis (`cos 115°`) is a behind-view cull candidate. Wide enough that the
+/// entire forward hemisphere plus a generous side margin is always kept.
+const BEHIND_VIEW_COS: f64 = -0.42;
+
 impl TileTree {
+    /// The tree window's side length in tiles per LOD. External samplers of
+    /// the GPU tile-tree buffer (the `body_render` sky/ocean pass) need it to
+    /// reproduce `lookup_tile_tree_entry`'s index arithmetic.
+    pub fn tree_size(&self) -> u32 {
+        self.tree_size
+    }
+
     /// Creates a new tile_tree from a terrain and a terrain view config.
     pub fn new(tile_atlas: &TileAtlas, view_config: &TerrainViewConfig) -> Self {
         let model = &tile_atlas.model;
@@ -211,6 +235,8 @@ impl TileTree {
             origin_lod: view_config.origin_lod,
             view_world_position: default(),
             view_world_rotation: DQuat::IDENTITY,
+            view_forward: DVec3::NEG_Z,
+            cull_behind_view: view_config.cull_behind_view,
             approximate_height: (model.min_height + model.max_height) / 2.0,
             origins: Array2::default((model.side_count() as usize, tile_atlas.lod_count as usize)),
             data: Array4::default((
@@ -321,6 +347,23 @@ impl TileTree {
         tile_world_position.distance(self.view_world_position)
     }
 
+    /// True when the tile's centre lies more than [`BEHIND_VIEW_COS`] off the
+    /// view's forward axis — i.e. behind the camera by a wide margin. Uses the
+    /// body-fixed tile centre and [`Self::view_forward`], both in the model's
+    /// local frame (`model.translation` is the body centre, so the direction is
+    /// well-defined).
+    fn tile_is_behind_view(&self, tile: TileCoordinate, model: &TerrainModel) -> bool {
+        let count = TileCoordinate::count(tile.lod) as f64;
+        let centre_uv = (DVec2::new(tile.x as f64, tile.y as f64) + 0.5) / count;
+        let tile_pos =
+            Coordinate::new(tile.side, centre_uv).world_position(model, self.approximate_height);
+        let to_tile = tile_pos - self.view_world_position;
+        match to_tile.try_normalize() {
+            Some(dir) => dir.dot(self.view_forward) < BEHIND_VIEW_COS,
+            None => false,
+        }
+    }
+
     pub(super) fn compute_blend(&self, sample_world_position: DVec3) -> (u32, f32) {
         let view_distance = self.view_world_position.distance(sample_world_position);
         let target_lod = (self.blend_distance / view_distance)
@@ -410,6 +453,7 @@ impl TileTree {
 
     fn update(&mut self, view_position: DVec3, tile_atlas: &TileAtlas) {
         let model = &tile_atlas.model;
+        let provider = tile_atlas.provider();
         self.view_world_position = view_position;
 
         let view_coordinate = Coordinate::from_world_position(self.view_world_position, model);
@@ -445,7 +489,36 @@ impl TileTree {
                     let load_distance =
                         self.load_distance / TileCoordinate::count(tile_coordinate.lod) as f64;
 
-                    let state = if lod == 0 || tile_distance < load_distance {
+                    // Screen-space-error: on tiles the generator reports as
+                    // low-relief, pull the load threshold in so flat regions
+                    // stream fewer fine tiles. `subdivision_scale` is ≤ 1 and
+                    // floored, so this only ever *removes* detail relative to the
+                    // distance-only baseline — and it is consulted **only for
+                    // tiles that already pass the distance test**, which keeps the
+                    // provider query off the full tree sweep (thousands of slots)
+                    // and on the actual request set (hundreds).
+                    let mut requested = lod == 0 || tile_distance < load_distance;
+                    if requested && lod != 0 {
+                        let scale = provider
+                            .subdivision_scale(tile_coordinate, model)
+                            .clamp(SSE_MIN_SCALE, 1.0);
+                        if tile_distance >= load_distance * scale {
+                            requested = false;
+                        }
+                    }
+                    // Behind-view cull: defer synthesis of tiles clearly behind
+                    // the camera, beyond a near keep radius. `lod == 0` is never
+                    // deferred (it is the pinned fallback). Hole-free — see
+                    // `TerrainViewConfig::cull_behind_view`.
+                    if requested
+                        && lod != 0
+                        && self.cull_behind_view
+                        && tile_distance > self.morph_distance
+                        && self.tile_is_behind_view(tile_coordinate, model)
+                    {
+                        requested = false;
+                    }
+                    let state = if requested {
                         RequestState::Requested
                     } else {
                         RequestState::Released
@@ -704,6 +777,13 @@ impl TileTree {
 
             tile_tree.view_world_position = view_position;
             tile_tree.view_world_rotation = view_rotation;
+            // Body-fixed forward (camera looks down its local -Z). Only a
+            // direction, so the f32 camera rotation is precise enough here even
+            // at planet scale (the position rebase above is what needs f64).
+            let forward_world = view_transform.transform.rotation * Vec3::NEG_Z;
+            tile_tree.view_forward = (view_rotation.inverse() * forward_world.as_dvec3())
+                .try_normalize()
+                .unwrap_or(DVec3::NEG_Z);
 
             if paused_terrains.contains(terrain) {
                 // Keep the shader's high-precision basis current while
@@ -762,7 +842,11 @@ impl TileTree {
     /// balanced quadtree has a few hundred leaves, and the balance pass
     /// converges in O(`lod_count`) sweeps. Well under a frame on a single
     /// thread.
-    pub fn refine_draw_set_balanced(&self, model: &TerrainModel) -> Vec<TileCoordinate> {
+    pub fn refine_draw_set_balanced(
+        &self,
+        model: &TerrainModel,
+        provider: &dyn crate::terrain_data::TileProvider,
+    ) -> Vec<TileCoordinate> {
         let view_coordinate = Coordinate::from_world_position(self.view_world_position, model);
 
         // Step 1: distance-driven refinement — direct port of
@@ -783,7 +867,7 @@ impl TileTree {
             let mut next: Vec<TileCoordinate> = Vec::with_capacity(current.len() * 4);
             for tile in current.drain(..) {
                 let can_split = tile.lod + 1 < self.lod_count;
-                if can_split && self.should_subdivide(tile, view_coordinate, model) {
+                if can_split && self.should_subdivide(tile, view_coordinate, model, provider) {
                     for child in tile.children() {
                         next.push(child);
                     }
@@ -815,11 +899,22 @@ impl TileTree {
         tile: TileCoordinate,
         view_coordinate: Coordinate,
         model: &TerrainModel,
+        provider: &dyn crate::terrain_data::TileProvider,
     ) -> bool {
         let projected_view = view_coordinate.project_to_side(tile.side, model);
         let distance = self.compute_tile_distance(tile, projected_view, model);
         let threshold = self.subdivision_distance / TileCoordinate::count(tile.lod) as f64;
-        distance < threshold
+        if distance >= threshold {
+            // Fails on distance alone — no need to consult the provider. Keeps
+            // the SSE query off every rejected candidate in the refinement walk.
+            return false;
+        }
+        // Same screen-space-error scale the streaming pass applies, so what is
+        // drawn and what is streamed refine on one consistent threshold.
+        let scale = provider
+            .subdivision_scale(tile, model)
+            .clamp(SSE_MIN_SCALE, 1.0);
+        distance < threshold * scale
     }
 
     /// Iteratively splits any drawn tile whose neighbouring leaf is more
@@ -903,7 +998,8 @@ impl TileTree {
             let Ok(tile_atlas) = tile_atlases.get(terrain) else {
                 continue;
             };
-            tile_tree.draw_set = tile_tree.refine_draw_set_balanced(&tile_atlas.model);
+            tile_tree.draw_set =
+                tile_tree.refine_draw_set_balanced(&tile_atlas.model, tile_atlas.provider());
         }
     }
 }
@@ -953,6 +1049,8 @@ mod tests {
             origin_lod: 0,
             view_world_position: DVec3::ZERO,
             view_world_rotation: DQuat::IDENTITY,
+            view_forward: DVec3::NEG_Z,
+            cull_behind_view: false,
             approximate_height: 0.0,
         }
     }

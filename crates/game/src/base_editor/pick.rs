@@ -7,16 +7,18 @@
 //! levels out live (the editor pauses the sim but terrain streaming keeps
 //! running — see [`crate::rendering::terrain_residency::TerrainRebuildRequest`]).
 //!
-//! Coordinate trick (shared with `debug::raycast_debug_surface_cursor`): big_space
-//! render space and the heliocentric world frame share axes (cells are pure
-//! translations), so a *direction* is identical in both. We raycast the cursor in
-//! render space against the body's render-space sphere, then read the resulting
-//! direction straight off as a body-fixed direction after un-rotating by the
-//! body orientation.
+//! The cursor→surface raycast goes through the shared
+//! [`super::cursor_body_dir`], which intersects the body sphere in the
+//! heliocentric f64 frame using the god-view camera's *current-frame* pose
+//! (its fresh `CellCoord` + `Transform`) rather than its one-frame-stale
+//! `GlobalTransform` — so the pick stays glued to the cursor even when the
+//! camera pans fast. That requires this system to run
+//! `.after(`[`crate::god_view::GodViewCameraSet`]`)`.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::HeightSource;
 use thalos_physics_canonical::types::BodyState;
 use thalos_physics_local::HeightSourceRegistry;
@@ -31,7 +33,7 @@ use crate::structures::{
     StructureKind, StructurePlacement, StructureRegistry, apply_structure_flatten,
 };
 
-use super::{BaseEditor, BaseEditorMode, base_editor_open, ray_vs_sphere_dir};
+use super::{BaseEditor, BaseEditorMode, base_editor_open, cursor_body_dir};
 
 /// Half-extent of the (square) building pad, metres.
 const SITE_HALF_M: f64 = 75.0;
@@ -70,6 +72,9 @@ impl Plugin for BaseEditorPickPlugin {
             Update,
             (update_site_pick, draw_pick_ghost)
                 .chain()
+                // Pick after the god-view camera moves so the raycast reads this
+                // frame's camera pose (see `cursor_body_dir`).
+                .after(crate::god_view::GodViewCameraSet)
                 .run_if(base_editor_open),
         );
     }
@@ -90,8 +95,8 @@ fn update_site_pick(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
+    cameras: Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: Query<&Grid, With<BigSpace>>,
 ) {
     if editor.mode != BaseEditorMode::PickSite {
         return;
@@ -119,7 +124,7 @@ fn update_site_pick(
     pick.hit = compute_pick_hit(
         &windows,
         &cameras,
-        &bodies,
+        &root_grid,
         &height_sources,
         body_id,
         body_state,
@@ -147,8 +152,8 @@ fn update_site_pick(
 
 fn compute_pick_hit(
     windows: &Query<&Window, With<PrimaryWindow>>,
-    cameras: &Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: &Query<(&RealSpaceBody, &GlobalTransform)>,
+    cameras: &Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: &Query<&Grid, With<BigSpace>>,
     height_sources: &HeightSourceRegistry,
     body_id: BodyId,
     body_state: &BodyState,
@@ -156,14 +161,18 @@ fn compute_pick_hit(
 ) -> Option<PickHit> {
     let window = windows.single().ok()?;
     let cursor = window.cursor_position()?;
-    let (camera, cam_gt) = cameras.single().ok()?;
-    let (_, body_gt) = bodies.iter().find(|(rsb, _)| rsb.body_id == body_id)?;
-    let center_render = body_gt.translation();
-    let ray = camera.viewport_to_world(cam_gt, cursor).ok()?;
-    let radius_render = (radius_m * SHIP_SCALE) as f32;
-    let dir_render = ray_vs_sphere_dir(ray.origin - center_render, *ray.direction, radius_render)?;
-    let dir_world = dir_render.as_dvec3().normalize();
-    let dir_body = (body_state.orientation.inverse() * dir_world).normalize();
+    let (camera, cam_cell, cam_transform) = cameras.single().ok()?;
+    let root_grid = root_grid.single().ok()?;
+    let dir_body = cursor_body_dir(
+        camera,
+        cam_cell,
+        cam_transform,
+        root_grid,
+        cursor,
+        body_state.position,
+        body_state.orientation,
+        radius_m,
+    )?;
     let height_m = height_sources
         .get(body_id)
         .and_then(|hs| hs.sample_height_m(dir_body.as_vec3(), PICK_LOD_M))

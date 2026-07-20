@@ -92,7 +92,7 @@ impl TileProvider for SyntheticTileProvider {
         tile_synthesis_pool().spawn(async move {
             let mut datas = Vec::with_capacity(attachments.len());
             for cfg in &attachments {
-                let data = match cfg.format {
+                let mut data = match cfg.format {
                     AttachmentFormat::R16 if cfg.name == "height" => match mode {
                         SyntheticTerrainMode::Analytic3d => {
                             synthesize_height_r16(&model, coord, cfg, min_height, max_height)
@@ -128,13 +128,18 @@ impl TileProvider for SyntheticTileProvider {
                         // for Flat mode is applied per-fragment in
                         // `body_terrain.wgsl` and reads from a debug
                         // uniform on `BodyTerrainMaterial`.
+                        // Alpha = neutral macro moisture (128 → 0.0).
                         SyntheticTerrainMode::Flat => {
-                            synthesize_constant_rgba8(cfg, [140, 140, 140, 255])
+                            synthesize_constant_rgba8(cfg, [140, 140, 140, 128])
                         }
                     },
                     AttachmentFormat::Rg16 => synthesize_zero_rg16(cfg),
                     AttachmentFormat::Rgb8 => AttachmentData::None,
                 };
+                // The `TileProvider` contract puts mip generation on the
+                // provider (off the main thread, and cacheable) — the atlas no
+                // longer regenerates it.
+                data.generate_mipmaps(cfg.texture_size, cfg.mip_level_count);
                 datas.push(data);
             }
             Ok(datas)
@@ -277,7 +282,10 @@ fn synthesize_albedo(
     let octaves = octaves_for_lod(coord.lod);
     let sample_count = SUPERSAMPLE_FACTOR * SUPERSAMPLE_FACTOR;
 
-    let mut out: Vec<[u8; 4]> = vec![[0, 0, 0, 255]; (size * size) as usize];
+    // Albedo alpha carries macro landcover moisture ([-1, 1] → [0, 255], see
+    // docs/terrain_macro.md); the synthetic surface has none, so encode
+    // neutral (128 → 0.0) rather than 255 (fully wet).
+    let mut out: Vec<[u8; 4]> = vec![[0, 0, 0, 128]; (size * size) as usize];
     out.par_chunks_mut(size as usize)
         .enumerate()
         .for_each(|(y, row)| {
@@ -306,7 +314,7 @@ fn synthesize_albedo(
                     (r / sample_count) as u8,
                     (g / sample_count) as u8,
                     (b / sample_count) as u8,
-                    255,
+                    128,
                 ];
             }
         });

@@ -78,8 +78,8 @@ Shown when no scenario is named: bare `just game` (the justfile default
 mode is now `menu`), `THALOS_SPAWN=menu`, or a bare `cargo run`. Skipped
 by: an explicit scenario, `just game shipyard`, `just game hub` (the PLAY
 route without the menu: orbit placeholder + `HubSpaceportBuild` +
-`OpenSpaceCenterOnStart` armed at build, and `register_boot_steps` appends
-the PLACEMENT step — the headless `hub` screenshot preset rides this), and
+`InitialContext(Some(SpaceCenter))` armed at build, and `register_boot_steps`
+appends the PLACEMENT step — the headless `hub` screenshot preset rides this), and
 **`THALOS_AUTO_RUN`** (truthy) — agents keep a one-shot launch into orbit.
 
 **A bare menu boot defers the world** (`loading::WorldState`, default
@@ -106,8 +106,8 @@ Scenario starts route on `WorldState`; **no process restart** either way:
 - **World absent** (the first start after a bare menu boot): every start is
   literally a boot triggered at runtime. `apply_menu_action` writes
   `SpawnSituation`, seats the sim where no terrain is needed
-  (`respawn_into` for orbit / EVA), arms the boot deferred-placement flags
-  for the rest (`DescentPlacement` for the descents + cruise,
+  (`respawn_into` for orbit / polar / EVA), arms the boot deferred-placement
+  flags for the rest (`DescentPlacement` for the descents + cruise,
   `RunwayPlacement` + settle for the runway pair), registers the **boot**
   step set (`steps_for(start, true)` — world load + placement), flips
   `WorldState::Live`, and re-enters `Loading` with destination `Running`.
@@ -115,7 +115,7 @@ Scenario starts route on `WorldState`; **no process restart** either way:
   scenario's own blueprint when the world spawns. PLAY prepends
   `world_load_steps()` to its spaceport-build pass the same way.
 - **World live** (menu re-entered from flight):
-  - **Orbit / Landing / Final approach / EVA** — same-craft:
+  - **Orbit / Polar orbit / Landing / Final approach / EVA** — same-craft:
     `scenario_menu::respawn_into` (the destruction picker's path) seats the
     craft, then straight to `Running`.
   - **Cruise** — craft swap to the Meridian: queues a

@@ -27,8 +27,7 @@ fn gate_enhanced_input_sources(
     shipyard_editor: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     base_editor: Option<Res<crate::base_editor::BaseEditor>>,
     space_center: Option<Res<crate::space_center::SpaceCenter>>,
-    editor_text: Option<Res<crate::shipyard_editor::EditorTextFocus>>,
-    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
+    ui_text: Res<thalos_ui::TextFieldFocus>,
     // Bundled to stay within Bevy's 16-param system limit.
     context_queries: (
         Query<(Entity, &ContextActivity<GameFlightContext>)>,
@@ -48,14 +47,10 @@ fn gate_enhanced_input_sources(
         .unwrap_or(false);
     let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
     let editor_open = shipyard_editor.as_deref().map(|e| e.open).unwrap_or(false);
-    // A focused text field (shipyard name, or any `crate::ui_widgets` field such
-    // as the settings HOTAS inputs) swallows the keyboard so raw keys edit the
-    // field instead of tripping flight/system bindings.
-    let editor_text_focused = editor_text
-        .as_deref()
-        .map(|t| t.is_focused())
-        .unwrap_or(false)
-        || ui_text.is_focused();
+    // A focused text field (shipyard name, settings HOTAS inputs — every
+    // field is a `thalos_ui::UiTextField` now) swallows the keyboard so raw
+    // keys edit the field instead of tripping flight/system bindings.
+    let editor_text_focused = ui_text.is_focused();
     // The start screen owns the frame like the shipyard editor does: every
     // gameplay context deactivates (the system context stays active for
     // Escape / screenshot). Folded into `editor_open` since the suppression

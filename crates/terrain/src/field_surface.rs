@@ -220,6 +220,7 @@ impl SurfaceQuery for FieldSurface {
             height_m: s.height_m,
             albedo_linear: albedo,
             roughness: s.roughness,
+            moisture: 0.0,
         }
     }
 

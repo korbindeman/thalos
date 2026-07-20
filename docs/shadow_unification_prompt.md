@@ -89,10 +89,46 @@
 > vertical cousin of round 5). Far-cascade texel at baseline is now ~11.5 m, so
 > far tree shadows are soft blobs by design.
 >
-> **Remaining:** user screenshots (§ Verification below) → bias/strength tuning;
-> per-fragment horizon term for spine materials (trees/grass/rocks); grass cast;
-> W18 PCSS / W2 cloud shadows; F8's `shade_surface` port retiring the
-> `SHADOW_FLOOR` attenuation. Status also recorded in
+> **Round 9 (2026-07-18, user: "overly pixelated, flicker while the sim runs;
+> want MSFS-tier fidelity across all scales"):** three changes, preview- +
+> headless-screenshot-verified (compile clean; interactive feel pending user).
+> The guiding conclusion (from how MSFS/AAA structure this): **don't stretch
+> one CSM across all scales** — MSFS splits "Shadow Maps" (a modest near-field
+> object CSM) from "Terrain Shadows" (wide-area heightfield-derived shading),
+> and stabilizes the rest with filtering + temporal accumulation.
+> 1. **Filtered PCF (the pixelation):** `shadow.wgsl`'s `cascade_factor` now
+>    uses a separable-tent kernel over a 4×4 `textureLoad` neighbourhood —
+>    exactly equivalent to averaging 3×3 *hardware-bilinear* comparison taps —
+>    so edges are smooth ~3-texel gradients instead of whole-texel staircases.
+>    No comparison-sampler bindings needed in any material. Per-vertex grass
+>    paths keep the cheap point 3×3 via new `sun_shadow_factor_vert`
+>    (interpolation smooths them; grass is the heaviest vertex workload).
+> 2. **Quantized sun stepping (the unpaused flicker):** round 8's body-fixed
+>    snap stabilized *translation*, but the sun still moved relative to the
+>    ground every simulated frame — every edge re-rasterized with fresh
+>    sub-texel phase. The rig now HOLDS its sun direction fixed in the BODY
+>    frame and steps only past `SUN_LOCK_STEP_RAD` (0.1°): between steps the
+>    light co-rotates rigidly with ground + casters + snap grid, so cascade
+>    content is frame-to-frame identical while the sim runs. Craft-local mode
+>    keeps the continuous sun (no body frame to hold). Scene lighting stays
+>    continuous — only the shadow rig quantizes (≤0.1° mismatch, invisible).
+> 3. **Caster-band trim (the "all scales" split, step 1):** far coarse tree
+>    rings (6–22 km, sub-pixel trees) no longer cast
+>    (`TREE_SHADOW_CASTER_MAX_M = 6 km` in vegetation.rs), so
+>    `CASCADE_MIN_HALF_M` shrank [0, 6.5 km, 23.5 km] → [0, 3 km, 6.5 km]:
+>    mid/far cascade texels 3.2 m → 1.5 m and 11.5 m → 3.2 m. The far field
+>    beyond the caster band is the heightfield horizon term's job (W12), per
+>    the MSFS split.
+>
+> **Remaining:** user interactive verification (crispness + unpaused
+> stability) → bias/strength tuning; **per-fragment heightfield horizon term
+> for all spine materials (W12 v2 — the "Terrain Shadows" half of the MSFS
+> split, now the top fidelity item)**; grass cast; W18 PCSS (contact-hardening
+> penumbras; consider Vogel-disk + per-pixel rotation only if TAA lands — 
+> without temporal accumulation rotated-disk noise shows raw); W2 cloud
+> shadows; F8's `shade_surface` port retiring the `SHADOW_FLOOR` attenuation.
+> Perf headroom if needed: hardware comparison samplers (halve tap cost),
+> round-robin far-cascade updates. Status also recorded in
 > `docs/graphics_fidelity.md` §3 F6 + §4.2 W5/W6/W12.
 
 Self-contained prompt for the agent taking on the shadow sprint. Read

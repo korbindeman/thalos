@@ -275,9 +275,13 @@ impl TileAtlasState {
                         );
                     }
 
-                    for (attachment_index, mut data) in datas.into_iter().enumerate() {
+                    // Mip chains arrive already generated: the `TileProvider`
+                    // builds them in its async task (on the synthesis pool), so
+                    // the main-thread `update` here does no per-tile mip
+                    // filtering and cache wrappers can store the fully-mipped
+                    // payload. See `AttachmentData::generate_mipmaps`.
+                    for (attachment_index, data) in datas.into_iter().enumerate() {
                         let attachment = &mut attachments[attachment_index];
-                        data.generate_mipmaps(attachment.texture_size, attachment.mip_level_count);
                         attachment
                             .uploading_tiles
                             .push(AtlasTileAttachmentWithData {
@@ -530,6 +534,13 @@ impl TileAtlas {
     /// state via `TileTree::best_resident_atlas_lod`.
     pub fn model(&self) -> &TerrainModel {
         &self.model
+    }
+
+    /// The tile-data provider backing this atlas. Exposed so the tile tree can
+    /// consult its screen-space-error hint ([`TileProvider::subdivision_scale`])
+    /// during refinement.
+    pub(crate) fn provider(&self) -> &dyn TileProvider {
+        self.provider.as_ref()
     }
 
     /// Maximum LOD depth tracked by this atlas. The deepest tracked LOD is

@@ -29,6 +29,14 @@ use crate::ground::rock_mesh::RockMeshData;
 use crate::ground::tile_lattice::{TileKey, TileLattice, cube_dir, tiles_per_side};
 use crate::ground::tree_mesh::TreeMeshData;
 
+/// Vegetation clearance above sea level (m): grass blades, GPU grass, and
+/// scattered plants/trees all require `height > sea_level +
+/// VEG_BEACH_CLEAR_M`, so the beach strand (the +4 m berm face the generator
+/// authors — BL-10) stays bare sand instead of growing a lawn to the
+/// waterline. Mirrored by the hardcoded gate in `gpu_grass.wgsl` — change
+/// together.
+pub const VEG_BEACH_CLEAR_M: f32 = 4.0;
+
 /// LOD sample hint for placement height queries — small enough to engage the
 /// full near-field cascade, matching what the player stands on.
 const PLACEMENT_LOD_M: f32 = 0.5;
@@ -321,7 +329,7 @@ pub struct VegScatterInput {
     pub species: Arc<[VegSpeciesPlacement]>,
     pub seed: u64,
     /// Sea level (m above reference radius); plants require
-    /// `height > sea_level + 1 m`. Pass `f32::MIN` for bodies without oceans.
+    /// `height > sea_level + VEG_BEACH_CLEAR_M`. Pass `f32::MIN` for bodies without oceans.
     pub sea_level_m: f32,
     /// Active terrain-flatten pad (e.g. the runway); plants are skipped where
     /// the pad has meaningful weight.
@@ -556,7 +564,7 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
                     continue;
                 };
-                if sample.height_m <= input.sea_level_m + 1.0 {
+                if sample.height_m <= input.sea_level_m + VEG_BEACH_CLEAR_M {
                     continue;
                 }
                 if sample.slope > sp.slope_limit || sample.grass_w < sp.min_grass_w {
@@ -579,7 +587,18 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     // sheltered hollows (the real ecotones, not a noise patch).
                     let clump = clump_field(dir, sp.layer, sp.clump_affinity);
                     let terrain = woody_terrain_factor(sp.layer, &sample, sp.slope_limit);
-                    sample.grass_w * alt * clump * terrain
+                    // Biome coupling: fold in the macro landcover the ground
+                    // already paints, so woody plants thin out on the dry-tan
+                    // steppe and vanish on the bare-soil / sand desert (moisture)
+                    // and above the latitude-descended treeline (cold lift),
+                    // instead of standing in the desert / at the poles. Mirrors
+                    // the ground's `vegetation_color` transfer — one world.
+                    let sin_lat = dir.y.abs();
+                    let eco_altitude_m =
+                        sample.height_m + thalos_terrain::climate_cold_lift_m(sin_lat) as f32;
+                    let biome =
+                        woody_biome_gate(sp.layer, source.landcover_moisture(dir), eco_altitude_m);
+                    sample.grass_w * alt * clump * terrain * biome
                 };
                 // Clearing around a flatten pad (e.g. the runway / spaceport
                 // basin): the *forest* fades in over a margin beyond the pad's
@@ -971,6 +990,46 @@ fn woody_terrain_factor(layer: VegLayer, sample: &PlacementSample, slope_limit: 
     (slope_factor * curve_factor).clamp(0.0, 1.0)
 }
 
+/// Biome suitability for **woody** plants (trees / shrubs) in `[0, 1]`, folding
+/// in the macro landcover the ground already paints so the woody layers stop
+/// ignoring climate (the scatter/biome coupling docs/terrain_macro.md §4,
+/// TM-P2r, calls for). Two terms, both mirroring the ground's `vegetation_color`
+/// transfer, so trees appear where the terrain reads forest / grass and vanish
+/// where it reads desert / tundra — one world:
+///
+/// - **Moisture** — trees follow the forest ↔ grass ↔ dry-tan ↔ bare-soil ramp:
+///   full on wet / temperate ground, thinning to scattered savanna on dry
+///   steppe, gone on the bare-soil / sand desert. Shrubs tolerate a little more
+///   dryness (scrub margins) but still bare out on true desert.
+/// - **Treeline** — via the climate-descended eco altitude (`height_m +
+///   climate_cold_lift`, which drops with latitude), woody cover stops where the
+///   ground greys to alpine / tundra, so the poles read treeless.
+///
+/// `moisture` is the macro field in `[-1, 1]`
+/// ([`HeightSource::landcover_moisture`](crate::ground::height_source::HeightSource::landcover_moisture));
+/// `eco_altitude_m = height_m + climate_cold_lift_m(sin_lat)`. Rocks never call
+/// this (they are placed inversely to grass and *want* the bare desert).
+fn woody_biome_gate(layer: VegLayer, moisture: f32, eco_altitude_m: f32) -> f32 {
+    let dryness = (0.5 - 0.5 * moisture).clamp(0.0, 1.0);
+    let moist = match layer {
+        // Trees: savanna-tolerant, but gone by the ground's bare-soil threshold.
+        VegLayer::Tree => smoothstep(0.82, 0.35, dryness),
+        // Shrubs push a little further into the dry margin before baring out.
+        VegLayer::Shrub => smoothstep(0.92, 0.42, dryness),
+        _ => 1.0,
+    };
+    // 1 below the lush band, ramping to 0 across the treeline the ground greys to
+    // alpine at (same constants as the ground palette). The generous low edge
+    // leaves mid-altitude temperate ground unaffected; latitude enters through
+    // `eco_altitude_m`, so a low-altitude polar site still crosses the treeline.
+    let below_treeline = smoothstep(
+        crate::ground::landcover::TREELINE_HI_M,
+        crate::ground::landcover::LUSH_HI_M,
+        eco_altitude_m,
+    );
+    moist * below_treeline
+}
+
 /// Slope at which woody density starts thinning, as a fraction of the species
 /// slope limit (below this, gentle ground carries full density).
 const SLOPE_THIN_FRAC: f32 = 0.5;
@@ -1067,8 +1126,15 @@ fn veg_hash(seed: u64, key: TileKey, species: u64, cand: u64, salt: u64) -> f64 
     (h & 0x000F_FFFF_FFFF_FFFF) as f64 / (1u64 << 52) as f64
 }
 
+// WGSL-parity smoothstep, safe for descending edges. Never guard the
+// denominator with `.max(EPSILON)` — that inverts descending-edge calls into
+// a hard step (INC-0005).
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    let denom = edge1 - edge0;
+    if denom.abs() < f32::EPSILON {
+        return if x >= edge0 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / denom).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 

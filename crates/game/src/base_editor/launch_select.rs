@@ -34,6 +34,7 @@ use thalos_world::BodyId;
 
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::coords::{SHIP_LAYER, SHIP_SCALE};
+use crate::game_context::{ContextHistory, GameContext};
 use crate::god_view::GodViewGizmos;
 use crate::loading::{AppState, LoadDestination, LoadingTracker, StepDesc, step};
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
@@ -48,7 +49,7 @@ use crate::staging::StagingPlan;
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
 
 use super::place::place_on_launchpad;
-use super::{BaseEditor, BaseEditorMode, ray_vs_sphere_dir};
+use super::{BaseEditor, BaseEditorMode, cursor_body_dir};
 
 /// External trigger for the launch flow: the shipyard's LAUNCH sets `arm`.
 /// Consumed by [`begin_launch_flow`].
@@ -143,6 +144,9 @@ impl Plugin for BaseEditorLaunchSelectPlugin {
                     update_hover_decal,
                 )
                     .chain()
+                    // Pick after the god-view camera moves so the raycast reads
+                    // this frame's camera pose (see `cursor_body_dir`).
+                    .after(crate::god_view::GodViewCameraSet)
                     .run_if(launch_select_active),
             )
             // Ungated: it must also *restore* the craft / hide the decal after
@@ -156,17 +160,24 @@ impl Plugin for BaseEditorLaunchSelectPlugin {
 }
 
 /// Open the god-view launch picker over `basin_id`, clearing any stale latch.
+/// The picker is a `GameContext::BaseEditor` session parented to **Flight** on
+/// the return stack (the craft is already rebuilt into an orbit hold), so both
+/// placing the craft and Escaping out back out to flight — "launched to fly",
+/// never back into the VAB or hub it was launched from.
 fn open_launch_select(
     editor: &mut BaseEditor,
     basin_id: StructureId,
     pending: &mut PendingLaunch,
     hover: &mut LaunchHover,
+    next: &mut NextState<GameContext>,
+    history: &mut ContextHistory,
 ) {
-    editor.open = true;
     editor.mode = BaseEditorMode::SelectLaunch;
     editor.active_site = Some(basin_id);
     pending.0 = None;
     hover.0 = None;
+    history.0 = vec![GameContext::Flight];
+    next.set(GameContext::BaseEditor);
 }
 
 /// Consume a [`SpaceportLaunchRequest`]: open the god-view now if the spaceport
@@ -185,6 +196,8 @@ fn begin_launch_flow(
     mut tracker: ResMut<LoadingTracker>,
     mut dest: ResMut<LoadDestination>,
     mut next_state: ResMut<NextState<AppState>>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
 ) {
     if !request.arm {
         return;
@@ -192,7 +205,16 @@ fn begin_launch_flow(
     request.arm = false;
     if let Some(site) = runway_site.as_deref() {
         // Spaceport already built (this session) — open the picker immediately.
-        open_launch_select(&mut editor, site.basin_id, &mut pending, &mut hover);
+        if let Some(next) = next_ctx.as_mut() {
+            open_launch_select(
+                &mut editor,
+                site.basin_id,
+                &mut pending,
+                &mut hover,
+                next,
+                &mut history,
+            );
+        }
         info!("launch-select: spaceport ready — choose a launch point");
     } else {
         // First launch: build the spaceport behind a brief loading pass, then
@@ -265,6 +287,8 @@ fn open_launch_select_on_running(
     mut editor: ResMut<BaseEditor>,
     mut pending: ResMut<PendingLaunch>,
     mut hover: ResMut<LaunchHover>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
 ) {
     if !select_pending.pending {
         return;
@@ -274,7 +298,17 @@ fn open_launch_select_on_running(
         warn!("launch-select: spaceport not built on Running entry — aborting");
         return;
     };
-    open_launch_select(&mut editor, site.basin_id, &mut pending, &mut hover);
+    let Some(next) = next_ctx.as_mut() else {
+        return;
+    };
+    open_launch_select(
+        &mut editor,
+        site.basin_id,
+        &mut pending,
+        &mut hover,
+        next,
+        &mut history,
+    );
     info!("launch-select: choose a launch point");
 }
 
@@ -292,8 +326,8 @@ fn update_launch_pick(
     mouse: Res<ButtonInput<MouseButton>>,
     ui_gate: Res<crate::hud::UiPointerGate>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
+    cameras: Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: Query<&Grid, With<BigSpace>>,
 ) {
     if pending.0.is_some() {
         return; // placement in flight — don't move the latch
@@ -302,7 +336,7 @@ fn update_launch_pick(
         return;
     };
     let Some((pad_r, body_id, dir_body)) =
-        cursor_pad_dir(&sim, &solar, &registry, basin_id, &windows, &cameras, &bodies)
+        cursor_pad_dir(&sim, &solar, &registry, basin_id, &windows, &cameras, &root_grid)
     else {
         hover.0 = None;
         return;
@@ -318,16 +352,17 @@ fn update_launch_pick(
 }
 
 /// Raycast the cursor against the base's pad sphere. Returns `(pad_r, body_id,
-/// dir_body)` — the pad radius `radius + E`, the body, and the grid-free
-/// body-fixed hit direction. Mirrors `place::compute_pad_hover`'s ray math.
+/// dir_body)` — the pad radius `radius + E`, the body, and the body-fixed hit
+/// direction. Delegates the ray math to the shared, lag-free
+/// [`cursor_body_dir`].
 fn cursor_pad_dir(
     sim: &SimulationState,
     solar: &SolarSystemState,
     registry: &StructureRegistry,
     basin_id: StructureId,
     windows: &Query<&Window, With<PrimaryWindow>>,
-    cameras: &Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: &Query<(&RealSpaceBody, &GlobalTransform)>,
+    cameras: &Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: &Query<&Grid, With<BigSpace>>,
 ) -> Option<(f64, BodyId, DVec3)> {
     let basin = registry.get(basin_id)?;
     let body_id = basin.body_id;
@@ -342,16 +377,18 @@ fn cursor_pad_dir(
 
     let window = windows.single().ok()?;
     let cursor = window.cursor_position()?;
-    let (camera, cam_gt) = cameras.single().ok()?;
-    let (_, body_gt) = bodies.iter().find(|(rsb, _)| rsb.body_id == body_id)?;
-    let center_render = body_gt.translation();
-    let ray = camera.viewport_to_world(cam_gt, cursor).ok()?;
-    let dir_render = ray_vs_sphere_dir(
-        ray.origin - center_render,
-        *ray.direction,
-        (pad_r * SHIP_SCALE) as f32,
+    let (camera, cam_cell, cam_transform) = cameras.single().ok()?;
+    let root_grid = root_grid.single().ok()?;
+    let dir_body = cursor_body_dir(
+        camera,
+        cam_cell,
+        cam_transform,
+        root_grid,
+        cursor,
+        body_state.position,
+        body_state.orientation,
+        pad_r,
     )?;
-    let dir_body = (body_state.orientation.inverse() * dir_render.as_dvec3()).normalize();
     Some((pad_r, body_id, dir_body))
 }
 
@@ -401,12 +438,13 @@ fn launch_point_under(
 #[allow(clippy::too_many_arguments)]
 fn apply_launch_placement(
     mut pending: ResMut<PendingLaunch>,
-    mut editor: ResMut<BaseEditor>,
     mut sim: ResMut<SimulationState>,
     solar: Res<SolarSystemState>,
     registry: Res<StructureRegistry>,
     mut active_bubble: ResMut<ActiveLocalBubble>,
     mut relight: ResMut<LaunchRelightEngines>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
     mut commands: Commands,
     ship_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
     children_q: Query<&Children>,
@@ -512,11 +550,15 @@ fn apply_launch_placement(
     }
 
     // Placed: resume to 1× (the placement cores are warp-neutral) and close the
-    // god-view. On close, `apply_open_state` restores the flight view / HUD and
-    // the flight camera re-acquires the now-parked craft.
+    // god-view by backing out to Flight (the picker was parented to Flight). On
+    // close, `apply_open_state` restores the flight view / HUD and the flight
+    // camera re-acquires the now-parked craft.
     sim.simulation.warp.reset();
     pending.0 = None;
-    editor.open = false;
+    history.0.clear();
+    if let Some(next) = next_ctx.as_mut() {
+        next.set(GameContext::Flight);
+    }
     info!("launch-select: launched from {:?}", target.kind);
 }
 

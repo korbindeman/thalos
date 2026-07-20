@@ -40,8 +40,8 @@ use bevy::{
     },
     ecs::system::SystemChangeTick,
     pbr::{
-        MaterialPlugin, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts, SetMaterialBindGroup,
-        SetMeshViewBindGroup,
+        ExtractedAtmosphere, MaterialPlugin, MeshPipelineViewLayoutKey, MeshPipelineViewLayouts,
+        SetMaterialBindGroup, SetMeshViewBindGroup,
     },
     prelude::*,
     render::{
@@ -128,6 +128,11 @@ bitflags::bitflags! {
         const NORMAL_PREPASS         = 1 << 19;
         const MOTION_VECTOR_PREPASS  = 1 << 20;
         const DEFERRED_PREPASS       = 1 << 21;
+        // Like the prepass bits: layout-selection only. Set when the view
+        // carries a stock Bevy atmosphere (`ExtractedAtmosphere`), which makes
+        // Bevy build the view's bind group with the `,atmosphere` layout
+        // variant (extra LUT bindings appended to group 0).
+        const ATMOSPHERE             = 1 << 22;
         const MSAA_RESERVED_BITS = TerrainPipelineFlags::MSAA_MASK_BITS << TerrainPipelineFlags::MSAA_SHIFT_BITS;
     }
 }
@@ -201,8 +206,10 @@ impl TerrainPipelineFlags {
     /// prepass bits. Must match the key Bevy uses to build the view's bind group
     /// (`MeshPipelineViewLayoutKey::from(Msaa) | from(ViewPrepassTextures)`), since
     /// `SetMeshViewBindGroup<0>` binds that group against this pipeline's layout-0.
-    /// OIT / Bevy-atmosphere bits are intentionally omitted: the terrain camera uses
-    /// neither (Thalos has its own atmosphere pass). Extend here if that changes.
+    /// The OIT bit is intentionally omitted (the terrain camera doesn't use it);
+    /// the ATMOSPHERE bit is live — the game's experimental stock-Bevy-atmosphere
+    /// toggle puts `ExtractedAtmosphere` on the ship view. Extend here if the
+    /// camera gains further layout-changing features.
     pub fn view_layout_key(&self) -> MeshPipelineViewLayoutKey {
         let mut key = MeshPipelineViewLayoutKey::empty();
         if self.msaa_samples() > 1 {
@@ -219,6 +226,9 @@ impl TerrainPipelineFlags {
         }
         if self.contains(TerrainPipelineFlags::DEFERRED_PREPASS) {
             key |= MeshPipelineViewLayoutKey::DEFERRED_PREPASS;
+        }
+        if self.contains(TerrainPipelineFlags::ATMOSPHERE) {
+            key |= MeshPipelineViewLayoutKey::ATMOSPHERE;
         }
         key
     }
@@ -470,6 +480,10 @@ pub(crate) fn queue_terrain<M: Material>(
         Has<NormalPrepass>,
         Has<MotionVectorPrepass>,
         Has<DeferredPrepass>,
+        // Same layout-matching contract as the prepass markers: a view with a
+        // stock Bevy atmosphere binds the `,atmosphere` mesh-view layout
+        // variant, so the pipeline's layout-0 must agree.
+        Has<ExtractedAtmosphere>,
     )>,
     // Unused since 0.19 dropped the change-tick arg from `BinnedRenderPhase::add`;
     // kept in the signature as the queue system's param list is otherwise fixed.
@@ -489,6 +503,7 @@ pub(crate) fn queue_terrain<M: Material>(
         normal_prepass,
         motion_vector_prepass,
         deferred_prepass,
+        has_atmosphere,
     ) in &views
     {
         let Some(opaque_phase) = opaque_render_phases.get_mut(&view.retained_view_entity) else {
@@ -529,6 +544,9 @@ pub(crate) fn queue_terrain<M: Material>(
             }
             if deferred_prepass {
                 flags |= TerrainPipelineFlags::DEFERRED_PREPASS;
+            }
+            if has_atmosphere {
+                flags |= TerrainPipelineFlags::ATMOSPHERE;
             }
 
             if gpu_tile_atlas.is_spherical {

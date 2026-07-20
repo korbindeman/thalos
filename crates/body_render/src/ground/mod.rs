@@ -50,7 +50,7 @@ mod water_material;
 
 pub use body_material::{
     BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT,
-    ShadowCascadeBlock, TerrainShadingStyle,
+    FlattenBlock, FlattenRegionGpu, MAX_FLATTEN_REGIONS, ShadowCascadeBlock, TerrainShadingStyle,
 };
 pub use gpu_grass::{
     GPU_GRASS_BAND_COUNT, GPU_GRASS_BANDS, GPU_GRASS_REACH_M, GPU_GRASS_SNAP_SLACK_M,

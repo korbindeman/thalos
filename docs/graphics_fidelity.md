@@ -259,7 +259,7 @@ Two layers deliver "objects aren't lit when terrain/things block the sun":
 |---|---|---|---|---|---|
 | — | Cascaded sun-shadow rig (terrain/trees/grass/rocks receive; trees+rocks cast) | ✅ | — | done | `sun_shadow.rs` + `thalos::shadow`. Open tuning: region size, bias, PCF |
 | W5 | **Caster + receiver unification** (= F6): craft, gear, buildings, pads, tanks, runway cast into and receive the rig | ☑ | Low | THIS | **Landed 2026-07-02 (compile + clippy clean, awaiting screenshots) — ONE SHADOW WORLD.** Every former Bevy-CSM receiver now samples `thalos::shadow`: the hull via `ship_part.wgsl` (F6b, as before), and everything else via the new **`ShadowedStandardMaterial`** (`body_render::craft::ShadowReceiveExtension` + `assets/shaders/shadowed_standard.wgsl` — stock PBR + rig receive, fanned per-frame by `apply_craft_shadow`): base buildings/pads/tanks/tarmac, runway paving+posts, plain craft parts (pod/engine/wing/control-surface/nacelle/gear), and the EVA capsule. Runway top/skirt/posts now also **cast** (`SHADOW_CASTER_LAYER`). **Stock Bevy CSM on the sun light is DISABLED** (`spawn.rs`, `shadow_maps_enabled: false`) — exactly one shadow definition exists. The old analytic terrain craft-shadow proxy (`BodyTerrainShadow` capsule/quad ray-test) is **deleted** (shader + `ground_terrain.rs` driver + `THALOS_TERRAIN_CRAFT_SHADOW`). In orbit / above 6 km AGL the rig switches to **craft-local mode** (cascade 0 centred on the craft, far cascades parked) so the hull keeps self-shadowing without ground cascades. F8's `shade_surface` port later retires the stylized `CRAFT_SHADOW_FLOOR`/`SHADOW_FLOOR` attenuation |
-| W2 | **Cloud shadows on the ground** (+ objects): project the planet-fixed `CloudCoverageMap` along the sun, attenuate sun + aerial in-scatter | ☐ | Low | THIS | Skybolt / UE Volumetric Cloud |
+| W2 | **Cloud sun transmittance for every receiver** (= cloud §3.5 / CLOUD-5): a body-fixed globe tail + view/sun-aligned near cascades derived from the canonical density field; terrain, objects, water, atmosphere shafts, and ambient all consume it | ☐ | High | later | A coverage-map projection is a debug rung only; the final field must match visible 3-D density. Nubis / Skybolt / UE Volumetric Cloud |
 | W6 | Stable CSM: bounding-sphere fit + **floating-origin-relative** texel snap; slope-scaled normal-offset bias per cascade | ☑ | Low-Med | THIS | **Landed 2026-07-02 (awaiting screenshots).** Per-cascade texel snapping in the light plane already existed (render-space/floating-origin-relative, craft-centred); added the **receiver normal-offset + slope-scaled depth bias** in `thalos::shadow`: `ShadowCascadeBlock` grew `sun_dir` + per-cascade texel size (`params.y`), and the new `sun_shadow_factor_nrm(pos, normal, …)` offsets the sample point ~1 texel along the surface normal and scales the bias by tanθ to the sun. Terrain (`height_n`), hull, and all `ShadowedStandardMaterial` surfaces use it; foliage/grass keep the normal-less path at `base × 2.5` (≈ the old tuned biases). Base biases dropped 0.6/2.5/10 m → 0.25/1/4 m (less peter-panning). Tuning knobs: `CASCADE_BIAS_M`, `NORMAL_OFFSET_TEXELS`, `MAX_SLOPE_SCALE`, `NO_NORMAL_BIAS_SCALE` |
 | W12 | **Terrain horizon-angle self-shadow** sampled by *all* surfaces (mountain shadows valley + objects) | ◐ | Med-High | next | Terrain-side already ships (`terrain_self_shadow` height-atlas march in `body_terrain.wgsl`, bounded by resident tiles). **Object-side v1 landed 2026-07-02:** `body_render::horizon_sun_visibility` (pure f64 body-local march of the body's `HeightSource` along the sun azimuth, ~30 km reach, no bake) evaluated at the craft each frame in `update_sun_light` and multiplied into the sun `DirectionalLight` illuminance — a mountain between the low sun and the parked craft/base now pulls the direct term on hull/structures/EVA to 0 (ambient sky fill deliberately kept). **Remaining for full W12:** per-fragment horizon term for trees/grass/rocks (spine materials), longer-than-resident-tile terrain reach, max-mip acceleration |
 | W18 | Contact shadows + PCSS contact-hardening | ☐ | Med | later | short screen-space depth march (reuse `SceneDepthImage`); grounds objects, fixes peter-panning |
@@ -282,13 +282,17 @@ Two layers deliver "objects aren't lit when terrain/things block the sun":
 
 ## 4.5 Atmosphere / aerial / clouds / water
 
+The high-fidelity cloud direction is now a dedicated program in
+[clouds.md](clouds.md). This table keeps the stable W-IDs, but cloud design,
+phase dependencies, and acceptance criteria live there.
+
 | ID | Item | Status | Effort | Sprint | Notes / source |
 |---|---|---|---|---|---|
 | — | Atmosphere Mie retune (clean continental haze) | ◐ | — | THIS | `assets/bodies/thalos.ron`; awaiting noon screenshot |
 | — | Object aerial recession (foliage/rocks → sky haze) | ◐ | — | THIS | `object_aerial_recession`; fold inside `shade_surface` so it can't be forgotten (one-world invariant #5) |
 | W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
-| W15 | Nubis cloud lighting (powder + multi-scatter octaves + isotropic floor) | ☐ | Med | later | Schneider 2023 |
-| W16 | Quarter-res + Bayer + neighborhood-clamp cloud reprojection (**body-fixed** motion vectors) | ☐ | Med | later | fixes cloud "not ready" ghosting; gated on W13 |
+| W15 | Atmosphere-coupled Nubis cloud lighting (powder + multi-scatter octaves + shared sun/sky transmittance) (= CLOUD-4) | ☐ | High | later | cloud §3.4 · Schneider 2023 |
+| W16 | View-relative 3×3 amortized cloud reconstruction, neighborhood-clamped body-fixed history, and screenshot mode (= CLOUD-2) | ☐ | High | later | cloud §3.3; cloud-local resolve is **not gated on W13** |
 
 ## 4.6 Terrain material
 
@@ -320,7 +324,7 @@ materials** instead of constant colours.
 
 | ID | Item | Status | Effort | Sprint | Notes |
 |---|---|---|---|---|---|
-| W13 | **TAA / temporal resolve** in the **body-fixed** frame | ☐ | Med-High | later | unblocks dithered LOD cross-fade + cloud resolve + veg shimmer (gates 4 items). Motion-vector story under big_space/dual-camera is the deferral reason. **Open Q7** |
+| W13 | **TAA / temporal resolve** in the **body-fixed** frame | ☐ | Med-High | later | unblocks whole-scene dithered LOD cross-fade + vegetation/edge stability. Cloud reconstruction owns a local depth/motion history (CLOUD-2) and no longer waits on this fork. Motion-vector story under big_space/dual-camera is the deferral reason. **Open Q7** |
 | 6b | Dithered mesh↔impostor LOD cross-fade | ☐ | Med | later | gated on W13 |
 | W17 | Slice-6 distant-body view: UDLOD at all ranges, delete the flat-colour impostor branch, re-home limb glow onto BodySky | ☐ | High | later | the interim solid-colour impostor breaks Hapke↔Vegetated reconvergence at the swap. **Open Q6** |
 
@@ -447,8 +451,10 @@ screenshot from the user. Structural changes are announced before they're made
 6. **Slice-6 distant-body view (W17)** — in scope this cycle (UDLOD at all ranges
    + delete the impostor branch + ~2.5k lines of dead bake code), or ride the
    interim impostor and mask the swap with W1?
-7. **TAA gate (W13)** — sanction it as a mid-term track (unblocks 4 items; needs
-   body-fixed motion vectors under big_space), or stay SMAA-only?
+7. **TAA gate (W13)** — sanction it as a mid-term whole-scene track (dithered
+   LOD and vegetation/edge stability; needs body-fixed motion vectors under
+   big_space), or stay SMAA-only? Cloud-local reconstruction is decided inside
+   the cloud program and does not wait on this choice.
 8. **Sky-view LUT light model** — LUT the sun only (keep moon/star analytic;
    simpler, recommended) or rebuild sky-view per dominant light (correct moonlit
    reflections, more cost)? Blocks W7's parameterization.

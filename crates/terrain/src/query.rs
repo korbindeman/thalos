@@ -114,6 +114,11 @@ pub struct SurfaceSample {
     pub albedo_linear: Vec3,
     /// PBR roughness, 0..1.
     pub roughness: f32,
+    /// Macro landcover moisture in `[-1, 1]` (+ wet, − dry) — the planet-scale
+    /// f64 field the terrain shader's wrapped fine noise modulates
+    /// (docs/terrain_macro.md). Baked into the tile albedo attachment's alpha
+    /// channel. `0.0` for backings without a landcover model.
+    pub moisture: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -156,6 +161,14 @@ pub trait SurfaceQuery: Send + Sync {
     /// ray-casts, and altitude readouts.
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
         self.sample(dir, lod_m).height_m
+    }
+
+    /// Macro landcover moisture in `[-1, 1]` (+ wet, − dry) at unit direction
+    /// `dir`, full detail — the point-query companion of
+    /// [`SurfaceSample::moisture`] for consumers that don't need a full sample
+    /// (grass builders, scatter). `0.0` for backings without a landcover model.
+    fn landcover_moisture(&self, _dir: DVec3) -> f32 {
+        0.0
     }
 
     /// Body reference radius, metres.
@@ -523,6 +536,10 @@ impl SurfaceQuery for FlattenedSurface {
         self.flatten_height(dir.as_dvec3(), self.inner.sample_height_m(dir, lod_m))
     }
 
+    fn landcover_moisture(&self, dir: DVec3) -> f32 {
+        self.inner.landcover_moisture(dir)
+    }
+
     fn radius_m(&self) -> f32 {
         self.inner.radius_m()
     }
@@ -573,6 +590,7 @@ pub fn surface_sample(
             height_m: 0.0,
             albedo_linear: Vec3::ZERO,
             roughness: 0.5,
+            moisture: 0.0,
         };
     }
     let dynamic_lod = lod_m.max(1e-6).log2();
@@ -582,6 +600,7 @@ pub fn surface_sample(
         height_m,
         albedo_linear: base.albedo_linear,
         roughness: base.roughness,
+        moisture: 0.0,
     }
 }
 

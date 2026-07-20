@@ -373,19 +373,16 @@ fn register_boot_steps(
     }
 }
 
-// Visual palette — kept local to this module so the loading screen can
-// render on frame 1 (before `hud::theme::init_theme` has populated the
-// `HudTheme` resource). Values mirror `HudTheme` so the loading screen
-// and the in-game HUD feel like the same UI.
-const SCREEN_BG: Color = Color::srgb(0.040, 0.038, 0.034);
-const TRACK_BG: Color = Color::srgba(0.085, 0.080, 0.070, 1.0);
-const TRACK_BORDER: Color = Color::srgba(0.46, 0.43, 0.36, 0.66);
-const ACCENT: Color = Color::srgba(0.95, 0.70, 0.28, 1.0);
-const TEXT_DIM: Color = Color::srgba(0.62, 0.60, 0.53, 1.0);
-const TEXT_FAINT: Color = Color::srgba(0.62, 0.60, 0.53, 0.55);
+// Colours come straight from the shared token consts (`thalos_ui::tokens`) —
+// no theme *resource* dependency, so the loading screen can render on frame 1
+// (before `thalos_ui::init_ui_theme` has run); only the font asset loads
+// asynchronously.
+use thalos_ui::tokens::{ACCENT, SCREEN_BG, TEXT_DIM, TEXT_FAINT};
+
+const TRACK_BG: Color = Color::srgba(1.0, 1.0, 1.0, 0.10);
 
 const PROGRESS_BAR_WIDTH: f32 = 360.0;
-const PROGRESS_BAR_HEIGHT: f32 = 14.0;
+const PROGRESS_BAR_HEIGHT: f32 = 4.0;
 
 fn spawn_loading_screen(
     mut commands: Commands,
@@ -396,7 +393,8 @@ fn spawn_loading_screen(
     if !existing.is_empty() {
         return;
     }
-    let font = FontSource::Handle(asset_server.load::<Font>("fonts/FiraCode-Regular.ttf"));
+    let display_font = FontSource::Handle(asset_server.load::<Font>("fonts/Inter-Light.ttf"));
+    let font = FontSource::Handle(asset_server.load::<Font>("fonts/Inter-Regular.ttf"));
 
     commands
         .spawn((
@@ -424,13 +422,12 @@ fn spawn_loading_screen(
             Name::new("LoadingScreen"),
         ))
         .with_children(|root| {
-            // Title — large, accent-gold, monospace. Letter-spacing widens
-            // it a touch so the all-caps reads as a logotype.
+            // Title — the logotype, in the display face.
             root.spawn((
                 Text::new("THALOS"),
                 TextFont {
-                    font: font.clone(),
-                    font_size: FontSize::Px(56.0),
+                    font: display_font,
+                    font_size: FontSize::Px(52.0),
                     ..default()
                 },
                 TextColor(ACCENT),
@@ -446,15 +443,13 @@ fn spawn_loading_screen(
                 Node {
                     width: Val::Px(PROGRESS_BAR_WIDTH),
                     height: Val::Px(PROGRESS_BAR_HEIGHT),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    border_radius: BorderRadius::all(Val::Px(2.0)),
                     flex_direction: FlexDirection::Row,
                     align_items: AlignItems::Stretch,
                     overflow: Overflow::clip(),
                     ..default()
                 },
                 BackgroundColor(TRACK_BG),
-                BorderColor::all(TRACK_BORDER),
                 Name::new("LoadingProgressTrack"),
             ))
             .with_children(|track| {

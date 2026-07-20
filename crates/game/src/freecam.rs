@@ -21,8 +21,12 @@
 //!   bail early, leaving the camera transform under freecam control.
 //! - [`GameFlightContext`] is suspended so movement keys don't simultaneously
 //!   pitch/yaw/roll the ship.
-//! - Sim time is paused through `sim_clock::SimClock`, while camera motion
-//!   continues on wall-clock time.
+//! - Sim time follows the craft's warp eligibility **snapshotted on enter**:
+//!   if the vehicle could time-warp (>1×) at that moment, freecam is *not* a
+//!   pause source — warp keys keep driving `SimClock` as in normal flight.
+//!   If warp was capped at ≤1× (atmosphere, walking while moving, …), freecam
+//!   freezes sim time so framing a dynamic surface flight doesn't advance the
+//!   craft. Camera motion always uses wall-clock time either way.
 //! - No terrain collision — flying through a planet is the point.
 
 use bevy::math::DVec3;
@@ -30,13 +34,19 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_input::game::GameInputIntent;
 
+use crate::bridge::WarpLimits;
 use crate::camera::{ActiveCamera, OrbitCamera, ShipCamera};
 use crate::debug::DebugMode;
+use crate::rendering::SimulationState;
 use crate::view::ViewMode;
 
 #[derive(Resource, Debug)]
 pub struct FreeCam {
     pub active: bool,
+    /// When `active`, whether freecam should leave sim time under warp control
+    /// instead of freezing [`crate::sim_clock::SimClock`]. Set only on enter
+    /// from [`craft_allows_time_warp`]; cleared on exit.
+    pub allow_sim_time: bool,
     /// Base translation speed in m/s before Shift/Ctrl multipliers.
     /// Scroll adjusts this in log-space so the same wheel input feels
     /// proportional at every scale.
@@ -47,9 +57,25 @@ impl Default for FreeCam {
     fn default() -> Self {
         Self {
             active: false,
+            allow_sim_time: false,
             base_speed_m_s: FREECAM_DEFAULT_SPEED_M_S,
         }
     }
+}
+
+/// True when the craft's current warp cap admits any ladder rung above 1×.
+///
+/// Matches "allowed to time warp" as players mean it: not merely unpausing to
+/// 1×, but accelerating sim time. Uses [`WarpLimits`] (regime policy applied
+/// this frame) against the live warp ladder.
+fn craft_allows_time_warp(sim: &SimulationState, limits: &WarpLimits) -> bool {
+    let cap = limits.max_level;
+    sim.simulation
+        .warp
+        .levels()
+        .iter()
+        .enumerate()
+        .any(|(i, &speed)| i <= cap && speed > 1.0)
 }
 
 const FREECAM_DEFAULT_SPEED_M_S: f64 = 100.0;
@@ -92,14 +118,17 @@ fn toggle_freecam_system(
     view: Res<ViewMode>,
     input: Res<GameInputIntent>,
     shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
+    sim: Res<SimulationState>,
+    warp_limits: Res<WarpLimits>,
     mut freecam: ResMut<FreeCam>,
-    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
+    ui_text: Res<thalos_ui::TextFieldFocus>,
 ) {
     // Auto-disable when leaving ship view — map view has no freecam analogue
     // and we don't want input gating to drift while the user can't recover.
     // [`gate_enhanced_input_sources`] picks up the change next PreUpdate.
     if freecam.active && *view != ViewMode::Ship {
         freecam.active = false;
+        freecam.allow_sim_time = false;
         return;
     }
 
@@ -120,7 +149,13 @@ fn toggle_freecam_system(
         return;
     }
 
-    freecam.active = !freecam.active;
+    if freecam.active {
+        freecam.active = false;
+        freecam.allow_sim_time = false;
+    } else {
+        freecam.allow_sim_time = craft_allows_time_warp(&sim, &warp_limits);
+        freecam.active = true;
+    }
 }
 
 fn freecam_drive_system(

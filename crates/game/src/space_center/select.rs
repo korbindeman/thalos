@@ -12,22 +12,22 @@
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
+use big_space::prelude::{BigSpace, CellCoord, Grid};
 
-use crate::base_editor::ray_vs_sphere_dir;
+use crate::base_editor::cursor_body_dir;
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::coords::SHIP_SCALE;
 use crate::god_view::GodViewGizmos;
 use crate::hud::theme::HudTheme;
 use crate::rendering::{RealSpaceBody, SimulationState, SolarSystemState};
-use crate::shipyard_editor::ShipyardEditor;
+use crate::game_context::{ContextHistory, GameContext};
 use crate::spawn::Homeworld;
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry, StructureSite};
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use super::{
-    ReturnToSpaceCenter, SpaceCenter, enter_facility, hub_context, kind_name, selectable_bound,
-    space_center_open,
+    SpaceCenter, enter_facility, hub_context, kind_name, selectable_bound, space_center_open,
 };
 
 pub(super) struct SpaceCenterSelectPlugin;
@@ -37,7 +37,12 @@ impl Plugin for SpaceCenterSelectPlugin {
         app.add_systems(Startup, setup_hover_label.after(crate::hud::theme::init_theme))
             .add_systems(
                 Update,
-                (hover_and_enter, draw_hover).chain().run_if(space_center_open),
+                (hover_and_enter, draw_hover)
+                    .chain()
+                    // Pick after the god-view camera moves so the raycast reads
+                    // this frame's camera pose (see `cursor_body_dir`).
+                    .after(crate::god_view::GodViewCameraSet)
+                    .run_if(space_center_open),
             )
             // Ungated: it also *hides* the callout when the hub closes (or the
             // cursor leaves every building), so it must run even while closed.
@@ -63,10 +68,10 @@ fn hover_and_enter(
     ui_gate: Res<crate::hud::UiPointerGate>,
     mouse: Res<ButtonInput<MouseButton>>,
     windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
-    mut shipyard: ResMut<ShipyardEditor>,
-    mut return_flag: ResMut<ReturnToSpaceCenter>,
+    cameras: Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: Query<&Grid, With<BigSpace>>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
 ) {
     // Over a UI panel → no world hover (so the callout + highlight vanish and a
     // click on the panel isn't also read as a click on the ground).
@@ -81,7 +86,7 @@ fn hover_and_enter(
             homeworld.0,
             &windows,
             &cameras,
-            &bodies,
+            &root_grid,
         )
     };
     if sc.hovered != hovered {
@@ -92,8 +97,9 @@ fn hover_and_enter(
     if mouse.just_pressed(MouseButton::Left)
         && let Some(id) = hovered
         && let Some(facility) = registry.get(id).and_then(|s| s.facility)
+        && let Some(next) = next_ctx.as_mut()
     {
-        enter_facility(facility, &mut sc, &mut shipyard, &mut return_flag);
+        enter_facility(facility, next, &mut history);
     }
 }
 
@@ -108,24 +114,26 @@ fn compute_hover(
     registry: &StructureRegistry,
     body_id: BodyId,
     windows: &Query<&Window, With<PrimaryWindow>>,
-    cameras: &Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: &Query<(&RealSpaceBody, &GlobalTransform)>,
+    cameras: &Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: &Query<&Grid, With<BigSpace>>,
 ) -> Option<StructureId> {
     let ctx = hub_context(sim, solar, height_sources, registry, body_id)?;
     let states = solar.states.as_deref()?;
     let body_state = states.get(ctx.body_id)?;
     let window = windows.single().ok()?;
     let cursor = window.cursor_position()?;
-    let (camera, cam_gt) = cameras.single().ok()?;
-    let (_, body_gt) = bodies.iter().find(|(rsb, _)| rsb.body_id == ctx.body_id)?;
-    let center_render = body_gt.translation();
-    let ray = camera.viewport_to_world(cam_gt, cursor).ok()?;
-    let dir_render = ray_vs_sphere_dir(
-        ray.origin - center_render,
-        *ray.direction,
-        (ctx.pad_r * SHIP_SCALE) as f32,
+    let (camera, cam_cell, cam_transform) = cameras.single().ok()?;
+    let root_grid = root_grid.single().ok()?;
+    let dir_body = cursor_body_dir(
+        camera,
+        cam_cell,
+        cam_transform,
+        root_grid,
+        cursor,
+        body_state.position,
+        body_state.orientation,
+        ctx.pad_r,
     )?;
-    let dir_body = (body_state.orientation.inverse() * dir_render.as_dvec3()).normalize();
 
     // Nearest hoverable structure to the click point on the pad.
     let mut best: Option<(StructureId, f64)> = None;

@@ -267,6 +267,11 @@ fn fragment(in: VertexOutput) -> FragOutput {
             sun_flux * SCENE_FLUX_SCALE,
             water_cd,
             1.0e6,
+            // Far shore sentinels: no shore interaction at impostor scale.
+            1.0e6,
+            1.0e9,
+            vec3<f32>(0.0, 0.0, 1.0),
+            1.0e9,
         );
     } else {
         // Land: shared Hapke regolith BRDF — the SAME routine the ground

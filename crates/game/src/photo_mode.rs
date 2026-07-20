@@ -49,7 +49,7 @@ pub fn not_in_photo_mode(photo_mode: Res<PhotoMode>) -> bool {
 
 fn toggle_photo_mode_input(
     input: Res<GameInputIntent>,
-    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
+    ui_text: Res<thalos_ui::TextFieldFocus>,
     mut photo_mode: ResMut<PhotoMode>,
 ) {
     if !input.toggle_photo_mode {

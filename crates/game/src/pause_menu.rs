@@ -2,7 +2,8 @@
 //!
 //! The menu itself owns only the Escape-modal state (`GamePause`) and its UI.
 //! Simulation pause aggregation lives in [`crate::sim_clock`], which folds the
-//! menu, destruction scenario picker, freecam, and warp pause into an explicit
+//! menu, destruction scenario picker, freecam (when not warp-eligible on enter),
+//! and warp pause into an explicit
 //! simulation clock. Bevy's default `Time`/`Time<Virtual>` remains an app clock
 //! so presentation effects can keep animating while canonical/local simulation
 //! is paused.
@@ -13,7 +14,9 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowCloseRequested};
 use thalos_input::game::GameInputIntent;
 
-use crate::hud::theme::{HudTheme, panel_frame};
+use thalos_ui::{self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row};
+
+use crate::game_context::{ContextHistory, GameContext, back_out, enter_context};
 use crate::maneuver::InteractionMode;
 use crate::settings_menu::SettingsMenu;
 use crate::target::TargetBody;
@@ -44,7 +47,7 @@ pub struct PauseMenuPlugin;
 impl Plugin for PauseMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GamePause>()
-            .add_systems(Startup, setup.after(crate::hud::theme::init_theme))
+            .add_systems(Startup, setup.after(thalos_ui::init_ui_theme))
             // Gated to `Running`: during loading there is nothing to pause,
             // and on the start screen Escape is owned by `crate::main_menu`.
             .add_systems(
@@ -53,15 +56,7 @@ impl Plugin for PauseMenuPlugin {
                     .run_if(in_state(crate::loading::AppState::Running))
                     .before(crate::SimStage::Physics),
             )
-            .add_systems(
-                Update,
-                (
-                    handle_button_clicks,
-                    update_visibility,
-                    update_button_visuals,
-                )
-                    .chain(),
-            );
+            .add_systems(Update, (handle_button_clicks, update_visibility).chain());
     }
 }
 
@@ -72,7 +67,7 @@ pub fn not_game_paused(
     !pause.active && !scenario.open
 }
 
-fn setup(mut commands: Commands, theme: Res<HudTheme>) {
+fn setup(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((
             Node {
@@ -87,7 +82,7 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                 align_items: AlignItems::Center,
                 ..default()
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.36)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.30)),
             GlobalZIndex(100),
             Pickable {
                 is_hoverable: false,
@@ -98,35 +93,16 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
             Name::new("PauseMenu"),
         ))
         .with_children(|root| {
-            let (bg, border) = panel_frame(&theme);
             root.spawn((
                 Node {
-                    width: Val::Px(246.0),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(4.0)),
-                    padding: UiRect::axes(Val::Px(16.0), Val::Px(14.0)),
-                    flex_direction: FlexDirection::Column,
+                    width: Val::Px(260.0),
                     align_items: AlignItems::Stretch,
-                    row_gap: Val::Px(10.0),
-                    ..default()
+                    ..ui::panel_node()
                 },
-                bg,
-                border,
+                theme.glass_heavy(),
                 Name::new("PauseMenuPanel"),
             ))
             .with_children(|panel| {
-                panel.spawn((
-                    Node {
-                        position_type: PositionType::Absolute,
-                        left: Val::Px(0.0),
-                        top: Val::Px(0.0),
-                        bottom: Val::Px(0.0),
-                        width: Val::Px(2.0),
-                        ..default()
-                    },
-                    BackgroundColor(theme.text_subtitle),
-                    Name::new("PauseMenuAccent"),
-                ));
                 panel
                     .spawn((
                         Node {
@@ -139,101 +115,39 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
                         Name::new("PauseMenuHeader"),
                     ))
                     .with_children(|header| {
-                        header.spawn((
-                            Text::new("PAUSED"),
-                            TextFont {
-                                font: theme.font.clone(),
-                                font_size: FontSize::Px(15.0),
-                                ..default()
-                            },
-                            TextColor(theme.text_accent),
-                            Name::new("PauseMenuTitle"),
-                        ));
-                        header.spawn((
-                            Text::new("THALOS v0"),
-                            TextFont {
-                                font: theme.font.clone(),
-                                font_size: FontSize::Px(10.0),
-                                ..default()
-                            },
-                            TextColor(theme.text_dim),
-                            Name::new("PauseMenuVersion"),
-                        ));
+                        header.spawn((theme.title("PAUSED"), Name::new("PauseMenuTitle")));
+                        header.spawn((theme.faint("THALOS v0"), Name::new("PauseMenuVersion")));
                     });
-                panel.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(1.0),
-                        ..default()
-                    },
-                    BackgroundColor(theme.panel_border),
-                    Name::new("PauseMenuDivider"),
-                ));
+                spawn_divider(panel);
                 panel
                     .spawn(Node {
                         flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
+                        row_gap: Val::Px(SPACE_XS + 2.0),
                         align_items: AlignItems::Stretch,
                         ..default()
                     })
                     .with_children(|buttons| {
-                        spawn_menu_button(buttons, &theme, PauseMenuAction::Resume, "RESUME");
-                        spawn_menu_button(
+                        spawn_menu_row(buttons, &theme, PauseMenuAction::Resume, "RESUME", "");
+                        spawn_menu_row(
                             buttons,
                             &theme,
                             PauseMenuAction::SpaceCenter,
                             "SPACE CENTER",
+                            "",
                         );
-                        spawn_menu_button(buttons, &theme, PauseMenuAction::Shipyard, "SHIPYARD");
-                        spawn_menu_button(
+                        spawn_menu_row(buttons, &theme, PauseMenuAction::Shipyard, "SHIPYARD", "");
+                        spawn_menu_row(
                             buttons,
                             &theme,
                             PauseMenuAction::BaseEditor,
                             "SURFACE BASE",
+                            "",
                         );
-                        spawn_menu_button(buttons, &theme, PauseMenuAction::Settings, "SETTINGS");
-                        spawn_menu_button(buttons, &theme, PauseMenuAction::MainMenu, "MAIN MENU");
-                        spawn_menu_button(buttons, &theme, PauseMenuAction::Quit, "QUIT");
+                        spawn_menu_row(buttons, &theme, PauseMenuAction::Settings, "SETTINGS", "");
+                        spawn_menu_row(buttons, &theme, PauseMenuAction::MainMenu, "MAIN MENU", "");
+                        spawn_menu_row(buttons, &theme, PauseMenuAction::Quit, "QUIT", "");
                     });
             });
-        });
-}
-
-fn spawn_menu_button(
-    parent: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
-    action: PauseMenuAction,
-    label: &str,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(30.0),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
-                padding: UiRect::left(Val::Px(12.0)),
-                justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(theme.panel_bg),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
-            action,
-            Name::new(format!("PauseMenu{label}Button")),
-        ))
-        .with_children(|c| {
-            c.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(theme.text_primary),
-            ));
         });
 }
 
@@ -242,9 +156,9 @@ pub(crate) fn handle_escape_input(
     scenario: Res<crate::scenario_menu::ScenarioMenu>,
     mut pause: ResMut<GamePause>,
     mut settings_menu: ResMut<SettingsMenu>,
-    shipyard: Option<ResMut<crate::shipyard_editor::ShipyardEditor>>,
-    base_editor: Option<ResMut<crate::base_editor::BaseEditor>>,
-    space_center: Option<ResMut<crate::space_center::SpaceCenter>>,
+    ctx: Option<Res<State<GameContext>>>,
+    next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
     mode: Option<ResMut<InteractionMode>>,
     target: Option<ResMut<TargetBody>>,
 ) {
@@ -264,44 +178,30 @@ pub(crate) fn handle_escape_input(
         return;
     }
 
-    // The shipyard editor closes before the pause menu opens. (While its
-    // ship-name field is focused, the editor's own text-input system eats
-    // Escape first by disabling the keyboard action source.)
-    if let Some(mut shipyard) = shipyard
-        && shipyard.open
-    {
-        shipyard.open = false;
-        return;
-    }
-
-    // The base editor closes before the pause menu opens, same as the shipyard.
-    if let Some(mut base_editor) = base_editor
-        && base_editor.open
-    {
-        base_editor.open = false;
-        return;
-    }
-
-    // The space-center hub. Escape must NOT dump to the start screen — the pause
-    // menu's MAIN MENU button is the deliberate exit now. When the hub was opened
-    // over a live flight (pause menu → SPACE CENTER), Escape backs out to that
-    // flight. When it is the session root (opened by PLAY, nothing flying), we
-    // fall through so Escape opens the pause menu over the hub instead (RESUME
-    // dismisses it; MAIN MENU leaves to the start screen).
-    if let Some(mut space_center) = space_center
-        && space_center.open
-        && !space_center.return_to_menu
-    {
-        space_center.open = false;
-        space_center.hovered = None;
-        return;
-    }
-
+    // The pause menu (which can sit over a root context, e.g. the PLAY hub)
+    // closes before we back out of a context.
     if pause.active {
         pause.active = false;
         return;
     }
 
+    // Context back-out: in a non-Flight mode (hub / VAB / base editor), Escape
+    // pops one level toward the parent it was opened from. At the **root** (an
+    // empty stack — the PLAY-rooted hub, or a `just game shipyard` VAB) Escape
+    // opens the pause menu instead of leaving the game; the pause menu's MAIN
+    // MENU button is the sole deliberate exit to the start screen (the user's
+    // rule). A focused editor text field eats Escape upstream by disabling the
+    // keyboard action source, so this never fires mid-rename.
+    if let (Some(ctx), Some(mut next)) = (ctx, next_ctx)
+        && !matches!(*ctx.get(), GameContext::Flight)
+    {
+        if back_out(&mut next, &mut history).is_none() {
+            pause.active = true;
+        }
+        return;
+    }
+
+    // Flight sub-modals.
     if let Some(mut mode) = mode
         && !matches!(*mode, InteractionMode::Idle)
     {
@@ -325,13 +225,18 @@ fn handle_button_clicks(
     primary_window: Query<Entity, With<PrimaryWindow>>,
     mut pause: ResMut<GamePause>,
     mut settings_menu: ResMut<SettingsMenu>,
-    mut shipyard: ResMut<crate::shipyard_editor::ShipyardEditor>,
     mut base_editor: ResMut<crate::base_editor::BaseEditor>,
-    mut space_center: ResMut<crate::space_center::SpaceCenter>,
+    ctx: Option<Res<State<GameContext>>>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
     mut next_state: ResMut<NextState<crate::loading::AppState>>,
     mut close_requested: MessageWriter<WindowCloseRequested>,
     mut app_exit: MessageWriter<AppExit>,
 ) {
+    // Where the pause menu was opened from (usually Flight; SpaceCenter when
+    // paused over the PLAY-rooted hub). Entering a mode remembers it so Escape
+    // backs out here.
+    let current = ctx.as_ref().map(|c| *c.get()).unwrap_or(GameContext::Flight);
     for (interaction, action) in &interactions {
         if !matches!(interaction, Interaction::Pressed) {
             continue;
@@ -339,22 +244,24 @@ fn handle_button_clicks(
         match action {
             PauseMenuAction::Resume => pause.active = false,
             PauseMenuAction::SpaceCenter => {
-                // Return to the hub from flight (KSP-style). Opened over a live
-                // flight, so EXIT/Escape returns to that flight, not the menu.
                 pause.active = false;
-                space_center.open = true;
-                space_center.hovered = None;
-                space_center.return_to_menu = false;
+                if let Some(next) = next_ctx.as_mut() {
+                    enter_context(next, &mut history, current, GameContext::SpaceCenter);
+                }
             }
             PauseMenuAction::Shipyard => {
                 pause.active = false;
-                shipyard.open = true;
+                if let Some(next) = next_ctx.as_mut() {
+                    enter_context(next, &mut history, current, GameContext::Vab);
+                }
             }
             PauseMenuAction::BaseEditor => {
                 pause.active = false;
-                base_editor.open = true;
                 base_editor.mode = crate::base_editor::BaseEditorMode::PickSite;
                 base_editor.active_site = None;
+                if let Some(next) = next_ctx.as_mut() {
+                    enter_context(next, &mut history, current, GameContext::BaseEditor);
+                }
             }
             PauseMenuAction::Settings => settings_menu.open = true,
             PauseMenuAction::MainMenu => {
@@ -396,37 +303,3 @@ fn update_visibility(
     }
 }
 
-fn update_button_visuals(
-    theme: Res<HudTheme>,
-    mut buttons: Query<
-        (
-            &Interaction,
-            &mut BorderColor,
-            &mut BackgroundColor,
-            &Children,
-        ),
-        With<PauseMenuAction>,
-    >,
-    mut text_q: Query<&mut TextColor>,
-) {
-    for (interaction, mut border, mut bg, children) in &mut buttons {
-        let (border_color, bg_color, label_color) = match interaction {
-            Interaction::Pressed => (theme.text_primary, theme.panel_border, theme.text_primary),
-            Interaction::Hovered => (theme.text_accent, theme.panel_bg, theme.text_accent),
-            Interaction::None => (theme.panel_border, theme.panel_bg, theme.text_primary),
-        };
-        let new_border = BorderColor::all(border_color);
-        if border.top != new_border.top {
-            *border = new_border;
-        }
-        if bg.0 != bg_color {
-            bg.0 = bg_color;
-        }
-        if let Some(&child) = children.first()
-            && let Ok(mut tc) = text_q.get_mut(child)
-            && tc.0 != label_color
-        {
-            tc.0 = label_color;
-        }
-    }
-}

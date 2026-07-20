@@ -24,13 +24,17 @@ use bytemuck::cast_slice;
 use itertools::iproduct;
 use std::iter;
 
+pub mod disk_cache;
 pub mod gpu_tile_atlas;
 pub mod gpu_tile_tree;
 pub mod tile_atlas;
 pub mod tile_provider;
 pub mod tile_tree;
 
-pub use tile_provider::{MemoryTileCacheProvider, TileProvider};
+pub use disk_cache::{prune_tile_cache, DiskTileCacheProvider};
+pub use tile_provider::{
+    static_namespace, MemoryTileCacheProvider, NamespaceFn, SharedTileCache, TileProvider,
+};
 
 pub const INVALID_ATLAS_INDEX: u32 = u32::MAX;
 pub const INVALID_LOD: u32 = u32::MAX;
@@ -175,7 +179,16 @@ impl AttachmentData {
         }
     }
 
-    pub(crate) fn generate_mipmaps(&mut self, texture_size: u32, mip_level_count: u32) {
+    /// Generate the downsampled mip chain in place, appending each level after
+    /// the base data.
+    ///
+    /// **Contract:** this is the [`TileProvider`](crate::terrain_data::TileProvider)'s
+    /// responsibility, not the atlas's. Providers call it in their async task so
+    /// the (expensive, per-tile) mip filtering runs on the synthesis pool rather
+    /// than the main thread in `TileAtlas::update`, and so cache wrappers store
+    /// the fully-mipped payload (a cache hit then costs nothing). Call exactly
+    /// once per payload — it appends, so a second call would double the chain.
+    pub fn generate_mipmaps(&mut self, texture_size: u32, mip_level_count: u32) {
         fn generate_mipmap_rgba8(
             data: &mut Vec<[u8; 4]>,
             parent_size: usize,

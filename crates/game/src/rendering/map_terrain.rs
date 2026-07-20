@@ -69,6 +69,7 @@ use super::ground_terrain::{
     TerrainTier, body_terrain_view_config, build_terrain_config, build_terrain_scene_lighting,
     pin_root_tiles, terrain_shading_style_for,
 };
+use super::tile_cache::TileCacheRegistry;
 use super::transforms::surface_body_to_world_orientation_f64;
 use super::types::{
     BodyMesh, CameraExposure, CelestialBody, SimulationState, SolarSystemState, TidallyLocked,
@@ -235,6 +236,7 @@ fn manage_map_terrain(
     mut tile_trees: ResMut<TerrainViewComponents<TileTree>>,
     mut state: ResMut<MapTerrainState>,
     sun_shadow: Res<super::sun_shadow::SunShadowImage>,
+    mut tile_cache: ResMut<TileCacheRegistry>,
 ) {
     let wanted = wanted_map_body(&view, &focus, &sim);
     if wanted == state.body_id {
@@ -272,6 +274,7 @@ fn manage_map_terrain(
             &mut tile_trees,
             &mut commands,
             sun_shadow.handles.clone(),
+            &mut tile_cache,
         )
     {
         state.entity = Some(entity);
@@ -349,6 +352,7 @@ fn spawn_map_terrain(
     tile_trees: &mut TerrainViewComponents<TileTree>,
     commands: &mut Commands,
     sun_shadow_maps: [Handle<Image>; CASCADE_COUNT],
+    tile_cache: &mut TileCacheRegistry,
 ) -> Option<Entity> {
     let body = sim.system.bodies.get(body_id)?;
     if !body.terrain.is_some() {
@@ -372,10 +376,17 @@ fn spawn_map_terrain(
     let config = build_terrain_config(model, TerrainTier::Map);
     let provider: Box<dyn TileProvider> =
         Box::new(PipelineTileProvider::new(body.name.clone(), surface));
+    // Cache the map tiles too, so re-focusing a body doesn't re-bake its sphere.
+    // The map has no flatten layer, and its `MAP_SCALE` model gives it a distinct
+    // cache namespace from the ship-view terrain of the same body.
+    let provider = tile_cache.wrap_provider(body_id, provider, &config, None);
     let mut tile_atlas = TileAtlas::with_provider(&config, provider);
     pin_root_tiles(&mut tile_atlas);
 
     let mut view_config = body_terrain_view_config(map_radius);
+    // The map camera sees the whole body at once — there is no "behind the view"
+    // half to defer, and deferring would only starve the far limb.
+    view_config.cull_behind_view = false;
     // The map renders the whole body from outside at MAP_SCALE, where f32 is
     // amply precise. UDLOD's high-precision Taylor path is only valid for
     // vertices near the view anchor on the near cube face — forced across the

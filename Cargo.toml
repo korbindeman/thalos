@@ -8,6 +8,7 @@ members = [
     "crates/celestial",
     "crates/texgen",
     "crates/input",
+    "crates/ui",
     "crates/body_render",
     "crates/game",
     "crates/shipyard",

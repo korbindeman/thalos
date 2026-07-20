@@ -7,16 +7,15 @@
 //! `BaseEditor`) as the source of truth. See `docs/ui_flow.md` for the full
 //! model, the per-context camera/HUD/pause authority, and the migration phases.
 //!
-//! **Migration status: Phase 2 (consumers flipped).** [`resolve_game_context`]
-//! still *derives* the sub-state from the legacy `.open` booleans (they remain
-//! the writers until Phase 3), but the **cross-cutting consumers now read
-//! `GameContext`**: the sim-clock pause ([`context_freezes_sim`]), the
-//! `SimStage` gates ([`not_vab`] / [`flight_or_no_context`] in `main.rs`), the
-//! single camera authority (`view::apply_active_camera`), and the HUD-update
-//! gate. Because the resolver writes `NextState` in `Update` (applied next
-//! `StateTransition`), there is a **one-frame lag** entering a mode — a brief
-//! flight-world flash / sim-tick on VAB open, gone in Phase 3 when the buttons
-//! set `NextState<GameContext>` directly. Mirrors `docs/regimes.md` A2→A3.
+//! **Migration status: Phase 3 (ownership inverted).** `GameContext` is now the
+//! **authority**: the button / Escape / facility handlers set
+//! `NextState<GameContext>` directly and navigate a [`ContextHistory`] return
+//! stack, and boot routing goes through [`InitialContext`]. The legacy `.open`
+//! booleans survive only as **derived mirrors** — [`mirror_context_to_booleans`]
+//! is their sole writer — so every `.open` *reader* (input gating, each modal's
+//! `apply_open_state`, run conditions) keeps working untouched. Because a state
+//! change set in `Update` applies at the next `StateTransition`, entering a mode
+//! still carries a **one-frame lag**. Mirrors `docs/regimes.md` A2→A3.
 
 use bevy::prelude::*;
 
@@ -29,8 +28,9 @@ use crate::space_center::SpaceCenter;
 /// [`AppState::Running`]; the ship/map [`ViewMode`](crate::view::ViewMode) nests
 /// inside [`Flight`](GameContext::Flight).
 ///
-/// **Sole writer (Phase 1):** [`resolve_game_context`] (shadow-derived). Phase 3
-/// inverts this so button/Escape handlers set it directly.
+/// **Sole authority (Phase 3):** the button / Escape / facility handlers set
+/// this via `NextState<GameContext>`; the `.open` booleans are derived from it
+/// by [`mirror_context_to_booleans`].
 #[derive(SubStates, Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
 #[source(AppState = AppState::Running)]
 pub enum GameContext {
@@ -46,20 +46,44 @@ pub enum GameContext {
     // TrackingStation — deferred: the ship-less map. See `docs/ui_flow.md`.
 }
 
-/// Pure classifier: the context implied by the legacy modal booleans. The
-/// priority order matters only if two are somehow open at once (they shouldn't
-/// be): the isolated-scene VAB wins, then the base editor, then the hub, else
-/// flight.
-pub fn expected_context(shipyard_open: bool, base_open: bool, hub_open: bool) -> GameContext {
-    if shipyard_open {
-        GameContext::Vab
-    } else if base_open {
-        GameContext::BaseEditor
-    } else if hub_open {
-        GameContext::SpaceCenter
-    } else {
-        GameContext::Flight
-    }
+/// The return stack for in-`Running` mode navigation. Entering a context pushes
+/// where you came from; Escape / EXIT / back-out pops it. Popping an **empty**
+/// stack means "at the session root" — the caller decides what that means (open
+/// the pause menu, or leave to the main menu). Replaces the old `return_to_menu`
+/// / `ReturnToSpaceCenter` bools + the `Local<bool>` edge latches. See
+/// `docs/ui_flow.md` *Return-stack*.
+#[derive(Resource, Default)]
+pub struct ContextHistory(pub Vec<GameContext>);
+
+/// Boot routing: the context to enter on the next `OnEnter(AppState::Running)`.
+/// `None` (the default) leaves the [`GameContext::Flight`] default; `Some(x)` is
+/// consumed (taken) once on reveal. Set by `main.rs` (`just game shipyard` /
+/// `hub`) and the start screen's PLAY. Replaces `OpenShipyardOnStart` /
+/// `OpenSpaceCenterOnStart`.
+#[derive(Resource, Default)]
+pub struct InitialContext(pub Option<GameContext>);
+
+/// Enter `target` from `current`, remembering `current` on the return stack.
+pub fn enter_context(
+    next: &mut NextState<GameContext>,
+    history: &mut ContextHistory,
+    current: GameContext,
+    target: GameContext,
+) {
+    history.0.push(current);
+    next.set(target);
+}
+
+/// Back out one level toward the parent context. Returns the context we popped
+/// to, or `None` if the stack was empty (we are at the session root — the caller
+/// decides what leaving the root does: pause menu, or main menu).
+pub fn back_out(
+    next: &mut NextState<GameContext>,
+    history: &mut ContextHistory,
+) -> Option<GameContext> {
+    let parent = history.0.pop()?;
+    next.set(parent);
+    Some(parent)
 }
 
 // --- Run conditions (Phase-2 consumers read `GameContext`, not the booleans) ---
@@ -98,32 +122,83 @@ pub struct GameContextPlugin;
 
 impl Plugin for GameContextPlugin {
     fn build(&self, app: &mut App) {
-        app.add_sub_state::<GameContext>().add_systems(
-            Update,
-            (resolve_game_context, log_context_transitions)
-                .chain()
-                .run_if(in_state(AppState::Running)),
-        );
+        app.add_sub_state::<GameContext>()
+            .init_resource::<ContextHistory>()
+            .init_resource::<InitialContext>()
+            .add_systems(OnEnter(AppState::Running), apply_initial_context)
+            .add_systems(OnExit(AppState::Running), leave_running)
+            .add_systems(
+                Update,
+                (mirror_context_to_booleans, log_context_transitions)
+                    .chain()
+                    .run_if(in_state(AppState::Running)),
+            );
     }
 }
 
-/// Phase-1 shadow resolver: keep [`GameContext`] tracking the legacy `.open`
-/// booleans. Reads the three modal resources, sets the sub-state when it
-/// differs. `Option` params guard the one-frame window around a source-state
-/// transition where the sub-state resources may not yet be present.
-fn resolve_game_context(
-    shipyard: Res<ShipyardEditor>,
-    base: Res<BaseEditor>,
-    hub: Res<SpaceCenter>,
-    current: Option<Res<State<GameContext>>>,
+/// Boot routing: on entry to `Running`, switch to the armed [`InitialContext`]
+/// (PLAY → hub, `just game shipyard` → VAB), else leave the `GameContext::Flight`
+/// default. One-shot (`take`), so later loading passes (runway starts, the
+/// launch-flow spaceport build) reveal into Flight and let their own systems
+/// drive the context. Seeds an empty return stack — the initial context is the
+/// session root.
+fn apply_initial_context(
+    mut initial: ResMut<InitialContext>,
+    mut history: ResMut<ContextHistory>,
     next: Option<ResMut<NextState<GameContext>>>,
 ) {
-    let (Some(current), Some(mut next)) = (current, next) else {
+    let Some(target) = initial.0.take() else {
+        return;
+    };
+    history.0.clear();
+    if let Some(mut next) = next {
+        next.set(target);
+    }
+}
+
+/// Leaving `Running` (→ MainMenu): reset the derived mirrors and the return
+/// stack so a later re-entry starts clean. `GameContext` itself is removed by
+/// Bevy when the source state exits, so the mirror stops running; without this
+/// the last-open booleans would linger into the menu.
+fn leave_running(
+    mut shipyard: ResMut<ShipyardEditor>,
+    mut base: ResMut<BaseEditor>,
+    mut hub: ResMut<SpaceCenter>,
+    mut history: ResMut<ContextHistory>,
+) {
+    shipyard.open = false;
+    base.open = false;
+    hub.open = false;
+    history.0.clear();
+}
+
+/// **Phase 3 authority mirror.** `GameContext` is the authority; this derives the
+/// legacy `.open` booleans from it (its sole writer), so every `.open` *reader*
+/// — input gating, each modal's `apply_open_state`, the run conditions — is
+/// untouched by the ownership inversion. Change-guarded so the modals' edge
+/// detection sees one clean transition. Only `open` is mirrored: the
+/// modal-internal fields (`mode`, `active_site`, `hovered`) stay caller-owned.
+fn mirror_context_to_booleans(
+    ctx: Option<Res<State<GameContext>>>,
+    mut shipyard: ResMut<ShipyardEditor>,
+    mut base: ResMut<BaseEditor>,
+    mut hub: ResMut<SpaceCenter>,
+) {
+    let Some(ctx) = ctx else {
         return; // sub-state not active this frame
     };
-    let expected = expected_context(shipyard.open, base.open, hub.open);
-    if *current.get() != expected {
-        next.set(expected);
+    let ctx = *ctx.get();
+    let want_vab = matches!(ctx, GameContext::Vab);
+    let want_base = matches!(ctx, GameContext::BaseEditor);
+    let want_hub = matches!(ctx, GameContext::SpaceCenter);
+    if shipyard.open != want_vab {
+        shipyard.open = want_vab;
+    }
+    if base.open != want_base {
+        base.open = want_base;
+    }
+    if hub.open != want_hub {
+        hub.open = want_hub;
     }
 }
 
@@ -138,24 +213,5 @@ fn log_context_transitions(
     if *last != Some(now) {
         info!(target: "thalos::ui", "GameContext -> {now:?}");
         *last = Some(now);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn classifier_priority() {
-        assert_eq!(expected_context(false, false, false), GameContext::Flight);
-        assert_eq!(
-            expected_context(false, false, true),
-            GameContext::SpaceCenter
-        );
-        assert_eq!(expected_context(false, true, false), GameContext::BaseEditor);
-        assert_eq!(expected_context(true, false, false), GameContext::Vab);
-        // The isolated-scene VAB wins any overlap.
-        assert_eq!(expected_context(true, true, true), GameContext::Vab);
-        assert_eq!(expected_context(false, true, true), GameContext::BaseEditor);
     }
 }

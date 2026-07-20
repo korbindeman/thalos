@@ -95,7 +95,10 @@
         ),
         camera: (
             bindings: {
+                // Left = click/drag interactions (maneuver handles, body focus,
+                // teleport). Right = orbit the view.
                 "primary": [MouseButton(Left)],
+                "orbit": [MouseButton(Right)],
                 "motion": [MouseMotion],
                 "wheel": [MouseWheel],
             },
@@ -143,7 +146,9 @@
     ),
     shipyard: (
         bindings: {
+            // Left = place / select parts, Right = orbit the build camera.
             "primary": [MouseButton(Left)],
+            "orbit": [MouseButton(Right)],
             "camera_motion": [MouseMotion],
             "camera_wheel": [MouseWheel],
             "precision_slow": [Key(ShiftLeft), Key(ShiftRight)],

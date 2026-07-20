@@ -368,9 +368,10 @@ identical result: `runway::build_spaceport` (site build minus craft place),
 `place::place_on_launchpad` (from the L-key `launch_from_pad`). `RunwaySite` gained a
 `basin_id` field (idempotency key + picker `active_site`).
 
-Composes with the space-center hub: a VAB LAUNCH queues a relaunch, so
-`space_center::restore_after_facility`'s `relaunching` branch drops to flight rather
-than reopening the hub, and `begin_launch_flow` then opens the picker.
+Composes with the space-center hub: a VAB LAUNCH clears the `ContextHistory`
+return stack and drops to `GameContext::Flight` (the "launched to fly" path), so
+`begin_launch_flow` opens the picker as a `BaseEditor` context parented to Flight
+rather than reopening the hub (see `docs/ui_flow.md` Phase 3).
 
 ## Not built yet (ordered follow-ups)
 

@@ -126,9 +126,9 @@ claim of a `build_parallel_taxiway` blocker is stale). Debt Phase 3 removes:
   (`grid.translation_to_grid` + cell/transform write) with no shared utility.
 - **Deferred placement flags** (`DescentPlacement`, `RunwayPlacement`,
   `LaunchSpaceportBuild`) are three copies of one armed-gate pattern.
-- Minor: duplicated menu-button builders, dead `format_thrust` /
-  `format_duration_s` (compiler already warns), terrain-height three-mirror
-  design is *intentional* but undocumented at the code site.
+- Minor: ~~duplicated menu-button builders~~ (→ package G, landed), ~~dead
+  `format_thrust` / `format_duration_s`~~ (deleted 2026-07-05), terrain-height
+  three-mirror design is *intentional* but undocumented at the code site.
 
 ## 3. The plan
 
@@ -172,42 +172,71 @@ removed uncalled `install_dynamic_surface_state` + `dynamic_surface_for` from
 `DynamicSurfaceState` seam); removed uncalled `from_static_surface` builders +
 the `StaticSurfaceData` import from `impostor/material.rs`. Tree still compiles.
 
-### B. Finish GameContext Phase 3 (docs/ui_flow.md) ☐
+### B. GameContext Phase 3 — LANDED 2026-07-05 ☑ (game-UNVERIFIED)
 
-Now unblocked. `NextState<GameContext>` becomes the **only** mode writer
-(buttons, Escape, facility flows); add the `ContextHistory` return stack
-(deleting `ReturnToSpaceCenter` + the edge latches); collapse the three
-`apply_open_state` + HUD hide/restore stacks into per-context
-`OnEnter`/`OnExit` systems; per-context Escape handling; `.open` booleans
-become read-only mirrors, then die. This is the biggest bug-class kill in the
-plan (every mode-transition race traces here).
-*Verify:* the ui_flow.md Phase-3 checklist — menu→hub→VAB→launch→flight→pause
-→hub→flight round-trips, Escape at every level, no HUD flash, no one-frame
-world flash on VAB open.
+`NextState<GameContext>` is now the **only** mode writer (pause-menu buttons,
+Escape, the hub facility flows, the shipyard Launch/Exit, the launch-select
+picker, the L-launch); a `ContextHistory` return stack replaces
+`ReturnToSpaceCenter` + `return_to_menu` + `restore_after_facility`'s edge
+latch; `InitialContext` (consumed on `OnEnter(Running)`) replaces the two
+`Open*OnStart` flags. The `.open` booleans are kept as **derived mirrors**
+(`mirror_context_to_booleans`, sole writer; `OnExit(Running)` resets them) so
+every `.open` reader — input gating, the three `apply_open_state`, run
+conditions — is untouched. The 9-rung Escape ladder collapsed into a
+context-aware back-out. Compile + clippy clean (game crate). Deleted dead
+`expected_context` + its test and `RelaunchInFlight::active` on contact.
 
-### C. One craft-lifecycle module ☐
+**Deferred to a B2 follow-up (optional):** moving the three `apply_open_state`
+HUD hide/restore into `OnEnter`/`OnExit(GameContext)` and deleting the `.open`
+mirrors once no reader needs them. Kept as mirrors here for minimal blast
+radius — the sanctioned ui_flow.md option.
 
-Create `crates/game/src/craft/` (or `spawn/` grown properly) owning a single
-canonical placement core:
+*Verify (user):* menu→hub→VAB→(Exit)→hub→(Escape)→pause; menu→hub→EDIT BASE→
+Escape→hub; flight→pause→SPACE CENTER→Escape→flight; flight→pause→SHIPYARD→
+Exit→flight; VAB→LAUNCH→pick runway/pad→fly; VAB→LAUNCH→Escape-cancel→flight
+(craft in orbit); `just game hub` / `shipyard` boot into the right mode;
+pause→MAIN MENU from each; no HUD flash on facility→hub handoff.
 
+### C. One craft-placement core — CORE LANDED 2026-07-05 ☑ (game-UNVERIFIED)
+
+The canonical-state ritual (`clear bubble → set_ship_state → set_attitude →
+transition_authority`, previously re-assembled — and occasionally mis-ordered —
+at ~9 sites) is now **one core** in `spawn.rs`:
+
+```rust
+struct CraftPlacement { state, attitude, authority }
+place_craft(sim, placement, teardown: Option<(&mut Commands, &mut ActiveLocalBubble)>)
+coast_placement(state, attitude) -> CraftPlacement   // the common OnRails case
 ```
-PlacementSpec { state, attitude, authority, body, engines: EngineState,
-                flatten_prereq: Option<…> }
-place_craft(&mut sim, &mut bubble, spec)   // encodes: clear bubble →
-                                           // set state → set attitude →
-                                           // set authority, in that order
-```
 
-Every entry point — boot scenarios, `respawn_into`, `begin_relaunch`,
-`apply_launch_placement`, dev runway park, EVA teleports (bubble-preserving
-variant) — routes through it. Fold in the missing helpers from §2.1 (shared
-raycast, clearance measurement, scenario→authority). Encode the big_space
-root-seating invariant in `build_player_ship` itself (already done — keep it
-there, add a doc-comment naming the invariant). Deferred placement gets one
-generic armed-gate (`DeferredPlacement` with a reason enum) replacing the
-three copies.
-*Verify:* all seven spawn paths, plus the two historical regressions (VAB
-launch buzzing, runway teleport without bubble clear) as explicit user checks.
+`place_craft` encodes the ordering invariant in one place, with the bubble
+teardown (`teardown = Some(..)`) up front so `spawn_player_avian_body` reseeds
+from the placed pose — the documented fix for the "buzzing/jitter after
+teleport" bug class. Routed through it (behavior-neutral): `spawn.rs`
+(`refine_descent_spawn`), `scenario_menu::respawn_into` (all 3 ship branches),
+`runway::{place_on_runway, place_approach}`, `place::place_on_launchpad` (its
+separate `clear_bubble` folded into the `teardown`), `relaunch`. Compile +
+clippy clean. Site-specific extras (throttle, target body, engine relight,
+gear/brake) stay at the call site.
+
+**Deliberately not routed (behavior-risk / low value):**
+- `body_tree_panel` (map cmd-click teleport) and `debug` teleport use the
+  **opposite order** (`transition_authority` *before* `set_ship_state`); routing
+  them would reorder, which needs runtime verification of whether
+  `transition_authority` snapshots state. **Candidate bug flagged:** the map
+  teleport does **not** clear the Avian bubble (violates "every craft teleport
+  clears the bubble") — routing it through `place_craft` with `teardown` would
+  fix it, but confirm the reorder is safe first.
+- The remaining §2.1 helper dedups (shared cursor→pad raycast in
+  `launch_select`/`place`, `measure_runway_clearance` vs `craft_extent_below`)
+  and the generic deferred-placement gate (`DescentPlacement` /
+  `RunwayPlacement` / `LaunchSpaceportBuild` — the audit deemed unifying these
+  *optional*) are left as C-follow-ups.
+
+*Verify (user):* every spawn/respawn/relaunch/launch path still seats the craft
+correctly — orbit/descent/final/cruise boot, destruction respawn into each,
+VAB→LAUNCH onto runway + onto pad, base-editor L-launch, runway/approach boot.
+Watch for any teleport jitter (the bubble-teardown ordering).
 
 > **In-flight (user, 2026-07-05):** `rendering/view_anchor.rs` introduces
 > `ViewAnchor` — "the one per-frame answer to *where is the view?*" — a
@@ -234,24 +263,68 @@ already are; make the rest uniform).
 *Verify:* spaceport looks unchanged (`just screenshot` spaceport-aerial),
 z-fighting/grass-clearing checks, base editor place/edit/remove round-trip.
 
-### E. N-craft groundwork (posture, not multiplayer) ☐
+### E. N-craft groundwork (posture, not multiplayer) — SEAM + LEDGER 2026-07-05 ◐
 
-Apply §2.2's rules: introduce `ActiveCraft` (entity id) and migrate
-`.single()` consumers to it; move per-craft state that is currently a global
-resource (`GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`,
-`ManeuverPlan`) onto the craft entity as components, with the resource kept
-briefly as a deprecated mirror if needed; document the knowingly-kept
-singletons (`Simulation`'s one canonical state, one bubble slot) here with
-their accessor boundaries. No gameplay change — this package is pure
-re-homing.
-*Verify:* full scenario matrix behaves identically; destruction respawn keeps
-per-craft state coherent.
+**Scoping decision (2026-07-05):** the full re-homing the audit imagined —
+migrating ~13 `PlayerShip.single()` sites to an accessor *and* moving
+`GearState` / `ParkingBrake` / `EvaMode` / `RealizedControl` / `ManeuverPlan`
+(the last used at **23 sites**) onto the craft entity — is **pure churn with
+zero benefit while there is one craft**, verifiable only as "nothing broke", and
+risks baking in the wrong abstraction speculatively. The durable, low-risk value
+of E is the **posture**, not the mass migration. So E delivers:
+
+1. **`ActiveCraft(Option<Entity>)`** (`rendering/types.rs`) — the declared
+   N-craft **accessor seam**, kept mirroring the active `PlayerShip` each frame
+   by its sole writer `track_active_craft` (`SimStage::Sync`). It is the single
+   sanctioned answer to "which craft is active"; consumers take the craft by id
+   (`None` in the respawn/relaunch window) instead of `q.single()` (which
+   *panics* the moment a second craft exists). *(Code written 2026-07-05,
+   UNVERIFIED — workspace build blocked by an unrelated in-progress `thalos_ui`
+   crate.)*
+2. **The convention** (also in CLAUDE.md's sprint rules): new/reworked per-craft
+   state is a **component on the craft entity**, never a new global resource; new
+   craft-entity reads go through `ActiveCraft`. Existing `.single()` sites and the
+   five global per-craft resources migrate **incrementally** (mixed idiom is
+   fine, per the plan) — ideally when a second craft is actually added, so the
+   change is requirements-driven and runtime-verifiable, not speculative.
+3. **Kept-singleton ledger** (below) — the single-instance assumptions that stay,
+   knowingly, with their accessor boundary.
+
+**Kept singletons (deliberate, N-craft seams recorded):**
+
+| Singleton | Where | Accessor / boundary | N-craft path |
+|---|---|---|---|
+| One canonical craft state + authority | `Simulation` (`ship_state`/`set_ship_state`/`transition_authority`) | the `place_craft` core (§C) is the sole seat-the-state path | per-craft `CraftState`, or a keyed map, behind the same accessor |
+| One Avian bubble slot | `ActiveLocalBubble.bubble: Option<…>` | `clear_bubble` / `spawn_player_avian_body` | per-craft bubble pool keyed by craft entity |
+| The active craft entity | `PlayerShip` (+ `.single()` sites) | **`ActiveCraft`** (new) | picks the active craft among many |
+| Per-craft global resources | `GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`, `ManeuverPlan` | still global resources today | move onto the craft entity as components |
+| Per-craft regime record | `CraftRegimeState` | **already per-craft component** (the template) | — none, already N-safe |
+
+*Verify (once the workspace builds):* full scenario matrix behaves identically —
+`ActiveCraft` is a pure add (mirrors the one craft), so nothing observable should
+change; destruction respawn / relaunch clears it to `None` during the rebuild
+window and repopulates it.
 
 ### F. Small unifications (batch as touched) ☐
 
-One `HudTheme` menu-button builder; document the terrain-height three-mirror
-design at `terrain_registry.rs`; camera.rs submodule split (only when camera
-work next happens — don't do it cold).
+Document the terrain-height three-mirror design at `terrain_registry.rs`;
+camera.rs submodule split (only when camera work next happens — don't do it
+cold). *(The "one menu-button builder" item was subsumed by package G.)*
+
+### G. UI kit consolidation — LANDED 2026-07-05 ☑ (game-UNVERIFIED)
+
+The "duplicated menu-button builders" finding, solved structurally: a new
+**`thalos_ui`** crate (see `docs/ui.md`) owns design tokens, a frosted-glass
+panel material (+ scene-copy backdrop pass), and the whole widget library.
+Deleted on contact: the game's `ui_widgets.rs`, the shipyard editor's private
+`ui/widgets.rs`, and four per-screen `update_button_visuals` clones. Every
+menu/editor screen (main/pause/settings/scenario/hub/base-editor/shipyard +
+loading) now composes the kit; `HudTheme` re-points at the shared tokens.
+Shipyard UX pass in the same change: status bar → toasts + pending pill,
+HANGAR craft load/save overlay, kit text field for the ship name.
+Verified: compile+clippy clean, kitchen-sink PNG (`just ui-preview`),
+headless hub screenshot. **Runtime interaction pass still needed** (hover /
+drag / typing / hangar flows).
 
 ## 4. Rules of engagement
 

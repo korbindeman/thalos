@@ -25,6 +25,7 @@ mod local_physics;
 mod main_menu;
 mod maneuver;
 mod map_view;
+mod mem_diag;
 mod navball;
 mod navigation;
 mod pause_menu;
@@ -52,7 +53,6 @@ mod structures;
 mod surface_settle;
 mod target;
 mod terrain_registry;
-mod ui_widgets;
 mod units_settings;
 mod velocity_frame;
 mod view;
@@ -79,7 +79,9 @@ use thalos_input::settings::InputSettings;
 use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{AuthorityMode, Epoch, WorldPhysicsConfig},
-    debug_orbits::debug_parking_orbit_relative_state,
+    debug_orbits::{
+        debug_parking_orbit_relative_state, debug_polar_parking_orbit_relative_state,
+    },
     gravity_mode::GravityMode,
     simulation::{Simulation, SimulationConfig},
     types::{AttitudeState, ShipParameters, VesselKind},
@@ -157,17 +159,20 @@ pub struct GameTerrainRegistry(pub SharedTerrainRegistry);
 // Entry point
 // ---------------------------------------------------------------------------
 
-fn backends_from_env() -> Option<Backends> {
+/// `THALOS_WGPU_BACKEND` selection. Outer `None` = variable unset or
+/// unparseable (fall through to the Thalos default); inner `None` =
+/// explicit `auto` (let wgpu pick).
+fn backends_from_env() -> Option<Option<Backends>> {
     let value = std::env::var("THALOS_WGPU_BACKEND").ok()?;
     match value.trim().to_ascii_lowercase().as_str() {
-        "auto" | "all" | "" => None,
-        "dx12" | "d3d12" => Some(Backends::DX12),
-        "vulkan" | "vk" => Some(Backends::VULKAN),
-        "metal" => Some(Backends::METAL),
-        "gl" | "opengl" => Some(Backends::GL),
+        "auto" | "all" | "" => Some(None),
+        "dx12" | "d3d12" => Some(Some(Backends::DX12)),
+        "vulkan" | "vk" => Some(Some(Backends::VULKAN)),
+        "metal" => Some(Some(Backends::METAL)),
+        "gl" | "opengl" => Some(Some(Backends::GL)),
         other => {
             eprintln!(
-                "Unknown THALOS_WGPU_BACKEND={other:?}; using Bevy/wgpu default. \
+                "Unknown THALOS_WGPU_BACKEND={other:?}; using the Thalos default. \
                  Expected auto, dx12, vulkan, metal, or gl."
             );
             None
@@ -177,7 +182,16 @@ fn backends_from_env() -> Option<Backends> {
 
 fn wgpu_settings_from_env() -> WgpuSettings {
     let mut settings = WgpuSettings::default();
-    if let Some(backends) = backends_from_env() {
+    let backends = backends_from_env().unwrap_or_else(|| {
+        // Thalos default: Vulkan on Windows. wgpu's own default prefers DX12
+        // there, and DX12 is this project's documented unstable path
+        // (swapchain-acquire panics, silent device death, and a full
+        // DeviceLost wedge — see docs/tooling.md). Other platforms keep the
+        // wgpu default (Metal on macOS); THALOS_WGPU_BACKEND=auto restores
+        // the wgpu default everywhere.
+        cfg!(target_os = "windows").then_some(Backends::VULKAN)
+    });
+    if let Some(backends) = backends {
         settings.backends = Some(backends);
     }
     settings
@@ -344,14 +358,19 @@ fn main() {
         );
         (state, VesselKind::Eva, ShipParameters::eva(), attitude)
     } else {
-        // `orbit` starts in the authored parking orbit. Deferred descent modes
-        // (`landing`, `final`) use that orbit only as the placeholder behind
-        // the loading screen: `spawn::refine_descent_spawn` swaps in the
-        // terrain-aware approach state on the first `Running` frame, once
-        // heights are available to place the ship above ground over land.
-        // The parking orbit is derived from the homeworld (a debug spawn, not
-        // authored world data) rather than stored on `SolarSystemDefinition`.
-        let rel = debug_parking_orbit_relative_state(homeworld);
+        // `orbit` / `polar` start in a debug parking orbit. Deferred descent
+        // modes (`landing`, `final`) use the equatorial orbit only as the
+        // placeholder behind the loading screen: `spawn::refine_descent_spawn`
+        // swaps in the terrain-aware approach state on the first `Running`
+        // frame, once heights are available to place the ship above ground
+        // over land. Parking orbits are derived from the homeworld (a debug
+        // spawn, not authored world data) rather than stored on
+        // `SolarSystemDefinition`.
+        let rel = if situation == SpawnSituation::PolarOrbit {
+            debug_polar_parking_orbit_relative_state(homeworld)
+        } else {
+            debug_parking_orbit_relative_state(homeworld)
+        };
         // Level orbital flight: nose along prograde, dorsal radial-out, shared
         // with the navball and control axes so "upright" stays aligned. Real
         // ship params (MOI, torque, masses) are pushed in by `spawn_player_ship`
@@ -375,8 +394,13 @@ fn main() {
             println!("  Start screen:    pick a scenario in-game (just game <mode> skips it)");
         } else {
             let altitude_km = (rel.position.length() - homeworld.radius_m) / 1000.0;
+            let plane = if situation == SpawnSituation::PolarOrbit {
+                "polar "
+            } else {
+                ""
+            };
             println!(
-                "  Ship:            {:.0} km orbit around {}",
+                "  Ship:            {:.0} km {plane}orbit around {}",
                 altitude_km, homeworld.name
             );
         }
@@ -521,16 +545,22 @@ fn main() {
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
         .insert_resource(situation)
-        // Open the editor only once the world finishes loading — opening it
-        // during `Loading` would gate off the very systems that complete the
-        // load (see `OpenShipyardOnStart`).
-        .insert_resource(shipyard_editor::OpenShipyardOnStart(open_shipyard))
         // `just game hub` / the headless hub preset: build the spaceport (no
         // craft) behind the boot loading pass and open the space-center hub on
         // reveal — the same arming the start screen's PLAY does at runtime.
         // `register_boot_steps` adds the PLACEMENT step when the build is armed.
         .insert_resource(space_center::HubSpaceportBuild { pending: boot_hub })
-        .insert_resource(space_center::OpenSpaceCenterOnStart(boot_hub))
+        // Boot routing: which `GameContext` the boot load reveals into (retiring
+        // the old `Open{Shipyard,SpaceCenter}OnStart` one-shot flags). The
+        // context switch is applied on `OnEnter(Running)` by
+        // `game_context::apply_initial_context`; `None` reveals into Flight.
+        .insert_resource(game_context::InitialContext(if open_shipyard {
+            Some(game_context::GameContext::Vab)
+        } else if boot_hub {
+            Some(game_context::GameContext::SpaceCenter)
+        } else {
+            None
+        }))
         // Where the boot load reveals to: the start screen for a bare
         // launch, straight into the scenario otherwise.
         .insert_resource(loading::LoadDestination(if menu_boot {
@@ -610,7 +640,9 @@ fn main() {
         .add_plugins(ControlLocksPlugin)
         .add_plugins(control_bus::ControlBusPlugin)
         .add_plugins(WarpToManeuverPlugin)
-        .add_plugins(ui_widgets::UiWidgetsPlugin)
+        // The shared game-UI kit: design tokens, frosted-glass panels, and the
+        // widget library every menu/editor screen composes (crates/ui).
+        .add_plugins(thalos_ui::ThalosUiPlugin)
         .add_plugins(HudPlugin)
         .add_plugins(PauseMenuPlugin)
         .add_plugins(main_menu::MainMenuPlugin)
@@ -646,6 +678,7 @@ fn main() {
         .add_plugins(god_view::GodViewPlugin)
         .add_plugins(space_center::SpaceCenterPlugin)
         .add_plugins(BodyTreePanelPlugin)
+        .add_plugins(mem_diag::MemDiagPlugin)
         .add_plugins(DebugPlugin);
 
     // Headless screenshot: the fixed-step runner (no winit event loop) plus the

@@ -1,9 +1,11 @@
 //! Player spawn situations.
 //!
-//! Five ways the player can start a session, selected by `just game [mode]`
+//! Ways the player can start a session, selected by `just game [mode]`
 //! (CLI arg) or the `THALOS_SPAWN` env var:
 //!
-//! - `orbit` (default): a ship in the authored low Thalos parking orbit.
+//! - `orbit` (default): a ship in the authored low Thalos parking orbit
+//!   (equatorial).
+//! - `polar`: same parking altitude as `orbit`, but a polar (i ≈ 90°) path.
 //! - `eva`: the player on foot at the Thalos sub-stellar point.
 //! - `landing`: a ship on a powered-descent approach, coming down over Thalos
 //!   land. (Thalos has no atmosphere yet, so this is a vacuum / lunar-style
@@ -13,7 +15,8 @@
 //! - `cruise`: the Meridian aircraft at ~15,000 ft (~4,600 m AGL), flying
 //!   level at cruise speed over dry land.
 //!
-//! `orbit` and `eva` resolve fully in `main.rs` from the body state alone.
+//! `orbit`, `polar`, and `eva` resolve fully in `main.rs` from the body state
+//! alone.
 //! `landing`, `final`, and `cruise` need terrain data to place the ship *over
 //! land* at a true above-ground altitude, neither of which is known until the
 //! bakes load — so `main.rs` seeds the ship in the parking orbit (hidden behind
@@ -27,12 +30,62 @@ use bevy::prelude::*;
 use thalos_body_render::HeightSource;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
-use thalos_physics_local::HeightSourceRegistry;
+use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
 use crate::loading::AppState;
 use crate::solar_system_state::SimulationState;
+
+/// The canonical placement of the player craft: where it is, how it's oriented,
+/// and which authority owns it.
+pub(crate) struct CraftPlacement {
+    pub state: StateVector,
+    pub attitude: AttitudeState,
+    pub authority: AuthorityMode,
+}
+
+/// The **one canonical way** to seat the player craft's canonical state — every
+/// spawn / respawn / relaunch / teleport / launch path routes through here, so
+/// the ordering invariant lives in exactly one place instead of being
+/// re-assembled (and occasionally mis-assembled) at each site.
+///
+/// The order is the invariant: if `teardown` is given, tear down the live Avian
+/// bubble **first** — so [`local_physics::spawn_player_avian_body`] rebuilds it
+/// seeded from the *placed* pose next frame instead of fighting a bubble still
+/// carrying the pre-teleport velocity (the class of jitter / "buzzing" bug that
+/// every teleport that forgot to clear the bubble produced). Then set the
+/// canonical state, attitude, and authority.
+///
+/// Pass `teardown = Some((commands, active))` for a runtime teleport of an
+/// existing craft; `None` at boot / before any bubble exists, or where the caller
+/// tears the bubble down itself. Site-specific extras (throttle, target body,
+/// engine lighting, gear/brake state) stay at the call site — this owns only the
+/// canonical-state ritual.
+pub(crate) fn place_craft(
+    sim: &mut SimulationState,
+    placement: CraftPlacement,
+    teardown: Option<(&mut Commands, &mut ActiveLocalBubble)>,
+) {
+    if let Some((commands, active)) = teardown {
+        crate::scenario_menu::clear_bubble(commands, active);
+    }
+    sim.simulation.set_ship_state(placement.state);
+    sim.simulation.set_attitude(placement.attitude);
+    sim.simulation.transition_authority(placement.authority);
+}
+
+/// A [`CraftPlacement`] for a craft coasting on rails — the common orbit /
+/// airborne / approach case (`OnRails` authority at trajectory 0). Landed poses
+/// (`BodyFixed`) build their `CraftPlacement` at the call site since the pose is
+/// derived from the state.
+pub(crate) fn coast_placement(state: StateVector, attitude: AttitudeState) -> CraftPlacement {
+    CraftPlacement {
+        state,
+        attitude,
+        authority: AuthorityMode::OnRails { trajectory: 0 },
+    }
+}
 
 /// Whether a fresh session resumes at 1× immediately instead of holding the
 /// paused-on-spawn default.
@@ -70,8 +123,11 @@ impl AutoRun {
 /// [`refine_descent_spawn`]) can tell which path they belong to.
 #[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnSituation {
-    /// Ship in the low parking orbit (default).
+    /// Ship in the low equatorial parking orbit (default).
     ShipOrbit,
+    /// Ship in a low polar parking orbit (same altitude as [`Self::ShipOrbit`],
+    /// inclination ≈ 90°).
+    PolarOrbit,
     /// Player on foot at the sub-stellar point.
     Eva,
     /// Ship descending toward a landing site over land.
@@ -102,6 +158,7 @@ impl SpawnSituation {
                 Self::RunwayApproach
             }
             "cruise" | "cruising" => Self::Cruise,
+            "polar" | "polar-orbit" | "polar_orbit" => Self::PolarOrbit,
             "" | "orbit" | "ship" => Self::ShipOrbit,
             other => {
                 eprintln!("  Unknown spawn mode '{other}'; defaulting to ship orbit.");
@@ -156,7 +213,11 @@ impl SpawnSituation {
             Self::Landing => Some(LANDING_PROFILE),
             Self::FinalApproach => Some(FINAL_APPROACH_PROFILE),
             Self::Cruise => Some(CRUISE_PROFILE),
-            Self::ShipOrbit | Self::Eva | Self::Runway | Self::RunwayApproach => None,
+            Self::ShipOrbit
+            | Self::PolarOrbit
+            | Self::Eva
+            | Self::Runway
+            | Self::RunwayApproach => None,
         }
     }
 }
@@ -186,6 +247,21 @@ pub(crate) fn orbit_respawn_state(
     let epoch = Epoch(sim.simulation.sim_time());
     let homeworld_state = sim.ephemeris.state(homeworld, epoch);
     let rel = thalos_physics_canonical::debug_orbits::debug_parking_orbit_relative_state(
+        &sim.system.bodies[homeworld],
+    );
+    orbit_parking_state(rel, &homeworld_state)
+}
+
+/// Polar variant of [`orbit_respawn_state`] — same altitude, inclination 90°.
+/// Shared by `just game polar`, the start-screen shortcut, and destruction
+/// respawn so all three stay identical.
+pub(crate) fn polar_orbit_respawn_state(
+    sim: &SimulationState,
+    homeworld: BodyId,
+) -> (StateVector, AttitudeState) {
+    let epoch = Epoch(sim.simulation.sim_time());
+    let homeworld_state = sim.ephemeris.state(homeworld, epoch);
+    let rel = thalos_physics_canonical::debug_orbits::debug_polar_parking_orbit_relative_state(
         &sim.system.bodies[homeworld],
     );
     orbit_parking_state(rel, &homeworld_state)
@@ -623,11 +699,10 @@ fn refine_descent_spawn(
     let Some((state, attitude)) = compute_descent_state(*situation, &sim, &height_sources) else {
         return; // Terrain not registered yet — retry next frame.
     };
-    sim.simulation.set_ship_state(state);
-    sim.simulation.set_attitude(attitude);
     // Coast on rails until the descent crosses the local-physics handoff band.
-    sim.simulation
-        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+    // No bubble teardown: this is a deferred boot placement behind the loading
+    // screen, before any Avian bubble exists.
+    place_craft(&mut sim, coast_placement(state, attitude), None);
     placement.pending = false;
     // Surface state installed: start the tile-settle timer at the site and
     // release the loading screen's placement gate.

@@ -122,6 +122,35 @@ about making the Thalos tile pipeline agree with the impostor, collider,
 and gameplay height sources, then moving expensive tile production to
 GPU jobs.
 
+### Structures render above the ground — the analytic pad flatten (invariant)
+
+Structures (runway, launchpads, base buildings) are built against a
+`TerrainFlatten` pad plane, but the ground the player sees is the tile
+*atlas*: the vertex-stage LOD height blend and morph mix in coarse
+ancestor tiles whose km-scale texels average natural terrain into the
+pad, and a runtime-installed flatten can leave stale unflattened tiles
+resident. Either error is decimetres — more than the few-cm paving lift
+— so, before 2026-07, at LOD-transition view distances the rendered
+ground rose through the paving and z-fought / swallowed the whole base.
+
+The fix is structural, not a bake-timing patch: `BodyTerrainMaterial`
+supplies a custom vertex stage (`flattened_height` in
+`body_terrain.wgsl`) that re-applies each flatten pad **analytically per
+vertex** — inside a pad rectangle the rendered height is pinned to the
+exact tangent-plane elevation (`TerrainFlatten::plane_elevation_m`,
+formulated cancellation-free for f32), feathered over a band just inside
+the rect edge. The game mirrors each body's `TerrainFlattenRegistry`
+regions into the material every frame (`update_body_terrain_atmosphere`
+→ `FlattenBlock`, up to `MAX_FLATTEN_REGIONS` pads, nearest-camera
+selected beyond that). Rendered ground under structures therefore equals
+the plane they were built against at **every** LOD / morph / bake state,
+by construction. The bake-side flatten and the post-install terrain
+rebuild remain load-bearing for what the shader can't touch: the
+GPU-atlas height mirror (collider + CPU height queries), albedo/material
+layers, scatter placement, and the ramp band outside the rect. Any
+future ground renderer must honor the flatten handle at render time the
+same way — do not regress this to a bake-only mechanism.
+
 ### Repository landscape
 
 - **`thalos_udlod`** — the library. Forked in-tree and edited as part

@@ -270,7 +270,7 @@ pub struct GrassTileBuildInput {
     pub height_source: Arc<dyn HeightSource>,
     pub radius_m: f64,
     /// Sea level (m above reference radius); blades require
-    /// `height > sea_level + 1 m`. Pass `f32::MIN` for bodies without oceans.
+    /// `height > sea_level + VEG_BEACH_CLEAR_M`. Pass `f32::MIN` for bodies without oceans.
     pub sea_level_m: f32,
     pub blades_per_m2: f32,
     /// The two grass *types* this body's meadow blends between, per clump, by the
@@ -393,7 +393,7 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
             continue;
         };
-        if sample.height_m <= input.sea_level_m + 1.0 {
+        if sample.height_m <= input.sea_level_m + crate::ground::scatter::VEG_BEACH_CLEAR_M {
             continue;
         }
         if sample.slope > 0.45 {
@@ -405,13 +405,18 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
 
         // Natural grassland gates — skipped inside a lawn, which is groomed grass
         // by construction regardless of the underlying material/moisture field.
+        // Climate-shifted (ecological) altitude: the treeline fade descends
+        // with latitude, so polar tundra thins out at low ground exactly like
+        // the terrain paint (docs/terrain_macro.md Phase 2).
+        let eco_h =
+            h + thalos_terrain::climate_cold_lift_m(dir.y.abs()) as f32;
         if !lawn {
             // Acceptance: keep (near-)all candidates on real grassland — the old
             // `smoothstep(0.45, 0.8)` halved density even where the ground *is*
             // grass, which is the main reason the field read sparse. We still
             // reject rock/soil (grass_w low) and fade out toward the treeline.
             let mut accept = smoothstep(0.20, 0.50, grass_w)
-                * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, h));
+                * (1.0 - smoothstep(GRASS_FADE_LO_M, GRASS_FADE_HI_M, eco_h));
             // Far rings cull grass under canopy — the trees occlude it, so the
             // distant blades are pure overdraw. Near rings pass `forest_cull = 0`.
             if input.forest_cull > 0.0 {
@@ -430,8 +435,12 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         // the field), so plains stay full and the carpet breaks up where it dries.
         // A lawn samples it only for the ground-matched colour — its coverage is
         // forced full so the kept grass reads as a continuous manicured carpet.
-        let landcover =
-            crate::ground::landcover::sample_landcover(dir * (input.radius_m + h as f64), h);
+        let landcover = crate::ground::landcover::sample_landcover(
+            dir * (input.radius_m + h as f64),
+            h,
+            input.height_source.landcover_moisture(dir),
+            dir.y.abs() as f32,
+        );
         // Floor the keep-probability so lush grassland stays a continuous carpet —
         // the raw coverage dipped enough to read as bald patches in the fields. Only
         // the genuinely dry/bare areas (coverage well below the floor) still thin.
@@ -1068,8 +1077,15 @@ fn blade_hash(seed: u64, key: GrassTileKey, blade: u64, salt: u64) -> f64 {
     (h & 0x000F_FFFF_FFFF_FFFF) as f64 / (1u64 << 52) as f64
 }
 
+// WGSL-parity smoothstep, safe for descending edges. Never guard the
+// denominator with `.max(EPSILON)` — that inverts descending-edge calls into
+// a hard step (INC-0005).
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    let denom = edge1 - edge0;
+    if denom.abs() < f32::EPSILON {
+        return if x >= edge0 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / denom).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 

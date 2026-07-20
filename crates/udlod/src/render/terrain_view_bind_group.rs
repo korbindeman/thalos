@@ -22,36 +22,6 @@ use bevy::{
     },
 };
 
-/// Descriptor for the indirect-buffer bind group used by the prepare-prepass compute pass.
-pub(crate) fn prepare_indirect_layout_descriptor() -> BindGroupLayoutDescriptor {
-    BindGroupLayoutDescriptor::new(
-        "prepare_indirect_layout",
-        &BindGroupLayoutEntries::single(
-            ShaderStages::COMPUTE,
-            storage_buffer::<Indirect>(false), // indirect buffer
-        ),
-    )
-}
-
-/// Descriptor for the refine-tiles bind group used by the tiling-prepass compute pipelines.
-pub(crate) fn refine_tiles_layout_descriptor() -> BindGroupLayoutDescriptor {
-    BindGroupLayoutDescriptor::new(
-        "refine_tiles_layout",
-        &BindGroupLayoutEntries::sequential(
-            ShaderStages::COMPUTE,
-            (
-                uniform_buffer::<TerrainViewConfigUniform>(false), // terrain view config
-                uniform_buffer::<TerrainModelApproximation>(false), // model view approximation
-                storage_buffer_read_only_sized(false, None),       // tile_tree
-                storage_buffer_read_only_sized(false, None),       // origins
-                storage_buffer_sized(false, None),                 // final tiles
-                storage_buffer_sized(false, None),                 // temporary tiles
-                storage_buffer::<Parameters>(false),               // parameters
-            ),
-        ),
-    )
-}
-
 /// Descriptor for the per-view bind group used by the terrain render pipeline.
 pub(crate) fn terrain_view_layout_descriptor() -> BindGroupLayoutDescriptor {
     BindGroupLayoutDescriptor::new(
@@ -75,14 +45,6 @@ pub(crate) struct Indirect {
     y_or_instance_count: u32,
     z_or_base_vertex: u32,
     base_instance: u32,
-}
-
-#[derive(Default, ShaderType)]
-struct Parameters {
-    tile_count: u32,
-    counter: i32,
-    child_index: i32,
-    final_index: i32,
 }
 
 #[derive(Default, ShaderType)]
@@ -122,13 +84,10 @@ impl TerrainViewConfigUniform {
     }
 }
 
-#[allow(dead_code)]
 pub struct TerrainViewData {
     view_config_buffer: StaticBuffer<TerrainViewConfigUniform>,
     terrain_model_approximation_buffer: StaticBuffer<TerrainModelApproximation>,
     pub(super) indirect_buffer: StaticBuffer<Indirect>,
-    pub(super) prepare_indirect_bind_group: BindGroup,
-    pub(super) refine_tiles_bind_group: BindGroup,
     pub(super) terrain_view_bind_group: BindGroup,
     final_tile_buffer: StaticBuffer<()>,
     /// CPU-balanced draw set extracted from main world this frame. Written
@@ -158,22 +117,15 @@ impl TerrainViewData {
 
         let view_config_buffer =
             StaticBuffer::empty(None, device, BufferUsages::UNIFORM | BufferUsages::COPY_DST);
-        // `final_tile_buffer` and `indirect_buffer` are now written from
-        // the CPU each frame (the CPU-balanced draw set replaces the GPU
-        // refine pass), so both need `COPY_DST`. The GPU compute prepass
-        // is still wired up but no longer dispatched — keeping the bind
-        // groups intact lets us bisect against the old path by toggling
-        // the dispatch back on, and avoids churning the bind-group
-        // descriptors.
+        // `final_tile_buffer` and `indirect_buffer` are written from the CPU
+        // each frame (the CPU-balanced draw set is the tile-selection
+        // authority — the GPU refine prepass it replaced has been deleted), so
+        // both need `COPY_DST`.
         let indirect_buffer = StaticBuffer::empty(
             None,
             device,
             BufferUsages::STORAGE | BufferUsages::INDIRECT | BufferUsages::COPY_DST,
         );
-        let parameter_buffer =
-            StaticBuffer::<Parameters>::empty(None, device, BufferUsages::STORAGE);
-        let temporary_tile_buffer =
-            StaticBuffer::<()>::empty_sized(None, device, tile_buffer_size, BufferUsages::STORAGE);
         let final_tile_buffer = StaticBuffer::<()>::empty_sized(
             None,
             device,
@@ -186,31 +138,9 @@ impl TerrainViewData {
             BufferUsages::UNIFORM | BufferUsages::COPY_DST,
         );
 
-        let prepare_indirect_layout =
-            pipeline_cache.get_bind_group_layout(&prepare_indirect_layout_descriptor());
-        let refine_tiles_layout =
-            pipeline_cache.get_bind_group_layout(&refine_tiles_layout_descriptor());
         let terrain_view_layout =
             pipeline_cache.get_bind_group_layout(&terrain_view_layout_descriptor());
 
-        let prepare_indirect_bind_group = device.create_bind_group(
-            "prepare_indirect_bind_group",
-            &prepare_indirect_layout,
-            &BindGroupEntries::single(&indirect_buffer),
-        );
-        let refine_tiles_bind_group = device.create_bind_group(
-            "refine_tiles_bind_group",
-            &refine_tiles_layout,
-            &BindGroupEntries::sequential((
-                &view_config_buffer,
-                &terrain_model_approximation_buffer,
-                &gpu_tile_tree.tile_tree_buffer,
-                &gpu_tile_tree.origins_buffer,
-                &final_tile_buffer,
-                &temporary_tile_buffer,
-                &parameter_buffer,
-            )),
-        );
         let terrain_view_bind_group = device.create_bind_group(
             "terrain_view_bind_group",
             &terrain_view_layout,
@@ -227,18 +157,11 @@ impl TerrainViewData {
             view_config_buffer,
             terrain_model_approximation_buffer,
             indirect_buffer,
-            prepare_indirect_bind_group,
-            refine_tiles_bind_group,
             terrain_view_bind_group,
             final_tile_buffer,
             draw_set: Vec::new(),
             vertices_per_tile: 0,
         }
-    }
-
-    #[allow(dead_code)]
-    pub(super) fn refinement_count(&self) -> u32 {
-        self.view_config_buffer.value().refinement_count
     }
 
     pub(crate) fn initialize(

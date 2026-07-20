@@ -42,6 +42,8 @@ struct SkyAtmosExtra {
     cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units), z = airlight ratio, w = cloud-composite-enable flag (1 = bind live clouds)
     ocean:                     vec4<f32>,  // x = ocean sphere radius (render units = m), y = enable (>=0.5), z = wave-scroll time (s), w = camera height above sea (m, CPU f64-precise)
     ocean_color_depth:         vec4<f32>,  // xyz = deep-water linear-RGB tint, w = min optical-depth scale
+    tile_lookup:               vec4<f32>,  // x = height-tile lookup enable, y = lod_count, z = tree_size, w = attachment-0 center size (texels/tile edge)
+    tile_atlas_uv:             vec4<f32>,  // x = atlas-UV scale (center/texture), y = offset (border/texture), z = height min (m), w = height max (m)
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 
@@ -80,6 +82,223 @@ struct SkyAtmosExtra {
 // geometry-occlusion ramp below. 1×1 far-sentinel fallback on bodies without
 // an active cloud layer.
 @group(3) @binding(8) var cloud_distance_tex: texture_2d<f32>;
+
+// Coast/bathymetry cube (ADR-0005): signed terrain height about sea level,
+// R16Unorm-encoded over ±COAST_ATLAS_HEIGHT_RANGE_M, indexed by body-fixed
+// direction. Baked once at spawn from the same generator the tiles bake from.
+// The analytic-ocean branch samples it at range for water coverage + colour so
+// the far-field coastline is independent of tile LOD / depth-buffer error.
+// No-ocean bodies bind a 1×1 blank and never sample it (`ocean.y` gate).
+@group(3) @binding(9) var coast_atlas_tex: texture_cube<f32>;
+@group(3) @binding(10) var coast_atlas_sampler: sampler;
+
+// ── Resident-height-tile lookup (ADR-0006) ─────────────────────────────────
+// The analytic-ocean branch samples signed sea height straight from the udlod
+// height atlas — the exact texels the visible terrain mesh is displaced from —
+// so water coverage/colour are a projection of the one terrain field, never a
+// depth-buffer comparison. The tile tree + atlas bindings mirror what the
+// terrain's own shaders bind through `thalos_udlod::bindings`; the lookup
+// functions below are a byte-faithful port of
+// `thalos_udlod::functions::{lookup_best, lookup_tile_tree_entry}` +
+// `thalos_udlod::math::Coordinate::from_world_position`, capped at the pixel's
+// footprint LOD (naga_oil binds udlod's own functions to udlod's bind groups,
+// so they can't be imported here directly — keep both sides in sync).
+@group(3) @binding(11) var tile_height_atlas: texture_2d_array<f32>;
+@group(3) @binding(12) var tile_height_sampler: sampler;
+struct SkyTileTreeEntry {
+    atlas_index: u32,
+    atlas_lod: u32,
+}
+@group(3) @binding(13) var<storage, read> sky_tile_tree: array<SkyTileTreeEntry>;
+@group(3) @binding(14) var<storage, read> sky_tile_origins: array<vec2<u32>>;
+
+// Mirror of `thalos_body_render::COAST_ATLAS_HEIGHT_RANGE_M` — change together.
+const COAST_ATLAS_HEIGHT_RANGE_M: f32 = 8000.0;
+
+// Mirror of `thalos_udlod`'s cube-sphere warp constant `C_SQR` (0.87²).
+const CUBE_C_SQR: f32 = 0.7569;
+// `INVALID_ATLAS_INDEX` / `INVALID_LOD` sentinels (u32::MAX).
+const TILE_INVALID: u32 = 0xffffffffu;
+
+// Physical wet-edge half-band (m of signed sea height) — the see-through
+// shoreline sliver at beach scale. The coverage band never gets narrower than
+// this, and widens only with the MEASURED local slope × sampled texel (the
+// real height spread inside the pixel footprint — see the ocean branch),
+// never with a range-scaled error model or an assumed representative slope.
+const WET_EDGE_BAND_M: f32 = 0.75;
+
+// The cube-face coordinate of a body-local direction: side index + face UV in
+// [0, 1]. Port of `thalos_udlod::math::Coordinate::from_world_position`
+// (spherical branch) — the side table and warp must match exactly or the
+// lookup reads the wrong tile.
+struct CubeCoord {
+    side: u32,
+    uv: vec2<f32>,
+}
+
+fn cube_coord_from_dir(n: vec3<f32>) -> CubeCoord {
+    let a = abs(n);
+    var side: u32;
+    var uv: vec2<f32>;
+    if a.x > a.y && a.x > a.z {
+        if n.x < 0.0 {
+            side = 0u;
+            uv = vec2(-n.z / n.x, n.y / n.x);
+        } else {
+            side = 3u;
+            uv = vec2(-n.y / n.x, n.z / n.x);
+        }
+    } else if a.z > a.y {
+        if n.z > 0.0 {
+            side = 1u;
+            uv = vec2(n.x / n.z, -n.y / n.z);
+        } else {
+            side = 4u;
+            uv = vec2(n.y / n.z, -n.x / n.z);
+        }
+    } else {
+        if n.y > 0.0 {
+            side = 2u;
+            uv = vec2(n.x / n.y, n.z / n.y);
+        } else {
+            side = 5u;
+            uv = vec2(-n.z / n.y, -n.x / n.y);
+        }
+    }
+    let w = uv * sqrt((1.0 + CUBE_C_SQR) / (1.0 + CUBE_C_SQR * uv * uv));
+    // Clamp just inside [0, 1) so `floor(uv * tiles)` never lands one tile out
+    // of range on exact face edges.
+    return CubeCoord(side, clamp(0.5 * w + 0.5, vec2(0.0), vec2(0.999999)));
+}
+
+// Terrain height (m about the reference radius) sampled from the resident
+// height tile best matching `footprint_rad` (the surface arc one screen pixel
+// subtends at the hit). Returns vec2(height_m, sampled_texel_m), or
+// x >= 1e29 when no resident tile covers this direction (lookup disabled,
+// cold streaming, terrain despawned) — the caller falls back to the coast
+// atlas. At mip 0 the packed Rg16 height is manually decoded per texel
+// (full precision — the coarse channel alone terraces gentle shores in
+// ~0.23 m steps); at coarser mips only the monotone coarse channel is
+// hardware-filtered, where the quantization is irrelevant.
+fn sample_tile_sea_height(dir_local: vec3<f32>, footprint_rad: f32) -> vec2<f32> {
+    let lookup = sky_atmos_extra.tile_lookup;
+    if lookup.x < 0.5 {
+        return vec2(1.0e30, 0.0);
+    }
+    let lod_count = u32(lookup.y + 0.5);
+    let tree_size = u32(lookup.z + 0.5);
+    let center_size = lookup.w;
+
+    let cc = cube_coord_from_dir(dir_local);
+
+    // Target LOD from the footprint: texel arc at LOD L is ~(π/2)/(2^L·center).
+    let want = log2(1.5707963 / max(footprint_rad * center_size, 1.0e-9));
+    let lod_target = u32(clamp(floor(want), 0.0, f32(lod_count) - 1.0));
+
+    // Walk the tree root→target, keeping the deepest LOD whose wandering
+    // window contains this point (lookup_best, capped at the footprint LOD —
+    // LOD 0 is always in-window).
+    var best_lod: u32 = 0u;
+    var best_xy: vec2<u32> = vec2(0u);
+    for (var lod: u32 = 0u; lod <= lod_target; lod = lod + 1u) {
+        let tiles = f32(1u << lod);
+        let scaled = cc.uv * tiles;
+        let xy = vec2<u32>(scaled);
+        let tuv = scaled - floor(scaled);
+        if lod > 0u {
+            let origin = sky_tile_origins[cc.side * lod_count + lod];
+            let window = min(f32(tree_size), tiles);
+            let rel = (vec2<f32>(vec2<i32>(xy) - vec2<i32>(origin)) + tuv) / window;
+            if any(rel <= vec2(0.0)) || any(rel >= vec2(1.0)) {
+                break;
+            }
+        }
+        best_lod = lod;
+        best_xy = xy;
+    }
+
+    let tree_xy = best_xy % vec2(tree_size);
+    let entry_index = ((cc.side * lod_count + best_lod) * tree_size + tree_xy.x) * tree_size
+        + tree_xy.y;
+    let entry = sky_tile_tree[entry_index];
+    if entry.atlas_index == TILE_INVALID || entry.atlas_lod == TILE_INVALID
+        || entry.atlas_lod >= lod_count {
+        return vec2(1.0e30, 0.0);
+    }
+
+    // The entry redirects to its best resident ancestor: re-derive the in-tile
+    // UV at the entry's own LOD.
+    let atlas_tiles = f32(1u << entry.atlas_lod);
+    let scaled_at = cc.uv * atlas_tiles;
+    let tile_uv = scaled_at - floor(scaled_at);
+    let atlas_uv = tile_uv * sky_atmos_extra.tile_atlas_uv.x + sky_atmos_extra.tile_atlas_uv.y;
+
+    // Footprint-matched mip inside the tile (providers bake full mip chains),
+    // so grazing-angle anisotropy reads the mean height over the footprint
+    // instead of point-sampling a foreshortened coast into moiré.
+    let texel_arc = 1.5707963 / (atlas_tiles * center_size);
+    let max_mip = f32(textureNumLevels(tile_height_atlas) - 1u);
+    let mip = clamp(log2(max(footprint_rad / texel_arc, 1.0)), 0.0, max_mip);
+    var h_unit: f32;
+    if (mip < 0.5) {
+        // Near field (mip 0): decode the FULL packed Rg16 fixed-point height —
+        // coarse UNORM16 in x plus the sub-LSB residual in y, each texel
+        // decoded before bilinear filtering (hardware-filtering the packed
+        // pair is invalid: y wraps at every x step — see
+        // `thalos_udlod::attachments`). The coarse channel alone quantizes
+        // height in ~0.23 m steps, which terraced the shore water into
+        // ~20 m depth/phase bands on gentle beaches.
+        let dims = vec2<f32>(textureDimensions(tile_height_atlas));
+        let p = atlas_uv * dims - vec2(0.5);
+        let base = floor(p);
+        let f = p - base;
+        let bi = vec2<i32>(base);
+        let dmax = vec2<i32>(dims) - vec2(1);
+        let layer = i32(entry.atlas_index);
+        let t00 = textureLoad(tile_height_atlas, clamp(bi, vec2(0), dmax), layer, 0);
+        let t10 = textureLoad(
+            tile_height_atlas, clamp(bi + vec2(1, 0), vec2(0), dmax), layer, 0);
+        let t01 = textureLoad(
+            tile_height_atlas, clamp(bi + vec2(0, 1), vec2(0), dmax), layer, 0);
+        let t11 = textureLoad(
+            tile_height_atlas, clamp(bi + vec2(1, 1), vec2(0), dmax), layer, 0);
+        let h00 = t00.x + t00.y / 65535.0;
+        let h10 = t10.x + t10.y / 65535.0;
+        let h01 = t01.x + t01.y / 65535.0;
+        let h11 = t11.x + t11.y / 65535.0;
+        h_unit = mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    } else {
+        // At range the 0.23 m coarse quantization is far below the coverage
+        // band; hardware-filter the monotone coarse channel with the mips.
+        h_unit = textureSampleLevel(tile_height_atlas, tile_height_sampler, atlas_uv,
+                                    entry.atlas_index, mip).x;
+    }
+    let h = mix(sky_atmos_extra.tile_atlas_uv.z, sky_atmos_extra.tile_atlas_uv.w, h_unit);
+    let texel_m = texel_arc * sky_atmos_extra.ocean.x * exp2(mip);
+    return vec2(h, texel_m);
+}
+
+// Signed sea height (m about sea level) of the terrain field at a body-local
+// direction — THE water authority (ADR-0006). One field, two resolutions:
+// the resident height tile when one covers this direction, else the baked
+// coast atlas mip chain (cold streaming, beyond terrain despawn, no-terrain
+// bodies). Both are projections of the same `SurfaceQuery` surface, so the
+// handoff is a resolution change, not an authority change — there is no seam
+// to tune and the waterline cannot move with camera distance or streaming
+// state. Returns vec2(signed_height_m, sampled_texel_m).
+fn sample_sea_field(dir_local: vec3<f32>, footprint_rad: f32, sea_level_m: f32) -> vec2<f32> {
+    let tile = sample_tile_sea_height(dir_local, footprint_rad);
+    if tile.x < 1.0e29 {
+        return vec2(tile.x - sea_level_m, tile.y);
+    }
+    let atlas_res = f32(textureDimensions(coast_atlas_tex).x);
+    let texel_rad = 1.5707963 / atlas_res;
+    let atlas_lod = clamp(log2(max(footprint_rad / texel_rad, 1.0)), 0.0, 12.0);
+    let h = (textureSampleLevel(coast_atlas_tex, coast_atlas_sampler, dir_local, atlas_lod).r
+        - 0.5) * (2.0 * COAST_ATLAS_HEIGHT_RANGE_M);
+    let texel_m = texel_rad * sky_atmos_extra.ocean.x * exp2(atlas_lod);
+    return vec2(h, texel_m);
+}
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -501,18 +720,28 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let view_pos   = view_pos_h.xyz / view_pos_h.w;
         let t_scene    = length(view_pos);
         scene_t = t_scene;
-        // Distinguish NEAR geometry (terrain, ship hull — always within the
-        // atmosphere shell plus a small margin) from a FAR background celestial
-        // body (a moon/planet impostor seen through this atmosphere, millions of
-        // metres away). For near geometry, clip the raymarch at it and run the
-        // surface aerial-perspective path. For a far body, leave `t_exit` at the
-        // shell exit and `surface_fade = 0` so this pixel is treated exactly like
-        // a SKY pixel: the in-scatter integrates the full air column and the
-        // perceptual sky-luminance opacity boost below CRUSHES the body by day
-        // (the same way it crushes stars), while a dim night sky lets it show.
-        // Without this the impostor was veiled as if it were distant *terrain*
-        // 190,000 km away, leaving Mira far too prominent in daylight.
-        if t_scene <= atmos_top_r * 4.0 {
+        // Distinguish NEAR geometry (terrain, ship hull) from a FAR background
+        // celestial body (a moon/planet impostor seen through this atmosphere,
+        // millions of metres away). For near geometry, clip the raymarch at it
+        // and run the surface aerial-perspective path. For a far body, leave
+        // `t_exit` at the shell exit and `surface_fade = 0` so this pixel is
+        // treated exactly like a SKY pixel: the in-scatter integrates the full
+        // air column and the perceptual sky-luminance opacity boost below
+        // CRUSHES the body by day (the same way it crushes stars), while a dim
+        // night sky lets it show. Without this the impostor was veiled as if it
+        // were distant *terrain* 190,000 km away, leaving Mira far too
+        // prominent in daylight.
+        //
+        // "Near" means the hit lies INSIDE this ray's atmosphere-shell segment
+        // (`t_exit` is still the shell far exit here). This is scale-free: the
+        // body's own terrain always qualifies at any camera distance, while a
+        // background body behind the shell never does. A fixed distance cutoff
+        // (the old `atmos_top_r * 4`) misclassified the planet's OWN terrain
+        // as a far body once the camera flew ~4 shell radii out — every land
+        // pixel got the star-crushing sky treatment and the continents went
+        // black while the analytic ocean stayed lit. The 0.1% margin absorbs
+        // f32 depth-reconstruction error at planet-scale distances.
+        if t_scene <= t_exit * 1.001 {
             t_exit = min(t_exit, t_scene);
             surface_fade = 1.0;
             surface_dist = t_scene;
@@ -524,10 +753,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ── Analytic ocean ────────────────────────────────────────────────────
-    // Ray-trace a math sphere at sea level and treat its surface as water
-    // wherever it sits in FRONT of the opaque seabed/terrain (`scene_t`). This
-    // is the smooth replacement for the meshed water shell: no facets, no sag,
-    // identical from orbit to sea level.
+    // Ray-trace a math sphere at sea level (ADR-0002: never a mesh). WHERE it
+    // is water and HOW DEEP it looks are both direct samples of the one
+    // signed sea-height field (ADR-0006): the resident udlod height tiles —
+    // the exact texels the visible terrain mesh is displaced from — with the
+    // baked coast atlas as the coarse tail. The depth buffer NEVER decides
+    // coverage or colour; its one remaining job is occluding water behind
+    // geometry that resolvably stands in front of it. Because the field's
+    // sea-level crossings are LOD-invariant (INC-0003), the waterline cannot
+    // move with camera distance, tile LOD, or streaming state.
     //
     // Numerical stability at planet radius is the whole ballgame here. The naive
     // `oc·oc − r_sea²` (two ~R² terms) and the near root `−b − √disc` (two ~R
@@ -538,7 +772,18 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // (Vieta) using the well-conditioned far root `t_far = −b + √disc`.
     var water_here = false;
     var t_ocean = 0.0;
-    var ocean_column_m = 0.0;
+    // Water coverage [0, 1] and the colour-driving column (m along the ray),
+    // both resolved from the sea field below (ADR-0006).
+    var ocean_cov = 0.0;
+    var ocean_color_column_m = 0.0;
+    // Shore-interaction inputs for `shade_ocean` (BL-10): vertical depth at
+    // the hit, distance to the waterline, and the tangent direction toward
+    // shore — all from the same signed sea field. Far sentinels disable the
+    // shore path (open ocean, or outside the near-field FX range).
+    var ocean_depth_m = 1.0e6;
+    var ocean_shore_dist_m = 1.0e9;
+    var ocean_shore_dir = vec3<f32>(0.0, 0.0, 1.0);
+    var ocean_fp_m = 1.0e9;
     if sky_atmos_extra.ocean.y >= 0.5 {
         let r_sea = sky_atmos_extra.ocean.x;
         let h = sky_atmos_extra.ocean.w;              // camera height above sea (m)
@@ -555,14 +800,131 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                 // Vieta near root: same sign as t_far, no large-cancellation.
                 let t_near = c_sea / t_far;
                 t_ocean = select(t_far, t_near, t_near > 0.0);
-                if t_ocean > 0.0 && t_ocean <= scene_t {
-                    water_here = true;
-                    ocean_column_m = max(scene_t - t_ocean, 0.0);
-                    // Integrate the air column to the WATER surface, not the
-                    // seabed behind it, so aerial perspective lands on the water.
-                    t_exit = min(t_exit, t_ocean);
-                    surface_fade = 1.0;
-                    surface_dist = t_ocean;
+                if t_ocean > 0.0 {
+                    // The tile height datum is the reference radius; the sea
+                    // sphere may sit `sea_level_m` above it (0 for runtime
+                    // procedural oceans).
+                    let sea_level_m = r_sea - sky_atmos_extra.planet_center_radius.w;
+                    // Direction of the sphere hit, body-local. The f32
+                    // planet-centre quantization (±0.25 m at Thalos radius)
+                    // bounds the waterline's absolute placement error to
+                    // sub-texel; it shifts only with floating-origin cell
+                    // crossings, not per frame.
+                    let hit_dir_w = normalize(cam_pos + t_ocean * ray_dir - planet_center);
+                    let hit_dir_l = rotate_quat(
+                        sky_atmos_extra.world_to_body_orientation, hit_dir_w);
+                    let mu_hit = abs(dot(hit_dir_w, ray_dir));
+                    // Surface arc one screen pixel sweeps at this hit —
+                    // `pixel_angle · t / (R·|μ|)` — grows without bound at
+                    // grazing incidence. Every field sample below is
+                    // mip-filtered to this footprint, so foreshortened
+                    // coastlines average instead of shredding into moiré.
+                    let pixel_angle = 2.0 * tan_fov_y / max(view.viewport.w, 1.0);
+                    let footprint_rad =
+                        pixel_angle * t_ocean / (r_sea * max(mu_hit, 1.0e-3));
+                    ocean_fp_m = footprint_rad * r_sea;
+
+                    // ── The one authority: the signed sea field ─────────────
+                    let field = sample_sea_field(hit_dir_l, footprint_rad, sea_level_m);
+                    // Colour column: exact bathymetry over the slant path.
+                    ocean_color_column_m = max(-field.x, 0.0) / max(mu_hit, 0.05);
+                    ocean_depth_m = max(-field.x, 0.0);
+
+                    // Local field gradient (two extra taps), wherever the
+                    // height is inside the coastal decision band. It feeds
+                    // BOTH the coverage antialiasing band below (the real
+                    // height spread inside this pixel's footprint) and the
+                    // near-field shore-wave geometry (shore distance ≈
+                    // |h| / |∇h|, uphill = toward land).
+                    var slope_local = 0.0;
+                    if (abs(field.x) < 60.0) {
+                        let axis_ref = select(
+                            vec3<f32>(0.0, 1.0, 0.0),
+                            vec3<f32>(1.0, 0.0, 0.0),
+                            abs(hit_dir_l.y) > 0.99,
+                        );
+                        let ta = normalize(cross(axis_ref, hit_dir_l));
+                        let tb = cross(hit_dir_l, ta);
+                        // Step ~¾ of the sampled texel: differences stay
+                        // resolved at every cascade resolution, and at a
+                        // mip-filtered shoreline the measured ramp slope IS
+                        // the footprint-scale height spread we want.
+                        let eps_m = max(field.y * 0.75, 3.0);
+                        let eps_rad = eps_m / r_sea;
+                        let ha = sample_sea_field(
+                            normalize(hit_dir_l + ta * eps_rad), footprint_rad, sea_level_m).x;
+                        let hb = sample_sea_field(
+                            normalize(hit_dir_l + tb * eps_rad), footprint_rad, sea_level_m).x;
+                        let g = vec2<f32>(ha - field.x, hb - field.x) / eps_m;
+                        let g_len = length(g);
+                        slope_local = g_len;
+                        if (field.x < 0.0 && g_len > 1.0e-5) {
+                            ocean_shore_dist_m = clamp(-field.x / g_len, 0.0, 1.0e8);
+                            // Uphill in the local tangent plane = toward land;
+                            // rotate back to render space (conjugate of the
+                            // world→body quaternion).
+                            let shore_l = (ta * g.x + tb * g.y) / g_len;
+                            let q = sky_atmos_extra.world_to_body_orientation;
+                            let q_conj = vec4<f32>(-q.xyz, q.w);
+                            ocean_shore_dir = normalize(rotate_quat(q_conj, shore_l));
+                        }
+                    }
+
+                    // Coverage: a band around the field's zero crossing sized
+                    // by the MEASURED local height spread in the footprint
+                    // (slope × sampled texel), floored at the physical wet
+                    // edge. Using a fixed representative coastal slope here
+                    // painted flat −10 m shoal fields as ~40 % land at coarse
+                    // footprints (±40 m bands — the island "halo" speckle);
+                    // the real slope gives shorelines their antialiasing while
+                    // flat shallows stay fully covered water.
+                    let band = clamp(slope_local * field.y, WET_EDGE_BAND_M, 40.0);
+                    var cov = 1.0 - smoothstep(-band, band, field.x);
+
+                    // ── Occlusion: geometry resolvably in front ─────────────
+                    // Two terms, both footprint-gated so unresolvable
+                    // coarse-mesh slivers at the limb defer to the filtered
+                    // field (the BL-5 lesson) while everything genuinely in
+                    // front still hides the water:
+                    if scene_t < 1.0e29 && scene_t < t_ocean {
+                        let fp_m = footprint_rad * r_sea;
+                        let scene_dir_w =
+                            normalize(cam_pos + scene_t * ray_dir - planet_center);
+                        let scene_dir_l = rotate_quat(
+                            sky_atmos_extra.world_to_body_orientation, scene_dir_w);
+                        // (a) Terrain: the FIELD's height at the blocker's
+                        // direction (exact data — the old radial depth
+                        // reconstruction was ±metres of f32 noise at range).
+                        // Thresholds scale with footprint: at flight ranges a
+                        // few metres of dune ridge occludes the lagoon behind
+                        // it; at limb anisotropy only mountain-scale relief
+                        // may override the filtered mask.
+                        let blocker = sample_sea_field(
+                            scene_dir_l, footprint_rad, sea_level_m);
+                        let occ_land = smoothstep(
+                            1.5 + 2.0e-3 * fp_m, 6.0 + 6.0e-3 * fp_m, blocker.x);
+                        // (b) Non-terrain geometry (craft, structures) isn't
+                        // in the field: occlude when it stands in front of
+                        // the water surface by more than a footprint-scaled
+                        // margin. The margin swallows depth-reconstruction
+                        // noise (≤ metres at orbital range, far below fp_m
+                        // there) so seabed ties can never flicker this on.
+                        let front_margin = max(4.0, fp_m);
+                        let occ_front = smoothstep(
+                            front_margin, 2.0 * front_margin, t_ocean - scene_t);
+                        cov = cov * (1.0 - max(occ_land, occ_front));
+                    }
+
+                    ocean_cov = cov;
+                    water_here = ocean_cov > 0.002;
+                    if ocean_cov >= 0.5 {
+                        // Mostly water: integrate the air column to the WATER
+                        // surface, not the seabed behind it, so aerial
+                        // perspective lands on the water.
+                        t_exit = min(t_exit, t_ocean);
+                        surface_fade = 1.0;
+                        surface_dist = t_ocean;
+                    }
                 }
             }
         }
@@ -621,10 +983,20 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let aerial_tau_near = 0.30;
     let aerial_tau_far = 2.40;
     let aerial_max = 0.72;
+    // Deep-tau extension: past the `aerial_max` plateau the veil keeps
+    // climbing toward near-total at extreme optical depths (tangent-zone /
+    // limb rays, whose air column is many times the vertical one). Physically
+    // the limb should melt into airlight; this ramp moves that way while
+    // leaving every view up to `aerial_tau_far` exactly as calibrated.
+    // (The INC-0003 "limb streak" residual was ultimately fixed elsewhere —
+    // the footprint-scaled occlusion in the ocean branch above — but this
+    // ramp remains the physically-right limb behaviour and softens whatever
+    // grazing detail survives.)
+    let aerial_deep_max = 0.96;
+    let aerial_deep = (aerial_deep_max - aerial_max) * smoothstep(aerial_tau_far, 7.0, view_tau);
     let aerial = select(
         0.0,
-        smoothstep(aerial_tau_near, aerial_tau_far, view_tau)
-            * aerial_max
+        (smoothstep(aerial_tau_near, aerial_tau_far, view_tau) * aerial_max + aerial_deep)
             * clamp(surface_fade, 0.0, 1.0),
         airlight_ratio > 0.0,
     );
@@ -789,19 +1161,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             sky_atmos_extra.sun_dir_flux.xyz,
             sun_flux_scaled,
             sky_atmos_extra.ocean_color_depth,
-            ocean_column_m,
+            ocean_color_column_m,
+            ocean_depth_m,
+            ocean_shore_dist_m,
+            ocean_shore_dir,
+            ocean_fp_m,
         );
         let surf_trans = (1.0 - opacity) * (1.0 - cloud.opacity);
-        // Feather the shoreline. Right at the waterline the seabed/terrain sits
-        // within a metre of sea level and the grass blades straddle it, so a hard
-        // water/land test dithers on the blade-height band. Ramp water coverage
-        // over the first few metres of depth: the seabed framebuffer shows through
-        // (partial alpha) in the shallowest sliver, giving a soft wet edge and
-        // letting clear shallows read their bed. Deeper than the band it is fully
-        // opaque water.
-        let shore_cov = clamp(ocean_column_m / 3.0, 0.0, 1.0);
-        let out_rgb = sky_rgb + water * surf_trans * shore_cov;
-        let out_a = mix(combined_opacity, 1.0, shore_cov);
+        // `ocean_cov` was resolved in the ocean block from the signed sea
+        // field (ADR-0006: resident height tiles → coast-atlas tail). Partial
+        // coverage lets the framebuffer seabed show through for the wet
+        // shoreline sliver / clear shallows.
+        let out_rgb = sky_rgb + water * surf_trans * ocean_cov;
+        let out_a = mix(combined_opacity, 1.0, ocean_cov);
         return vec4(out_rgb, out_a);
     }
 

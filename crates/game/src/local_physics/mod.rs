@@ -277,7 +277,7 @@ fn sync_avian_time(
 ) {
     // Avian's clock runs both for `Full` (translation+rotation+contact) and
     // `AttitudeOnly` (rotation+contact while Kepler owns translation).
-    // `SimClock` is a hard pause over that role classifier so menu/freecam/warp
+    // `SimClock` is a hard pause over that role classifier so menu/freecam-freeze/warp
     // pause stops local and canonical physics together.
     if clock.is_paused() {
         physics_time.pause();

@@ -106,6 +106,9 @@ struct GpuGrassState {
     /// The window's own anchor (its texel-grid origin) + entity height.
     window_anchor: Option<GpuGrassAnchor>,
     anchor_height_m: f32,
+    /// Macro landcover moisture at the window anchor (see
+    /// `GpuGrassWindow::anchor_moisture`), forwarded to `params.phase.w`.
+    anchor_moisture: f32,
     built_revision: u64,
     built_region_count: usize,
     agl_m: f64,
@@ -388,6 +391,7 @@ fn finalize_gpu_grass(
     state.anchor = Some(anchor);
     state.window_anchor = Some(anchor);
     state.anchor_height_m = window.anchor_height_m;
+    state.anchor_moisture = window.anchor_moisture;
     state.built_revision = window.built_revision;
     state.built_region_count = region_count;
 
@@ -572,12 +576,19 @@ fn update_gpu_grass_material(
         texel_m as f32,
         GPU_GRASS_WINDOW_SIZE_PX as f32,
         GPU_GRASS_WINDOW_HALF_M as f32,
-        0.0,
+        // Climate cold lift at the anchor (m): shifts the blade treeline fade
+        // and the veg palette with latitude, matching the terrain shader.
+        thalos_terrain::climate_cold_lift_m(anchor.dir.y.abs()) as f32,
     );
 
     let anchor_point = anchor.dir * (radius_m + state.anchor_height_m as f64);
     let phase = anchor_point.map(|c| c.rem_euclid(LANDCOVER_PERIOD_M));
-    material.params.phase = Vec4::new(phase.x as f32, phase.y as f32, phase.z as f32, 0.0);
+    material.params.phase = Vec4::new(
+        phase.x as f32,
+        phase.y as f32,
+        phase.z as f32,
+        state.anchor_moisture,
+    );
 
     for i in 0..GPU_GRASS_BAND_COUNT {
         let (cx, cy) = anchor.band_cell[i];

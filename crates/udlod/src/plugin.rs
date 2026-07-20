@@ -1,14 +1,6 @@
 use crate::{
     math::{generate_terrain_model_approximation, TerrainModelApproximation},
-    render::{
-        culling_bind_group::CullingBindGroup,
-        terrain_bind_group::TerrainData,
-        terrain_view_bind_group::TerrainViewData,
-        tiling_prepass::{
-            init_tiling_prepass_pipelines, queue_tiling_prepass, TilingPrepassItem,
-            TilingPrepassPipelines,
-        },
-    },
+    render::{terrain_bind_group::TerrainData, terrain_view_bind_group::TerrainViewData},
     shaders::{load_terrain_shaders, InternalShaders},
     terrain::TerrainComponents,
     terrain_data::{
@@ -19,7 +11,7 @@ use crate::{
 };
 use bevy::{
     prelude::*,
-    render::{render_resource::*, Render, RenderApp, RenderStartup, RenderSystems},
+    render::{Render, RenderApp, RenderSystems},
 };
 
 /// The plugin for the terrain renderer.
@@ -50,10 +42,6 @@ impl Plugin for TerrainPlugin {
             .init_resource::<TerrainComponents<TerrainData>>()
             .init_resource::<TerrainViewComponents<GpuTileTree>>()
             .init_resource::<TerrainViewComponents<TerrainViewData>>()
-            .init_resource::<TerrainViewComponents<CullingBindGroup>>()
-            .init_resource::<TerrainViewComponents<TilingPrepassItem>>()
-            .init_resource::<SpecializedComputePipelines<TilingPrepassPipelines>>()
-            .add_systems(RenderStartup, init_tiling_prepass_pipelines)
             .add_systems(
                 ExtractSchedule,
                 (
@@ -70,28 +58,16 @@ impl Plugin for TerrainPlugin {
             .add_systems(
                 Render,
                 (
-                    (
-                        GpuTileTree::prepare,
-                        GpuTileAtlas::prepare,
-                        TerrainData::prepare,
-                        TerrainViewData::prepare,
-                        CullingBindGroup::prepare,
-                    )
-                        .in_set(RenderSystems::Prepare),
-                    queue_tiling_prepass.in_set(RenderSystems::Queue),
-                ),
+                    GpuTileTree::prepare,
+                    GpuTileAtlas::prepare,
+                    TerrainData::prepare,
+                    TerrainViewData::prepare,
+                )
+                    .in_set(RenderSystems::Prepare),
             );
     }
 
     fn finish(&self, app: &mut App) {
         load_terrain_shaders(app);
-
-        // Bevy 0.19 replaced the node-based render graph with render-pass
-        // systems. The former `TilingPrepassNode` was already a no-op (the GPU
-        // tiling prepass was superseded by the CPU draw-set computation in
-        // `TileTree::compute_draw_set`), so it is not ported — there is no GPU
-        // work to schedule. The compute pipelines / bind groups remain wired
-        // (`queue_tiling_prepass`) so the dispatch path can be reinstated as a
-        // `Core3d`-schedule system if we ever bisect back to it.
     }
 }

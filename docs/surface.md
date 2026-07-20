@@ -1088,16 +1088,17 @@ explosion FX yet):
   sim delta and gating the `SimStage` system sets exactly like the escape
   menu / warp / freecam. Bevy's global `Time<Virtual>` keeps running so
   presentation effects can continue. A centered overlay (`scenario_menu.rs`)
-  shows "VESSEL DESTROYED — impact NN m/s" above the four start scenarios,
+  shows "VESSEL DESTROYED — impact NN m/s" above the start scenarios,
   plus a log line at destruction time. `destroyed` is mirrored into
   `CraftStateMirror` so the HUD / a debug overlay can read it.
 - **Recovery is an in-place respawn.** Each scenario button repairs the
   craft (`Simulation::repair()`) and rebuilds it for the chosen start
-  without relaunching the process: the authored Thalos parking orbit, a
-  landing / final-approach descent over daylight dry land, or a Ship→EVA
-  disembark. The three ship scenarios reuse `spawn::orbit_parking_state`
-  / `spawn::compute_descent_state` (shared with the startup spawn so the
-  two never drift); EVA swaps the vessel kind and lets
+  without relaunching the process: the Thalos parking orbit (equatorial
+  or polar), a landing / final-approach / cruise over daylight dry land,
+  or a Ship→EVA disembark. Orbit / polar reuse
+  `spawn::orbit_respawn_state` / `spawn::polar_orbit_respawn_state`;
+  descents use `spawn::compute_descent_state` (shared with the startup
+  spawn so the two never drift); EVA swaps the vessel kind and lets
   `spawn_player_avian_body` plant the on-foot capsule next frame. The
   wreck's Avian bubble is torn down so a clean body respawns. The
   existing debug teleports (F9 surface-drop, body-tree orbit) still call

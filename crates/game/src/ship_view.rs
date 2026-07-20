@@ -38,6 +38,7 @@ use thalos_body_render::{ShadowedStandardMaterial, shadowed};
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
+use crate::game_context::GameContext;
 use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
 
@@ -88,6 +89,12 @@ impl Plugin for ShipViewPlugin {
                 OnEnter(crate::loading::WorldState::Live),
                 spawn_player_ship,
             )
+            // Re-acquire the craft when returning to flight from any in-world
+            // modal (launch-select / hub / base editor / VAB). Without this the
+            // ship camera keeps whatever focus the modal left — on a session's
+            // first launch, the world-spawn `Body(homeworld)` focus — and flies
+            // off the placed craft until a view toggle happens to fix it.
+            .add_systems(OnEnter(GameContext::Flight), reacquire_flight_focus)
             .add_systems(
                 Update,
                 (
@@ -494,12 +501,60 @@ fn sync_view_mode_changed(
     mut focus: ResMut<CameraFocus>,
     bodies: Query<&CelestialBody>,
 ) {
-    match *view {
+    establish_flight_focus(
+        *view,
+        &sim,
+        &body_states,
+        player.as_deref(),
+        &mut focus,
+        &bodies,
+    );
+}
+
+/// Re-acquire the flight camera focus on entry to [`GameContext::Flight`] — i.e.
+/// returning to flying from an in-world modal (launch-select, the space-center
+/// hub, the base editor, or the VAB). Those modes leave [`CameraFocus::target`]
+/// on whatever they last used: the launch flow, on a session's *first* launch,
+/// inherits the world-spawn `focus_camera_on_homeworld` `Body(homeworld)` focus,
+/// so the ship camera would keep orbiting the planet's map-billboard position
+/// instead of the just-placed craft (it "flies away"). Unlike a map↔ship toggle,
+/// no [`ViewMode`] change fires here, so [`sync_view_mode_changed`] never runs to
+/// correct it — hence this explicit re-acquire on the context edge. It applies
+/// the same establishing framing a view toggle would.
+fn reacquire_flight_focus(
+    view: Res<ViewMode>,
+    sim: Res<SimulationState>,
+    body_states: Res<SolarSystemState>,
+    player: Option<Res<crate::player_controller::PlayerControllerState>>,
+    mut focus: ResMut<CameraFocus>,
+    bodies: Query<&CelestialBody>,
+) {
+    establish_flight_focus(
+        *view,
+        &sim,
+        &body_states,
+        player.as_deref(),
+        &mut focus,
+        &bodies,
+    );
+}
+
+/// Establish the flight camera focus for `view`: chase the craft (or the on-foot
+/// player) in ship view, frame the SOI body in map view. The single home for the
+/// "what should the flight camera look at" decision — shared by
+/// [`sync_view_mode_changed`] (a view toggle) and [`reacquire_flight_focus`] (a
+/// return to flight).
+fn establish_flight_focus(
+    view: ViewMode,
+    sim: &SimulationState,
+    body_states: &SolarSystemState,
+    player: Option<&crate::player_controller::PlayerControllerState>,
+    focus: &mut CameraFocus,
+    bodies: &Query<&CelestialBody>,
+) {
+    match view {
         ViewMode::Ship => {
-            let player_active = player
-                .as_deref()
-                .map(|state| state.is_active())
-                .unwrap_or(false);
+            let player_active = player.map(|state| state.is_active()).unwrap_or(false);
             focus.target = if player_active {
                 crate::camera::CameraFocusTarget::PlayerController
             } else {

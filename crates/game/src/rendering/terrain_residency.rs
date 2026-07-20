@@ -267,6 +267,9 @@ struct ResidencySpawnParams<'w, 's> {
     tile_trees: ResMut<'w, TerrainViewComponents<TileTree>>,
     height_sources: Res<'w, HeightSourceRegistry>,
     flatten: ResMut<'w, super::ground_terrain::TerrainFlattenRegistry>,
+    /// Per-body tile caches. Held in a resource so retained tile payloads survive
+    /// the despawn/respawn this module performs on every tier change.
+    tile_cache: ResMut<'w, super::tile_cache::TileCacheRegistry>,
     bodies: Query<'w, 's, (&'static RealSpaceBody, Entity)>,
     ship_camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
     sun_shadow: Res<'w, super::sun_shadow::SunShadowImage>,
@@ -470,6 +473,7 @@ fn try_spawn(
         flatten,
         tier,
         sun_shadow_maps,
+        &mut params.tile_cache,
     );
 
     // Ocean is no longer a terrain-parented mesh: it is rendered analytically as

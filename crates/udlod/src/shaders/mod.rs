@@ -3,10 +3,6 @@ use itertools::Itertools;
 
 pub const DEFAULT_VERTEX_SHADER: &str = "embedded://thalos_udlod/shaders/render/vertex.wgsl";
 pub const DEFAULT_FRAGMENT_SHADER: &str = "embedded://thalos_udlod/shaders/render/fragment.wgsl";
-pub const PREPARE_PREPASS_SHADER: &str =
-    "embedded://thalos_udlod/shaders/tiling_prepass/prepare_prepass.wgsl";
-pub const REFINE_TILES_SHADER: &str =
-    "embedded://thalos_udlod/shaders/tiling_prepass/refine_tiles.wgsl";
 
 #[derive(Default, Resource)]
 pub(crate) struct InternalShaders(Vec<Handle<Shader>>);
@@ -31,8 +27,6 @@ pub(crate) fn load_terrain_shaders(app: &mut App) {
     embedded_asset!(app, "debug.wgsl");
     embedded_asset!(app, "render/vertex.wgsl");
     embedded_asset!(app, "render/fragment.wgsl");
-    embedded_asset!(app, "tiling_prepass/prepare_prepass.wgsl");
-    embedded_asset!(app, "tiling_prepass/refine_tiles.wgsl");
 
     InternalShaders::load(
         app,

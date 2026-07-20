@@ -18,7 +18,7 @@ in-atmosphere flight is the remaining frontier.
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
 | Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, and aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. The terrain `BodySky` pass and the impostor path both use this orbital model so the surface stays readable and haze concentrates toward the limb instead of washing the whole disk blue. Sky pixels still boost alpha from local in-scatter luminance so bright sky crushes stars where an observer's eye would adapt away from them. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 / Hillaire-style multi-scatter LUTs once in-atmosphere flight justifies the precompute step. |
-| Cloud rendering | **Terrain `BodySky` path: volumetric slab raymarch** (`body_sky.wgsl::cloud_volume_overlay`) between two concentric shells (`cloud_shape.x/y`). Density = reference coverage cube (16-band differential rotation) shaped by a vertical profile and 3-D detail noise; a short sun march gives self-shadow, a forward-scatter phase the silver lining, and a per-sample + segment terminator fade keeps the night side from punching black holes in the starfield. Camera-regime aware: clouds show over the disk from orbit and overhead from the surface. The impostor (orbital/far) still composites a flat lit reference shell + shadow probe. Bodies without a registered overlay bind a blank cube. Gas-giant cloud deck is part of the impostor. | Procedural coverage field (real weather patterns) to replace hand-picked equirects; half-res + temporal upscale for cost; surface-shadow projection from clouds onto terrain LOD; volumetric in the impostor for close orbital cinematics. |
+| Cloud rendering | **Near/mid `BodySky` path:** the vendored compute raymarch described in *Cloud rendering (M4)* below; body-fixed spherical shells, procedural density, a planet-fixed weather map, cloud-depth export, and temporal reprojection. The far impostor still composites a separately authored flat shell. Gas-giant cloud decks remain a distinct system. | The canonical surface-to-orbit replacement is planned in [clouds.md](clouds.md): one per-body weather field, atmosphere-coupled lighting, scalable reconstruction, shared cloud shadows, and a weather-derived orbital projection. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
@@ -206,6 +206,53 @@ prepass-depth texture is terrain-blind. The workaround lives in
   extracted to the render world via `ExtractComponentPlugin` so the
   node's `ViewQuery` filters to that view only (the map camera and
   any future light / shadow views don't carry it).
+- **Near/far geometry classification is shell-segment membership, never a
+  fixed distance** (INC-0003). A depth hit counts as "this body's surface"
+  iff it lies inside the ray's atmosphere-shell segment (`t_scene <=` the
+  shell far exit); anything past the shell exit is a background celestial
+  body and gets the sky-pixel treatment (full-column in-scatter + the
+  perceptual luminance opacity boost that crushes stars/daylit moons). A
+  distance cutoff encodes a camera-altitude assumption that orbital views
+  violate — the old `atmos_top_r * 4` cutoff turned the planet's own
+  continents pure black beyond ~13,000 km while the analytic ocean stayed
+  lit.
+- **The analytic ocean's coverage/colour are direct samples of the one signed
+  sea-height field — never a depth comparison, at any range** (ADR-0006,
+  superseding ADR-0005's range-blend). The ocean branch samples signed sea
+  height at the sphere-hit direction from a resolution cascade of the same
+  field: the resident **udlod height-tile atlas** first (a WGSL port of the
+  tile-tree walk, capped at the pixel's footprint LOD and mip-sampled within
+  the tile — the exact texels the visible terrain mesh is displaced from;
+  bound at material bindings 11–14 via `BodySkyMaterial`'s manual
+  `AsBindGroup`, keyed by its `terrain_entity` field), then the per-body
+  **coast/bathymetry cube** (`BodySkyMaterial::coast_atlas`, baked once at
+  spawn by `bake_coast_bathymetry_cube` from the same `SurfaceQuery` surface)
+  as the coarse tail — cold streaming, terrain despawned, beyond the impostor
+  swap. Same field at two resolutions = no authority crossfade and no seam;
+  the field's zero crossings are LOD-invariant (relief never crosses sea
+  level), so the waterline cannot move with camera distance or streaming
+  state. Coverage is a band around the zero crossing sized by the *sampled
+  texel* (0.75 m wet-edge floor, never a range-scaled error model); colour is
+  the field's bathymetry over the slant path. Scene depth's only remaining
+  job is occlusion by resolvable geometry: terrain occludes via the *field's*
+  height at the scene-hit direction (footprint-scaled thresholds), and
+  non-terrain geometry (craft, structures) occludes when it stands in front
+  of the water surface by more than a footprint-scaled margin. Never derive
+  water coverage or colour from scene depth again — the depth-compare
+  architecture regenerated coast speckle / translucent-wash artifacts three
+  times (INC-0003, BL-5, BL-8) before ADR-0006 removed it.
+- **Shore interaction is keyed on the same field** (BL-10, tier 1 —
+  MSFS-class, normals + albedo only, no displaced geometry): near shore the
+  sky pass takes two extra field taps for the tangent gradient, giving
+  `shade_ocean` the vertical depth, distance-to-waterline, and shoreward
+  direction. From those: wave shoaling (chop calms as depth → 0), breaker
+  swell ridges + foam stripes whose phase is a function of *shore distance*
+  (crest lines parallel to the beach by construction — refraction for free —
+  marching shoreward with time), and a churned swash edge in the last metre.
+  All of it fades out past ~9 km view distance; the map/impostor callers pass
+  far sentinels and are untouched. Tier 2 (advected breaker fronts with
+  crest shaping + foam decay trails, Sea-of-Thieves-class) is the follow-up
+  seam.
 
 Cost: one fullscreen depth copy per frame. Trivial on M2 Pro at
 typical resolutions.
@@ -412,6 +459,11 @@ this yet — they'd need an `ExtendedMaterial` to reach a fragment hook; deferre
 
 ## Cloud rendering (M4)
 
+> This section specifies the implementation that ships today. The future
+> architecture, sequencing, and acceptance matrix live in
+> [clouds.md](clouds.md); keep future rationale there rather than growing a
+> second plan in this file.
+
 ### Today: vendored HZD volumetric clouds (`thalos_volumetric_clouds`)
 
 The shipping near-cloud renderer is a vendored fork of
@@ -511,33 +563,14 @@ for now.
 - The weather map is static between version bumps — no advection or
   evolution yet.
 
-### Next (living weather)
+### Planned replacement
 
-- **Evolving weather field.** Advect/evolve `CloudWeatherState` over sim
-  time (drifting systems, growing/decaying coverage), either by animating
-  the generator parameters or by replacing the parametric generator with
-  a coarse simulated grid written into the same `CloudCoverageMap`.
-- **Storms.** Cyclonic systems / fronts as features in that field, with
-  locally boosted density, height, and (later) lightning, inferred from
-  rotation rate + obliquity.
-- **Unify with the impostor reference clouds.** Derive the orbital
-  impostor's cloud cubemap from the same `CloudWeatherState` so coverage
-  agrees across the impostor↔terrain LOD swap.
-- **Cost: half-res + temporal upscale.** The march currently runs
-  full-res; on surface views it touches the whole sky hemisphere. Drop to
-  half/quarter-res with temporal reprojection (Blackrack/HZD style) if it
-  bites.
-- **Surface cloud shadows (designed; terrain receiver pending).** A dynamic,
-  low-res **sun-projected cloud transmittance** buffer, sampled as the
-  `cloud_transmittance` multiplier on the direct-sun term by terrain, objects,
-  and the in-scatter march alike — one shared slot (see
-  [terrain.md](terrain.md) *Surface shadows*). Cheap because clouds are
-  soft/low-frequency; updated per frame (or every few) from the cloud volume
-  state in `SolarSystemState`, kept in a body-fixed / sun-aligned frame so it
-  doesn't swim under the floating origin. The same transmittance, sampled per
-  step in the `BodySky` march, gives **god rays / crepuscular shafts** (already
-  depth-coupled via `SceneDepthImage`). The impostor's existing shadow probe is
-  the orbital analogue; the terrain receiver is the remaining wiring.
+The former living-weather list is now decomposed in [clouds.md §4](clouds.md):
+canonical per-body state (CLOUD-1), scalable temporal reconstruction (CLOUD-2),
+multi-scale density (CLOUD-3), shared atmosphere lighting (CLOUD-4), one-world
+cloud transmittance/godrays (CLOUD-5), the orbital projection (CLOUD-6), and
+weather/authoring (CLOUD-7). The first pickable slice is CLOUD-0, which captures
+the current renderer and establishes budgets before replacement work begins.
 
 For gas giants, "clouds" *are* the cloud deck and live inside
 `AtmosphereParams` already.

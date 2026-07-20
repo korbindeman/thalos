@@ -149,6 +149,14 @@ pub struct CycleShipCameraAction;
 #[action_output(bool)]
 pub struct CameraPrimaryAction;
 
+/// Camera-orbit drag button. Distinct from [`CameraPrimaryAction`]: primary
+/// (left mouse) stays for click/drag *interactions* (maneuver handles, body
+/// focus, debug teleport), while orbit (right mouse) rotates the view — the
+/// same right-drag-orbits grammar the god-view modes already use.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct CameraOrbitAction;
+
 #[derive(InputAction)]
 #[action_output(Vec2)]
 pub struct CameraMotionAction;
@@ -235,6 +243,9 @@ pub struct GameInputIntent {
     pub primary_pressed: bool,
     pub primary_started: bool,
     pub primary_released: bool,
+    /// Held: the camera-orbit (right mouse) button is down. Drives view
+    /// rotation in the flight orbit camera and the freecam mouse-look.
+    pub orbit_pressed: bool,
     pub camera_motion: Vec2,
     pub camera_wheel: Vec2,
     pub toggle_player_controller: bool,
@@ -473,6 +484,14 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Bindings::spawn(settings.game.camera.bindings("primary")),
             ),
             (
+                Action::<CameraOrbitAction>::new(),
+                ActionSettings {
+                    consume_input: false,
+                    ..default()
+                },
+                Bindings::spawn(settings.game.camera.bindings("orbit")),
+            ),
+            (
                 Action::<CameraMotionAction>::new(),
                 ActionSettings {
                     consume_input: false,
@@ -678,6 +697,7 @@ fn collect_view_intent(
 fn collect_camera_intent(
     mut intent: ResMut<GameInputIntent>,
     primary: Query<(&Action<CameraPrimaryAction>, &ActionEvents)>,
+    orbit: Query<&Action<CameraOrbitAction>>,
     motion: Query<&Action<CameraMotionAction>>,
     wheel: Query<&Action<CameraWheelAction>>,
     scroll: Res<AccumulatedMouseScroll>,
@@ -685,6 +705,7 @@ fn collect_camera_intent(
     intent.primary_pressed = held_with_events(&primary);
     intent.primary_started = started(&primary);
     intent.primary_released = completed(&primary);
+    intent.orbit_pressed = held(&orbit);
     intent.camera_motion = vec2(&motion);
     intent.camera_wheel = crate::camera_scroll_delta(vec2(&wheel), scroll.unit);
 }

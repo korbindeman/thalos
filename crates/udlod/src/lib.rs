@@ -38,9 +38,11 @@ pub mod prelude {
         render::terrain_material::TerrainMaterialPlugin,
         terrain::{TerrainBundle, TerrainConfig},
         terrain_data::{
+            prune_tile_cache, static_namespace,
             tile_atlas::TileAtlas,
             tile_tree::{TerrainStreamingPaused, TileTree},
-            AttachmentConfig, AttachmentFormat, MemoryTileCacheProvider, TileProvider,
+            AttachmentConfig, AttachmentFormat, DiskTileCacheProvider, MemoryTileCacheProvider,
+            NamespaceFn, SharedTileCache, TileProvider,
         },
         terrain_view::{TerrainViewComponents, TerrainViewConfig},
     };

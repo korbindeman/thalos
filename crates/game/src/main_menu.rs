@@ -44,7 +44,10 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
-use crate::hud::theme::{HudTheme, panel_frame};
+use thalos_ui::{
+    self as ui, SPACE_SM, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens,
+};
+
 use crate::loading::{
     AppState, LoadDestination, LoadingTracker, StepDesc, WorldState, step, steps_for,
     world_load_steps,
@@ -56,8 +59,8 @@ use crate::rendering::{PlayerShip, SimulationState};
 use crate::runway::{RunwayPlacement, RunwaySite};
 use crate::scenario_menu::respawn_into;
 use crate::settings_menu::SettingsMenu;
-use crate::shipyard_editor::OpenShipyardOnStart;
-use crate::space_center::{HubSpaceportBuild, OpenSpaceCenterOnStart};
+use crate::game_context::{GameContext, InitialContext};
+use crate::space_center::HubSpaceportBuild;
 use crate::spawn::{DescentPlacement, Homeworld, SpawnSituation};
 use crate::surface_settle::SurfaceSettle;
 
@@ -107,7 +110,6 @@ impl Plugin for MainMenuPlugin {
                     collect_menu_clicks,
                     apply_menu_action,
                     update_dev_visibility,
-                    update_button_visuals,
                 )
                     .chain()
                     .run_if(in_state(AppState::MainMenu)),
@@ -137,7 +139,7 @@ fn restore_update_rate(mut commands: Commands) {
 // Opaque backdrop matching the loading screen, so the boot placeholder world
 // (and its HUD) never shows through. A live-world backdrop is a later polish
 // pass — it needs the HUD hidden per app state first.
-const SCREEN_BG: Color = Color::srgb(0.040, 0.038, 0.034);
+const SCREEN_BG: Color = tokens::SCREEN_BG;
 
 const MENU_WIDTH: f32 = 380.0;
 
@@ -146,6 +148,11 @@ const SCENARIOS: &[(SpawnSituation, &str, &str)] = &[
         SpawnSituation::ShipOrbit,
         "ORBIT",
         "low Thalos parking orbit",
+    ),
+    (
+        SpawnSituation::PolarOrbit,
+        "POLAR ORBIT",
+        "low polar parking orbit",
     ),
     (
         SpawnSituation::Landing,
@@ -175,7 +182,7 @@ const SCENARIOS: &[(SpawnSituation, &str, &str)] = &[
     (SpawnSituation::Eva, "EVA", "on foot on the surface"),
 ];
 
-fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>, mut dev: ResMut<DevMenuExpanded>) {
+fn spawn_menu(mut commands: Commands, theme: Res<UiTheme>, mut dev: ResMut<DevMenuExpanded>) {
     // Start collapsed each time the menu is shown (keeps the section's spawned
     // `Hidden` state and the resource in agreement on re-entry).
     dev.0 = false;
@@ -218,76 +225,36 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>, mut dev: ResMut<DevM
                 Name::new("MainMenuHeader"),
             ))
             .with_children(|header| {
+                let mut title = theme.display("THALOS");
+                title.2 = TextColor(tokens::ACCENT);
+                header.spawn((title, Name::new("MainMenuTitle")));
                 header.spawn((
-                    Text::new("THALOS"),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(56.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_accent),
-                    Name::new("MainMenuTitle"),
-                ));
-                header.spawn((
-                    Text::new(concat!("pre-alpha  v", env!("CARGO_PKG_VERSION"))),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(11.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
+                    theme.faint(concat!("pre-alpha  v", env!("CARGO_PKG_VERSION"))),
                     Name::new("MainMenuVersion"),
                 ));
             });
 
-            let (bg, border) = panel_frame(&theme);
             root.spawn((
                 Node {
                     width: Val::Px(MENU_WIDTH),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(4.0)),
-                    padding: UiRect::axes(Val::Px(18.0), Val::Px(16.0)),
-                    flex_direction: FlexDirection::Column,
                     align_items: AlignItems::Stretch,
-                    row_gap: Val::Px(6.0),
-                    ..default()
+                    row_gap: Val::Px(SPACE_SM),
+                    ..ui::panel_node()
                 },
-                bg,
-                border,
+                theme.glass(),
                 Name::new("MainMenuPanel"),
             ))
             .with_children(|panel| {
                 // Primary: the usual PLAY / SETTINGS / QUIT.
-                spawn_menu_button(
-                    panel,
-                    &theme,
-                    MenuAction::Play,
-                    "PLAY",
-                    "enter the space center",
-                );
-                spawn_menu_button(
-                    panel,
-                    &theme,
-                    MenuAction::Settings,
-                    "SETTINGS",
-                    "window & input",
-                );
-                spawn_menu_button(panel, &theme, MenuAction::Quit, "QUIT", "");
+                spawn_menu_row(panel, &theme, MenuAction::Play, "PLAY", "enter the space center");
+                spawn_menu_row(panel, &theme, MenuAction::Settings, "SETTINGS", "window & input");
+                spawn_menu_row(panel, &theme, MenuAction::Quit, "QUIT", "");
 
-                panel.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        height: Val::Px(1.0),
-                        margin: UiRect::vertical(Val::Px(6.0)),
-                        ..default()
-                    },
-                    BackgroundColor(theme.panel_border),
-                    Name::new("MainMenuDivider"),
-                ));
+                spawn_divider(panel);
 
                 // Secondary: the direct-scenario shortcuts, collapsed by default
                 // (toggled by the button; visibility driven by `update_dev_visibility`).
-                spawn_menu_button(
+                spawn_menu_row(
                     panel,
                     &theme,
                     MenuAction::ToggleDev,
@@ -300,8 +267,8 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>, mut dev: ResMut<DevM
                         Node {
                             flex_direction: FlexDirection::Column,
                             align_items: AlignItems::Stretch,
-                            row_gap: Val::Px(6.0),
-                            margin: UiRect::top(Val::Px(6.0)),
+                            row_gap: Val::Px(SPACE_XS + 2.0),
+                            margin: UiRect::top(Val::Px(SPACE_XS + 2.0)),
                             ..default()
                         },
                         Visibility::Hidden,
@@ -309,73 +276,11 @@ fn spawn_menu(mut commands: Commands, theme: Res<HudTheme>, mut dev: ResMut<DevM
                     ))
                     .with_children(|dev| {
                         for &(situation, label, desc) in SCENARIOS {
-                            spawn_menu_button(
-                                dev,
-                                &theme,
-                                MenuAction::Scenario(situation),
-                                label,
-                                desc,
-                            );
+                            spawn_menu_row(dev, &theme, MenuAction::Scenario(situation), label, desc);
                         }
-                        spawn_menu_button(
-                            dev,
-                            &theme,
-                            MenuAction::Shipyard,
-                            "SHIPYARD",
-                            "design a craft",
-                        );
+                        spawn_menu_row(dev, &theme, MenuAction::Shipyard, "SHIPYARD", "design a craft");
                     });
             });
-        });
-}
-
-fn spawn_menu_button(
-    parent: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
-    action: MenuAction,
-    label: &str,
-    desc: &str,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(30.0),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
-                padding: UiRect::horizontal(Val::Px(12.0)),
-                justify_content: JustifyContent::SpaceBetween,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(theme.panel_bg),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
-            action,
-            Name::new(format!("MainMenu{label}Button")),
-        ))
-        .with_children(|c| {
-            c.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(theme.text_primary),
-            ));
-            if !desc.is_empty() {
-                c.spawn((
-                    Text::new(desc),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(10.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
-                ));
-            }
         });
 }
 
@@ -440,8 +345,7 @@ fn apply_menu_action(
     runway_site: Option<Res<RunwaySite>>,
     ui: (
         ResMut<SettingsMenu>,
-        ResMut<OpenShipyardOnStart>,
-        ResMut<OpenSpaceCenterOnStart>,
+        ResMut<InitialContext>,
         ResMut<HubSpaceportBuild>,
         ResMut<DevMenuExpanded>,
     ),
@@ -458,7 +362,7 @@ fn apply_menu_action(
     let (mut tracker, mut dest, mut settle, mut runway_placement, mut relaunch, mut descent) =
         load;
     let (world_state, mut next_world) = world;
-    let (mut settings, mut open_shipyard, mut open_space_center, mut hub_build, mut dev) = ui;
+    let (mut settings, mut initial_context, mut hub_build, mut dev) = ui;
     let (primary_window, mut close_requested, mut app_exit) = exit;
     let world_absent = *world_state.get() == WorldState::Absent;
 
@@ -473,7 +377,7 @@ fn apply_menu_action(
             // player launches a ship themselves from the VAB; nothing is loaded on
             // the pad/runway. If the spaceport already exists this session, skip
             // straight to the hub.
-            open_space_center.0 = true;
+            initial_context.0 = Some(GameContext::SpaceCenter);
             if runway_site.is_some() {
                 next_state.set(AppState::Running);
             } else {
@@ -509,9 +413,9 @@ fn apply_menu_action(
             return;
         }
         MenuAction::Shipyard => {
-            // The editor opens on entry to `Running` (never during a load) —
-            // the same deferred-open used by `just game shipyard`.
-            open_shipyard.0 = true;
+            // The VAB opens on entry to `Running` (never during a load) via the
+            // initial-context boot route, same as `just game shipyard`.
+            initial_context.0 = Some(GameContext::Vab);
             SpawnSituation::ShipOrbit
         }
         MenuAction::Scenario(s) => s,
@@ -534,7 +438,7 @@ fn apply_menu_action(
             // Seat the sim itself into the scenario now (orbit state reset /
             // EVA vessel-kind swap — neither needs terrain, and the EVA
             // branch's ship-despawn loop just sees an empty query).
-            SpawnSituation::ShipOrbit | SpawnSituation::Eva => {
+            SpawnSituation::ShipOrbit | SpawnSituation::PolarOrbit | SpawnSituation::Eva => {
                 respawn_into(
                     start,
                     &mut commands,
@@ -572,6 +476,7 @@ fn apply_menu_action(
         // Same-craft starts: seat the boot placeholder craft (or the EVA
         // capsule) into the scenario in place and reveal immediately.
         SpawnSituation::ShipOrbit
+        | SpawnSituation::PolarOrbit
         | SpawnSituation::Landing
         | SpawnSituation::FinalApproach
         | SpawnSituation::Eva => {
@@ -647,37 +552,3 @@ fn update_dev_visibility(
     }
 }
 
-fn update_button_visuals(
-    theme: Res<HudTheme>,
-    mut buttons: Query<
-        (
-            &Interaction,
-            &mut BorderColor,
-            &mut BackgroundColor,
-            &Children,
-        ),
-        With<MenuAction>,
-    >,
-    mut text_q: Query<&mut TextColor>,
-) {
-    for (interaction, mut border, mut bg, children) in &mut buttons {
-        let (border_color, bg_color, label_color) = match interaction {
-            Interaction::Pressed => (theme.text_primary, theme.panel_border, theme.text_primary),
-            Interaction::Hovered => (theme.text_accent, theme.panel_bg, theme.text_accent),
-            Interaction::None => (theme.panel_border, theme.panel_bg, theme.text_primary),
-        };
-        let new_border = BorderColor::all(border_color);
-        if border.top != new_border.top {
-            *border = new_border;
-        }
-        if bg.0 != bg_color {
-            bg.0 = bg_color;
-        }
-        if let Some(&child) = children.first()
-            && let Ok(mut tc) = text_q.get_mut(child)
-            && tc.0 != label_color
-        {
-            tc.0 = label_color;
-        }
-    }
-}

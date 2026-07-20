@@ -34,8 +34,9 @@ mod ui;
 
 pub use launch_select::SpaceportLaunchRequest;
 
-use bevy::math::{DVec2, DVec3};
+use bevy::math::{DQuat, DVec2, DVec3};
 use bevy::prelude::*;
+use big_space::prelude::{CellCoord, Grid};
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
@@ -119,15 +120,18 @@ impl Plugin for BaseEditorPlugin {
 ///   strip — normal runway crossings, rendered under the runway's higher
 ///   paving — and sweep tangentially onto the secondary's parallel-taxiway
 ///   line. Run-up/holding aprons sit at both primary thresholds.
-/// - **Launch complex** (`+off`, behind the core) — two large **launchpads**
-///   with blast-clear rings, each flanked by a **flame diverter** and a
-///   **fuel/tank farm**, plus a **VAB**-scale assembly building (the enterable
-///   shipyard [`Facility::Vab`]). A **crawlerway**
-///   (`ConnectionKind::Crawlerway`) runs from the VAB to each pad — the future
-///   crawler-transporter route.
-/// - **Landside** (`ConnectionKind::Road`) — one curved service road: ops →
-///   east blockhouse → around the apron → across the VAB's doors → west
-///   blockhouse.
+/// - **Launch complex** (`+off`, behind the core) — the **VAB**-scale assembly
+///   building (the enterable shipyard [`Facility::Vab`]) nearest the runway,
+///   then two large **launchpads** set furthest out (well back from the runway,
+///   beyond the VAB), each flanked by a **flame diverter** and a **fuel/tank
+///   farm**. A single **crawlerway** (`ConnectionKind::Crawlerway`) leaves the
+///   VAB's one pad-facing (`+off`) door, runs straight out, then forks to the
+///   two pads — so both pad routes share the same VAB exit (the future
+///   crawler-transporter route).
+/// - **Landside** (`ConnectionKind::Road`) — one curved service road behind the
+///   apron: ops → east blockhouse → behind the VAB (its landside/runway-side
+///   face) → west blockhouse. The VAB's pad-facing door and crawlerway are on
+///   the far (`+off`) side, so the road stays clear of them.
 ///
 /// Called by the runway scenario after it installs the basin `BaseSite`.
 /// `pad_r = radius_m + E`; `sec_heading` is the second runway's takeoff heading
@@ -164,9 +168,20 @@ pub(crate) fn spawn_default_base(
     };
 
     // Launch-complex geometry (`+off` side), in runway-frame (along, off) metres.
-    const PAD_ALONG: f64 = 900.0;
-    const PAD_OFF: f64 = 640.0;
-    const VAB_OFF: f64 = 1080.0;
+    // The VAB sits nearest the runway of the complex; the two launchpads sit
+    // furthest out — well back from the runway, beyond the VAB — each flanking
+    // the centreline. The VAB has a single crawler exit facing the pads
+    // (`+off`): its crawlerway runs straight out that door to `CRAWLER_FORK_OFF`,
+    // then forks to the two pads (see the crawlerway network below). Pushing the
+    // pads (and their beyond-pad flame diverters / tank farms at `+112` / `+235`)
+    // this far out still keeps the tank farm inside the flattened basin, whose
+    // `+off` reach is ~1.4 km (see `runway::BASIN_*`).
+    const PAD_ALONG: f64 = 700.0;
+    const PAD_OFF: f64 = 1050.0;
+    const VAB_OFF: f64 = 720.0;
+    // Where the VAB's single crawlerway forks toward the two pads (`+off`,
+    // between the VAB's pad-facing door and the pads).
+    const CRAWLER_FORK_OFF: f64 = 900.0;
     // Airside geometry, on the SAME (`+off`) side as the launch complex — one
     // core campus reading outward from the strip: runway → parallel taxiway →
     // large apron with the hangar row standing ON it → landside (ops /
@@ -375,42 +390,93 @@ pub(crate) fn spawn_default_base(
         );
     }
 
-    // --- Road (landside): one curved service road — ops → east blockhouse →
-    // around the apron corner → across the VAB's doors → west blockhouse. ---
+    // --- Road (landside): one curved service road behind the apron — ops →
+    // east blockhouse → behind the VAB (its landside/runway-side face) → west
+    // blockhouse. The VAB's pad-facing door and crawlerway are on the far
+    // (`+off`) side, so this stays clear of them. ---
     connections::spawn_authored_path(
         commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
         connections::ConnectionKind::Road,
         &[
             DVec2::new(1100.0, 300.0),               // ops
             DVec2::new(PAD_ALONG, PAD_OFF - 240.0),  // east blockhouse
-            DVec2::new(1010.0, 760.0),               // swing wide of the apron
-            DVec2::new(0.0, VAB_OFF - 150.0),        // across the VAB's doors
-            DVec2::new(-1010.0, 760.0),
+            DVec2::new(0.0, VAB_OFF - 150.0),        // behind the VAB (landside)
             DVec2::new(-PAD_ALONG, PAD_OFF - 240.0), // west blockhouse
         ],
         120.0,
         0.0,
     );
 
-    // --- Crawlerway: VAB → each launchpad (explicit edges, not an MST) ---
+    // --- Crawlerway: the VAB has one exit, facing the pads (`+off`). A single
+    // trunk leaves that door and runs straight out to a fork, which then splits
+    // to each launchpad — so both pad routes share the same VAB door instead of
+    // fanning off different faces. Explicit edges (trunk + two forks), not an
+    // MST. ---
     let crawler_nodes: Vec<(f64, f64, f64)> = vec![
-        (0.0, VAB_OFF, place::kind_bounding_m(&vab_kind)),
-        (PAD_ALONG, PAD_OFF, 50.0),
-        (-PAD_ALONG, PAD_OFF, 50.0),
+        (0.0, VAB_OFF, place::kind_bounding_m(&vab_kind)), // 0: VAB door (+off face)
+        (0.0, CRAWLER_FORK_OFF, 0.0),                      // 1: fork junction
+        (PAD_ALONG, PAD_OFF, 50.0),                        // 2: east pad
+        (-PAD_ALONG, PAD_OFF, 50.0),                       // 3: west pad
     ];
     connections::spawn_authored_network(
         commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
-        connections::ConnectionKind::Crawlerway, &crawler_nodes, Some(&[(0, 1), (0, 2)]),
+        connections::ConnectionKind::Crawlerway, &crawler_nodes, Some(&[(0, 1), (1, 2), (1, 3)]),
     );
 }
 
-/// Ray-vs-sphere intersection for a sphere centred at the origin; returns the
-/// unit hit direction, or `None` on a miss. Shared by site-pick and building
-/// placement (both raycast the cursor against the body sphere in render space,
-/// where directions equal world directions). Mirrors the helper in `debug.rs`.
-pub(crate) fn ray_vs_sphere_dir(origin: Vec3, dir: Vec3, radius: f32) -> Option<Vec3> {
-    let b = origin.dot(dir);
-    let c = origin.length_squared() - radius * radius;
+/// Cast the screen cursor onto a body-centred sphere of radius `pad_r`
+/// (heliocentric metres) and return the **body-fixed** unit direction of the
+/// nearest hit, or `None` on a miss / missing input. The single canonical pick
+/// used by every god-view cursor picker (site pick, building placement, launch
+/// point, hub building select).
+///
+/// Rather than raycasting in render space off the camera's `GlobalTransform`
+/// (as the older per-picker helpers did), this reads the god-view camera's
+/// **current-frame** pose straight from its `CellCoord` + `Transform`. The
+/// god-view driver
+/// ([`crate::god_view::drive_god_view`]) writes the camera `Transform` in
+/// `Update`, but `GlobalTransform` is only propagated in `PostUpdate`, so a
+/// same-frame raycast off `GlobalTransform` uses *last* frame's camera pose — the
+/// pick then visibly desyncs from the rendered buildings when the camera pans
+/// fast (the body's render position is stable frame-to-frame; only the floating
+/// origin's own render pose lags). Every god-view picker must therefore (a) call
+/// this and (b) run `.after(`[`crate::god_view::GodViewCameraSet`]`)` so the
+/// `Transform` it reads is the pose the driver just wrote this frame.
+///
+/// Works entirely in the heliocentric f64 frame — big_space cells are pure
+/// translations and `SHIP_SCALE == 1`, so it is exact across floating-origin cell
+/// recentering (which a render-space reconstruction from the fresh local
+/// `Transform` would not be, since the body's `GlobalTransform` is anchored to
+/// the previous frame's origin cell).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn cursor_body_dir(
+    camera: &Camera,
+    cam_cell: &CellCoord,
+    cam_transform: &Transform,
+    root_grid: &Grid,
+    cursor: Vec2,
+    body_position: DVec3,
+    body_orientation: DQuat,
+    pad_r: f64,
+) -> Option<DVec3> {
+    // Cursor ray *direction* in world space. `viewport_to_world` needs a
+    // `GlobalTransform`, but only its rotation affects the direction, and the
+    // camera's world rotation equals its local `Transform.rotation` (it is a
+    // direct child of the identity-transform BigSpace root). A rotation-only
+    // transform therefore yields the correct world direction; its origin is
+    // discarded — we supply the exact f64 origin below.
+    let rot_only = GlobalTransform::from(Transform::from_rotation(cam_transform.rotation));
+    let ray = camera.viewport_to_world(&rot_only, cursor).ok()?;
+    let dir = (*ray.direction).as_dvec3();
+
+    // Camera world position from its fresh grid cell + local offset.
+    let origin = root_grid.grid_position_double(cam_cell, cam_transform);
+
+    // Ray–sphere against the body sphere, in heliocentric metres (nearest hit:
+    // the near root if in front of the camera, else the far root).
+    let oc = origin - body_position;
+    let b = oc.dot(dir);
+    let c = oc.length_squared() - pad_r * pad_r;
     let disc = b * b - c;
     if disc < 0.0 {
         return None;
@@ -425,7 +491,8 @@ pub(crate) fn ray_vs_sphere_dir(origin: Vec3, dir: Vec3, radius: f32) -> Option<
     } else {
         return None;
     };
-    Some((origin + dir * t).normalize_or_zero())
+    let hit = origin + dir * t;
+    Some((body_orientation.inverse() * (hit - body_position)).normalize())
 }
 
 /// The world-space frame the editor is currently looking at: a point on the

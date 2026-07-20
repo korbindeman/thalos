@@ -209,7 +209,10 @@ impl Default for CameraFocus {
             target: CameraFocusTarget::None,
             distance: 5e11, // ~3.3 AU, sees inner system
             target_distance: 5e11,
-            azimuth: 0.0,
+            // `azimuth = 0` sits in front of the nose looking back at the
+            // craft; start behind it instead (a chase view) since that's
+            // the far more useful default for flying.
+            azimuth: std::f32::consts::PI,
             elevation: 0.3, // slight downward tilt so the horizon is visible
             min_distance: DISTANCE_MIN_DEFAULT,
             transition_origin_start: None,
@@ -457,6 +460,8 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         space_camera_post_stack(),
         OrbitCamera,
         ShipCamera,
+        // The frosted-glass UI blurs this camera's output (thalos_ui).
+        thalos_ui::UiBackdropSource,
         bevy::picking::mesh_picking::MeshPickingCamera,
         // Layer 0 (default) covers entities visible in both views (bodies,
         // sky); SHIP_LAYER covers ship-only entities (ship parts, etc.).
@@ -524,7 +529,7 @@ fn apply_graphics_msaa(
 /// and while a UI text field is consuming keyboard input.
 fn ship_camera_mode_input(
     input: Res<GameInputIntent>,
-    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
+    ui_text: Res<thalos_ui::TextFieldFocus>,
     view: Res<ViewMode>,
     mut mode: ResMut<ShipCameraMode>,
 ) {

@@ -44,10 +44,14 @@ THALOS_GAME_COMMAND="cargo run -p thalos_game"
 
 ### Game window / renderer launch toggles
 
-`just game` normally starts borderless fullscreen with Bevy/wgpu's default
-backend selection. If Windows reports a swapchain/device-loss style panic while
-acquiring the next frame, the first local workaround is to take the display mode
-and backend choice out of the equation without changing source:
+`just game` normally starts borderless fullscreen. The renderer backend
+defaults to **Vulkan on Windows** (set in `wgpu_settings_from_env`,
+`crates/game/src/main.rs`) — wgpu's own default prefers DX12 there, and DX12
+is this dev machine's documented unstable path (swapchain-acquire panics,
+silent device death, and a 2026-07-19 full DeviceLost wedge requiring a
+reboot). Other platforms keep the wgpu default (Metal on macOS). If a
+swapchain/device-loss style panic still appears, take the display mode and
+backend choice out of the equation without changing source:
 
 ```dotenv
 THALOS_WINDOW_MODE=windowed      # windowed | borderless | fullscreen
@@ -71,8 +75,8 @@ the upstream Bevy fractional-scale text bug is fixed.
 `THALOS_WGPU_BACKEND` is a Thalos-facing alias for the same class of wgpu
 backend selection that `WGPU_BACKEND` provides, but it is scoped to our game
 startup helper in `crates/game/src/main.rs` and is easy to keep in `.env.just`.
-Use `vulkan` on Windows when DX12 presents become unstable; remove the override
-again after driver/Bevy/wgpu updates.
+It overrides the Vulkan-on-Windows default above: `auto` restores wgpu's own
+selection (DX12 on Windows), `dx12` forces DX12 for A/B comparison.
 
 ### Uncapping the framerate for profiling (`THALOS_VSYNC`)
 

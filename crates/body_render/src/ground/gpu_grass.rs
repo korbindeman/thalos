@@ -292,6 +292,12 @@ pub struct GpuGrassWindow {
     pub aux: Vec<u8>,
     /// Terrain height at the anchor (m above reference radius).
     pub anchor_height_m: f32,
+    /// Macro landcover moisture at the anchor (`[-1, 1]`), sampled from the
+    /// height source's wrapped surface. Per-window constant — the finest macro
+    /// tier (~9 km) is far wider than the ±420 m window — carried to the
+    /// shader in `GpuGrassParams.phase.w`, where the wrapped fine detail tier
+    /// is added per blade (docs/terrain_macro.md).
+    pub anchor_moisture: f32,
     /// `HeightSource::revision()` at fill time.
     pub built_revision: u64,
 }
@@ -386,6 +392,7 @@ pub fn build_gpu_grass_window(input: &GpuGrassWindowInput) -> GpuGrassWindow {
         heights,
         aux,
         anchor_height_m,
+        anchor_moisture: source.landcover_moisture(input.anchor.dir),
         built_revision,
     }
 }
@@ -427,10 +434,14 @@ pub struct GpuGrassParams {
     /// Body-fixed radial up at the anchor; w = anchor offset along `north`.
     pub frame_up: Vec4,
     /// x = window texel size (m), y = window size (px), z = window half (m),
-    /// w unused.
+    /// w = climate cold lift at the anchor (m — see
+    /// `thalos::landcover::climate_cold_lift`; shifts the blade treeline fade
+    /// and veg palette with latitude).
     pub window_meta: Vec4,
     /// xyz = anchor surface point, body-fixed metres, folded mod the landcover
     /// coordinate period (4 km) — the `thalos::landcover` sampling phase.
+    /// w = macro landcover moisture at the anchor (`[-1, 1]`; the shader adds
+    /// the wrapped fine detail tier per blade).
     pub phase: Vec4,
     /// Per band: anchor global cell x, y, cube face, unused.
     pub band_cell: [UVec4; GPU_GRASS_BAND_COUNT],

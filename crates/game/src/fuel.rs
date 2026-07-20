@@ -18,11 +18,13 @@
 //!    every other warp level forces the gated throttle to 0.
 //! 3. Reconcile tank pools to whatever mass the simulation actually
 //!    burned last frame. The simulation is the **single source of
-//!    truth** for ship mass — its propagator integrates burn duration,
-//!    SOI clipping, and dry-mass cutoff exactly. We read back the mass
-//!    delta and drain tank pools by that amount, split across the
-//!    engine set that actually fired, so the per-tank UI matches the
-//!    physics regardless of short burns inside the frame.
+//!    truth** for propellant burned — its monotonic
+//!    `propellant_burned_kg` counter integrates burn duration and
+//!    dry-mass cutoff exactly. We read back that counter's delta and
+//!    drain tank pools by that amount, split across the engine set that
+//!    actually fired, so the per-tank UI matches the physics regardless
+//!    of short burns inside the frame. (Never infer the burn from the
+//!    raw `ship_mass_kg` delta: staging/respawn rewrite that mass too.)
 //!
 //! Engine activation is not staging. It is the lower-level capability:
 //! enabled engines contribute to the scalar propulsion summary consumed
@@ -754,20 +756,25 @@ fn drain_resource_from_component(
     }
 }
 
-/// Drain tank reactant pools by however much mass the simulation burned
-/// since this system last ran. The simulation's `ship_mass_kg` is the
-/// authoritative record of "current ship mass" — it integrates short
-/// burns inside long warp ticks correctly, while a naive
-/// `mass_flow · real_dt · warp` overdrains the tanks. Reading the sim's
-/// actual delta avoids that whole class of bug.
+/// Drain tank reactant pools by however much propellant the simulation
+/// burned since this system last ran, read from the monotonic
+/// [`Simulation::propellant_burned_kg`] counter that
+/// `apply_external_mass_flow` advances at the single canonical burn site.
+/// That counter integrates short burns inside long warp ticks correctly
+/// (a naive `mass_flow · real_dt · warp` overdrains the tanks), and —
+/// unlike the raw `ship_mass_kg` delta this system previously watched —
+/// it is untouched by non-burn mass rewrites: a staging drop, respawn, or
+/// relaunch slashes `ship_mass_kg` by the jettisoned/replaced mass in one
+/// frame, and attributing that to the engines instantly drained the
+/// surviving stage's tanks (the "full tank empty after separation" bug).
 ///
 /// Drain follows the same crossfeed graph as throttle gating. Each
 /// engine's mass-flow share drains only tanks in the component reachable
 /// from that engine through [`FuelCrossfeed`] parts.
 ///
-/// First-call behaviour: records the spawn-time ship mass and skips
-/// drain. Without this, the very first frame would treat the ship's
-/// entire propellant load as a one-frame burn.
+/// First-call behaviour: records the counter and skips drain. A rebuilt
+/// `Simulation` restarts the counter at 0; the `(current - prev).max(0)`
+/// clamp makes that read as "no burn", never a spurious drain.
 fn reconcile_tanks_from_sim_drain(
     sim: Res<SimulationState>,
     last_burn: Res<LastBurnRecipe>,
@@ -775,16 +782,16 @@ fn reconcile_tanks_from_sim_drain(
     attachments: Query<(Entity, &Attachment), Without<EditorPart>>,
     surface_mounts: Query<(Entity, &SurfaceMount), Without<EditorPart>>,
     crossfeeds: Query<&FuelCrossfeed>,
-    mut prev_sim_mass: Local<Option<f64>>,
+    mut prev_burned_kg: Local<Option<f64>>,
 ) {
-    let current = sim.simulation.ship_mass_kg();
-    let Some(prev) = *prev_sim_mass else {
-        *prev_sim_mass = Some(current);
+    let current = sim.simulation.propellant_burned_kg();
+    let Some(prev) = *prev_burned_kg else {
+        *prev_burned_kg = Some(current);
         return;
     };
-    *prev_sim_mass = Some(current);
+    *prev_burned_kg = Some(current);
 
-    let drained_total_kg = (prev - current).max(0.0);
+    let drained_total_kg = (current - prev).max(0.0);
     if drained_total_kg <= 0.0 || last_burn.engines.is_empty() {
         return;
     }

@@ -23,6 +23,15 @@ pub trait HeightSource: Send + Sync {
         0
     }
 
+    /// Macro landcover moisture in `[-1, 1]` (+ wet, − dry) at body-fixed unit
+    /// direction `dir` — forwarded from the wrapped
+    /// [`SurfaceQuery::landcover_moisture`] so grass/scatter builders read the
+    /// same planet-scale field the terrain albedo bakes (docs/terrain_macro.md).
+    /// `0.0` (neutral) for sources without a landcover model.
+    fn landcover_moisture(&self, _dir: DVec3) -> f32 {
+        0.0
+    }
+
     /// Build a collider patch directly from this source's native geometry —
     /// e.g. the resident GPU atlas tiles the renderer meshes from — so the
     /// collider lines up with the drawn surface by construction. `center_dir`
@@ -142,6 +151,10 @@ impl HeightSource for CpuPipelineHeightSource {
     fn sample_height_m(&self, dir: Vec3, tile_lod_m: f32) -> Option<f32> {
         Some(self.surface.sample_height_m(dir, tile_lod_m))
     }
+
+    fn landcover_moisture(&self, dir: DVec3) -> f32 {
+        self.surface.landcover_moisture(dir)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -197,6 +210,10 @@ impl HeightSource for GpuAtlasMirrorHeightSource {
 
     fn revision(&self) -> u64 {
         self.mirror.read().map(|m| m.revision()).unwrap_or(0)
+    }
+
+    fn landcover_moisture(&self, dir: DVec3) -> f32 {
+        self.fallback.landcover_moisture(dir)
     }
 
     fn build_collider_patch(

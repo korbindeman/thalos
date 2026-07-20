@@ -13,6 +13,7 @@
 
 use bevy::math::DVec3;
 use thalos_body_render::sample_landcover;
+use thalos_terrain::ProceduralSurface;
 
 const SIZE: u32 = 768;
 const SPAN_M: f64 = 2400.0; // metres across the image
@@ -23,6 +24,10 @@ const OUT_DIR: &str = "tools/preview/out";
 fn main() {
     std::fs::create_dir_all(OUT_DIR).ok();
 
+    // The planet-scale macro moisture comes from the real generator (Thalos =
+    // seed 2), composed with the wrapped fine tier exactly as the game does.
+    let surface = ProceduralSurface::new(RADIUS_M as f32, 2);
+
     // A tangent patch on the +X face of the body: vary the two tangent axes (Y,
     // Z) over ±SPAN/2, hold the surface at the lowland altitude.
     let mut color = image::RgbaImage::new(SIZE, SIZE);
@@ -32,7 +37,16 @@ fn main() {
             let u = (px as f64 / SIZE as f64 - 0.5) * SPAN_M;
             let v = (py as f64 / SIZE as f64 - 0.5) * SPAN_M;
             let pos = DVec3::new(RADIUS_M + ALTITUDE_M as f64, u, v);
-            let s = sample_landcover(pos, ALTITUDE_M);
+            let macro_moisture = {
+                use thalos_terrain::query::SurfaceQuery;
+                surface.landcover_moisture(pos.normalize())
+            };
+            let s = sample_landcover(
+                pos,
+                ALTITUDE_M,
+                macro_moisture,
+                pos.normalize().y.abs() as f32,
+            );
 
             let c = s.veg_color;
             color.put_pixel(px, py, image::Rgba(rgb8(c.x, c.y, c.z)));

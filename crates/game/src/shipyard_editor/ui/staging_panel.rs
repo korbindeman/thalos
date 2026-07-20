@@ -5,52 +5,37 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use thalos_shipyard::Resource;
 use crate::shipyard_editor::core::{format_delta_v, format_mass_kg};
+use thalos_shipyard::Resource;
 
-use crate::hud::theme::{HudTheme, panel_frame};
+use thalos_ui::{
+    self as ui, ScrollableColumn, SPACE_XS, UiTheme, spawn_heading, tokens,
+};
 
 use super::EditorStatsCache;
-use super::widgets::ScrollableColumn;
 
 #[derive(Component)]
 pub(super) struct StagingContent;
 
-pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
-    let (bg, border) = panel_frame(theme);
+pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
     root.spawn((
         Node {
-            position_type: PositionType::Absolute,
             right: Val::Px(320.0),
-            top: Val::Px(60.0),
+            top: Val::Px(64.0),
             width: Val::Px(176.0),
             max_height: Val::Percent(62.0),
-            border: UiRect::all(Val::Px(1.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(5.0),
-            ..default()
+            ..ui::floating_panel_node()
         },
-        bg,
-        border,
+        theme.glass(),
         Interaction::None,
         Name::new("ShipyardStaging"),
     ))
     .with_children(|panel| {
-        panel.spawn((
-            Text::new("STAGING"),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(12.0),
-                ..default()
-            },
-            TextColor(theme.text_subtitle),
-        ));
+        spawn_heading(panel, theme, "STAGING", false);
         panel.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(5.0),
+                row_gap: Val::Px(SPACE_XS + 1.0),
                 overflow: Overflow::scroll_y(),
                 ..default()
             },
@@ -68,7 +53,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
 pub(super) fn rebuild_staging(
     mut commands: Commands,
     cache: Res<EditorStatsCache>,
-    theme: Res<HudTheme>,
+    theme: Res<UiTheme>,
     content: Query<(Entity, Option<&Children>), With<StagingContent>>,
     mut shown_digest: Local<String>,
 ) {
@@ -132,15 +117,9 @@ pub(super) fn rebuild_staging(
 
     let theme = theme.clone();
     commands.entity(content_entity).with_children(|c| {
-        c.spawn((
-            Text::new(header),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(10.0),
-                ..default()
-            },
-            TextColor(theme.text_primary),
-        ));
+        let mut head = theme.mono(header);
+        head.1.font_size = FontSize::Px(10.0);
+        c.spawn(head);
         for (stage, dv, bars) in rows {
             c.spawn((
                 Node {
@@ -148,12 +127,12 @@ pub(super) fn rebuild_staging(
                     flex_direction: FlexDirection::Column,
                     row_gap: Val::Px(3.0),
                     border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    border_radius: BorderRadius::all(Val::Px(ui::RADIUS_CTRL)),
                     padding: UiRect::axes(Val::Px(7.0), Val::Px(5.0)),
                     ..default()
                 },
-                BackgroundColor(theme.panel_bg_alt),
-                BorderColor::all(theme.panel_border),
+                BackgroundColor(tokens::FILL_HOVER),
+                BorderColor::all(tokens::STROKE),
             ))
             .with_children(|card| {
                 card.spawn(Node {
@@ -162,37 +141,24 @@ pub(super) fn rebuild_staging(
                     ..default()
                 })
                 .with_children(|head| {
-                    head.spawn((
-                        Text::new(stage),
-                        TextFont {
-                            font: theme.font.clone(),
-                            font_size: FontSize::Px(10.0),
-                            ..default()
-                        },
-                        TextColor(theme.text_accent),
-                    ));
-                    head.spawn((
-                        Text::new(dv),
-                        TextFont {
-                            font: theme.font.clone(),
-                            font_size: FontSize::Px(10.0),
-                            ..default()
-                        },
-                        TextColor(theme.text_primary),
-                    ));
+                    let mut stage_text = theme.mono(stage);
+                    stage_text.1.font_size = FontSize::Px(10.0);
+                    stage_text.2 = TextColor(tokens::ACCENT);
+                    head.spawn(stage_text);
+                    let mut dv_text = theme.mono(dv);
+                    dv_text.1.font_size = FontSize::Px(10.0);
+                    head.spawn(dv_text);
                 });
                 for (label, frac) in bars {
                     card.spawn((
                         Node {
                             width: Val::Percent(100.0),
-                            height: Val::Px(10.0),
-                            border: UiRect::all(Val::Px(1.0)),
+                            height: Val::Px(4.0),
                             border_radius: BorderRadius::all(Val::Px(2.0)),
-                            padding: UiRect::all(Val::Px(1.0)),
+                            overflow: Overflow::clip(),
                             ..default()
                         },
-                        BackgroundColor(Color::srgba(0.02, 0.02, 0.02, 0.9)),
-                        BorderColor::all(theme.panel_border),
+                        BackgroundColor(Color::srgba(1.0, 1.0, 1.0, 0.10)),
                     ))
                     .with_children(|bar| {
                         bar.spawn((
@@ -201,18 +167,12 @@ pub(super) fn rebuild_staging(
                                 height: Val::Percent(100.0),
                                 ..default()
                             },
-                            BackgroundColor(theme.text_datum_sea.with_alpha(0.55)),
+                            BackgroundColor(Color::srgba(0.42, 0.74, 0.88, 0.9)),
                         ));
                     });
-                    card.spawn((
-                        Text::new(label),
-                        TextFont {
-                            font: theme.font.clone(),
-                            font_size: FontSize::Px(8.5),
-                            ..default()
-                        },
-                        TextColor(theme.text_dim),
-                    ));
+                    let mut label_text = theme.faint(label);
+                    label_text.1.font_size = FontSize::Px(9.0);
+                    card.spawn(label_text);
                 }
             });
         }

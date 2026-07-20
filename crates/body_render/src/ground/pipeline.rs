@@ -29,15 +29,16 @@
 //! `GpuAtlasMirrorHeightSource` path closes most of this by sampling the
 //! actual resident atlas tiles. Tracked separately.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use bevy::math::{DVec3, UVec2, Vec3};
+use bevy::math::{DVec2, DVec3, UVec2, Vec3};
 use bevy::prelude::*;
 use bevy::tasks::Task;
 use rayon::prelude::*;
 use thalos_terrain::SurfaceQuery;
-use thalos_udlod::math::TileCoordinate;
+use thalos_udlod::math::{Coordinate, TileCoordinate};
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
 
@@ -55,6 +56,11 @@ pub struct PipelineTileProvider {
     /// `Arc<dyn SurfaceQuery>`.
     surface: Arc<dyn SurfaceQuery>,
     body_name: String,
+    /// Memoized per-tile screen-space-error scale (see
+    /// [`TileProvider::subdivision_scale`]). The tile tree queries this for every
+    /// tile in the request set each frame, so the relief probe behind it must be
+    /// evaluated at most once per coordinate.
+    relief_scale: Mutex<HashMap<TileCoordinate, f64>>,
 }
 
 impl PipelineTileProvider {
@@ -62,6 +68,7 @@ impl PipelineTileProvider {
         Self {
             surface,
             body_name: body_name.into(),
+            relief_scale: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -120,33 +127,142 @@ impl TileProvider for PipelineTileProvider {
 
         tile_synthesis_pool().spawn(async move {
             let height_range_m = surface.height_range_m();
-            // All requested attachments share the same per-pixel evaluation,
-            // so resolve the largest texture size once, evaluate, then encode
-            // each attachment from the shared buffer. Different sizes would
-            // require separate passes; in practice every attachment in a body
-            // config uses the same `texture_size`, so just assert that.
-            let Some(first) = attachments.first() else {
+            if attachments.is_empty() {
                 return Ok(Vec::new());
-            };
-            let size = first.texture_size;
-            let border = first.border_size;
-            debug_assert!(
-                attachments
-                    .iter()
-                    .all(|c| c.texture_size == size && c.border_size == border),
-                "PipelineTileProvider expects every attachment in a tile to share \
-                 the same texture_size and border_size",
-            );
+            }
 
-            let pixels = compute_tile_pixels(surface.as_ref(), coord, &model, size, border);
+            // Attachments may declare **different resolutions**: height carries
+            // the silhouette and wants the full grid, while albedo/material are
+            // macro-colour and mask anchors that read fine at half. The GPU atlas
+            // already sizes each attachment's texture array independently, so the
+            // only cost is here — evaluate the field once per *distinct* grid
+            // (not once per attachment) and encode every attachment sharing that
+            // grid from the one buffer.
+            let mut grids: HashMap<(u32, u32), Vec<TilePixel>> = HashMap::new();
+            for cfg in &attachments {
+                grids.entry((cfg.texture_size, cfg.border_size)).or_insert_with(|| {
+                    compute_tile_pixels(
+                        surface.as_ref(),
+                        coord,
+                        &model,
+                        cfg.texture_size,
+                        cfg.border_size,
+                    )
+                });
+            }
 
             let mut datas = Vec::with_capacity(attachments.len());
             for cfg in &attachments {
-                datas.push(encode_attachment(cfg, &pixels, height_range_m, &body_name));
+                let pixels = &grids[&(cfg.texture_size, cfg.border_size)];
+                let mut data = encode_attachment(cfg, pixels, height_range_m, &body_name);
+                // Mip generation is the provider's job (see the `TileProvider`
+                // contract): doing it here runs it on the synthesis pool instead
+                // of the main thread in `TileAtlas::update`, and means the cache
+                // wrappers store a fully-mipped payload — a cache hit then costs
+                // neither synthesis nor mip filtering.
+                data.generate_mipmaps(cfg.texture_size, cfg.mip_level_count);
+                datas.push(data);
             }
             Ok(datas)
         })
     }
+
+    /// Relief-aware refinement: a tile whose footprint is nearly flat does not
+    /// need the same subdivision distance as a mountainside. Probes the surface
+    /// on a coarse grid across the tile, turns the relative relief into a scale
+    /// in `[SSE_FLAT_SCALE, 1]`, and memoizes it per coordinate (the tile tree
+    /// asks every frame; the probe must run once).
+    fn subdivision_scale(&self, coord: TileCoordinate, model: &TerrainModel) -> f64 {
+        if let Some(scale) = self
+            .relief_scale
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(&coord)
+        {
+            return *scale;
+        }
+
+        let scale = compute_subdivision_scale(self.surface.as_ref(), coord, model);
+        let mut memo = self.relief_scale.lock().unwrap_or_else(|p| p.into_inner());
+        // Flying across a planet touches unboundedly many coordinates, so this memo
+        // is a slow leak if left to grow. It's a pure function of the coordinate,
+        // so dropping it wholesale is always safe — just re-probe. Cheaper and far
+        // simpler than tracking recency for a value this cheap to recompute.
+        if memo.len() >= RELIEF_MEMO_CAPACITY {
+            memo.clear();
+        }
+        memo.insert(coord, scale);
+        scale
+    }
+}
+
+/// Coordinates retained by the relief memo before it is dropped and refilled.
+/// Comfortably above the request set of any single view (hundreds), so steady-state
+/// play never clears; a long traversal clears occasionally and re-probes.
+const RELIEF_MEMO_CAPACITY: usize = 32_768;
+
+/// Subdivision scale for a tile from its relative relief.
+///
+/// "Relative" is the point: absolute metres of relief mean nothing without the
+/// tile's own footprint — 50 m across a 100 km LOD-2 tile is a plain, across a
+/// 100 m LOD-15 tile it is a cliff. Dividing by the tile's arc length gives a
+/// grade the threshold is scale-free in.
+fn compute_subdivision_scale(
+    surface: &dyn SurfaceQuery,
+    coord: TileCoordinate,
+    model: &TerrainModel,
+) -> f64 {
+    let radius_m = surface.radius_m();
+    let tile_count = TileCoordinate::count(coord.lod).max(1) as f32;
+    let tile_span_m = radius_m * std::f32::consts::FRAC_PI_2 / tile_count;
+    if tile_span_m <= f32::EPSILON {
+        return 1.0;
+    }
+    // Probe at the tile's own scale so the cascade resolves the relief this tile
+    // would actually show, not sub-texel noise.
+    let probe_lod_m = (tile_span_m / RELIEF_PROBE_GRID as f32).max(1.0);
+
+    let mut min_h = f32::INFINITY;
+    let mut max_h = f32::NEG_INFINITY;
+    for j in 0..=RELIEF_PROBE_GRID {
+        for i in 0..=RELIEF_PROBE_GRID {
+            let u = i as f64 / RELIEF_PROBE_GRID as f64;
+            let v = j as f64 / RELIEF_PROBE_GRID as f64;
+            let uv = (DVec2::new(coord.x as f64 + u, coord.y as f64 + v)) / tile_count as f64;
+            let dir = coordinate_direction(Coordinate::new(coord.side, uv), model);
+            let h = surface.sample_height_m(dir.as_vec3(), probe_lod_m);
+            min_h = min_h.min(h);
+            max_h = max_h.max(h);
+        }
+    }
+    if !min_h.is_finite() || !max_h.is_finite() {
+        return 1.0;
+    }
+
+    let grade = ((max_h - min_h) / tile_span_m) as f64;
+    // Full detail once the tile carries a real grade; ramp down toward
+    // `SSE_FLAT_SCALE` as it flattens out.
+    let t = (grade / RELIEF_FULL_DETAIL_GRADE).clamp(0.0, 1.0);
+    let smooth = t * t * (3.0 - 2.0 * t);
+    SSE_FLAT_SCALE + (1.0 - SSE_FLAT_SCALE) * smooth
+}
+
+/// Samples per tile side for the relief probe (a `(N+1)²` grid).
+const RELIEF_PROBE_GRID: u32 = 4;
+/// Relief-over-span ratio at which a tile earns full distance-driven detail.
+/// ~3% grade across the tile; below that it starts refining less.
+const RELIEF_FULL_DETAIL_GRADE: f64 = 0.03;
+/// Subdivision scale for dead-flat terrain (ocean, salt pan, a flattened pad).
+/// Kept above the tile tree's `SSE_MIN_SCALE` floor so this is the binding value.
+const SSE_FLAT_SCALE: f64 = 0.6;
+
+/// Body-local unit direction for a cube-sphere coordinate. Differencing two
+/// lifted positions keeps this valid regardless of `model.translation` (mirrors
+/// [`pixel_direction`]).
+fn coordinate_direction(coordinate: Coordinate, model: &TerrainModel) -> DVec3 {
+    let surface = coordinate.world_position(model, 0.0);
+    let lifted = coordinate.world_position(model, 1.0);
+    (lifted - surface).normalize()
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +274,11 @@ struct TilePixel {
     height_m: f32,
     albedo_linear: Vec3,
     roughness: f32,
+    /// Macro landcover moisture in `[-1, 1]` — encoded into the albedo
+    /// attachment's **alpha** channel (linear even on the sRGB texture), where
+    /// the ground shader decodes it and adds its wrapped fine detail tier
+    /// (docs/terrain_macro.md). The attachment alpha is NOT opacity.
+    moisture: f32,
     /// Packed procedural material intent for the ground shader:
     /// R = vegetation/grass, G = soil/peat/sediment, B = exposed rock,
     /// A = wetness/cavity darkening. The channels are masks, not final color.
@@ -198,6 +319,7 @@ fn compute_tile_pixels(
                         height_m: sample.height_m,
                         albedo_linear: sample.albedo_linear,
                         roughness: sample.roughness,
+                        moisture: sample.moisture,
                         material_rgba: [0, 0, 0, 255],
                     };
                 }
@@ -233,7 +355,16 @@ fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32)
     if size == 0 {
         return;
     }
-    let step_m = tile_lod_m.clamp(2.0, 250.0);
+    // The stencil reads neighbouring texels, which are `tile_lod_m` metres
+    // apart — the divisor must be that real spacing. An earlier version clamped
+    // it to 250 m, which inflated slope/curvature by `tile_lod_m / 250` on
+    // every tile coarser than 250 m/texel (up to ~80× at planet-scale LODs):
+    // the rock mask saturated planet-wide grey, and the laplacian-driven
+    // wetness mask tightened specular into a km-scale glint mottle. Coarse
+    // tiles now measure genuinely coarse (smoother) slopes, which is the
+    // consistent box-filtered limit of the fine view; the altitude-band model
+    // in the shader carries the "mountains read rocky from orbit" look.
+    let step_m = tile_lod_m.max(1.0);
 
     let heights: Vec<f32> = pixels.iter().map(|p| p.height_m).collect();
     // Slope/curvature stencil over the (read-only) height buffer. Rows are
@@ -273,6 +404,23 @@ fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32)
 /// B = rock, A = wetness). `pub(crate)` so the grass decoration layer
 /// (`vegetation`) places blades with the exact gate the shader's grass
 /// channel is baked from.
+/// Fractal-scale slope compensation (INC-0004 follow-up). fBm terrain's
+/// measured slope shrinks as the measurement baseline grows (RMS slope
+/// ∝ `L^(H−1)`), so a coarse tile's texel-baseline slope under-reports the
+/// fine-scale steepness the rock/soil thresholds below were tuned against —
+/// mountainsides would read green from orbit. Boosting the measured slope by
+/// `(step / REF)^exp` restores the *statistics* of the fine view (the coarse
+/// mask approximates the area fraction of steep ground), unlike the old fixed
+/// 250 m divisor which inflated every slope unconditionally. The ratio is
+/// clamped ≥ 1 so tiles at/below the reference spacing — the near field the
+/// thresholds were tuned on, and the grass-placement callers — are exact
+/// no-ops. Only the ROCK response reads the compensated slope: soil (low
+/// threshold, 0.035) and curvature (wetness/hollow) are fine-scale phenomena —
+/// compensating them repainted the plains with a brown soil mottle / the
+/// km-scale specular glint mottle respectively.
+const SLOPE_REF_STEP_M: f32 = 30.0;
+const SLOPE_SPECTRUM_EXP: f32 = 0.35;
+
 pub(crate) fn material_masks_from_heights(
     height_m: f32,
     h_l: f32,
@@ -284,9 +432,10 @@ pub(crate) fn material_masks_from_heights(
     let grad_x = (h_r - h_l) / (2.0 * step_m);
     let grad_y = (h_u - h_d) / (2.0 * step_m);
     let slope = (grad_x * grad_x + grad_y * grad_y).sqrt();
+    let slope_gain = (step_m / SLOPE_REF_STEP_M).max(1.0).powf(SLOPE_SPECTRUM_EXP);
     let laplacian = ((h_l + h_r + h_d + h_u) * 0.25 - height_m) / step_m.max(1.0);
 
-    let slope_rock = smoothstep(0.20, 0.75, slope);
+    let slope_rock = smoothstep(0.20, 0.75, slope * slope_gain);
     let high_rock = smoothstep(2_200.0, 6_000.0, height_m);
     let convex_rock = smoothstep(0.04, 0.20, -laplacian);
     let rock = (slope_rock * 0.82 + high_rock * 0.18 + convex_rock * 0.16).clamp(0.0, 0.95);
@@ -310,8 +459,15 @@ pub(crate) fn material_masks_from_heights(
     ]
 }
 
+// WGSL-parity smoothstep, safe for descending edges. Never guard the
+// denominator with `.max(EPSILON)` — that inverts descending-edge calls into
+// a hard step (INC-0005).
 fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let t = ((x - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    let denom = edge1 - edge0;
+    if denom.abs() < f32::EPSILON {
+        return if x >= edge0 { 1.0 } else { 0.0 };
+    }
+    let t = ((x - edge0) / denom).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
 
@@ -347,7 +503,15 @@ fn encode_attachment(
         (AttachmentFormat::Rgba8, "albedo") => AttachmentData::Rgba8(
             pixels
                 .iter()
-                .map(|p| linear_rgb_to_srgba8(p.albedo_linear))
+                .map(|p| {
+                    // Alpha carries the macro landcover moisture ([-1, 1] →
+                    // [0, 255]; linear even on the sRGB texture). The ground
+                    // shader decodes it and forces its own output alpha to 1.
+                    let mut texel = linear_rgb_to_srgba8(p.albedo_linear);
+                    texel[3] =
+                        ((p.moisture.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+                    texel
+                })
                 .collect(),
         ),
         (AttachmentFormat::R16, "roughness") => AttachmentData::R16(

@@ -81,6 +81,9 @@ fn setup_editor_scene(
         },
         EditorCamera,
         EditorViewCamera,
+        // Frosted panels blur this camera's output while the editor is open
+        // (the ship camera deactivates, so exactly one marked camera renders).
+        thalos_ui::UiBackdropSource,
         Name::new("ShipyardEditorCamera"),
     ));
 

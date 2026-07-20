@@ -5,6 +5,8 @@
 //! frame look live here so a future styling pass touches a single file.
 
 use bevy::prelude::*;
+use bevy::ui_render::prelude::MaterialNode;
+use thalos_ui::GlassMaterial;
 
 #[derive(Resource, Clone)]
 pub struct HudTheme {
@@ -12,6 +14,10 @@ pub struct HudTheme {
     /// shared HUD font is stored as `FontSource::Handle` so every panel's
     /// `font: theme.font.clone()` keeps working.
     pub font: FontSource,
+    /// The shared frosted-glass panel material (same asset as
+    /// `UiTheme::glass_regular`), so HUD panels are the same surface as the
+    /// menu/editor screens.
+    pub glass: Handle<GlassMaterial>,
     pub panel_bg: Color,
     pub panel_bg_alt: Color,
     pub panel_border: Color,
@@ -29,42 +35,60 @@ pub struct HudTheme {
     pub text_datum_gnd: Color,
 }
 
-pub fn init_theme(mut commands: Commands, asset_server: Res<AssetServer>) {
+/// Ordered `.after(thalos_ui::init_ui_theme)` (see `hud/mod.rs`) so the
+/// shared glass material handle exists.
+pub fn init_theme(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    ui_theme: Res<thalos_ui::UiTheme>,
+) {
+    // The palette derives from the shared design tokens (`thalos_ui::tokens`)
+    // so the flight HUD reads as the same family as the menu/editor screens;
+    // only the HUD-specific datum colours are local. Fira Code stays as the
+    // HUD face — flight readouts want tabular mono digits.
+    use thalos_ui::tokens;
     commands.insert_resource(HudTheme {
         font: FontSource::Handle(asset_server.load("fonts/FiraCode-Regular.ttf")),
-        panel_bg: Color::srgba(0.055, 0.055, 0.050, 0.86),
-        panel_bg_alt: Color::srgba(0.085, 0.080, 0.070, 0.84),
-        panel_border: Color::srgba(0.46, 0.43, 0.36, 0.66),
-        text_primary: Color::srgba(0.92, 0.91, 0.86, 1.0),
-        text_dim: Color::srgba(0.62, 0.60, 0.53, 1.0),
-        text_accent: Color::srgba(0.95, 0.70, 0.28, 1.0),
-        text_warn: Color::srgba(0.95, 0.42, 0.26, 1.0),
+        glass: ui_theme.glass_regular.clone(),
+        panel_bg: Color::srgba(0.024, 0.030, 0.038, 0.78),
+        panel_bg_alt: Color::srgba(1.0, 1.0, 1.0, 0.07),
+        panel_border: tokens::STROKE,
+        text_primary: tokens::TEXT_PRIMARY,
+        text_dim: tokens::TEXT_DIM,
+        text_accent: tokens::ACCENT,
+        text_warn: tokens::DANGER,
         text_label_alt: Color::srgba(0.88, 0.43, 0.30, 1.0),
-        text_subtitle: Color::srgba(0.66, 0.68, 0.60, 1.0),
+        text_subtitle: tokens::TEXT_FAINT,
         text_datum_sea: Color::srgba(0.42, 0.74, 0.88, 1.0),
         text_datum_gnd: Color::srgba(0.86, 0.62, 0.32, 1.0),
     });
 }
 
-/// Standard panel frame components: dark translucent fill + subtle
-/// border colour. In Bevy 0.18 `BackgroundColor` and `BorderColor` are
-/// separate components required by `Node`. `border_radius` is a `Node`
-/// field, set by [`panel_node`].
-pub fn panel_frame(theme: &HudTheme) -> (BackgroundColor, BorderColor) {
+/// Standard panel surface: the shared frosted glass + floating-sheet shadow
+/// (the material draws its own hairline stroke, so the node border stays
+/// colourless). Returned as a pair so the many existing
+/// `let (bg, border) = panel_frame(&theme)` call sites keep working unchanged
+/// — `bg` is simply a nested bundle now.
+pub fn panel_frame(
+    theme: &HudTheme,
+) -> ((MaterialNode<GlassMaterial>, BoxShadow), BorderColor) {
     (
-        BackgroundColor(theme.panel_bg),
-        BorderColor::all(theme.panel_border),
+        (
+            MaterialNode(theme.glass.clone()),
+            thalos_ui::widgets::panel::panel_shadow(),
+        ),
+        BorderColor::all(Color::NONE),
     )
 }
 
 /// Build a `Node` pre-configured as a HUD panel — absolute positioning,
-/// 1px border, rounded corners, comfortable padding, column flex with
-/// small row gaps.
+/// rounded corners (the radius flows into the glass shader), comfortable
+/// padding, column flex with small row gaps.
 pub fn panel_node() -> Node {
     Node {
         position_type: PositionType::Absolute,
         border: UiRect::all(Val::Px(1.0)),
-        border_radius: BorderRadius::all(Val::Px(4.0)),
+        border_radius: BorderRadius::all(Val::Px(8.0)),
         padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
         flex_direction: FlexDirection::Column,
         row_gap: Val::Px(4.0),
@@ -96,4 +120,48 @@ pub fn emphasis(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
         },
         TextColor(theme.text_primary),
     )
+}
+
+/// Spawn a compact mono-labelled HUD button. Interaction visuals come from the
+/// shared kit (`thalos_ui::style_buttons` via [`thalos_ui::UiButton`]); only
+/// the label face is HUD-specific (Fira Code, matching the readouts around it).
+pub fn hud_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    binding: impl Bundle,
+    label: &str,
+    font_size: f32,
+    height_px: f32,
+) -> Entity {
+    parent
+        .spawn((
+            Button,
+            Node {
+                height: Val::Px(height_px),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(thalos_ui::RADIUS_CTRL)),
+                padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(Color::NONE),
+            BorderColor::all(thalos_ui::tokens::STROKE),
+            Interaction::None,
+            thalos_ui::UiButton::default(),
+            binding,
+        ))
+        .with_children(|c| {
+            c.spawn((
+                Text::new(label),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(font_size),
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+                thalos_ui::ButtonLabel,
+            ));
+        })
+        .id()
 }

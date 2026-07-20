@@ -157,6 +157,17 @@ const TREE_RINGS: [TreeRing; 4] = [
 /// skipped entirely until the atlas is ready (a second or two into the session).
 const TREE_MESH_ONLY_REACH_M: f64 = 2200.0;
 
+/// Outer reach (m) of the last ring whose tiles still CAST into the sun-shadow
+/// cascades. Rings 0–1 (mesh + natural-size near impostors, to 6 km) cast; the
+/// coarse far rings (6–22 km, `spacing_scale` 2.5–4×) do not — their trees are
+/// sub-pixel from any near-surface vantage, and covering them forced the far
+/// shadow cascade out to a 23.5 km half-extent (~11.5 m/texel: every shadow
+/// beyond the near cascade was a coarse blob). Trimming the caster band lets
+/// `sun_shadow::CASCADE_MIN_HALF_M` shrink ~3× (the MSFS-style split: shadow
+/// maps carry the near field only; far-terrain shading belongs to the
+/// heightfield horizon term, W12). Keep in lockstep with those minimums.
+const TREE_SHADOW_CASTER_MAX_M: f64 = 6_000.0;
+
 /// Half-width of the ring cross-fade (m), fixed so it is identical on both sides
 /// of every shared boundary (that is what makes adjacent rings *complementary* —
 /// see [`tree_ring_fade`]). Also used as the build look-ahead margin.
@@ -743,6 +754,16 @@ fn drive_veg_tiles(
         veg.in_flight.clear();
     };
 
+    // Leak-bisection kill switch (`THALOS_NO_SCATTER=1`): park the tree/shrub
+    // scatter entirely (see `mem_diag::scatter_killed`).
+    if crate::mem_diag::scatter_killed() {
+        if veg.body.is_some() {
+            despawn_all(&mut veg, &mut commands);
+            veg.body = None;
+        }
+        return;
+    }
+
     // Active body: the anchor's (nearest terrain-backed) body, when vegetated.
     let anchored = anchor.resolved.filter(|a| {
         sim.system
@@ -1109,23 +1130,33 @@ fn finalize_veg_tiles(
                 a.half_extents += Vec3A::splat(library.max_tree_extent_m * TREE_SCALE_MAX * grove);
                 a
             });
+            // Near impostor rings also cast into the custom sun-shadow
+            // cascades so mid-distance trees ground with a shadow — not just
+            // the mesh trees. The billboard orients to `view.world_position`,
+            // which in the cascade caster pass is the cascade camera (up-sun),
+            // so it faces the SUN and renders the canopy silhouette from the
+            // sun angle (octahedral atlas sampled there) → casts the right
+            // shape. The coarse FAR rings (past `TREE_SHADOW_CASTER_MAX_M`) do
+            // NOT cast — see that constant. `NotShadowCaster` still excludes
+            // every tile from Bevy's stock CSM.
+            let ring_casts = TREE_RINGS
+                .get(rk.ring as usize)
+                .is_some_and(|r| r.outer_m <= TREE_SHADOW_CASTER_MAX_M);
+            let layers = if ring_casts {
+                RenderLayers::from_layers(&[
+                    SHIP_LAYER,
+                    crate::rendering::sun_shadow::SHADOW_CASTER_LAYER,
+                ])
+            } else {
+                RenderLayers::layer(SHIP_LAYER)
+            };
             let mut tile_cmd = commands.spawn((
                 mesh,
                 MeshMaterial3d(impostor_material),
                 transform,
                 cell,
                 Visibility::Inherited,
-                // Also cast into the custom sun-shadow cascades so DISTANT
-                // (impostor-band) trees ground with a shadow too — not just the
-                // near mesh trees. The billboard orients to `view.world_position`,
-                // which in the cascade caster pass is the cascade camera (up-sun),
-                // so it faces the SUN and renders the canopy silhouette from the
-                // sun angle (octahedral atlas sampled there) → casts the right
-                // shape. `NotShadowCaster` still excludes it from Bevy's stock CSM.
-                RenderLayers::from_layers(&[
-                    SHIP_LAYER,
-                    crate::rendering::sun_shadow::SHADOW_CASTER_LAYER,
-                ]),
+                layers,
                 NotShadowCaster,
                 ChildOf(root.entity),
                 visual,

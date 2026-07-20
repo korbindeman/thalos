@@ -1,9 +1,9 @@
 # UI flow — screens, modes, and transitions
 
-Status: **design + in-flight migration** (Phase 1 landed 2026-07-04, shadow
-mode; nothing consumes `GameContext` yet). This doc is the design of record for
-the game's screen/mode flow and the migration that unifies it. Update it as the
-phases land.
+Status: **migration complete** (Phases 1–4 landed; Phase 3 — ownership inverted —
+landed 2026-07-05, compile+clippy-clean, game-UNVERIFIED). `GameContext` is now
+the sole in-`Running` mode authority; the `.open` booleans survive only as derived
+mirrors. This doc is the design of record for the game's screen/mode flow.
 
 ## The problem this fixes
 
@@ -90,9 +90,11 @@ context (nothing below it — the PLAY-rooted hub, or Flight) Escape opens the
 **pause menu** instead of leaving the game. This collapses the 9-rung ladder in
 `pause_menu::handle_escape_input`.
 
-*Interim (pre-Phase-3):* the fix landed 2026-07-04 removes the hub's
-Escape→`MainMenu` jump — a PLAY-rooted hub now falls through to the pause menu,
-and a hub opened over a flight still backs out to that flight.
+Escape's priority order (Phase 3): forced modal (destruction picker) → Settings
+overlay → pause menu (it can sit over a root context) → context back-out (pop the
+return stack; empty stack at the root → open the pause menu) → Flight sub-modals
+(interaction mode, target deselect) → open the pause menu. A focused editor text
+field eats Escape upstream by disabling the keyboard action source.
 
 ### Boot routing
 
@@ -152,28 +154,24 @@ then invert ownership).
    the VAB, gone in Phase 3. HUD-visibility *ownership* stays per-modal for now
    (moved to `OnEnter/OnExit` in Phase 3, bundled with deleting the booleans;
    deferred here to avoid editing files under unrelated WIP).
-3. **Invert ownership** *(blocked — see below)* — button clicks + Escape set
-   `NextState<GameContext>` directly; add `ContextHistory`; delete
-   `return_to_menu`, `ReturnToSpaceCenter`, and the `.open` bools (or keep thin
-   derived mirrors only where UI still reads them). Add `InitialContext` boot
-   routing.
+3. **Invert ownership** *(landed 2026-07-05)* — button clicks + Escape + the
+   facility flows set `NextState<GameContext>` directly and navigate a
+   `ContextHistory` return stack (`game_context::{enter_context, back_out}`);
+   `return_to_menu`, `ReturnToSpaceCenter`, `restore_after_facility`, and the two
+   `Open*OnStart` flags are deleted; `InitialContext` (consumed on
+   `OnEnter(Running)`) is the boot route. The `.open` bools are kept as **derived
+   mirrors** (`game_context::mirror_context_to_booleans`, the sole writer) so all
+   `.open` *readers* — input gating, each modal's `apply_open_state`, the run
+   conditions — are untouched. `OnExit(Running)` resets the mirrors + stack. The
+   Escape ladder collapsed into a context-aware back-out (root context → pause
+   menu, never the start screen). A VAB **Launch** / launchpad L-launch clears the
+   stack and drops to Flight; the launch-select picker re-enters `BaseEditor`
+   parented to Flight, so place/cancel both land in flight.
 4. **Main Menu exit** *(landed 2026-07-04, partial)* — the pause menu gained a
    **MAIN MENU** button (`pause_menu.rs`) → the direct flight→`AppState::MainMenu`
    route (previously only reachable via the hub). Collapsing the Escape ladder
    into a per-context handler is deferred with Phase 3 (it needs `GameContext` to
    be settable).
-
-### Phase 3 blocker
-
-Inverting ownership requires rerouting **every** mode writer to
-`NextState<GameContext>`, including the base editor's *self*-open/close
-(`base_editor::launch_select::open_launch_select`, `place.rs`'s close). At time
-of writing those live in an **untracked / non-compiling base-editor WIP**
-(`build_parallel_taxiway` undefined), so Phase 3 can be neither verified at
-runtime nor landed without editing active in-progress files. Every scheme that
-avoids touching base-editor degrades into fragile bidirectional bool↔state sync.
-**Do Phase 3 once `base_editor` compiles**, so the writer inversion + return-stack
-can be verified live.
 
 Follow-ups the state machine makes cheap: transition fades ("good transitions"),
 multi-base + default, and the **Tracking Station** context (ship-less map).

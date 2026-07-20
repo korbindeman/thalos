@@ -46,29 +46,16 @@ use thalos_shipyard::ShipyardPlugin;
 use thalos_shipyard::sizing::propagate_node_sizes;
 
 pub use commands::{CollectQuery, collect_blueprint};
-pub use debug_log::SelectionLog;
-pub use files::{
-    SHIPS_DIR, SavedShip, list_ships, schema_ship_name, ship_name_from_ron, ship_path_for_name,
-    ship_path_for_slug, slugify_ship_name,
-};
+pub use files::SavedShip;
 pub use format::{
-    format_delta_v, format_duration_s, format_mass_kg, format_thrust, kind_order, meters_label,
+    format_delta_v, format_mass_kg, kind_order,
     palette_category_label, palette_category_order, palette_part_summary,
 };
-pub use placement::{
-    BODY_SKIN_SNAP_STEP, body_skin_mount, host_group_members, snap_body_skin_angle,
-    surface_mount_from_hit, symmetry_edit_target,
-};
-pub use shrouds::{Shroud, ShroudBody};
+pub use placement::symmetry_edit_target;
 pub use state::{
-    AttachNodePin, BuildOrientation, CLICK_THRESHOLD_PX, DeselectTracker, EditorAssets,
-    EditorPart, EditorState, EditorUiGate, EditorViewCamera, GearBayVisual, GearVisual,
-    NacelleVisual, NextSymmetryId, PART_RESOLUTION, PartBody, PartShaderHandle, PartVisual,
-    PendingPart, PlacementPreview, PlacementSnap, PreviewGhost, PreviewSig, SymmetryMode,
-    TankDragState, TankResizeArrow, TankResizeDrag, WingVisual,
-};
-pub use visuals::{
-    VisualSpec, engine_visual_profile, host_top_diameter, ship_part_params, visual_spec,
+    BuildOrientation, CLICK_THRESHOLD_PX, DeselectTracker,
+    EditorPart, EditorState, EditorUiGate, EditorViewCamera, NextSymmetryId,
+    PendingPart, PlacementPreview, PlacementSnap, PreviewGhost, SymmetryMode, TankResizeArrow, TankResizeDrag,
 };
 
 /// The current [`thalos_shipyard::PartParams`] of a selected part, read back from its

@@ -10,7 +10,8 @@ game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_g
 
 # Run the game. Bare `just game` boots to the start screen (scenario
 # picker / shipyard / settings); naming a mode skips it and launches
-# directly: `just game orbit` (ship in low Thalos orbit), `just game eva`
+# directly: `just game orbit` (ship in low equatorial Thalos orbit),
+# `just game polar` (same altitude, polar / i≈90°), `just game eva`
 # (on foot on the Thalos surface), `just game landing` (powered-descent
 # approach over Thalos land), `just game final` (very low over a flat dry
 # patch for touchdown practice), `just game runway` (aircraft parked on the
@@ -36,6 +37,17 @@ game mode=env_var_or_default("THALOS_SPAWN", "menu"):
 preview:
     cargo run -p thalos_body_render --example object_preview
 
+# UI kitchen sink: renders every thalos_ui token/widget over a test scene to
+# tools/ui_preview/kitchen_sink.png headlessly, then exits — agents iterate on
+# the UI kit by reading the PNG. See crates/ui/examples/kitchen_sink.rs.
+ui-preview:
+    cargo run -p thalos_ui --example kitchen_sink
+
+# Interactive window variant of `just ui-preview` (hover/press/typing feel;
+# S saves the same screenshot). User-run (opens a window).
+ui-preview-window:
+    cargo run -p thalos_ui --example kitchen_sink -- --window
+
 # Interactive window variant of `just preview`: opens a window with an orbit
 # camera — drag to orbit, scroll to zoom, ←/→ cycle objects, S saves a
 # screenshot to tools/preview/out/<object>_view.png.
@@ -47,12 +59,24 @@ preview-window:
 # exits — agent-runnable like `just preview`, but of a whole composed scene.
 # `just screenshot` does the spaceport aerial; `just screenshot hub` captures
 # the space-center hub exactly as PLAY presents it (spaceport built, no craft
-# placed — the regression probe for view-anchored surface detail). Override
-# the framing without recompiling via env vars, e.g. (PowerShell):
+# placed — the regression probe for view-anchored surface detail);
+# `just screenshot dry-belt` (aliases: dry / desert / biome) surveys the driest
+# sunlit desert site it can find — the verification probe for terrain-per-biome
+# work (landcover palette + the tree/scatter biome gate). Override the framing
+# without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP.
 screenshot preset="spaceport-aerial":
     $env:THALOS_SCREENSHOT='{{preset}}'; cargo run -p thalos_game
+
+# Whole-planet biome map export (headless, agent-readable): renders the true
+# in-game macro palette + a flat biome-class map with per-biome area stats to
+# target/world_map.png + target/world_biomes.png, then exits. Defaults to
+# web-mercator; knobs (set as env vars): WORLD_PROJ=equirect, WORLD_MODE=hypso
+# (legacy ramp), WORLD_W, WORLD_SEED, WORLD_RADIUS_KM, and the WORLD_ZOOM /
+# WORLD_TRANSECT probe modes. See crates/terrain/examples/world_map.rs.
+map:
+    cargo run --release -p thalos_terrain --example world_map
 
 # Build everything
 build:

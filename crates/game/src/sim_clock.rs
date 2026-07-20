@@ -59,7 +59,10 @@ impl Plugin for SimClockPlugin {
 /// - Escape menu (`GamePause`)
 /// - destruction scenario picker (`ScenarioMenu::open`)
 /// - start screen (`AppState::MainMenu`)
-/// - freecam (`FreeCam::active`)
+/// - freecam when the craft could **not** time-warp on enter
+///   (`FreeCam::active && !FreeCam::allow_sim_time`). When the craft *was*
+///   warp-eligible, freecam leaves sim time under normal warp control so
+///   `.`/`,` still advance the world while framing.
 /// - a modal in-game context — VAB / base editor / space-center hub — via the
 ///   `GameContext` sub-state (`game_context::context_freezes_sim`), replacing
 ///   the former `ShipyardEditor`/`BaseEditor`/`SpaceCenter` boolean reads
@@ -80,12 +83,15 @@ pub(crate) fn sync_sim_clock(
     mut clock: ResMut<SimClock>,
 ) {
     let wall_delta_s = time.delta_secs_f64();
-    let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
+    let freecam_freezes = freecam
+        .as_deref()
+        .map(|f| f.active && !f.allow_sim_time)
+        .unwrap_or(false);
     let context_freezes = crate::game_context::context_freezes_sim(game_context.as_deref());
     let paused = pause.active
         || scenario.open
         || *app_state.get() == AppState::MainMenu
-        || freecam_active
+        || freecam_freezes
         || context_freezes
         || sim.simulation.warp.speed() == 0.0;
 

@@ -33,9 +33,9 @@
     mesh_view_bindings::view,
 }
 #import thalos::lighting::{compute_surface_sky, SurfaceSky, FoliageSurface, shade_foliage, object_aerial_recession, sun_daylight}
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_vert}
 #import thalos::grass_displace::grass_blade_world_pos
-#import thalos::landcover::{moisture_at, macro_variation, vegetation_color}
+#import thalos::landcover::{moisture_detail, macro_variation, vegetation_color, climate_warmth}
 
 // Mirror of gpu_grass.rs `GpuGrassParams` — field order is load-bearing.
 struct GpuGrassParams {
@@ -53,9 +53,11 @@ struct GpuGrassParams {
     frame_east: vec4<f32>,
     frame_north: vec4<f32>,
     frame_up: vec4<f32>,
-    // x = texel (m), y = size (px), z = half extent (m), w unused.
+    // x = texel (m), y = size (px), z = half extent (m), w = climate cold
+    // lift at the anchor (m — shifts the treeline fade / veg palette).
     window_meta: vec4<f32>,
-    // Anchor surface point mod the landcover period (body-fixed metres).
+    // xyz = anchor surface point mod the landcover period (body-fixed metres),
+    // w = macro landcover moisture at the anchor ([-1, 1]).
     phase: vec4<f32>,
     band_cell: array<vec4<u32>, 5>,
     band_geom: array<vec4<f32>, 5>,
@@ -307,7 +309,7 @@ fn gg_emit(
     out.world_position = world_pos;
     out.world_normal = world_normal;
     out.color = vec4<f32>(tint, 1.0);
-    out.shadow = sun_shadow_factor(
+    out.shadow = sun_shadow_factor_vert(
         world_pos, gg_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
     );
     out.sky0 = vec4<f32>(sky.sun_color, sky.sun_scale);
@@ -394,7 +396,9 @@ fn vertex(in: VertexInput) -> VertexOutput {
         return gg_kill(in, local_root);
     }
     let lawn = treatment > 0.25;
-    if (h <= gg.time_fade.z + 1.0) { // sea level + 1 m
+    // Sea level + beach clearance — mirror of `scatter::VEG_BEACH_CLEAR_M`
+    // (the strand stays bare sand; change together).
+    if (h <= gg.time_fade.z + 4.0) {
         return gg_kill(in, local_root);
     }
     // Terrain normal in the tangent frame; slope = |∇h| = tan(tilt).
@@ -405,11 +409,15 @@ fn vertex(in: VertexInput) -> VertexOutput {
         return gg_kill(in, local_root);
     }
     let grass_w = aux.x;
+    // Climate-shifted (ecological) altitude: the treeline fade descends with
+    // latitude (window_meta.w = cold lift at the anchor), matching the
+    // terrain paint + CPU blades.
+    let eco_h = h + gg.window_meta.w;
     // Loose ramp: real landcover grass weights sit ~0.3–0.6, and the old
     // (0.20, 0.50) ramp culled up to two-thirds of those blades — the
     // in-game "bald" read. Sub-0.3 weights now still grow a thinning sward.
     var accept = smoothstep(0.06, 0.30, grass_w)
-        * (1.0 - smoothstep(2000.0, 2700.0, h));
+        * (1.0 - smoothstep(2000.0, 2700.0, eco_h));
     if (lawn) {
         accept = 1.0;
     }
@@ -418,10 +426,13 @@ fn vertex(in: VertexInput) -> VertexOutput {
     }
 
     // ── Grass type + tint from the shared landcover field ───────────────────
+    // Macro moisture rides `phase.w` (per-window, sampled at the anchor from
+    // the planet-scale f64 field — docs/terrain_macro.md); the wrapped fine
+    // tier is added per blade so blades match the terrain's per-pixel field.
     let p_body = gg.phase.xyz + east * clump_2d.x + north * clump_2d.y + r_up * h_rel;
-    let moisture = moisture_at(p_body);
+    let moisture = clamp(gg.phase.w + moisture_detail(p_body), -1.0, 1.0);
     let macro_var = macro_variation(p_body);
-    let veg = vegetation_color(h, moisture, macro_var);
+    let veg = vegetation_color(eco_h, moisture, macro_var, climate_warmth(gg.window_meta.w));
 
     // Style blend: moisture picks along dry→lush; lawn treatment overrides.
     var styles = gg.style;

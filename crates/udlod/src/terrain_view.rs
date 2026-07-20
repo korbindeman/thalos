@@ -42,6 +42,14 @@ pub struct TerrainViewConfig {
     /// The blend percentage in the vertex and fragment shader.
     pub blend_range: f32,
     pub origin_lod: u32,
+    /// Defer *streaming* (synthesis + residency) of tiles clearly behind the
+    /// view, past a near-field keep radius. Hole-free by construction: the
+    /// pinned root LODs always provide a resident ancestor, so a deferred tile
+    /// simply draws from its coarse parent until the camera turns toward it.
+    /// Leave `false` for views that see the whole body at once (map / distant
+    /// tiers); enable for a first-person surface view where roughly half the
+    /// near tiles fall behind the camera.
+    pub cull_behind_view: bool,
 }
 
 impl Default for TerrainViewConfig {
@@ -59,6 +67,7 @@ impl Default for TerrainViewConfig {
             blend_range: 0.2,
             precision_threshold_distance: 0.001,
             origin_lod: 10,
+            cull_behind_view: false,
         }
     }
 }

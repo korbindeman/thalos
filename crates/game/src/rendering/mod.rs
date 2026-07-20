@@ -19,12 +19,14 @@ pub(crate) mod ground_terrain;
 mod lighting;
 mod map_terrain;
 mod materials;
+pub(crate) mod tile_cache;
 pub(crate) mod real_space;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
 // Re-enable by uncommenting this and the `RockScatterPlugin` registration below.
 // mod rocks;
 mod scene_depth;
 mod spawn;
+mod stock_atmosphere;
 pub(crate) mod ssao;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
@@ -73,7 +75,8 @@ use trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
 pub use types::{
-    CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, RealSpaceBody, ShipMarker,
+    ActiveCraft, CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, RealSpaceBody,
+    ShipMarker, track_active_craft,
 };
 
 use bevy::prelude::*;
@@ -106,6 +109,9 @@ impl Plugin for RenderingPlugin {
             .add_plugins(SceneDepthPlugin)
             .add_plugins(ssao::SsaoPlugin)
             .add_plugins(sun_shadow::SunShadowPlugin)
+            // Must precede the terrain plugins: they spawn terrain (and thus ask
+            // for cached providers) and the registry has to exist by then.
+            .add_plugins(tile_cache::TileCachePlugin)
             .add_plugins(TerrainResidencyPlugin)
             .add_plugins(map_terrain::MapTerrainPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
@@ -124,6 +130,10 @@ impl Plugin for RenderingPlugin {
             .init_resource::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
+            .init_resource::<ActiveCraft>()
+            // The N-craft accessor seam: keep `ActiveCraft` mirroring the active
+            // craft entity each frame (`SimStage::Sync`, before consumers read it).
+            .add_systems(Update, track_active_craft.in_set(SimStage::Sync))
             .add_systems(
                 Startup,
                 (
@@ -184,6 +194,14 @@ impl Plugin for RenderingPlugin {
                     sync_body_render_lod
                         .after(update_real_space_body_positions)
                         .after(pause_surface_terrain_streaming_at_high_warp),
+                    // Experimental stock-Bevy-atmosphere A/B (Settings →
+                    // Graphics). The suppressor must run after the LOD pass:
+                    // it overrides the `BodySky` visibility the LOD pass just
+                    // wrote, and the LOD pass restores it when toggled off.
+                    stock_atmosphere::sync_stock_atmosphere,
+                    stock_atmosphere::sync_impostor_atmosphere_with_stock,
+                    stock_atmosphere::suppress_body_sky_for_stock_atmosphere
+                        .after(sync_body_render_lod),
                     // `update_body_terrain_atmosphere` moved to PostUpdate
                     // (see below) so it reads body GlobalTransforms after
                     // big_space's `TransformSystems::Propagate` finishes

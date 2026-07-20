@@ -98,10 +98,12 @@ the simulation.
 Simulation pause is not implemented by pausing Bevy's global
 `Time<Virtual>`. `crates/game/src/sim_clock.rs` owns the explicit
 `SimClock` resource, whose sole writer folds the Escape pause menu, the
-destruction scenario picker, freecam, and warp pause (`warp.speed() == 0`)
-into a zero simulation delta. Canonical stepping, local Avian ownership,
-resource burn, and grounded EVA motion consume `SimClock` instead of plain
-`Res<Time>`.
+destruction scenario picker, freecam when the craft was not time-warp
+eligible on enter (`FreeCam::active && !allow_sim_time` — when freecam is
+entered with warp >1× allowed, sim time stays under normal warp control),
+and warp pause (`warp.speed() == 0`) into a zero simulation delta. Canonical
+stepping, local Avian ownership, resource burn, and grounded EVA motion
+consume `SimClock` instead of plain `Res<Time>`.
 
 Presentation systems are outside that boundary. Camera smoothing,
 freecam motion, UI hover/drag animation, film grain, reflection-probe

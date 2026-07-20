@@ -4,6 +4,7 @@
 /tools/preview/out/
 # Headless whole-scene captures (`just screenshot` / THALOS_SCREENSHOT).
 /tools/screenshots/
+/tools/ui_preview/
 # Baked procedural textures (`cargo run -p thalos_texgen --example bake`).
 /tools/texgen/out/
 # Per-user runtime settings written by the game (window mode, UI scale, …).
@@ -16,5 +17,8 @@ Cargo.lock
 .cargo/config.toml
 .env.just
 .thalos_dumps/
-.claude/
+# Session-local Claude state stays ignored, but project skills (steer,
+# wgsl-bevy) are shared infrastructure and are tracked.
+.claude/*
+!.claude/skills/
 .codex/

@@ -1,41 +1,86 @@
-// Atlas — an orbital-class two-stage methalox rocket, the reference
-// ground-to-orbit vehicle. Catalog-referenced (stats live in
-// `assets/parts.ron`); resources omitted so each tank spawns full.
-//
-// Stack, nose to tail:
-//   Hyperion pod → upper methalox tank → Boreas (vacuum, gimballed)
-//     → decoupler → booster methalox tank → Typhon (sea-level, gimballed)
-//
-// Both engines gimbal, so the ascent is flyable: lift off under SAS (holds
-// vertical), pitch over a few degrees off the pad, then hold surface Prograde
-// and ride the gravity turn to orbit. ~10 km/s of Δv over the two stages —
-// Thalos low orbit needs ~7 km/s — with a launch TWR ≈ 1.3.
 (
     name: "Atlas",
     root: 0,
     parts: [
-        (catalog_id: "hyperion"),
+        (
+            catalog_id: "hyperion",
+            params: r#None,
+            resources: {
+                Electricity: 4.0,
+            },
+        ),
         (
             catalog_id: "tank_methalox",
-            params: Tank(diameter: 4.0, length: 5.0),
+            params: Tank(
+                diameter: 4.0,
+                length: 5.0,
+            ),
+            resources: {
+                Methane: 26954.865,
+                Lox: 35876.99,
+            },
         ),
-        (catalog_id: "boreas"),
+        (
+            catalog_id: "boreas",
+            params: r#None,
+            resources: {},
+        ),
         (
             catalog_id: "decoupler_std",
-            params: Decoupler(diameter: 4.0),
+            params: Decoupler(
+                diameter: 4.0,
+            ),
+            resources: {},
         ),
         (
             catalog_id: "tank_methalox",
-            params: Tank(diameter: 4.0, length: 10.0),
+            params: Tank(
+                diameter: 4.0,
+                length: 20.011194,
+            ),
+            resources: {
+                Lox: 143588.28,
+                Methane: 107879.81,
+            },
         ),
-        (catalog_id: "typhon"),
+        (
+            catalog_id: "typhon",
+            params: r#None,
+            resources: {},
+        ),
     ],
     connections: [
-        (parent: 0, parent_node: "bottom", child: 1, child_node: "top"),
-        (parent: 1, parent_node: "bottom", child: 2, child_node: "top"),
-        (parent: 2, parent_node: "bottom", child: 3, child_node: "top"),
-        (parent: 3, parent_node: "bottom", child: 4, child_node: "top"),
-        (parent: 4, parent_node: "bottom", child: 5, child_node: "top"),
+        (
+            parent: 1,
+            parent_node: "bottom",
+            child: 2,
+            child_node: "top",
+        ),
+        (
+            parent: 4,
+            parent_node: "bottom",
+            child: 5,
+            child_node: "top",
+        ),
+        (
+            parent: 0,
+            parent_node: "bottom",
+            child: 1,
+            child_node: "top",
+        ),
+        (
+            parent: 3,
+            parent_node: "bottom",
+            child: 4,
+            child_node: "top",
+        ),
+        (
+            parent: 2,
+            parent_node: "bottom",
+            child: 3,
+            child_node: "top",
+        ),
     ],
+    surface_mounts: [],
     layout: Some(Vertical),
 )

@@ -4,7 +4,7 @@
 //! centred modal with a tab strip; the body is rebuilt from the current tab +
 //! model whenever the tab changes, the menu opens, or a structural edit bumps
 //! [`SettingsMenu::rebuild`] (HOTAS add/remove, device-mode switch). Interactive
-//! widgets come from [`crate::ui_widgets`]; per-tab apply systems read
+//! widgets come from [`thalos_ui`]; per-tab apply systems read
 //! `Changed<Widget>` and write the backing resource (value-compared, so an open
 //! tab never churns change detection).
 //!
@@ -26,13 +26,14 @@ use thalos_input::settings::{
     AxisSpec, BindingSection, BindingSpec, HotasAxisBinding, HotasDeviceSelector, InputSettings,
 };
 
-use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
-use crate::hud::theme::{HudTheme, panel_frame};
-use crate::units_settings::{UnitSystem, UnitsSettings};
-use crate::ui_widgets::{
-    ScrollableColumn, SliderFormat, TextField, UiButton, UiCheckbox, UiCycle, UiSlider,
-    spawn_button, spawn_checkbox_row, spawn_cycle_row, spawn_slider_row, spawn_text_field,
+use thalos_ui::{
+    self as ui, ButtonVariant, ScrollableColumn, SliderFormat, UiButton, UiCheckbox, UiCycle,
+    UiSlider, UiTextField, UiTheme, spawn_button, spawn_checkbox_row, spawn_cycle_row,
+    spawn_divider, spawn_slider_row, spawn_text_field, tokens,
 };
+
+use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
+use crate::units_settings::{UnitSystem, UnitsSettings};
 use crate::window_settings::{
     MonitorChoice, RESOLUTION_PRESETS, UI_SCALE_MAX, UI_SCALE_MIN, WindowModeSetting,
     WindowSettings, WindowSettingsOverrides,
@@ -135,6 +136,8 @@ struct GpuGrassControl;
 #[derive(Component)]
 struct MsaaControl;
 #[derive(Component)]
+struct StockAtmosphereControl;
+#[derive(Component)]
 struct ResetGraphicsControl;
 
 // Units tab
@@ -176,7 +179,7 @@ pub struct SettingsMenuPlugin;
 impl Plugin for SettingsMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SettingsMenu>()
-            .add_systems(Startup, setup_ui.after(crate::hud::theme::init_theme))
+            .add_systems(Startup, setup_ui.after(thalos_ui::init_ui_theme))
             .add_systems(
                 Update,
                 (
@@ -196,8 +199,7 @@ impl Plugin for SettingsMenuPlugin {
 
 // ── Setup ─────────────────────────────────────────────────────────────────────
 
-fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
-    let (bg, border) = panel_frame(&theme);
+fn setup_ui(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((
             Node {
@@ -227,15 +229,9 @@ fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
                     width: Val::Px(560.0),
                     height: Val::Px(540.0),
                     max_height: Val::Percent(92.0),
-                    border: UiRect::all(Val::Px(1.0)),
-                    border_radius: BorderRadius::all(Val::Px(4.0)),
-                    padding: UiRect::axes(Val::Px(16.0), Val::Px(12.0)),
-                    flex_direction: FlexDirection::Column,
-                    row_gap: Val::Px(8.0),
-                    ..default()
+                    ..ui::panel_node()
                 },
-                bg,
-                border,
+                theme.glass_heavy(),
                 Name::new("SettingsPanel"),
             ))
             .with_children(|panel| {
@@ -249,19 +245,11 @@ fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
                         ..default()
                     })
                     .with_children(|row| {
-                        row.spawn((
-                            Text::new("SETTINGS"),
-                            TextFont {
-                                font: theme.font.clone(),
-                                font_size: FontSize::Px(15.0),
-                                ..default()
-                            },
-                            TextColor(theme.text_accent),
-                        ));
-                        spawn_button(row, &theme, CloseButton, "×", 14.0, 24.0);
+                        row.spawn(theme.title("SETTINGS"));
+                        spawn_button(row, &theme, CloseButton, "×", ButtonVariant::Bare, 24.0);
                     });
 
-                divider(panel, &theme);
+                spawn_divider(panel);
 
                 // Tab strip.
                 panel
@@ -275,11 +263,11 @@ fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
                     })
                     .with_children(|strip| {
                         for tab in Tab::ALL {
-                            spawn_button(strip, &theme, TabButton(tab), tab.label(), 11.0, 24.0);
+                            spawn_button(strip, &theme, TabButton(tab), tab.label(), ButtonVariant::Ghost, 24.0);
                         }
                     });
 
-                divider(panel, &theme);
+                spawn_divider(panel);
 
                 // Scrollable body (children rebuilt per tab).
                 panel.spawn((
@@ -302,16 +290,6 @@ fn setup_ui(mut commands: Commands, theme: Res<HudTheme>) {
         });
 }
 
-fn divider(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
-    parent.spawn((
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(1.0),
-            ..default()
-        },
-        BackgroundColor(theme.panel_border),
-    ));
-}
 
 // ── Chrome systems ──────────────────────────────────────────────────────────
 
@@ -368,7 +346,7 @@ fn update_tab_latches(menu: Res<SettingsMenu>, mut tabs: Query<(&TabButton, &mut
 fn rebuild_tab_body(
     mut commands: Commands,
     menu: Res<SettingsMenu>,
-    theme: Res<HudTheme>,
+    theme: Res<UiTheme>,
     window: Res<WindowSettings>,
     overrides: Res<WindowSettingsOverrides>,
     graphics: Res<GraphicsSettings>,
@@ -412,7 +390,7 @@ fn rebuild_tab_body(
 
 fn build_window_tab(
     b: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
+    theme: &UiTheme,
     settings: &WindowSettings,
     overrides: &WindowSettingsOverrides,
     monitors: &Query<(&Monitor, Has<PrimaryMonitor>)>,
@@ -521,7 +499,7 @@ fn build_window_tab(
     );
 
     spacer(b);
-    spawn_button(b, theme, ResetWindowControl, "Reset to defaults", 11.0, 26.0);
+    spawn_button(b, theme, ResetWindowControl, "Reset to defaults", ButtonVariant::Ghost, 26.0);
     note(
         b,
         theme,
@@ -531,7 +509,7 @@ fn build_window_tab(
 
 // ── Graphics tab ────────────────────────────────────────────────────────────────
 
-fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings: &GraphicsSettings) {
+fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: &GraphicsSettings) {
     spawn_checkbox_row(b, theme, "Volumetric clouds", settings.clouds, CloudsControl);
     note(
         b,
@@ -580,13 +558,29 @@ fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settin
     );
 
     spacer(b);
-    spawn_button(b, theme, ResetGraphicsControl, "Reset to defaults", 11.0, 26.0);
+
+    spawn_checkbox_row(
+        b,
+        theme,
+        "Stock Bevy atmosphere (experimental)",
+        settings.stock_atmosphere,
+        StockAtmosphereControl,
+    );
+    note(
+        b,
+        theme,
+        "A/B comparison: replaces the custom sky pass with Bevy's raymarched \
+         atmosphere. Ocean and volumetric clouds are hidden while it is on.",
+    );
+
+    spacer(b);
+    spawn_button(b, theme, ResetGraphicsControl, "Reset to defaults", ButtonVariant::Ghost, 26.0);
     note(b, theme, "Saved to user/graphics.ron.");
 }
 
 // ── Units tab ─────────────────────────────────────────────────────────────────────
 
-fn build_units_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings: &UnitsSettings) {
+fn build_units_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: &UnitsSettings) {
     let index = UnitSystem::ALL
         .iter()
         .position(|s| *s == settings.system)
@@ -613,7 +607,7 @@ enum BindingKind {
 
 fn build_binding_tab(
     b: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
+    theme: &UiTheme,
     settings: &InputSettings,
     kind: BindingKind,
 ) {
@@ -665,7 +659,7 @@ fn build_binding_tab(
 
 fn build_binding_group(
     b: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
+    theme: &UiTheme,
     title: &str,
     section: &BindingSection,
     filter: fn(&BindingSpec) -> bool,
@@ -698,7 +692,7 @@ fn build_binding_group(
     }
 }
 
-fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, action: &str, value: &str) {
+fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, action: &str, value: &str) {
     b.spawn(Node {
         width: Val::Percent(100.0),
         flex_direction: FlexDirection::Row,
@@ -710,27 +704,27 @@ fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, action: &str,
         row.spawn((
             Text::new(action.to_string()),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(10.0),
                 ..default()
             },
-            TextColor(theme.text_dim),
+            TextColor(tokens::TEXT_DIM),
         ));
         row.spawn((
             Text::new(value.to_string()),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(10.0),
                 ..default()
             },
-            TextColor(theme.text_primary),
+            TextColor(tokens::TEXT_PRIMARY),
         ));
     });
 }
 
 // ── HOTAS tab ───────────────────────────────────────────────────────────────────
 
-fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings: &InputSettings) {
+fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: &InputSettings) {
     let hotas = &settings.game.hotas;
     spawn_checkbox_row(b, theme, "HOTAS enabled", hotas.enabled, HotasEnabledControl);
 
@@ -758,17 +752,23 @@ fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings:
             row.spawn((
                 Text::new("Name:"),
                 TextFont {
-                    font: theme.font.clone(),
+                    font: theme.font_ui.clone(),
                     font_size: FontSize::Px(11.0),
                     ..default()
                 },
-                TextColor(theme.text_dim),
+                TextColor(tokens::TEXT_DIM),
                 Node {
                     width: Val::Px(120.0),
                     ..default()
                 },
             ));
-            spawn_text_field(row, theme, name, 220.0, HotasDeviceNameControl);
+            spawn_text_field(
+                row,
+                theme,
+                UiTextField::new(name, "device name"),
+                Val::Px(220.0),
+                HotasDeviceNameControl,
+            );
         });
     }
 
@@ -796,7 +796,7 @@ fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, settings:
 
 fn build_hotas_axis_row(
     b: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
+    theme: &UiTheme,
     axis: &'static str,
     binding: &HotasAxisBinding,
 ) {
@@ -811,11 +811,11 @@ fn build_hotas_axis_row(
         row.spawn((
             Text::new(axis.to_string()),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(11.0),
                 ..default()
             },
-            TextColor(theme.text_primary),
+            TextColor(tokens::TEXT_PRIMARY),
             Node {
                 width: Val::Px(70.0),
                 flex_shrink: 0.0,
@@ -825,14 +825,20 @@ fn build_hotas_axis_row(
         row.spawn((
             Text::new("code"),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(10.0),
                 ..default()
             },
-            TextColor(theme.text_dim),
+            TextColor(tokens::TEXT_DIM),
         ));
-        spawn_text_field(row, theme, &binding.code.to_string(), 56.0, HotasCodeControl { axis });
-        spawn_button(row, theme, HotasRemoveControl { axis }, "✕", 10.0, 20.0);
+        spawn_text_field(
+            row,
+            theme,
+            UiTextField::new(binding.code.to_string(), "code"),
+            Val::Px(56.0),
+            HotasCodeControl { axis },
+        );
+        spawn_button(row, theme, HotasRemoveControl { axis }, "✕", ButtonVariant::Ghost, 20.0);
     });
 
     // Invert + deadzone, each on its own full-width row (indented under the axis).
@@ -869,7 +875,7 @@ fn indented(b: &mut ChildSpawnerCommands<'_>, build: impl FnOnce(&mut ChildSpawn
     .with_children(|row| build(row));
 }
 
-fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, axis: &'static str) {
+fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, axis: &'static str) {
     b.spawn(Node {
         width: Val::Percent(100.0),
         flex_direction: FlexDirection::Row,
@@ -881,18 +887,18 @@ fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, ax
         row.spawn((
             Text::new(axis.to_string()),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(11.0),
                 ..default()
             },
-            TextColor(theme.text_dim),
+            TextColor(tokens::TEXT_DIM),
             Node {
                 width: Val::Px(70.0),
                 flex_shrink: 0.0,
                 ..default()
             },
         ));
-        spawn_button(row, theme, HotasAddControl { axis }, "Add", 10.0, 20.0);
+        spawn_button(row, theme, HotasAddControl { axis }, "Add", ButtonVariant::Ghost, 20.0);
     });
 }
 
@@ -957,6 +963,7 @@ fn apply_graphics_controls(
     clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
     grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
     gpu_grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GpuGrassControl>)>,
+    stock_atmosphere_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<StockAtmosphereControl>)>,
     msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
@@ -973,6 +980,11 @@ fn apply_graphics_controls(
     for checkbox in &gpu_grass_q {
         if settings.gpu_grass != checkbox.checked {
             settings.gpu_grass = checkbox.checked;
+        }
+    }
+    for checkbox in &stock_atmosphere_q {
+        if settings.stock_atmosphere != checkbox.checked {
+            settings.stock_atmosphere = checkbox.checked;
         }
     }
     for cycle in &msaa_q {
@@ -1009,8 +1021,8 @@ fn apply_hotas_controls(
     mut menu: ResMut<SettingsMenu>,
     enabled_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<HotasEnabledControl>)>,
     mode_q: Query<&UiCycle, (Changed<UiCycle>, With<HotasDeviceModeControl>)>,
-    name_q: Query<&TextField, (Changed<TextField>, With<HotasDeviceNameControl>)>,
-    code_q: Query<(&TextField, &HotasCodeControl), Changed<TextField>>,
+    name_q: Query<&UiTextField, (Changed<UiTextField>, With<HotasDeviceNameControl>)>,
+    code_q: Query<(&UiTextField, &HotasCodeControl), Changed<UiTextField>>,
     invert_q: Query<(&UiCheckbox, &HotasInvertControl), Changed<UiCheckbox>>,
     deadzone_q: Query<(&UiSlider, &HotasDeadzoneControl), Changed<UiSlider>>,
     add_q: Query<(&Interaction, &HotasAddControl), Changed<Interaction>>,
@@ -1038,14 +1050,14 @@ fn apply_hotas_controls(
     }
     for field in &name_q {
         if let HotasDeviceSelector::NameContains(name) = &mut hotas.device
-            && *name != field.text
+            && *name != field.value
         {
-            *name = field.text.clone();
+            *name = field.value.clone();
         }
     }
     for (field, control) in &code_q {
         if let Some(binding) = hotas.axes.get_mut(control.axis)
-            && let Ok(code) = field.text.trim().parse::<u32>()
+            && let Ok(code) = field.value.trim().parse::<u32>()
             && binding.code != code
         {
             binding.code = code;
@@ -1098,7 +1110,7 @@ fn spacer(b: &mut ChildSpawnerCommands<'_>) {
     });
 }
 
-fn section_header(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str) {
+fn section_header(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, text: &str) {
     b.spawn((
         Node {
             margin: UiRect::top(Val::Px(4.0)),
@@ -1106,29 +1118,29 @@ fn section_header(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str
         },
         Text::new(text.to_string()),
         TextFont {
-            font: theme.font.clone(),
+            font: theme.font_ui.clone(),
             font_size: FontSize::Px(10.0),
             ..default()
         },
-        TextColor(theme.text_subtitle),
+        TextColor(tokens::TEXT_FAINT),
     ));
 }
 
-fn note(b: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, text: &str) {
+fn note(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, text: &str) {
     b.spawn((
         Text::new(text.to_string()),
         TextFont {
-            font: theme.font.clone(),
+            font: theme.font_ui.clone(),
             font_size: FontSize::Px(9.0),
             ..default()
         },
-        TextColor(theme.text_dim),
+        TextColor(tokens::TEXT_DIM),
     ));
 }
 
 fn pinned_row(
     b: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
+    theme: &UiTheme,
     label: &str,
     value: String,
     env_var: &str,
@@ -1144,11 +1156,11 @@ fn pinned_row(
         row.spawn((
             Text::new(label.to_string()),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(11.0),
                 ..default()
             },
-            TextColor(theme.text_dim),
+            TextColor(tokens::TEXT_DIM),
             Node {
                 width: Val::Px(120.0),
                 ..default()
@@ -1157,11 +1169,11 @@ fn pinned_row(
         row.spawn((
             Text::new(format!("{value}  (pinned by {env_var})")),
             TextFont {
-                font: theme.font.clone(),
+                font: theme.font_ui.clone(),
                 font_size: FontSize::Px(11.0),
                 ..default()
             },
-            TextColor(theme.text_dim),
+            TextColor(tokens::TEXT_DIM),
         ));
     });
 }

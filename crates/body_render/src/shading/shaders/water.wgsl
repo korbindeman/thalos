@@ -79,10 +79,19 @@ fn h2o_tangent_frame(n: vec3<f32>) -> mat2x3<f32> {
 // camera-to-fragment distance in metres; the perturbation fades to zero past
 // ~6 km so distant/orbital water reads as a smooth sphere modulated only by the
 // GGX statistical-slope lobe — the same model the impostor uses past the swap.
-fn water_wave_normal(world_pos: vec3<f32>, geo_n: vec3<f32>, t: f32, view_dist_m: f32) -> vec3<f32> {
+// `amp_scale` scales the whole perturbation: the shore-shoaling term passes
+// < 1 so chop calms as the water shallows (BL-10).
+fn water_wave_normal(
+    world_pos: vec3<f32>,
+    geo_n: vec3<f32>,
+    t: f32,
+    view_dist_m: f32,
+    amp_scale: f32,
+) -> vec3<f32> {
     let near_m = 80.0;
     let far_m = 6000.0;
-    let fade = clamp(1.0 - (view_dist_m - near_m) / (far_m - near_m), 0.0, 1.0);
+    let fade =
+        clamp(1.0 - (view_dist_m - near_m) / (far_m - near_m), 0.0, 1.0) * amp_scale;
     if fade <= 0.005 {
         return geo_n;
     }
@@ -159,15 +168,34 @@ fn water_brdf(
 }
 
 // Depth-graded subsurface colour. `column_m` is the camera-ray thickness
-// between the sea surface and the seabed (from the scene-depth buffer); near
-// zero at the waterline, large in open ocean. Shallows lighten toward cyan,
-// deep water saturates to the per-body deep tint.
+// between the sea surface and the seabed (scene depth near, baked bathymetry
+// far — ADR-0005); near zero at the waterline, large in open ocean. Shallows
+// lighten toward cyan, deep water saturates to the per-body deep tint.
+//
+// The 8 m e-folding keeps the pale-shallow band a *fringe*: only the first
+// couple of tens of metres of depth read shallow. The previous 14 m ramp
+// painted every < ~30 m shelf pale, which turned whole archipelago seas into
+// one vast translucent bank instead of water with bright island fringes.
 fn water_subsurface(color_depth: vec4<f32>, column_m: f32) -> vec3<f32> {
     let deep = max(color_depth.xyz, vec3<f32>(0.0));
-    let shallow = vec3<f32>(0.10, 0.20, 0.22);
-    let depth_t = 1.0 - exp(-max(column_m, 0.0) / 14.0);
+    // Sand-floored shallow water is a warm saturated turquoise (BL-10) — the
+    // old grey-green (0.10, 0.20, 0.22) blended into the coastal grass and
+    // read as marsh instead of beach water.
+    let shallow = vec3<f32>(0.055, 0.215, 0.255);
+    let depth_t = 1.0 - exp(-max(column_m, 0.0) / 8.0);
     return mix(shallow, deep, depth_t);
 }
+
+// Shore-interaction ranges (BL-10, tier 1 — MSFS-class: normals + albedo only,
+// no displaced geometry, ADR-0002 intact). All shore effects are keyed on the
+// signed sea field's depth / shore distance the sky pass supplies, so they are
+// as LOD-stable as the coastline itself.
+const SHORE_FX_VIEW_LO_M: f32 = 3500.0;  // shore effects full inside this…
+const SHORE_FX_VIEW_HI_M: f32 = 9000.0;  // …gone past this (orbital ocean unchanged)
+const SHORE_FX_DIST_M: f32 = 4000.0;     // max distance-to-shore that gets shore FX
+const SHOAL_DEPTH_M: f32 = 30.0;         // chop calms from here up to the waterline
+const BREAKER_WAVELENGTH_M: f32 = 70.0;  // crest-to-crest spacing of shore waves
+const BREAKER_SPEED_M_S: f32 = 5.0;      // shoreward crest speed
 
 // Shade the ocean surface at a ray-traced hit point.
 //
@@ -176,6 +204,25 @@ fn water_subsurface(color_depth: vec4<f32>, column_m: f32) -> vec3<f32> {
 // aerial perspective are added by the atmosphere integral the sky pass already
 // runs over the camera→water-surface segment, so here the sky term is only the
 // base Fresnel-blue ambient.
+//
+// Shore inputs (pass far sentinels — depth 1e6, shore_dist 1e9, dir anything —
+// to disable, e.g. from the map/impostor paths):
+//   depth_m      — vertical water depth at the hit (from the signed sea field)
+//   shore_dist_m — horizontal distance to the waterline
+//   shore_dir    — unit tangent pointing toward the shore (uphill on the field)
+//   footprint_m  — surface metres one screen pixel spans at the hit (the sky
+//                  pass's analytic footprint). Band-limits every procedural
+//                  shore pattern: a stripe or noise whose wavelength
+//                  approaches the footprint fades to its mean instead of
+//                  aliasing into pixel dither at grazing angles. (Analytic on
+//                  purpose — naga rejects fwidth() in non-uniform control
+//                  flow, and this whole function runs inside a water branch.)
+//
+// The shore-wave phase is a function of SHORE DISTANCE, so crest lines are
+// parallel to the beach by construction — refraction for free — and march
+// shoreward with time; they steepen (normal ridges) and break into foam in a
+// narrow surf window (~0.2–3 m depth — a couple of lines, not a ruled field),
+// and a thin churned swash edge rides the last half metre.
 fn shade_ocean(
     hit_ws: vec3<f32>,
     geo_n: vec3<f32>,
@@ -186,8 +233,58 @@ fn shade_ocean(
     sun_flux: f32,
     color_depth: vec4<f32>,
     column_m: f32,
+    depth_m: f32,
+    shore_dist_m: f32,
+    shore_dir: vec3<f32>,
+    footprint_m: f32,
 ) -> vec3<f32> {
-    let n = water_wave_normal(hit_ws, geo_n, time, view_dist);
+    // Shore effects fade with view distance (they are a near-field treatment;
+    // at range the GGX slope lobe + subsurface colour carry the ocean).
+    let shore_view_t = 1.0 - smoothstep(SHORE_FX_VIEW_LO_M, SHORE_FX_VIEW_HI_M, view_dist);
+
+    // Shoaling: open-sea chop calms as the bottom rises, so inshore water goes
+    // glassier and the breaker lines read against it.
+    let shoal = (1.0 - smoothstep(1.0, SHOAL_DEPTH_M, depth_m)) * shore_view_t;
+    var n = water_wave_normal(hit_ws, geo_n, time, view_dist, 1.0 - 0.7 * shoal);
+
+    var foam = 0.0;
+    if (shore_dist_m < SHORE_FX_DIST_M && shore_view_t > 0.003) {
+        // Resolution guards: fade each pattern out as one screen pixel grows
+        // toward its feature size (its mean is ~0, so fading to zero is the
+        // band-limited result, not a brightness shift).
+        let stripe_res = 1.0 - smoothstep(0.08, 0.30, footprint_m / BREAKER_WAVELENGTH_M);
+        let noise_res = 1.0 - smoothstep(4.0, 14.0, footprint_m);
+
+        // Crest phase keyed on shore distance: `fract` gives periodic wave
+        // fronts, and `+ time·v` marches them down the gradient (shoreward).
+        let phase = (shore_dist_m + time * BREAKER_SPEED_M_S) / BREAKER_WAVELENGTH_M;
+        let crest = fract(phase);
+        // Narrow surf window: waves break over roughly the last couple of
+        // crest spacings of a natural foreshore, not across the whole shelf
+        // (a 0.25–7 m window on a ~1 % beach was ~700 m of ruled stripes).
+        let breaker_zone = smoothstep(3.2, 1.9, depth_m) * smoothstep(0.18, 0.45, depth_m);
+        // A narrow foam stripe rides just behind each crest, broken up
+        // along-shore (~30 m clumps) so the lines are ragged, not ruled.
+        let stripe = exp(-pow((crest - 0.2) * 5.5, 2.0));
+        let breakup = h2o_vfbm3(hit_ws * 0.033 + vec3<f32>(0.0, time * 0.05, 0.0));
+        let foam_breaker =
+            breaker_zone * stripe * smoothstep(0.35, 0.60, breakup) * stripe_res;
+        // Swash foam: a thin always-on bright line at the water's edge (the
+        // last ~15 cm) plus intermittent noisy patches in the last half
+        // metre — not the solid white strip a high constant base painted.
+        let swash_n = h2o_vfbm3(hit_ws * 0.09 + vec3<f32>(time * -0.10, 0.0, 0.0));
+        let foam_edge = (1.0 - smoothstep(0.02, 0.15, depth_m)) * 0.85
+            + (1.0 - smoothstep(0.05, 0.6, depth_m))
+                * (0.10 + 0.60 * smoothstep(0.48, 0.72, swash_n));
+        foam = clamp(foam_breaker + foam_edge * noise_res, 0.0, 1.0) * shore_view_t;
+        // Swell ridges: tilt the normal along the shore direction on the crest
+        // profile so the incoming wave fronts catch light before they break.
+        // Same resolution guard, or the ridge speculars dither at range.
+        let ridge = sin(phase * 6.2831853);
+        n = normalize(
+            n + shore_dir * (ridge * 0.14 * breaker_zone * shore_view_t * stripe_res));
+    }
+
     let n_dot_v = max(dot(n, view_dir), 0.0);
     let f0 = 0.02;
     let f_nv = f0 + (1.0 - f0) * pow(max(1.0 - n_dot_v, 0.0), 5.0);
@@ -214,5 +311,15 @@ fn shade_ocean(
 
     let sun_brdf = water_brdf(n, view_dir, sun_dir, n_dot_v, f_nv, alpha_ggx, f0, subsurface);
     lit = lit + sun_brdf * sun_flux * brdf_scale;
+
+    // Foam: bright rough diffuse replacing the water response (it also kills
+    // the glint — foam is matte). Lit by the same sun + ambient calibration.
+    if (foam > 0.001) {
+        let foam_albedo = vec3<f32>(0.60, 0.62, 0.63);
+        let foam_lit = foam_albedo
+            * (max(dot(geo_n, sun_dir), 0.0) * sun_flux * brdf_scale / PI_WATER
+                + ambient * 2.5);
+        lit = mix(lit, foam_lit, foam);
+    }
     return lit;
 }

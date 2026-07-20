@@ -32,7 +32,6 @@
 
 use bevy::prelude::*;
 
-use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 use thalos_shipyard::ShipBlueprint;
@@ -41,7 +40,10 @@ use crate::SimStage;
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::rendering::{PlayerShip, ShipMarker, SimulationState};
 use crate::scenario_menu::clear_bubble;
-use crate::spawn::{Homeworld, SpawnSituation, compute_descent_state, orbit_respawn_state};
+use crate::spawn::{
+    Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
+    place_craft,
+};
 use crate::view::ViewMode;
 
 /// A pending relaunch: the design to fly and the scenario to drop it into.
@@ -66,15 +68,6 @@ pub struct RelaunchRequest(pub Option<RelaunchSpec>);
 /// other module touches it.)
 #[derive(Resource, Default)]
 pub(crate) struct RelaunchInFlight(Option<RelaunchSpec>);
-
-impl RelaunchInFlight {
-    /// Whether a relaunch rebuild is mid-flight (blueprint parked between the
-    /// two phases). Read by the space-center hub to tell a VAB **Launch** (go
-    /// fly) from an Escape-out (return to the hub).
-    pub(crate) fn active(&self) -> bool {
-        self.0.is_some()
-    }
-}
 
 /// Run condition: no relaunch teardown/rebuild is in flight. Systems that
 /// measure or place the player craft (the deferred runway placement) gate on
@@ -162,10 +155,9 @@ fn begin_relaunch(
         }
         _ => orbit_respawn_state(&sim, homeworld.0),
     };
-    sim.simulation.set_ship_state(state);
-    sim.simulation.set_attitude(attitude);
-    sim.simulation
-        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+    // Bubble already torn down above; seat the placed pose. (`spawn::place_craft`
+    // is the shared canonical-state core.)
+    place_craft(&mut sim, coast_placement(state, attitude), None);
 
     in_flight.0 = Some(spec);
 }

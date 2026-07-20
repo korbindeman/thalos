@@ -17,7 +17,7 @@
     mesh_view_bindings::view,
 }
 #import thalos::lighting::{compute_surface_sky, SurfaceSky, FoliageSurface, shade_foliage, object_aerial_recession}
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_vert}
 #import thalos::grass_displace::grass_blade_world_pos
 
 struct GrassParams {
@@ -143,7 +143,7 @@ fn vertex(in: VertexInput) -> VertexOutput {
     out.color = in.color;
     // Per-vertex sun-shadow: tree (and self) shadows on the grass, sampled at the
     // blade's final (swayed) world position and interpolated up the blade.
-    out.shadow = sun_shadow_factor(
+    out.shadow = sun_shadow_factor_vert(
         world_pos, grass_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
     );
     out.sky0 = vec4<f32>(sky.sun_color, sky.sun_scale);

@@ -1,0 +1,11 @@
+[package]
+name = "thalos_ui"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.19" }
+
+[[example]]
+name = "kitchen_sink"

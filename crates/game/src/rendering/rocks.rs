@@ -322,6 +322,16 @@ fn drive_rock_tiles(
         rocks.in_flight.clear();
     };
 
+    // Leak-bisection kill switch (`THALOS_NO_SCATTER=1`): park the rock scatter
+    // entirely (see `mem_diag::scatter_killed`).
+    if crate::mem_diag::scatter_killed() {
+        if rocks.body.is_some() {
+            despawn_all(&mut rocks, &mut commands);
+            rocks.body = None;
+        }
+        return;
+    }
+
     // Active body: the view anchor's (nearest terrain-backed) body, when
     // vegetated — rocks follow the VIEW, see `rendering::view_anchor`.
     let anchored = anchor.resolved.filter(|a| {

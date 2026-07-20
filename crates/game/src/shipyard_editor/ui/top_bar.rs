@@ -1,27 +1,33 @@
-//! Editor top bar: title, ship name field, live build stats, the
-//! mirror / snap / layout toggles, and save / new / exit.
+//! Editor top bar: title + ship-name field on the left, live build stats in
+//! the centre, and the action rail on the right — build toggles
+//! (mirror / snap / horizontal layout), HANGAR (craft load/save overlay),
+//! SAVE / NEW housekeeping, the headline ▶ LAUNCH, and EXIT.
 
-use bevy::input::keyboard::KeyboardInput;
 use bevy::prelude::*;
 
 use thalos_shipyard::Ship;
+use thalos_ui::{
+    self as ui, ButtonVariant, SPACE_SM, TextFieldFocus, UiButton, UiTextField, UiTheme,
+    spawn_button, spawn_text_field,
+};
+
+use crate::game_context::{ContextHistory, GameContext, back_out};
+use crate::relaunch::{RelaunchRequest, RelaunchSpec};
 use crate::shipyard_editor::core::{
     BuildOrientation, EditorPart, EditorState, PlacementSnap, SymmetryMode, format_delta_v,
     format_mass_kg,
 };
-
-use crate::hud::theme::{HudTheme, panel_frame};
-use crate::relaunch::{RelaunchRequest, RelaunchSpec};
 use crate::spawn::SpawnSituation;
 
-use super::widgets::{self, EditorTextFocus, EditorUiButton, ShipNameField};
-use super::{EditorStatsCache, ShipyardEditor};
+use super::hangar::HangarOpen;
+use super::EditorStatsCache;
 
 #[derive(Component, Clone, Copy, PartialEq)]
 pub(super) enum TopBarAction {
     ToggleMirror,
     ToggleSnap,
     ToggleLayout,
+    Hangar,
     Launch,
     Save,
     New,
@@ -31,82 +37,41 @@ pub(super) enum TopBarAction {
 #[derive(Component)]
 pub(super) struct StatsText;
 
+/// Marker on the ship-name [`UiTextField`].
 #[derive(Component)]
-pub(super) struct ShipNameText;
+pub(super) struct ShipNameField;
 
-pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
-    let (bg, border) = panel_frame(theme);
+pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
     root.spawn((
         Node {
-            position_type: PositionType::Absolute,
             left: Val::Px(12.0),
             right: Val::Px(12.0),
             top: Val::Px(12.0),
-            height: Val::Px(40.0),
-            border: UiRect::all(Val::Px(1.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
-            padding: UiRect::axes(Val::Px(14.0), Val::Px(4.0)),
+            height: Val::Px(44.0),
             flex_direction: FlexDirection::Row,
             align_items: AlignItems::Center,
-            column_gap: Val::Px(10.0),
-            ..default()
+            column_gap: Val::Px(SPACE_SM),
+            padding: UiRect::horizontal(Val::Px(ui::SPACE_LG)),
+            ..ui::floating_panel_node()
         },
-        bg,
-        border,
+        theme.glass(),
         Interaction::None,
         Name::new("ShipyardTopBar"),
     ))
     .with_children(|bar| {
-        bar.spawn((
-            Text::new("SHIPYARD"),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(15.0),
-                ..default()
-            },
-            TextColor(theme.text_accent),
-        ));
+        bar.spawn(theme.title("SHIPYARD"));
 
-        // Ship name field — minimal single-line text input.
-        bar.spawn((
-            Button,
-            Node {
-                width: Val::Px(220.0),
-                height: Val::Px(26.0),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
-                padding: UiRect::axes(Val::Px(8.0), Val::Px(2.0)),
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(Color::srgba(0.02, 0.02, 0.02, 0.9)),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
+        spawn_text_field(
+            bar,
+            theme,
+            UiTextField::new("", "ship name"),
+            Val::Px(220.0),
             ShipNameField,
-            Name::new("ShipyardNameField"),
-        ))
-        .with_children(|field| {
-            field.spawn((
-                Text::new(""),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(theme.text_primary),
-                ShipNameText,
-            ));
-        });
+        );
 
         // Live stats, centred in the leftover space.
         bar.spawn((
-            Text::new(""),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(11.0),
-                ..default()
-            },
-            TextColor(theme.text_dim),
+            theme.mono_dim(""),
             Node {
                 flex_grow: 1.0,
                 justify_content: JustifyContent::Center,
@@ -115,22 +80,28 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             StatsText,
         ));
 
-        widgets::spawn_button(
-            bar,
-            theme,
-            TopBarAction::ToggleMirror,
-            "MIRROR 2×",
-            10.0,
-            24.0,
-        );
-        widgets::spawn_button(bar, theme, TopBarAction::ToggleSnap, "SNAP 15°", 10.0, 24.0);
-        widgets::spawn_button(bar, theme, TopBarAction::ToggleLayout, "HANGAR", 10.0, 24.0);
-        // LAUNCH is the headline action — fly the current design. The play
-        // glyph sets it apart from the SAVE/NEW/EXIT housekeeping buttons.
-        widgets::spawn_button(bar, theme, TopBarAction::Launch, "▶ LAUNCH", 11.0, 24.0);
-        widgets::spawn_button(bar, theme, TopBarAction::Save, "SAVE", 11.0, 24.0);
-        widgets::spawn_button(bar, theme, TopBarAction::New, "NEW", 11.0, 24.0);
-        widgets::spawn_button(bar, theme, TopBarAction::Exit, "EXIT", 11.0, 24.0);
+        for (action, label) in [
+            (TopBarAction::ToggleMirror, "MIRROR 2×"),
+            (TopBarAction::ToggleSnap, "SNAP 15°"),
+            (TopBarAction::ToggleLayout, "HORIZONTAL"),
+        ] {
+            spawn_button(bar, theme, action, label, ButtonVariant::Ghost, ui::CTRL_H);
+        }
+        bar.spawn((
+            Node {
+                width: Val::Px(1.0),
+                height: Val::Px(20.0),
+                margin: UiRect::horizontal(Val::Px(4.0)),
+                ..default()
+            },
+            BackgroundColor(ui::tokens::STROKE),
+        ));
+        spawn_button(bar, theme, TopBarAction::Hangar, "HANGAR", ButtonVariant::Ghost, ui::CTRL_H);
+        spawn_button(bar, theme, TopBarAction::Save, "SAVE", ButtonVariant::Ghost, ui::CTRL_H);
+        spawn_button(bar, theme, TopBarAction::New, "NEW", ButtonVariant::Ghost, ui::CTRL_H);
+        // LAUNCH is the headline action — fly the current design.
+        spawn_button(bar, theme, TopBarAction::Launch, "▶  LAUNCH", ButtonVariant::Primary, ui::CTRL_H);
+        spawn_button(bar, theme, TopBarAction::Exit, "EXIT", ButtonVariant::Bare, ui::CTRL_H);
     });
 }
 
@@ -141,10 +112,12 @@ pub(super) fn handle_actions(
     mut symmetry: ResMut<SymmetryMode>,
     mut snap: ResMut<PlacementSnap>,
     mut orientation: ResMut<BuildOrientation>,
-    mut editor: ResMut<ShipyardEditor>,
+    mut hangar: ResMut<HangarOpen>,
     cache: Res<EditorStatsCache>,
     mut relaunch: ResMut<RelaunchRequest>,
     mut launch_req: ResMut<crate::base_editor::SpaceportLaunchRequest>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
 ) {
     for (interaction, action) in &interactions {
         if !matches!(interaction, Interaction::Pressed) {
@@ -156,6 +129,13 @@ pub(super) fn handle_actions(
             TopBarAction::ToggleLayout => {
                 let flipped = !orientation.bypass_change_detection().horizontal;
                 orientation.horizontal = flipped;
+            }
+            TopBarAction::Hangar => {
+                hangar.0 = !hangar.0;
+                if hangar.0 {
+                    // Fresh listing every time the overlay opens.
+                    state.refresh_list = true;
+                }
             }
             TopBarAction::Launch => {
                 let Some(blueprint) = cache.blueprint.clone() else {
@@ -172,7 +152,14 @@ pub(super) fn handle_actions(
                     situation: SpawnSituation::ShipOrbit,
                 });
                 launch_req.arm = true;
-                editor.open = false;
+                // "Launched to fly": clear the return stack and drop to Flight.
+                // The launch-select flow then re-enters BaseEditor (the picker)
+                // parented to Flight, so placing / cancelling both land in flight
+                // — never back in the VAB or hub (`docs/ui_flow.md`).
+                history.0.clear();
+                if let Some(next) = next_ctx.as_mut() {
+                    next.set(GameContext::Flight);
+                }
                 state.status = "Launching…".into();
             }
             TopBarAction::Save => state.save_requested = true,
@@ -186,7 +173,15 @@ pub(super) fn handle_actions(
                     state.status = "Canvas already empty".into();
                 }
             }
-            TopBarAction::Exit => editor.open = false,
+            TopBarAction::Exit => {
+                // Back out to whatever opened the VAB (the hub, or flight), or
+                // Flight when the VAB is the session root (`just game shipyard`).
+                if let Some(next) = next_ctx.as_mut()
+                    && back_out(next, &mut history).is_none()
+                {
+                    next.set(GameContext::Flight);
+                }
+            }
         }
     }
 }
@@ -196,7 +191,7 @@ pub(super) fn update_toggle_latches(
     symmetry: Res<SymmetryMode>,
     snap: Res<PlacementSnap>,
     orientation: Res<BuildOrientation>,
-    mut buttons: Query<(&TopBarAction, &mut EditorUiButton)>,
+    mut buttons: Query<(&TopBarAction, &mut UiButton)>,
 ) {
     for (action, mut button) in &mut buttons {
         let latched = match action {
@@ -251,76 +246,45 @@ pub(super) fn update_stats_text(
     }
 }
 
-/// Feed key events into the ship name while the field is focused. Writes to
-/// the live `Ship` entity when one exists, falling back to the staged
-/// `EditorState::ship_name` used for the next root placement.
-pub(super) fn apply_name_input(
-    mut focus: ResMut<EditorTextFocus>,
-    mut key_events: MessageReader<KeyboardInput>,
+/// Two-way sync between the name field and the build.
+///
+/// - **Field → model** on user edits (`Changed<UiTextField>` while focused):
+///   writes the live `Ship` entity when one exists, plus the staged
+///   `EditorState::ship_name` used for the next root placement.
+/// - **Model → field** while not focused, so loads / New / re-opens show the
+///   real name without clobbering in-progress typing.
+pub(super) fn sync_ship_name(
+    focus: Res<TextFieldFocus>,
     mut state: ResMut<EditorState>,
+    mut fields: Query<(Entity, &mut UiTextField), With<ShipNameField>>,
     mut ships: Query<&mut Ship, With<EditorPart>>,
 ) {
-    if !focus.is_focused() {
-        // Drain so stale events don't replay on the next focus.
-        key_events.clear();
+    let Ok((field_entity, mut field)) = fields.single_mut() else {
         return;
-    }
-    if let Some(ship_entity) = state.ship_entity
-        && let Ok(mut ship) = ships.get_mut(ship_entity)
-    {
-        let mut name = ship.name.clone();
-        widgets::collect_text_edits(&mut focus, &mut key_events, &mut name);
-        if ship.name != name {
+    };
+    let focused = focus.field == Some(field_entity);
+
+    if focused {
+        // User is typing: push field → model (value-guarded).
+        let name = field.value.clone();
+        if let Some(ship_entity) = state.ship_entity
+            && let Ok(mut ship) = ships.get_mut(ship_entity)
+            && ship.name != name
+        {
             ship.name = name.clone();
         }
-        // Keep the staged copy aligned so clearing the canvas keeps the
-        // typed name.
         if state.ship_name != name {
             state.ship_name = name;
         }
-        return;
-    }
-    let mut name = state.ship_name.clone();
-    widgets::collect_text_edits(&mut focus, &mut key_events, &mut name);
-    if state.ship_name != name {
-        state.ship_name = name;
-    }
-}
-
-pub(super) fn update_name_display(
-    state: Res<EditorState>,
-    focus: Res<EditorTextFocus>,
-    theme: Res<HudTheme>,
-    ships: Query<&Ship, With<EditorPart>>,
-    mut name_text: Query<&mut Text, With<ShipNameText>>,
-    mut field: Query<&mut BorderColor, With<ShipNameField>>,
-) {
-    let name = state
-        .ship_entity
-        .and_then(|e| ships.get(e).ok())
-        .map(|s| s.name.clone())
-        .unwrap_or_else(|| state.ship_name.clone());
-    let shown = if focus.is_focused() {
-        format!("{name}_")
-    } else if name.is_empty() {
-        "(unnamed)".to_string()
     } else {
-        name
-    };
-    if let Ok(mut text) = name_text.single_mut()
-        && **text != shown
-    {
-        **text = shown;
-    }
-    if let Ok(mut border) = field.single_mut() {
-        let color = if focus.is_focused() {
-            theme.text_accent
-        } else {
-            theme.panel_border
-        };
-        let target = BorderColor::all(color);
-        if border.top != target.top {
-            *border = target;
+        // Idle: pull model → field.
+        let name = state
+            .ship_entity
+            .and_then(|e| ships.get(e).ok())
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| state.ship_name.clone());
+        if field.value != name {
+            field.value = name;
         }
     }
 }

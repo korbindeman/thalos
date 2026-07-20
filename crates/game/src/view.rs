@@ -221,7 +221,7 @@ pub fn in_map_view(view: Res<ViewMode>) -> bool {
 
 fn toggle_view_input(
     input: Res<GameInputIntent>,
-    ui_text: Res<crate::ui_widgets::TextFieldFocus>,
+    ui_text: Res<thalos_ui::TextFieldFocus>,
     mut view: ResMut<ViewMode>,
 ) {
     if !input.toggle_view {

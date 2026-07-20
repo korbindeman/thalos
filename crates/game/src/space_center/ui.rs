@@ -12,18 +12,17 @@
 
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
+use thalos_ui::{
+    self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_heading, spawn_menu_row,
+};
 
 use crate::base_editor::BaseEditor;
-use crate::hud::theme::{HudTheme, panel_frame};
+use crate::game_context::{ContextHistory, GameContext, back_out};
 use crate::loading::AppState;
-use crate::shipyard_editor::ShipyardEditor;
 use crate::spawn::Homeworld;
 use crate::structures::{Facility, StructureRegistry};
 
-use super::{
-    ReturnToSpaceCenter, SpaceCenter, enter_base_editor, enter_facility, home_base_site,
-    space_center_open,
-};
+use super::{SpaceCenter, enter_base_editor, enter_facility, home_base_site, space_center_open};
 
 #[derive(Component)]
 struct SpaceCenterUiRoot;
@@ -41,37 +40,26 @@ pub(super) struct SpaceCenterUiPlugin;
 
 impl Plugin for SpaceCenterUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup.after(crate::hud::theme::init_theme))
+        app.add_systems(Startup, setup.after(thalos_ui::init_ui_theme))
             .add_systems(Update, update_visibility)
-            .add_systems(
-                Update,
-                (handle_clicks, update_button_visuals).run_if(space_center_open),
-            );
+            .add_systems(Update, handle_clicks.run_if(space_center_open));
     }
 }
 
 const PANEL_WIDTH: f32 = 300.0;
 
-fn setup(mut commands: Commands, theme: Res<HudTheme>) {
-    let (bg, border) = panel_frame(&theme);
+fn setup(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((
             SpaceCenterUiRoot,
             Node {
-                position_type: PositionType::Absolute,
                 left: Val::Px(24.0),
                 top: Val::Px(24.0),
                 width: Val::Px(PANEL_WIDTH),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
-                padding: UiRect::axes(Val::Px(18.0), Val::Px(16.0)),
-                flex_direction: FlexDirection::Column,
                 align_items: AlignItems::Stretch,
-                row_gap: Val::Px(8.0),
-                ..default()
+                ..ui::floating_panel_node()
             },
-            bg,
-            border,
+            theme.glass(),
             GlobalZIndex(90),
             Visibility::Hidden,
             // `Interaction` makes the whole panel a pointer sink, so
@@ -86,117 +74,25 @@ fn setup(mut commands: Commands, theme: Res<HudTheme>) {
             Name::new("SpaceCenterUi"),
         ))
         .with_children(|panel| {
-            panel.spawn((
-                Text::new("SPACE CENTER"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(20.0),
+            panel.spawn((theme.title("SPACE CENTER"), Name::new("SpaceCenterTitle")));
+            panel.spawn(theme.small("Right-drag to orbit · scroll to zoom · WASD to pan"));
+            panel.spawn(theme.small("Hover a building for its name · click the VAB to enter"));
+
+            spawn_divider(panel);
+            spawn_heading(panel, &theme, "FACILITIES", false);
+            panel
+                .spawn(Node {
+                    flex_direction: FlexDirection::Column,
+                    align_items: AlignItems::Stretch,
+                    row_gap: Val::Px(SPACE_XS + 2.0),
                     ..default()
-                },
-                TextColor(theme.text_accent),
-                Name::new("SpaceCenterTitle"),
-            ));
-            panel.spawn((
-                Text::new("Right-drag to orbit · scroll to zoom · WASD to pan"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(10.0),
-                    ..default()
-                },
-                TextColor(theme.text_dim),
-            ));
-            panel.spawn((
-                Text::new("Hover a building for its name · click the VAB to enter"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(10.0),
-                    ..default()
-                },
-                TextColor(theme.text_dim),
-            ));
-
-            divider(panel, &theme);
-            heading(panel, &theme, "FACILITIES");
-            spawn_button(panel, &theme, HubButton::EditBase, "EDIT BASE", "reshape the site");
-            spawn_button(panel, &theme, HubButton::Vab, "VAB", "assemble a craft");
-
-            divider(panel, &theme);
-            spawn_button(panel, &theme, HubButton::Exit, "EXIT", "Esc");
-        });
-}
-
-fn heading(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, label: &str) {
-    parent.spawn((
-        Text::new(label.to_string()),
-        TextFont {
-            font: theme.font.clone(),
-            font_size: FontSize::Px(11.0),
-            ..default()
-        },
-        TextColor(theme.text_dim),
-    ));
-}
-
-fn divider(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
-    parent.spawn((
-        Node {
-            width: Val::Percent(100.0),
-            height: Val::Px(1.0),
-            margin: UiRect::vertical(Val::Px(4.0)),
-            ..default()
-        },
-        BackgroundColor(theme.panel_border),
-    ));
-}
-
-/// Spawn a hub facility/exit button with a label and a dim description.
-fn spawn_button(
-    parent: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
-    action: HubButton,
-    label: &str,
-    desc: &str,
-) {
-    parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(30.0),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
-                padding: UiRect::horizontal(Val::Px(12.0)),
-                justify_content: JustifyContent::SpaceBetween,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(theme.panel_bg),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
-            action,
-            Name::new(format!("SpaceCenter{label}Button")),
-        ))
-        .with_children(|c| {
-            c.spawn((
-                Text::new(label.to_string()),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(theme.text_primary),
-            ));
-            if !desc.is_empty() {
-                c.spawn((
-                    Text::new(desc.to_string()),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(10.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_dim),
-                ));
-            }
+                })
+                .with_children(|buttons| {
+                    spawn_menu_row(buttons, &theme, HubButton::EditBase, "EDIT BASE", "reshape the site");
+                    spawn_menu_row(buttons, &theme, HubButton::Vab, "VAB", "assemble a craft");
+                    spawn_divider(buttons);
+                    spawn_menu_row(buttons, &theme, HubButton::Exit, "EXIT", "Esc");
+                });
         });
 }
 
@@ -219,10 +115,9 @@ fn update_visibility(sc: Res<SpaceCenter>, mut roots: Query<&mut Visibility, Wit
 
 fn handle_clicks(
     interactions: Query<(&Interaction, &HubButton), Changed<Interaction>>,
-    mut sc: ResMut<SpaceCenter>,
-    mut shipyard: ResMut<ShipyardEditor>,
     mut base: ResMut<BaseEditor>,
-    mut return_flag: ResMut<ReturnToSpaceCenter>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
     mut next_state: ResMut<NextState<AppState>>,
     homeworld: Res<Homeworld>,
     registry: Res<StructureRegistry>,
@@ -231,58 +126,27 @@ fn handle_clicks(
         if !matches!(interaction, Interaction::Pressed) {
             continue;
         }
+        let Some(next) = next_ctx.as_mut() else {
+            continue;
+        };
         match action {
             HubButton::EditBase => {
                 let base_site = home_base_site(&registry, homeworld.0).map(|s| s.id);
-                enter_base_editor(&mut sc, &mut base, &mut return_flag, base_site);
+                enter_base_editor(&mut base, next, &mut history, base_site);
             }
             HubButton::Vab => {
-                enter_facility(Facility::Vab, &mut sc, &mut shipyard, &mut return_flag);
+                enter_facility(Facility::Vab, next, &mut history);
             }
             HubButton::Exit => {
-                // Back to the main menu when the hub is the session root (PLAY),
-                // otherwise back to the flight it was opened over.
-                if sc.return_to_menu {
+                // Back out toward the parent the hub was opened over (a flight),
+                // or to the start screen when the hub is the session root (PLAY):
+                // an empty return stack means root. Escape never leaves the game,
+                // but the EXIT button is a deliberate exit.
+                if back_out(next, &mut history).is_none() {
                     next_state.set(AppState::MainMenu);
                 }
-                sc.open = false;
-                sc.hovered = None;
             }
         }
     }
 }
 
-fn update_button_visuals(
-    theme: Res<HudTheme>,
-    mut buttons: Query<
-        (
-            &Interaction,
-            &mut BorderColor,
-            &mut BackgroundColor,
-            &Children,
-        ),
-        With<HubButton>,
-    >,
-    mut text_q: Query<&mut TextColor>,
-) {
-    for (interaction, mut border, mut bg, children) in &mut buttons {
-        let (border_color, bg_color, label_color) = match interaction {
-            Interaction::Pressed => (theme.text_primary, theme.panel_border, theme.text_primary),
-            Interaction::Hovered => (theme.text_accent, theme.panel_bg, theme.text_accent),
-            Interaction::None => (theme.panel_border, theme.panel_bg, theme.text_primary),
-        };
-        let new_border = BorderColor::all(border_color);
-        if border.top != new_border.top {
-            *border = new_border;
-        }
-        if bg.0 != bg_color {
-            bg.0 = bg_color;
-        }
-        if let Some(&child) = children.first()
-            && let Ok(mut tc) = text_q.get_mut(child)
-            && tc.0 != label_color
-        {
-            tc.0 = label_color;
-        }
-    }
-}

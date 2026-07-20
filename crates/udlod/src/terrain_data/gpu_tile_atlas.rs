@@ -166,6 +166,16 @@ pub struct GpuTileAtlas {
 }
 
 impl GpuTileAtlas {
+    /// The raw atlas texture array of attachment `index` (layers = atlas
+    /// slots, full per-tile mip chain). Exposed so external passes (the
+    /// `body_render` sky/ocean pass) can bind and sample the resident height
+    /// tiles resolved through [`super::gpu_tile_tree::GpuTileTree`].
+    pub fn attachment_texture(&self, index: usize) -> Option<&Texture> {
+        self.attachments
+            .get(index)
+            .map(|attachment| &attachment.atlas_texture)
+    }
+
     /// Creates a new gpu tile atlas and initializes its attachment textures.
     fn new(device: &RenderDevice, tile_atlas: &TileAtlas) -> Self {
         let attachments = tile_atlas

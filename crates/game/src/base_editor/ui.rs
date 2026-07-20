@@ -9,8 +9,9 @@
 //! `- =`), surfaced in the hint.
 
 use bevy::prelude::*;
-
-use crate::hud::theme::{HudTheme, panel_frame};
+use thalos_ui::{
+    self as ui, ButtonVariant, CTRL_H, SPACE_SM, UiButton, UiTheme, spawn_button,
+};
 
 use super::place::{BuildingDims, PendingKind, Tool};
 use super::{BaseBuildState, BaseEditor, BaseEditorMode};
@@ -76,38 +77,31 @@ pub(super) struct BaseEditorUiPlugin;
 
 impl Plugin for BaseEditorUiPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_overlay.after(crate::hud::theme::init_theme))
+        app.add_systems(Startup, setup_overlay.after(thalos_ui::init_ui_theme))
             .add_systems(
                 Update,
                 (
                     toggle_overlay,
                     sync_overlay_for_mode,
                     handle_palette_clicks,
-                    style_palette_buttons,
+                    latch_active_tool,
                     update_overlay_text,
                 ),
             );
     }
 }
 
-fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
-    let (bg, border) = panel_frame(&theme);
+fn setup_overlay(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
                 left: Val::Px(16.0),
                 top: Val::Px(16.0),
-                width: Val::Px(220.0),
-                padding: UiRect::axes(Val::Px(12.0), Val::Px(12.0)),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(4.0)),
-                flex_direction: FlexDirection::Column,
-                row_gap: Val::Px(5.0),
-                ..default()
+                width: Val::Px(230.0),
+                row_gap: Val::Px(SPACE_SM - 3.0),
+                ..ui::floating_panel_node()
             },
-            bg,
-            border,
+            theme.glass(),
             GlobalZIndex(60),
             Visibility::Hidden,
             BaseEditorOverlay,
@@ -115,13 +109,7 @@ fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
         ))
         .with_children(|panel| {
             panel.spawn((
-                Text::new("SURFACE BASE EDITOR"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(13.0),
-                    ..default()
-                },
-                TextColor(theme.text_accent),
+                theme.title("SURFACE BASE"),
                 Node {
                     margin: UiRect::bottom(Val::Px(4.0)),
                     ..default()
@@ -133,15 +121,9 @@ fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
                 spawn_palette_button(panel, &theme, PaletteAction::Place(i), preset.label);
             }
             panel.spawn((
-                Text::new(""),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(10.0),
-                    ..default()
-                },
-                TextColor(theme.text_dim),
+                theme.small(""),
                 Node {
-                    margin: UiRect::top(Val::Px(8.0)),
+                    margin: UiRect::top(Val::Px(SPACE_SM)),
                     ..default()
                 },
                 BaseEditorText,
@@ -151,39 +133,19 @@ fn setup_overlay(mut commands: Commands, theme: Res<HudTheme>) {
 
 fn spawn_palette_button(
     parent: &mut ChildSpawnerCommands<'_>,
-    theme: &HudTheme,
+    theme: &UiTheme,
     action: PaletteAction,
     label: &str,
 ) {
+    let button = spawn_button(parent, theme, action, label, ButtonVariant::Ghost, CTRL_H);
+    // Left-aligned full-width rows read better in a tool palette.
     parent
-        .spawn((
-            Button,
-            Node {
-                width: Val::Percent(100.0),
-                height: Val::Px(26.0),
-                border: UiRect::all(Val::Px(1.0)),
-                border_radius: BorderRadius::all(Val::Px(3.0)),
-                padding: UiRect::left(Val::Px(10.0)),
-                justify_content: JustifyContent::FlexStart,
-                align_items: AlignItems::Center,
-                ..default()
-            },
-            BackgroundColor(theme.panel_bg),
-            BorderColor::all(theme.panel_border),
-            Interaction::None,
-            action,
-            Name::new(format!("BasePalette {label}")),
-        ))
-        .with_children(|c| {
-            c.spawn((
-                Text::new(label),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(12.0),
-                    ..default()
-                },
-                TextColor(theme.text_primary),
-            ));
+        .commands_mut()
+        .entity(button)
+        .entry::<Node>()
+        .and_modify(|mut node| {
+            node.width = Val::Percent(100.0);
+            node.justify_content = JustifyContent::FlexStart;
         });
 }
 
@@ -211,20 +173,12 @@ fn handle_palette_clicks(
     }
 }
 
-/// Hover + active-tool tinting for the palette buttons.
-fn style_palette_buttons(
-    theme: Res<HudTheme>,
+/// Latch the active tool onto the shared button styling ([`UiButton`]).
+fn latch_active_tool(
     build: Res<BaseBuildState>,
-    mut buttons: Query<(
-        &Interaction,
-        &PaletteAction,
-        &mut BorderColor,
-        &mut BackgroundColor,
-        &Children,
-    )>,
-    mut text_q: Query<&mut TextColor>,
+    mut buttons: Query<(&PaletteAction, &mut UiButton)>,
 ) {
-    for (interaction, action, mut border, mut bg, children) in &mut buttons {
+    for (action, mut button) in &mut buttons {
         let active = match action {
             PaletteAction::Select => build.tool == Tool::Select,
             PaletteAction::Place(i) => {
@@ -232,24 +186,8 @@ fn style_palette_buttons(
                 build.tool == Tool::Place && build.pending_kind == p.kind
             }
         };
-        let (border_color, bg_color, label_color) = match interaction {
-            Interaction::Pressed => (theme.text_primary, theme.panel_border, theme.text_primary),
-            Interaction::Hovered => (theme.text_accent, theme.panel_bg, theme.text_accent),
-            Interaction::None if active => (theme.text_accent, theme.panel_bg_alt, theme.text_accent),
-            Interaction::None => (theme.panel_border, theme.panel_bg, theme.text_primary),
-        };
-        let new_border = BorderColor::all(border_color);
-        if border.top != new_border.top {
-            *border = new_border;
-        }
-        if bg.0 != bg_color {
-            bg.0 = bg_color;
-        }
-        if let Some(&child) = children.first()
-            && let Ok(mut tc) = text_q.get_mut(child)
-            && tc.0 != label_color
-        {
-            tc.0 = label_color;
+        if button.latched != active {
+            button.latched = active;
         }
     }
 }

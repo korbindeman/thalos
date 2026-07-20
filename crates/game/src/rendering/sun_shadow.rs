@@ -102,16 +102,20 @@ const CASCADE_FARS_M: [f32; CASCADE_COUNT] = [1500.0, 5000.0, 12000.0];
 const SHADOW_BACK_DISTANCE_M: f32 = 150.0;
 const SHADOW_NEAR_M: f32 = 0.5;
 
-/// Per-cascade MINIMUM half-extents (m), keyed to the vegetation caster band:
-/// the tree rings (`TREE_RINGS` in `rendering/vegetation.rs`) place casting
-/// tree entities out to 22 km from the craft — beyond that nothing exists to
-/// cast, so shadows "running out" inside that band is a coverage bug, not a
-/// content limit. Cascade 0 keeps its small footprint-scaled box (crisp craft
-/// / near-field shadows); cascade 1 always spans the mesh + near-impostor
-/// rings (~6 km); cascade 2 always spans the whole band, so existing casters
-/// never outrun shadow coverage regardless of where the camera sits. The
-/// footprint scale still grows any of them further when the vantage demands it.
-const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 6_500.0, 23_500.0];
+/// Per-cascade MINIMUM half-extents (m), keyed to the vegetation CASTER band:
+/// tree tiles cast into the rig only out to `TREE_SHADOW_CASTER_MAX_M` (6 km —
+/// rings 0–1 in `rendering/vegetation.rs`; the coarse far rings are sub-pixel
+/// and no longer cast), so shadows "running out" inside that band is a
+/// coverage bug, while beyond it nothing exists to cast. Cascade 0 keeps its
+/// small footprint-scaled box (crisp craft / near-field shadows); cascade 1
+/// always spans the mesh-tree ring (2.4 km + fade); cascade 2 always spans the
+/// whole caster band. The footprint scale still grows any of them further when
+/// the vantage demands it. (Previously 6.5 / 23.5 km to chase the 22 km
+/// impostor band — ~3.2 / 11.5 m per texel, which made every shadow past the
+/// near cascade a coarse blob. The far field beyond the caster band belongs to
+/// the heightfield horizon term (W12), not to stretched cascades — the
+/// MSFS-style shadow-map / terrain-shadow split.)
+const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 3_000.0, 6_500.0];
 
 /// Depth margin (m) bracketing terrain relief above/below the centre's tangent
 /// plane. With band-wide boxes, casters on hills inside the box sit well above
@@ -167,6 +171,22 @@ const SHADOW_LOOK_REACH_MAX_AGL: f32 = 4.0;
 /// drifts this far from it, re-anchor (a one-frame sub-texel phase jump).
 /// Keeps the f32 relative coordinates small and precise.
 const SNAP_ANCHOR_REACH_M: f64 = 8_000.0;
+
+/// Quantized sun stepping (stable CSM, part 2 — the rotational cousin of the
+/// body-fixed texel snap). The snap stabilizes the cascade's *translation*
+/// relative to the co-rotating ground, but the sun's direction over the site
+/// still changed every simulated frame (planet rotation × warp) — the light
+/// basis rotated relative to the casters, so every shadow edge re-rasterized
+/// with a fresh sub-texel phase each frame anyway. The rig therefore HOLDS its
+/// sun direction fixed IN THE BODY FRAME and only steps it once the true sun
+/// has drifted past this angle: between steps the light co-rotates rigidly
+/// with the ground, the light↔caster geometry is frame-to-frame constant, and
+/// the rendered depth maps are stable. At 0.1° a 100 m shadow moves ~17 cm per
+/// step (sub-texel for cascade 0); under high warp shadows advance in visible
+/// discrete steps, which reads as intended time-lapse rather than shimmer.
+/// Scene lighting (`update_sun_light`) keeps the continuous sun — only the
+/// shadow rig quantizes; a ≤0.1° mismatch is imperceptible.
+const SUN_LOCK_STEP_RAD: f64 = 0.1 * core::f64::consts::PI / 180.0;
 
 /// Default shadow darkening strength (0 = off, 1 = black). Higher values give
 /// hard cliff/ridge contrast; ambient fill keeps shadowed ground from going pure black.
@@ -448,9 +468,11 @@ fn update_sun_shadow_camera(
     mut state: ResMut<SunShadowState>,
     mut frame: Local<u64>,
     // Body-fixed texel-snap anchor (see the snap note below) + the current
-    // quantized footprint step (power-of-two, with shrink hysteresis).
+    // quantized footprint step (power-of-two, with shrink hysteresis) + the
+    // held body-fixed sun direction (see `SUN_LOCK_STEP_RAD`).
     mut snap_anchor: Local<Option<(BodyId, DVec3)>>,
     mut footprint_step: Local<f32>,
+    mut sun_lock: Local<Option<(BodyId, DVec3)>>,
 ) {
     *frame = frame.wrapping_add(1);
     let log_now = *frame % 15 == 0;
@@ -506,10 +528,28 @@ fn update_sun_shadow_camera(
         };
 
         let offset = star.position - body_state.position;
-        let sun_dir = if offset.length_squared() > 0.0 {
+        let sun_dir = if offset.length_squared() <= 0.0 {
+            Vec3::Y
+        } else if craft_local {
+            // Orbit / high flight: the caster is the freely-rotating craft, so
+            // there is no body frame to hold the light in — use the true sun.
+            *sun_lock = None;
             offset.normalize().as_vec3()
         } else {
-            Vec3::Y
+            // Quantized sun stepping: hold the shadow sun fixed in the BODY
+            // frame until the true sun drifts `SUN_LOCK_STEP_RAD` away (see the
+            // constant's note). Between steps the light basis, the body-fixed
+            // snap grid, and every caster co-rotate rigidly — the rendered
+            // cascade content is frame-to-frame identical while the sim runs.
+            let cur_bf = body_state.orientation.inverse() * offset.normalize();
+            let locked_bf = match *sun_lock {
+                Some((b, l)) if b == active_id && l.dot(cur_bf) > SUN_LOCK_STEP_RAD.cos() => l,
+                _ => {
+                    *sun_lock = Some((active_id, cur_bf));
+                    cur_bf
+                }
+            };
+            (body_state.orientation * locked_bf).normalize().as_vec3()
         };
 
         // Centre the cascades on the ground point BELOW THE VIEW, so the crisp

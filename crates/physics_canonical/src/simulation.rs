@@ -493,6 +493,15 @@ pub struct Simulation {
     /// special-casing.
     delivered_dv: f64,
 
+    /// Lifetime cumulative propellant mass burned through
+    /// [`Self::apply_external_mass_flow`], in kg. Monotonic. The game-side
+    /// tank reconciliation (`crates/game/src/fuel.rs`) drains tank pools by
+    /// this counter's per-frame delta — **not** by the raw change in
+    /// [`Self::ship_mass_kg`], which is also rewritten by staging drops,
+    /// respawns, and relaunches via [`Self::set_ship_mass`] and must never
+    /// be mistaken for a burn.
+    propellant_burned_kg: f64,
+
     ship_params: ShipParameters,
     control: ControlInput,
     vessel_kind: crate::types::VesselKind,
@@ -564,6 +573,7 @@ impl Simulation {
             maneuvers: ManeuverSequence::new(),
             target_body: None,
             delivered_dv: 0.0,
+            propellant_burned_kg: 0.0,
             ship_params,
             control: ControlInput::default(),
             vessel_kind: crate::types::VesselKind::default(),
@@ -807,8 +817,12 @@ impl Simulation {
         let throttle = throttle.clamp(0.0, 1.0);
         if self.ship_params.mass_flow_kg_per_s > 0.0 {
             let drained = self.ship_params.mass_flow_kg_per_s * throttle * real_dt;
+            let prev_wet = self.craft.mass.wet_mass_kg;
             self.craft.mass.wet_mass_kg =
                 (self.craft.mass.wet_mass_kg - drained).max(self.ship_params.dry_mass_kg);
+            // Record what was *actually* drained (the dry-mass floor can
+            // clip the request) so the tank reconciliation stays exact.
+            self.propellant_burned_kg += prev_wet - self.craft.mass.wet_mass_kg;
         }
         if self.ship_params.thrust_n > 0.0 && self.craft.mass.wet_mass_kg > 0.0 {
             let accel_mag = self.ship_params.thrust_n / self.craft.mass.wet_mass_kg;
@@ -909,6 +923,15 @@ impl Simulation {
     /// compute "Δv delivered since burn start = current − anchor".
     pub fn delivered_dv(&self) -> f64 {
         self.delivered_dv
+    }
+
+    /// Lifetime cumulative propellant mass burned through
+    /// [`Self::apply_external_mass_flow`], in kg. Monotonic within one
+    /// simulation instance. The game-side tank reconciliation drains tank
+    /// pools by this counter's per-frame delta; unlike [`Self::ship_mass_kg`]
+    /// it is untouched by staging drops / respawn mass rewrites.
+    pub fn propellant_burned_kg(&self) -> f64 {
+        self.propellant_burned_kg
     }
 
     // -- Target body --------------------------------------------------------

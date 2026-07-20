@@ -31,6 +31,19 @@ use big_space::prelude::{CellCoord, Grid};
 #[reflect(Default)]
 pub struct GodViewGizmos;
 
+/// System set owning the per-frame god-view camera drive (the base editor and
+/// space-center hub both place the `ShipCamera` through [`drive_god_view`]).
+///
+/// Every god-view **cursor picker** — site pick, building placement, launch
+/// point, hub building select — must run `.after(GodViewCameraSet)`. The drive
+/// writes the camera `Transform` in `Update`; the pickers read that fresh pose
+/// (via [`crate::base_editor::cursor_body_dir`], not the one-frame-stale
+/// `GlobalTransform`) to stay in sync with the rendered scene when the camera
+/// pans fast. Without the ordering a picker might read the `Transform` before the
+/// drive writes it, reintroducing the lag.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct GodViewCameraSet;
+
 fn configure_god_view_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     let (config, _) = config_store.config_mut::<GodViewGizmos>();
     config.line.width = 3.0;
@@ -42,6 +55,16 @@ fn configure_god_view_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
 }
 
 const DEFAULT_DISTANCE_M: f32 = 500.0;
+/// The single canonical god-view boom distance for framing a whole **base**
+/// (metres). The kilometre-scale spaceport (a 5 km runway basin) needs a wide
+/// 3/4 establishing shot; the close [`DEFAULT_DISTANCE_M`] (~500 m) frames only a
+/// corner of it, deep inside the tree-cleared basin. Every god-view opened *over
+/// a base* — the space-center hub, the base editor placing buildings, and the
+/// launch-point picker — boots at this one distance (via
+/// [`GodViewOrbit::reset_over_base`]), so there is **one default god-view per
+/// base**, not one per mode. Matches the headless spaceport-aerial / hub
+/// screenshot framing.
+pub const BASE_ESTABLISHING_DISTANCE_M: f32 = 4000.0;
 const DEFAULT_PITCH: f32 = 0.9; // ~51° — a comfortable 3/4 establishing view
 const MIN_PITCH: f32 = 0.26; // ~15°, near-horizon
 const MAX_PITCH: f32 = 1.2; // ~69°; below 90° so the look-up stays well-defined
@@ -88,18 +111,19 @@ impl Default for GodViewOrbit {
 }
 
 impl GodViewOrbit {
-    /// Fresh establishing view — call when a god-view mode opens.
+    /// Fresh **close** establishing view — for a god-view over open terrain (the
+    /// base editor picking a *new* site, where there is no base to frame). For a
+    /// view over an existing base use [`Self::reset_over_base`].
     pub fn reset(&mut self) {
         *self = Self::default();
     }
 
-    /// Fresh establishing view boomed out to `distance_m` (clamped to the zoom
-    /// range). The space-center hub uses this so PLAY frames the whole kilometre-
-    /// scale spaceport — the default close boom shows only a corner of it, well
-    /// inside the tree-cleared basin.
-    pub fn reset_framed(&mut self, distance_m: f32) {
+    /// Fresh establishing view framed to take in a whole **base** — the single
+    /// default god-view every base-focused mode (hub / place-buildings /
+    /// launch-select) opens at (see [`BASE_ESTABLISHING_DISTANCE_M`]).
+    pub fn reset_over_base(&mut self) {
         self.reset();
-        self.distance = distance_m.clamp(MIN_DISTANCE_M, MAX_DISTANCE_M);
+        self.distance = BASE_ESTABLISHING_DISTANCE_M.clamp(MIN_DISTANCE_M, MAX_DISTANCE_M);
     }
 }
 

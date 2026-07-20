@@ -19,11 +19,12 @@
 // ground terrain LOD is visible. Outside the terrain handoff distance,
 // the impostor handles the body and its own inline atmosphere/cloud path.
 
-#import thalos_udlod::types::AtlasTile
+#import thalos_udlod::types::{AtlasTile, Coordinate}
 #import thalos_udlod::bindings::{config, atlas_sampler, attachments, attachment2_atlas, attachment3_atlas}
 #import thalos_udlod::attachments::{sample_attachment1, sample_normal, attachment_uv, sample_height_atlas_uv_m, sample_height}
 #import thalos_udlod::fragment::{FragmentInput, FragmentOutput, fragment_info}
-#import thalos_udlod::functions::{lookup_tile, tile_count}
+#import thalos_udlod::vertex::{VertexInput, VertexOutput, vertex_info, vertex_output}
+#import thalos_udlod::functions::{lookup_tile, tile_count, compute_local_position}
 #import thalos::atmosphere::AtmosphereBlock
 #import thalos::lighting::{
     SceneLighting, ThalosSurface, shade_surface, SURFACE_DIELECTRIC, SURFACE_REGOLITH,
@@ -32,7 +33,9 @@
 }
 // Shared vegetated-ground colour + moisture field, also mirrored CPU-side by
 // `ground/landcover.rs` so the grass blades read the exact same green.
-#import thalos::landcover::{moisture_at, macro_variation, vegetation_color}
+#import thalos::landcover::{
+    moisture_detail, macro_variation, vegetation_color, climate_cold_lift, climate_warmth,
+}
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
 #import bevy_pbr::mesh_view_bindings::view
 
@@ -58,10 +61,39 @@ struct BodyTerrainDebug {
 // `ShadowCascadeBlock` + `sun_shadow_factor` are shared from `thalos::shadow`.
 // The depth maps are SEPARATE `texture_depth_2d` bindings (one per cascade).
 
+// One analytic flatten pad, mirrored from `thalos_terrain::TerrainFlatten` by
+// `FlattenRegionGpu` in `body_material.rs` (see there for field packing).
+struct TerrainFlattenRegion {
+    // xyz = unit body-fixed direction to the pad centre, w = plane elevation at
+    // the centre (m above the reference radius).
+    center_elev: vec4<f32>,
+    // xyz = unit body-fixed tangent along the pad, w = rect half-length (m).
+    along: vec4<f32>,
+    // xyz = unit body-fixed tangent across the pad, w = rect half-width (m).
+    across: vec4<f32>,
+    // x = rect centre offset along (m), y = rect centre offset across (m),
+    // z = cos of the angular reject radius, w = interior feather width (m).
+    rect: vec4<f32>,
+}
+
+// Mirrors `FlattenBlock` in `body_material.rs`; keep MAX_FLATTEN_REGIONS in sync.
+struct TerrainFlattenBlock {
+    // x = active region count, y = body reference radius (m), zw reserved.
+    // (Named `header` because `meta` is a naga reserved word — see the
+    // wgsl-bevy skill. Uniform layout matches the Rust side by declaration
+    // order, not name.)
+    header: vec4<f32>,
+    regions: array<TerrainFlattenRegion, 4>,
+}
+
 struct BodyTerrainExtras {
     debug: BodyTerrainDebug,
     inspection: vec4<f32>,
     shadow: ShadowCascadeBlock,
+    // WGSL field is named `pads` (not `flatten`) to stay clear of any
+    // current/future reserved word; the Rust field is `flatten` — uniform
+    // layout matches by declaration order, not name.
+    pads: TerrainFlattenBlock,
 }
 
 @group(3) @binding(0) var<uniform> terrain_atmos: AtmosphereBlock;
@@ -91,6 +123,110 @@ fn screen_space_ao(frag_coord: vec2<f32>) -> f32 {
     let uv = frag_coord / max(view.viewport.zw, vec2<f32>(1.0));
     return textureSampleLevel(ao_tex, ao_samp, uv, 0.0).r;
 }
+
+// ── Analytic pad flatten (vertex stage) ────────────────────────────────────
+//
+// The height sampled from the tile atlas is only *approximately* the flatten
+// plane structures are built against: the vertex-stage LOD height blend and
+// morph mix in coarse ancestor tiles whose kilometre-scale texels average
+// natural terrain into the pad, and tiles baked before a runtime flatten
+// installed carry no flatten at all. Either error is decimetres — more than
+// the few-cm asphalt lift — so at LOD-transition view distances the rendered
+// ground used to rise through the paving and z-fight the whole base.
+//
+// This override makes the flatten plane a render-time authority instead of a
+// bake-time hope: inside a pad rectangle the vertex height is pinned to the
+// exact tangent-plane elevation (the same `plane_elevation_m` maths the CPU
+// bake, collider, and structure placement use), independent of tile LOD, morph
+// state, or bake timing. At fine LOD the baked interior already equals the
+// plane, so this is a no-op there; at coarse LOD it removes the error exactly
+// where structures live. A feather band just inside the rectangle edge blends
+// the correction in so no crease appears against the (uncorrected) ramp.
+//
+// Precision: everything here is f32, but formulated cancellation-free. The
+// plane elevation is NOT computed as `(R+E)/cosθ − R` (which subtracts two
+// ~R-magnitude values and quantises to f32 ulp(R) ≈ 0.25 m); instead
+// `1 − cosθ = |dir − c|²/2` keeps every term at pad scale, leaving sub-mm
+// error. The vertex direction from `compute_local_position` carries ~1e-7 rad
+// noise → ~0.2 m lateral wobble of the rectangle test, invisible against the
+// feather.
+fn flattened_height(coordinate: Coordinate, height: f32) -> f32 {
+    let count = u32(terrain_extras.pads.header.x);
+    if (count == 0u) {
+        return height;
+    }
+    let radius = terrain_extras.pads.header.y;
+    // Unit body-fixed direction of this vertex (the terrain's local frame is
+    // the body-fixed frame). Must use the post-morph coordinate so the test
+    // matches the position the vertex actually renders at.
+    let dir = compute_local_position(coordinate);
+    var out_height = height;
+    for (var i = 0u; i < count; i = i + 1u) {
+        let region = terrain_extras.pads.regions[i];
+        let c = region.center_elev.xyz;
+        // Cheap angular reject: almost every vertex on the planet is nowhere
+        // near a pad. The CPU packs generous slack into `rect.z` because a
+        // near-1 cosine compare is noisy at f32.
+        if (dot(dir, c) < region.rect.z) {
+            continue;
+        }
+        let d = dir - c;
+        // Tangent-plane offset from the pad centre, metres (chord ≈ arc at pad
+        // scale — same approximation as `TerrainFlatten::weight`).
+        let offset = d * radius;
+        let along = abs(dot(offset, region.along.xyz) - region.rect.x) - region.along.w;
+        let across = abs(dot(offset, region.across.xyz) - region.rect.y) - region.across.w;
+        // Signed interior distance to the rectangle edge (< 0 inside). The
+        // override applies only INSIDE the flat rectangle — the smoothstep
+        // ramp outside is already baked into the tiles, and re-applying it
+        // here would double the blend and pull the rendered ramp metres off
+        // the collider.
+        let dist = max(along, across);
+        if (dist >= 0.0) {
+            continue;
+        }
+        // Flat tangent-plane elevation at `dir` (see `TerrainFlatten::
+        // plane_elevation_m`), cancellation-free: 1 − cosθ = |d|²/2 exactly
+        // for unit vectors.
+        let one_minus_cos = 0.5 * dot(d, d);
+        let cos_theta = 1.0 - one_minus_cos;
+        let elev = region.center_elev.w
+            + (radius + region.center_elev.w) * one_minus_cos / cos_theta;
+        let feather = max(region.rect.w, 1.0e-3);
+        let w = smoothstep(0.0, feather, -dist);
+        out_height = mix(out_height, elev, w);
+    }
+    return out_height;
+}
+
+// Custom vertex entry: identical to `thalos_udlod::vertex::vertex` (the
+// default the pipeline would otherwise use) plus the analytic pad flatten
+// above. Keep the sample/blend sequence in lockstep with the udlod default.
+//
+// Gated out of the FRAGMENT compile (and the fragment entry out of the vertex
+// compile, below): udlod's `Coordinate` struct gains `uv_dx`/`uv_dy` fields
+// under the FRAGMENT def, so each stage's `Coordinate(...)` constructors are
+// only valid under that stage's defs — an entry point is always kept by
+// naga_oil, dragging the wrong-def constructors into the final module unless
+// the off-stage entry is preprocessed away.
+#ifndef FRAGMENT
+@vertex
+fn vertex(input: VertexInput) -> VertexOutput {
+    var info = vertex_info(input);
+
+    let tile = lookup_tile(info.coordinate, info.blend, 0u);
+    var height = sample_height(tile);
+
+    if (info.blend.ratio > 0.0) {
+        let tile2 = lookup_tile(info.coordinate, info.blend, 1u);
+        height = mix(height, sample_height(tile2), info.blend.ratio);
+    }
+
+    height = flattened_height(info.coordinate, height);
+
+    return vertex_output(&info, height);
+}
+#endif
 
 // Blend the atlas-derived macro height normal into the smooth geometric normal.
 // Height is sampled through decode-then-filter RG16 interpolation in
@@ -189,18 +325,14 @@ const BARREN_STRENGTH: f32 = 0.65;
 const MACRO_VAR_SCALE: f32 = 0.004;  // 1/period_m → ~250 m biome-mottle patches
 const MACRO_VAR_AMT: f32 = 0.14;     // ± low-frequency value mottle
 // Mid-scale moisture: lush ↔ dry grass (and soil in the driest spots) so flat
-// lowland reads as a varied carpet, not one flat green. Primary monotone knob.
+// lowland reads as a varied carpet, not one flat green. The MACRO moisture
+// (regions / mosaics / stands, ≥ ~500 m) is NOT synthesised here — it is the
+// f64 `ProceduralSurface::macro_moisture` field baked into the albedo
+// attachment's alpha channel (docs/terrain_macro.md); the fragment decodes it
+// and adds only `thalos::landcover::moisture_detail` (the wrapped ~125 m tier).
+// Do not re-add coarse wrapped tiers: anything at km scale visibly tiles on
+// the 4 km coordinate wrap — that was the "repeating leopard-print planet".
 const MOISTURE_SCALE: f32 = 0.008;          // 1/period_m → ~125 m medium patches
-const LANDCOVER_COARSE_SCALE: f32 = 0.002;  // 1/period_m → ~500 m forest/clearing stands
-// Large-scale (~1 km) landcover/tone variation: the low-frequency PARENT of the
-// 500 m / 125 m / 20 m cascade — the same body-fixed value-noise family — so a
-// broad lush/dry region resolves INTO the finer patches as the camera descends
-// instead of fighting them. It never distance-fades (it lives in the material
-// stack, not the detail tint), so it carries the far field. Wavelength is held
-// near the 4 km coordinate wrap (4 lattice cells/period) to avoid visible tiling.
-const LANDCOVER_REGION_SCALE: f32 = 0.001;  // 1/period_m → ~1 km lush/dry regions
-const MACRO_REGION_SCALE: f32 = 0.001;      // 1/period_m → ~1 km tone-drift patches
-const MOISTURE_CONTRAST: f32 = 1.35;        // widen spread so regions reach forest/dry extremes
 
 // Earthy linear-space material anchors. Deliberately lower-value and less
 // saturated than neon grass; direct sun and sky fill lift them in the lighting
@@ -217,6 +349,19 @@ const C_ROCK_LO: vec3<f32>  = vec3<f32>(0.108, 0.104, 0.098); // lower rock (nea
 const C_ROCK_HI: vec3<f32>  = vec3<f32>(0.140, 0.143, 0.150); // alpine scree (cool grey)
 const C_SNOW: vec3<f32>     = vec3<f32>(0.600, 0.640, 0.720); // snow (faint blue)
 const C_WET: vec3<f32>      = vec3<f32>(0.028, 0.058, 0.026); // wet hollow (dark green)
+
+// Beach strand (BL-10): the coastline is bare sand from the waterline up to
+// the generator's +4 m berm top, painted from the RAW altitude (the physical
+// coast — never the climate-shifted eco altitude) and gated off steep ground
+// so cliff coasts stay rock. The band tracks the generator's `BEACH_RISE_M`;
+// vegetation placement clears the same strip (`scatter::VEG_BEACH_CLEAR_M`).
+const BEACH_TOP_LO_M: f32 = 3.0;   // sand starts fading out above this
+const BEACH_TOP_HI_M: f32 = 5.0;   // fully vegetated ground above this
+const BEACH_SLOPE_LO: f32 = 0.35;  // sand holds on gentle strands…
+const BEACH_SLOPE_HI: f32 = 0.60;  // …cliff faces keep their rock
+const WET_SAND_TOP_M: f32 = 0.8;   // swash-darkened sand below this
+const C_BEACH_DRY: vec3<f32> = vec3<f32>(0.280, 0.243, 0.158); // dry strand sand
+const C_BEACH_WET: vec3<f32> = vec3<f32>(0.152, 0.128, 0.086); // water-saturated sand
 
 // Step 3 — micro-relief normal. A detail height field whose gradient tilts the
 // lighting normal, giving the surface the light/dark micro-contrast under a
@@ -524,16 +669,22 @@ struct TerrainMaterialSample {
 
 // Build the local surface colour by stacking ecological bands by altitude and
 // slope on top of the tile provider's grass/soil/rock intent masks.
-//   altitude_m — metres above the body reference sphere (drives treeline / snow)
+//   eco_altitude_m — CLIMATE-SHIFTED altitude (`height + climate_cold_lift`),
+//                    so the treeline/snow bands descend with latitude (polar
+//                    caps at sea level) — docs/terrain_macro.md Phase 2
 //   slope_t    — geometric steepness in [0,1] (0 flat, 1 vertical)
 //   variation  — low-frequency value noise in [-1,1] (jitters bands, mottles)
+//   warmth     — hot-climate weight (1 tropics → 0 cool): dry ground reads as
+//                sand only while warm
 fn eval_material_stack(
     masks_in: vec4<f32>,
     macro_albedo: vec3<f32>,
+    eco_altitude_m: f32,
     altitude_m: f32,
     slope_t: f32,
     variation: f32,
     moisture: f32,
+    warmth: f32,
 ) -> TerrainMaterialSample {
     var masks = max(masks_in, vec4<f32>(0.0));
     let weight_sum = max(masks.r + masks.g + masks.b, 1.0e-4);
@@ -553,13 +704,13 @@ fn eval_material_stack(
     // forest (dark canopy), mid → grassland, dry → tan dry grass, driest → bare
     // soil. Forest is the default cover up to the treeline; above it the cover
     // cools to alpine tundra and greys out to bare scree (the `barren` term).
-    let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m + jitter);
+    let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, eco_altitude_m + jitter);
     // The vegetated ground colour comes from the shared `thalos::landcover`
     // library — the SAME function the grass blades' CPU mirror
     // (`ground/landcover.rs`) reads — so the ground and the blades growing from
     // it are literally the same green. The macro-value mottle is applied to the
     // whole `ground` below (so it can be exempted under snow).
-    let veg = vegetation_color(altitude_m, moisture, variation);
+    let veg = vegetation_color(eco_altitude_m, moisture, variation, warmth);
 
     // Rock cools and greys with altitude (warm soil-stained rock low down,
     // lichen-free scree up high).
@@ -579,9 +730,19 @@ fn eval_material_stack(
     let barren = alpine * (1.0 - wet) * (1.0 - 0.6 * rock_w);
     ground = mix(ground, C_ROCK_HI, barren * BARREN_STRENGTH);
 
+    // Beach strand (BL-10): bare sand from the waterline to the berm top,
+    // wet-darkened in the swash band. Overrides vegetation/soil (the strand IS
+    // the substrate there) but sits under snow so polar shores can still ice
+    // over; steep coastal faces keep their rock (cliff coasts).
+    let beach = (1.0 - smoothstep(BEACH_TOP_LO_M, BEACH_TOP_HI_M, altitude_m))
+        * (1.0 - smoothstep(BEACH_SLOPE_LO, BEACH_SLOPE_HI, steep));
+    let wet_sand = 1.0 - smoothstep(0.15, WET_SAND_TOP_M, altitude_m);
+    let sand_col = mix(C_BEACH_DRY, C_BEACH_WET, wet_sand);
+    ground = mix(ground, sand_col, beach);
+
     // Snow: above a noise-jittered snowline, only where the ground is not too
     // steep. Permanent cap once well clear of the line.
-    let snow_alt = smoothstep(SNOW_LINE_LO_M + jitter, SNOW_LINE_HI_M + jitter, altitude_m);
+    let snow_alt = smoothstep(SNOW_LINE_LO_M + jitter, SNOW_LINE_HI_M + jitter, eco_altitude_m);
     let snow_hold = 1.0 - smoothstep(SNOW_SLOPE_LO, SNOW_SLOPE_HI, steep);
     let snow = clamp(snow_alt * snow_hold, 0.0, 1.0);
     ground = mix(ground, C_SNOW, snow);
@@ -598,6 +759,8 @@ fn eval_material_stack(
     var out: TerrainMaterialSample;
     out.albedo = mix(ground, macro_tint, 0.10 * (1.0 - snow));
     out.normal_strength = mix(mix(0.45, 0.85, rock_w) + soil_w * 0.12, 0.25, snow);
+    // Wave-worked sand is smooth; damp the micro-relief on the strand.
+    out.normal_strength = mix(out.normal_strength, 0.30, beach);
     out.occlusion = 1.0 - wet * 0.18 - soil_w * 0.05 - rock_w * 0.04;
     return out;
 }
@@ -1076,6 +1239,9 @@ const AO_MIN: f32 = 0.15;
 // fully tree-shadowed pixel loses all ambient.
 const AMBIENT_SHADOW_BLEED: f32 = 0.6;
 
+// Gated on FRAGMENT for the same reason the vertex entry is gated off it —
+// see the note above `fn vertex`.
+#ifdef FRAGMENT
 @fragment
 fn fragment(input: FragmentInput) -> FragmentOutput {
     var info = fragment_info(input);
@@ -1172,18 +1338,30 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // bands (treeline, alpine scree, snow caps) computed here from the
         // height attachment and the geometric slope.
         //
-        // Large-scale value variation + the 3-scale landcover moisture, both
-        // from the shared `thalos::landcover` library (mirrored CPU-side by
+        // Moisture = baked macro (albedo attachment alpha, the planet-scale
+        // f64 field — no 4 km tiling) + the wrapped fine detail tier from the
+        // shared `thalos::landcover` library (mirrored CPU-side by
         // `ground/landcover.rs`), so the grass blades read the exact same field.
         let macro_var = macro_variation(detail_p_body);
-        let moisture = moisture_at(detail_p_body);
+        let moisture =
+            clamp(albedo.a * 2.0 - 1.0 + moisture_detail(detail_p_body), -1.0, 1.0);
+        // Climate: the cube-sphere coordinate gives the body-fixed unit
+        // direction (terrain model space is body-fixed), so latitude — and the
+        // cold lift that descends the ecological bands toward the poles — is
+        // exact per fragment. docs/terrain_macro.md Phase 2.
+        let body_dir = compute_local_position(info.coordinate);
+        let cold_lift = climate_cold_lift(body_dir.y);
+        let warmth = climate_warmth(cold_lift);
+        let eco_altitude_m = altitude_m + cold_lift;
         material = eval_material_stack(
             material_masks,
             grade_surface(albedo.rgb, material_masks.b),
+            eco_altitude_m,
             altitude_m,
             geo_slope_t,
             macro_var,
             moisture,
+            warmth,
         );
         surface_rgb = material.albedo;
         if (!debug_on) {
@@ -1195,8 +1373,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
             // grass-textured.
             let grass_w_frag = material_masks.r
                 / max(material_masks.r + material_masks.g + material_masks.b, 1e-3);
-            grass_gate =
-                grass_w_frag * (1.0 - smoothstep(TREELINE_LO_M, TREELINE_HI_M, altitude_m));
+            // Gated off the beach strand too (BL-10) — the baked grass mask
+            // doesn't know sea level, and grass-textured sand reads as algae.
+            grass_gate = grass_w_frag
+                * (1.0 - smoothstep(TREELINE_LO_M, TREELINE_HI_M, eco_altitude_m))
+                * smoothstep(BEACH_TOP_LO_M, BEACH_TOP_HI_M, altitude_m);
             let gd = grass_field_detail(detail_p_body, geo_normal, grass_gate, footprint_m);
             surface_rgb = surface_rgb * gd.tint;
             grass_normal_offset = gd.normal_offset;
@@ -1206,7 +1387,9 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
             grass_cavity = mix(1.0, min(gd_luma, 1.0), GRASS_AO_FROM_DETAIL);
         }
     }
-    albedo = vec4<f32>(surface_rgb, albedo.a);
+    // The attachment alpha carries baked macro moisture, not opacity — force
+    // the output alpha opaque from here on.
+    albedo = vec4<f32>(surface_rgb, 1.0);
 
     // Debug checkerboard overlay. The body-fixed position of this
     // fragment is recovered as:
@@ -1424,3 +1607,5 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     }
     return output;
 }
+
+#endif

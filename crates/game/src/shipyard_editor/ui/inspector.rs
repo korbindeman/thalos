@@ -17,9 +17,10 @@ use thalos_shipyard::{
     resource_capacity_for,
 };
 
-use crate::hud::theme::{HudTheme, panel_frame};
-
-use super::widgets::{self, ScrollableColumn, SliderFormat, UiSlider};
+use thalos_ui::{
+    self as ui, ButtonVariant, ScrollableColumn, SliderFormat, UiSlider, UiTheme, spawn_button,
+    spawn_heading, spawn_slider_row,
+};
 
 /// Which part-component field a slider drives.
 #[derive(Component, Clone, Copy, PartialEq)]
@@ -104,37 +105,21 @@ type KindQueryMut<'w, 's> = Query<
     With<EditorPart>,
 >;
 
-pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
-    let (bg, border) = panel_frame(theme);
+pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
     root.spawn((
         Node {
-            position_type: PositionType::Absolute,
             right: Val::Px(12.0),
-            top: Val::Px(60.0),
+            top: Val::Px(64.0),
             bottom: Val::Px(12.0),
             width: Val::Px(300.0),
-            border: UiRect::all(Val::Px(1.0)),
-            border_radius: BorderRadius::all(Val::Px(4.0)),
-            padding: UiRect::axes(Val::Px(10.0), Val::Px(8.0)),
-            flex_direction: FlexDirection::Column,
-            row_gap: Val::Px(6.0),
-            ..default()
+            ..ui::floating_panel_node()
         },
-        bg,
-        border,
+        theme.glass(),
         Interaction::None,
         Name::new("ShipyardInspector"),
     ))
     .with_children(|panel| {
-        panel.spawn((
-            Text::new("INSPECTOR"),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(12.0),
-                ..default()
-            },
-            TextColor(theme.text_subtitle),
-        ));
+        spawn_heading(panel, theme, "INSPECTOR", false);
         panel.spawn((
             Node {
                 flex_direction: FlexDirection::Column,
@@ -196,7 +181,7 @@ fn kind_label(
 pub(super) fn rebuild_inspector(
     mut commands: Commands,
     state: Res<EditorState>,
-    theme: Res<HudTheme>,
+    theme: Res<UiTheme>,
     catalog: Res<PartCatalog>,
     groups: Query<(Entity, &SymmetryGroup), With<EditorPart>>,
     parts: KindQuery,
@@ -228,16 +213,9 @@ pub(super) fn rebuild_inspector(
     }
 
     let Some((target, is_root, _)) = key else {
+        let placeholder = theme.faint("(no selection)");
         commands.entity(content_entity).with_children(|c| {
-            c.spawn((
-                Text::new("(no selection)"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(10.0),
-                    ..default()
-                },
-                TextColor(theme.text_dim),
-            ));
+            c.spawn(placeholder);
         });
         return;
     };
@@ -285,26 +263,13 @@ pub(super) fn rebuild_inspector(
     let gear_v = gear.cloned();
 
     commands.entity(content_entity).with_children(|c| {
-        c.spawn((
-            Text::new(kind),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(12.0),
-                ..default()
-            },
-            TextColor(theme.text_accent),
-        ));
+        let mut kind_text = theme.body_strong(kind);
+        kind_text.2 = TextColor(thalos_ui::tokens::ACCENT);
+        c.spawn(kind_text);
         // Live info block, refreshed per frame by `update_info_text`.
-        c.spawn((
-            Text::new(""),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(9.5),
-                ..default()
-            },
-            TextColor(theme.text_dim),
-            InspectorInfoText,
-        ));
+        let mut info = theme.mono_dim("");
+        info.1.font_size = FontSize::Px(9.5);
+        c.spawn((info, InspectorInfoText));
 
         let slider = |c: &mut ChildSpawnerCommands<'_>,
                       label: &str,
@@ -313,18 +278,7 @@ pub(super) fn rebuild_inspector(
                       max: f32,
                       format: SliderFormat,
                       binding: ParamBinding| {
-            widgets::spawn_slider_row(
-                c,
-                &theme,
-                label,
-                UiSlider {
-                    min,
-                    max,
-                    value,
-                    format,
-                },
-                binding,
-            );
+            spawn_slider_row(c, &theme, label, UiSlider::new(min, max, value, format), binding);
         };
 
         use ParamBinding as B;
@@ -572,19 +526,7 @@ pub(super) fn rebuild_inspector(
                 })
                 .collect();
             if !storable.is_empty() {
-                c.spawn((
-                    Text::new("RESOURCES"),
-                    TextFont {
-                        font: theme.font.clone(),
-                        font_size: FontSize::Px(10.0),
-                        ..default()
-                    },
-                    TextColor(theme.text_subtitle),
-                    Node {
-                        margin: UiRect::top(Val::Px(6.0)),
-                        ..default()
-                    },
-                ));
+                spawn_heading(c, &theme, "RESOURCES", true);
                 for (option, capacity) in storable {
                     if let Some((_, pool)) = pools.iter().find(|(r, _)| *r == option.resource) {
                         slider(
@@ -601,17 +543,17 @@ pub(super) fn rebuild_inspector(
                             ..default()
                         })
                         .with_children(|row| {
-                            widgets::spawn_button(
+                            spawn_button(
                                 row,
                                 &theme,
                                 InspectorAction::RemoveResource(option.resource),
                                 "REMOVE",
-                                8.0,
-                                16.0,
+                                ButtonVariant::Danger,
+                                18.0,
                             );
                         });
                     } else {
-                        widgets::spawn_button(
+                        spawn_button(
                             c,
                             &theme,
                             InspectorAction::AddResource(option.resource),
@@ -621,7 +563,7 @@ pub(super) fn rebuild_inspector(
                                 capacity,
                                 option.resource.unit_label()
                             ),
-                            9.0,
+                            ButtonVariant::Ghost,
                             22.0,
                         );
                     }
@@ -641,16 +583,23 @@ pub(super) fn rebuild_inspector(
         ))
         .with_children(|row| {
             if !is_root {
-                widgets::spawn_button(
+                spawn_button(
                     row,
                     &theme,
                     InspectorAction::SetRoot,
                     "SET ROOT",
-                    10.0,
+                    ButtonVariant::Ghost,
                     24.0,
                 );
             }
-            widgets::spawn_button(row, &theme, InspectorAction::Delete, "DELETE", 10.0, 24.0);
+            spawn_button(
+                row,
+                &theme,
+                InspectorAction::Delete,
+                "DELETE",
+                ButtonVariant::Danger,
+                24.0,
+            );
         });
     });
 }

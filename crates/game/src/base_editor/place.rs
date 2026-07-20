@@ -26,6 +26,8 @@ use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
 use crate::camera::{ActiveCamera, ShipCamera};
+use crate::game_context::{ContextHistory, GameContext};
+use crate::spawn::{CraftPlacement, place_craft};
 use crate::coords::{SHIP_LAYER, SHIP_SCALE};
 use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::rendering::real_space::RealSpaceRoot;
@@ -34,7 +36,7 @@ use crate::runway::craft_extent_below;
 use crate::solar_system_state::sync_solar_system_state;
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
 
-use super::{BaseEditor, BaseEditorMode, base_editor_open, ray_vs_sphere_dir};
+use super::{BaseEditor, BaseEditorMode, base_editor_open, cursor_body_dir};
 
 /// Grid step for snapping placement, metres.
 const GRID_STEP_M: f64 = 2.0;
@@ -239,6 +241,9 @@ impl Plugin for BaseEditorPlacePlugin {
                     draw_placement_ghost,
                 )
                     .chain()
+                    // Pick after the god-view camera moves so the placement
+                    // raycast reads this frame's camera pose (see `cursor_body_dir`).
+                    .after(crate::god_view::GodViewCameraSet)
                     .run_if(base_editor_open),
             )
             // Anchored every frame like the runway (`update_runway_transform`).
@@ -279,8 +284,8 @@ fn update_structure_placement(
     mut placed_q: Query<(Entity, &mut PlacedVisual)>,
     queries: (
         Query<&Window, With<PrimaryWindow>>,
-        Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-        Query<(&RealSpaceBody, &GlobalTransform)>,
+        Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+        Query<&Grid, With<BigSpace>>,
     ),
 ) {
     if editor.mode != BaseEditorMode::PlaceBuildings {
@@ -320,7 +325,7 @@ fn update_structure_placement(
     let heading = site.heading_tangent;
     let across = center_dir.cross(heading).normalize();
 
-    let (windows, cameras, bodies) = &queries;
+    let (windows, cameras, root_grid) = &queries;
 
     // Tab toggles the pending kind.
     if keys.just_pressed(KeyCode::Tab) {
@@ -373,8 +378,7 @@ fn update_structure_placement(
     state.hover = compute_pad_hover(
         windows,
         cameras,
-        bodies,
-        body_id,
+        root_grid,
         body_state,
         center_dir,
         heading,
@@ -520,9 +524,8 @@ fn pending_footprint_half(state: &BaseBuildState) -> f64 {
 #[allow(clippy::too_many_arguments)]
 fn compute_pad_hover(
     windows: &Query<&Window, With<PrimaryWindow>>,
-    cameras: &Query<(&Camera, &GlobalTransform), (With<ShipCamera>, With<ActiveCamera>)>,
-    bodies: &Query<(&RealSpaceBody, &GlobalTransform)>,
-    body_id: BodyId,
+    cameras: &Query<(&Camera, &CellCoord, &Transform), (With<ShipCamera>, With<ActiveCamera>)>,
+    root_grid: &Query<&Grid, With<BigSpace>>,
     body_state: &BodyState,
     center_dir: DVec3,
     heading: DVec3,
@@ -534,13 +537,18 @@ fn compute_pad_hover(
 ) -> Option<HoverPad> {
     let window = windows.single().ok()?;
     let cursor = window.cursor_position()?;
-    let (camera, cam_gt) = cameras.single().ok()?;
-    let (_, body_gt) = bodies.iter().find(|(rsb, _)| rsb.body_id == body_id)?;
-    let center_render = body_gt.translation();
-    let ray = camera.viewport_to_world(cam_gt, cursor).ok()?;
-    let dir_render =
-        ray_vs_sphere_dir(ray.origin - center_render, *ray.direction, (pad_r * SHIP_SCALE) as f32)?;
-    let dir_body = (body_state.orientation.inverse() * dir_render.as_dvec3()).normalize();
+    let (camera, cam_cell, cam_transform) = cameras.single().ok()?;
+    let root_grid = root_grid.single().ok()?;
+    let dir_body = cursor_body_dir(
+        camera,
+        cam_cell,
+        cam_transform,
+        root_grid,
+        cursor,
+        body_state.position,
+        body_state.orientation,
+        pad_r,
+    )?;
 
     // Tangent-plane offset from the pad centre, in metres.
     let offset = (dir_body - center_dir) * pad_r;
@@ -842,7 +850,6 @@ fn spawn_structure_entity(
 #[allow(clippy::too_many_arguments)]
 fn launch_from_pad(
     keys: Res<ButtonInput<KeyCode>>,
-    mut editor: ResMut<BaseEditor>,
     build: Res<BaseBuildState>,
     registry: Res<StructureRegistry>,
     mut sim: ResMut<SimulationState>,
@@ -853,6 +860,8 @@ fn launch_from_pad(
     children_q: Query<&Children>,
     mesh_q: Query<(&GlobalTransform, &Mesh3d)>,
     meshes: Res<Assets<Mesh>>,
+    mut next_ctx: Option<ResMut<NextState<GameContext>>>,
+    mut history: ResMut<ContextHistory>,
 ) {
     if !keys.just_pressed(KeyCode::KeyL) {
         return;
@@ -917,7 +926,11 @@ fn launch_from_pad(
     // runtime teleport, not a `Loading → Running` edge.
     sim.simulation.warp.reset();
 
-    editor.open = false;
+    // The L-launch flies immediately: clear the return stack and drop to Flight.
+    history.0.clear();
+    if let Some(next) = next_ctx.as_mut() {
+        next.set(GameContext::Flight);
+    }
     info!("launched player ship onto launchpad {:?}", sel);
 }
 
@@ -948,19 +961,24 @@ pub(crate) fn place_on_launchpad(
     let state = StateVector { position, velocity };
     let attitude = vertical_attitude(body_state, up, heading);
 
-    sim.simulation.set_ship_state(state);
-    sim.simulation.set_attitude(attitude);
     let pose = body_fixed_pose_from_inertial(body_state, TranslationalState::from(state), attitude);
-    sim.simulation
-        .transition_authority(AuthorityMode::BodyFixed {
-            body: body_id,
-            pose,
-        });
+    // Tear the live Avian bubble down first, then seat the placed pose, so the
+    // rebuild seeds from it rather than fighting the pre-teleport state (see
+    // `spawn::place_craft`).
+    place_craft(
+        sim,
+        CraftPlacement {
+            state,
+            attitude,
+            authority: AuthorityMode::BodyFixed {
+                body: body_id,
+                pose,
+            },
+        },
+        Some((commands, active_bubble)),
+    );
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(body_id));
-
-    // Tear down the live Avian bubble so the rebuild seeds from the placed pose.
-    crate::scenario_menu::clear_bubble(commands, active_bubble);
 }
 
 /// Re-place every structure in the body-fixed frame each frame, exactly like

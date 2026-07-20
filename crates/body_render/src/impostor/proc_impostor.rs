@@ -95,6 +95,114 @@ pub fn blank_impostor_cube() -> Image {
     cube_image(1, vec![0u8; 4 * 6], TextureFormat::Rgba8UnormSrgb)
 }
 
+/// Height range (m about sea level) the coast/bathymetry cube encodes.
+/// `R16Unorm` texel = `height / (2·range) + 0.5`, so one step ≈ 0.24 m — the
+/// shoreline zero crossing lands within a quarter metre at any bilinear tap.
+/// Mirrored by `coast_atlas_height_m` in `body_sky.wgsl`; change both together.
+pub const COAST_ATLAS_HEIGHT_RANGE_M: f32 = 8_000.0;
+
+/// Bake the per-body **coast/bathymetry cube** (ADR-0005): signed terrain
+/// height (m about sea level, `R16Unorm`-encoded) sampled at one fixed coarse
+/// LOD, indexed by body-fixed direction. The `BodySky` analytic ocean reads it
+/// at range for water **coverage** (its zero crossing — which equals the
+/// LOD-invariant macro shoreline, because relief never crosses sea level; see
+/// INC-0003) and for water **colour** (bathymetry depth), making both
+/// structurally independent of tile LOD / streaming / depth-buffer error.
+/// Near-field water keeps the exact depth-compare path; gameplay keeps reading
+/// the f64 surface — this is a render-only projection of the same generator.
+///
+/// The cube carries a **full mip chain** (2×2 height averages) and the shader
+/// samples it at an analytically-computed footprint LOD. This is load-bearing,
+/// not an optimisation: at orbital ranges one screen pixel's sphere-hit sweeps
+/// many texels of surface (tens at grazing incidence near the limb), and
+/// point-sampling the coastline at that anisotropy shredded it into moiré
+/// "dash streak" fields along the tangent zone. A mip-filtered read returns
+/// the mean height over the footprint instead, so foreshortened coasts blur
+/// into a coherent band the way a real camera would resolve them.
+pub fn bake_coast_bathymetry_cube(surface: &dyn SurfaceQuery, resolution: u32) -> Image {
+    let res = (resolution.max(4) as usize).next_power_of_two();
+    let radius = surface.radius_m().max(1.0);
+    // One texel spans ~ this arc; feed it as the LOD so the bake reads the
+    // matching (coarse, anti-aliased) octave set.
+    let lod_m = (std::f32::consts::TAU * radius / (4.0 * res as f32)).max(1.0);
+    let mip_count = res.ilog2() + 1;
+
+    // Per face: mip 0 sampled from the surface, then a 2×2-average chain down
+    // to 1×1 — matching `TextureDataOrder::LayerMajor` (each layer's full mip
+    // chain contiguous).
+    let faces: Vec<Vec<u8>> = CubemapFace::ALL
+        .par_iter()
+        .map(|&face| {
+            let mut level: Vec<u16> = Vec::with_capacity(res * res);
+            for y in 0..res {
+                let v = (y as f32 + 0.5) / res as f32;
+                for x in 0..res {
+                    let u = (x as f32 + 0.5) / res as f32;
+                    let dir = face_uv_to_dir(face, u, v).normalize();
+                    let h = surface.sample_height_m(dir, lod_m);
+                    let n = (h / (2.0 * COAST_ATLAS_HEIGHT_RANGE_M) + 0.5).clamp(0.0, 1.0);
+                    level.push((n * 65535.0 + 0.5).min(65535.0) as u16);
+                }
+            }
+            let mut bytes: Vec<u8> = Vec::with_capacity(res * res * 2 * 4 / 3 + 8);
+            bytes.extend(level.iter().flat_map(|q| q.to_le_bytes()));
+            let mut size = res;
+            while size > 1 {
+                let next = size / 2;
+                let mut down = Vec::with_capacity(next * next);
+                for y in 0..next {
+                    for x in 0..next {
+                        let s = level[(2 * y) * size + 2 * x] as u32
+                            + level[(2 * y) * size + 2 * x + 1] as u32
+                            + level[(2 * y + 1) * size + 2 * x] as u32
+                            + level[(2 * y + 1) * size + 2 * x + 1] as u32;
+                        down.push(((s + 2) / 4) as u16);
+                    }
+                }
+                bytes.extend(down.iter().flat_map(|q| q.to_le_bytes()));
+                level = down;
+                size = next;
+            }
+            bytes
+        })
+        .collect();
+
+    let data: Vec<u8> = faces.into_iter().flatten().collect();
+    // `Image::new` debug-asserts `data.len()` against the BASE level only, so
+    // a mipped payload must go through `new_uninit` + manual `data`.
+    let mut image = Image::new_uninit(
+        Extent3d {
+            width: res as u32,
+            height: res as u32,
+            depth_or_array_layers: 6,
+        },
+        TextureDimension::D2,
+        TextureFormat::R16Unorm,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    image.data = Some(data);
+    image.texture_descriptor.mip_level_count = mip_count;
+    image.data_order = bevy::render::render_resource::TextureDataOrder::LayerMajor;
+    image.texture_view_descriptor = Some(TextureViewDescriptor {
+        dimension: Some(TextureViewDimension::Cube),
+        ..default()
+    });
+    // Trilinear: the shader's footprint LOD must interpolate between mips.
+    image.sampler = bevy::image::ImageSampler::linear();
+    image
+}
+
+/// A 1×1×6 "sea level everywhere" coast cube for bodies without an ocean —
+/// the `BodySky` ocean branch is gated off (`ocean.y < 0.5`) so it is never
+/// actually sampled; the binding just needs a valid cube.
+pub fn blank_coast_cube() -> Image {
+    let texel = 0x8000u16.to_le_bytes();
+    let mut image = cube_image(1, texel.repeat(6), TextureFormat::R16Unorm);
+    // Same filtering sampler as the real atlas so the bind-group layout matches.
+    image.sampler = bevy::image::ImageSampler::linear();
+    image
+}
+
 fn cube_image(res: u32, data: Vec<u8>, format: TextureFormat) -> Image {
     let mut image = Image::new(
         Extent3d {

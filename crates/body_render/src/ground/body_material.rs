@@ -20,6 +20,7 @@ use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
+use thalos_terrain::TerrainFlatten;
 
 /// Per-frame dynamic data for `BodySkyMaterial`.
 ///
@@ -59,6 +60,19 @@ pub struct BodySkyExtra {
     /// matching the impostor water BRDF fallback so the ground↔impostor handoff
     /// stays consistent. Only read when `ocean.y >= 0.5`.
     pub ocean_color_depth: Vec4,
+    /// Resident-height-tile lookup parameters (ADR-0006). The ocean branch
+    /// samples signed sea height straight from the udlod height atlas bound at
+    /// bindings 11–14 — the exact texels the visible terrain mesh is displaced
+    /// from — with the coast atlas as the coarse tail.
+    /// x = enable (≥ 0.5 only when the terrain's tile tree + atlas are bound),
+    /// y = `lod_count`, z = `tree_size`, w = attachment-0 center size (texels
+    /// per tile edge, borders excluded).
+    pub tile_lookup: Vec4,
+    /// x = attachment-0 atlas-UV scale (center/texture size), y = atlas-UV
+    /// offset (border/texture size), z = height-encoding `min_height` (m),
+    /// w = `max_height` (m) — the UNORM16 decode range, mirroring
+    /// `thalos_udlod::attachments::decode_height_m`.
+    pub tile_atlas_uv: Vec4,
 }
 
 impl Default for BodySkyExtra {
@@ -70,6 +84,8 @@ impl Default for BodySkyExtra {
             cloud_band_radii: Vec4::ZERO,
             ocean: Vec4::ZERO,
             ocean_color_depth: Vec4::ZERO,
+            tile_lookup: Vec4::ZERO,
+            tile_atlas_uv: Vec4::ZERO,
         }
     }
 }
@@ -197,6 +213,118 @@ impl Default for ShadowCascadeBlock {
     }
 }
 
+/// Max flatten pads mirrored to the GPU per body terrain. Keep in sync with
+/// the `array<TerrainFlattenRegion, 4>` in `body_terrain.wgsl`. When a body
+/// carries more regions than this, the material driver uploads the pads
+/// nearest the camera — only pads near the view can produce visible error.
+pub const MAX_FLATTEN_REGIONS: usize = 4;
+
+/// GPU mirror of one [`thalos_terrain::TerrainFlatten`] pad, consumed by the
+/// analytic vertex-stage flatten in `body_terrain.wgsl` (`flattened_height`).
+///
+/// **Why this exists (the structural invariant):** structures are built
+/// against the flatten plane, but the terrain the player sees is the tile
+/// atlas — whose vertex-stage LOD blend/morph mixes in coarse ancestor tiles
+/// with kilometre-scale texels that average natural terrain into the pad
+/// (decimetres of error, more than the few-cm paving lift), and which can
+/// hold tiles baked before a runtime flatten existed at all. The shader
+/// therefore re-applies the flatten *analytically per vertex*: inside a pad
+/// rectangle the rendered ground is pinned to the exact tangent-plane
+/// elevation, at every LOD, every morph state, and every bake state. Rendered
+/// ground under structures can no longer depend on tile streaming/bake
+/// timing, so structures always draw above it.
+#[derive(Clone, Copy, Default, ShaderType)]
+pub struct FlattenRegionGpu {
+    /// xyz = unit body-fixed direction to the pad centre, w = plane elevation
+    /// at the centre (m above the reference radius).
+    pub center_elev: Vec4,
+    /// xyz = unit body-fixed tangent along the pad, w = rect half-length (m).
+    pub along: Vec4,
+    /// xyz = unit body-fixed tangent across the pad, w = rect half-width (m).
+    pub across: Vec4,
+    /// x = rect centre offset along (m), y = rect centre offset across (m),
+    /// z = cos of the angular reject radius, w = interior feather width (m).
+    pub rect: Vec4,
+}
+
+impl FlattenRegionGpu {
+    /// Pack one CPU flatten pad for the shader.
+    pub fn from_flatten(f: &TerrainFlatten) -> Self {
+        let radius = f.radius_m.max(1.0);
+        // Angular reject over the *rectangle* only (the ramp is not part of
+        // the vertex override), plus generous slack: near cosθ = 1 an f32
+        // dot-product compare is noisy at the equivalent of ~100–200 m of
+        // lateral reach, so a tight bound could cull valid pad-corner
+        // vertices. 512 m of slack still rejects virtually the whole planet.
+        let reach_along = f.offset_along_m.abs() + f.half_along_m;
+        let reach_across = f.offset_across_m.abs() + f.half_across_m;
+        let reach = (reach_along * reach_along + reach_across * reach_across).sqrt() + 512.0;
+        let cos_max = (reach / radius).atan().cos();
+        // Feather the override in across a band just inside the rectangle
+        // edge so the (analytically exact) interior meets the (baked, ramped)
+        // exterior without a crease. Structures sit well inside the pad rect,
+        // so the feather band never runs under them; scale it down for small
+        // pads so it can't eat a pad whole.
+        let feather_m = (0.25 * f.half_along_m.min(f.half_across_m)).clamp(1.0, 30.0);
+        Self {
+            center_elev: Vec4::new(
+                f.center_dir.x as f32,
+                f.center_dir.y as f32,
+                f.center_dir.z as f32,
+                f.elevation_m as f32,
+            ),
+            along: Vec4::new(
+                f.tangent_along.x as f32,
+                f.tangent_along.y as f32,
+                f.tangent_along.z as f32,
+                f.half_along_m as f32,
+            ),
+            across: Vec4::new(
+                f.tangent_across.x as f32,
+                f.tangent_across.y as f32,
+                f.tangent_across.z as f32,
+                f.half_across_m as f32,
+            ),
+            rect: Vec4::new(
+                f.offset_along_m as f32,
+                f.offset_across_m as f32,
+                cos_max as f32,
+                feather_m as f32,
+            ),
+        }
+    }
+}
+
+/// The per-body flatten-pad set bound to the terrain vertex stage. Zero
+/// `meta.x` (the [`Default`]) disables the override entirely — the map
+/// terrain and airless bodies never pay for it.
+#[derive(Clone, Copy, Default, ShaderType)]
+pub struct FlattenBlock {
+    /// x = active region count, y = body reference radius (m), zw reserved.
+    pub meta: Vec4,
+    pub regions: [FlattenRegionGpu; MAX_FLATTEN_REGIONS],
+}
+
+impl FlattenBlock {
+    /// Pack up to [`MAX_FLATTEN_REGIONS`] pads. All pads must belong to the
+    /// same body (they share `meta.y`); extras beyond the cap are dropped, so
+    /// callers with more should pre-sort by relevance (nearest the camera).
+    pub fn pack<'a>(flattens: impl IntoIterator<Item = &'a TerrainFlatten>) -> Self {
+        let mut block = Self::default();
+        let mut count = 0usize;
+        for f in flattens {
+            if count >= MAX_FLATTEN_REGIONS {
+                break;
+            }
+            block.meta.y = f.radius_m as f32;
+            block.regions[count] = FlattenRegionGpu::from_flatten(f);
+            count += 1;
+        }
+        block.meta.x = count as f32;
+        block
+    }
+}
+
 /// Packed bag of terrain-specific per-frame uniforms.
 ///
 /// Exists so the material lands a single uniform binding instead of three.
@@ -221,6 +349,12 @@ pub struct BodyTerrainExtras {
     /// [`ShadowCascadeBlock`]). Packed here rather than as its own `#[uniform]`
     /// to avoid a second vertex buffer (Metal 16-slot cap).
     pub shadow: ShadowCascadeBlock,
+    /// Analytic vertex-stage flatten pads (see [`FlattenBlock`] /
+    /// [`FlattenRegionGpu`]). Mirrored per frame from the body's
+    /// `TerrainFlattenRegistry` handle by the game's terrain material driver;
+    /// the WGSL field is named `pads`. Packed here for the same slot-budget
+    /// reason as `shadow`.
+    pub flatten: FlattenBlock,
 }
 
 impl Default for BodyTerrainExtras {
@@ -229,6 +363,7 @@ impl Default for BodyTerrainExtras {
             debug: BodyTerrainDebug::default(),
             inspection: Vec4::ZERO,
             shadow: ShadowCascadeBlock::default(),
+            flatten: FlattenBlock::default(),
         }
     }
 }
@@ -276,6 +411,15 @@ pub struct BodyTerrainMaterial {
 }
 
 impl Material for BodyTerrainMaterial {
+    /// Custom vertex stage: the udlod default plus the analytic pad flatten
+    /// (see [`FlattenRegionGpu`]). Both terrain paths (surface + orbital map)
+    /// render through thalos_udlod's `TerrainRenderPipeline`, which reads this
+    /// — there is no Bevy mesh-pipeline consumer of this material, so the
+    /// override cannot leak into a standard prepass.
+    fn vertex_shader() -> ShaderRef {
+        "embedded://thalos_body_render/ground/body_terrain.wgsl".into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "embedded://thalos_body_render/ground/body_terrain.wgsl".into()
     }

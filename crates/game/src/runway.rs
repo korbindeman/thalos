@@ -44,7 +44,6 @@
 
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
-use bevy::light::NotShadowCaster;
 use bevy::math::{DMat3, DQuat, DVec3, Vec3, Vec3A};
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
@@ -71,7 +70,7 @@ use crate::rendering::terrain_residency::TerrainRebuildRequest;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
-use crate::spawn::SpawnSituation;
+use crate::spawn::{CraftPlacement, SpawnSituation, coast_placement, place_craft};
 
 // ---------------------------------------------------------------------------
 // Runway dimensions (aerospace research runway: 5 km × 90 m)
@@ -837,15 +836,17 @@ pub(crate) fn build_spaceport(
     // level — but the loading-pass callers only run once the height source is
     // resident, by which point the coarse low-LOD ancestor tiles covering the
     // whole planet (streamed at the placeholder-craft view before the flatten
-    // existed) are already resident and stay natural. UDLOD's vertex-stage LOD
-    // blend/morph mixes those coarse ancestors with the fine flattened tiles,
-    // pulling the rendered ground ~decimetres off the flat plane in the
-    // LOD-transition bands — subtle near the basin centre (natural ≈ the mean
-    // `E`), enough to z-fight the flush aprons/taxiways. A rebuild despawns +
-    // re-streams every resident tile with the flatten in place, so the whole
-    // surface renders flat. Mirrors `base_editor::pick`, which rebuilds for the
-    // same reason after a runtime flatten. A no-op if nothing is resident yet
-    // (then the first bake is already flattened).
+    // existed) are already resident and stay natural. Note the *rendered*
+    // ground no longer depends on this: the terrain vertex stage re-applies
+    // the flatten analytically per vertex (`flattened_height` in
+    // `body_terrain.wgsl`), so stale/coarse tiles still draw flat inside the
+    // basin at every LOD. The rebuild remains load-bearing for everything the
+    // shader can't fix — the GPU-atlas height mirror (collider / CPU height
+    // queries), the baked albedo/material layers, and scatter placement — and
+    // for the ramp band outside the rect, which only the bake levels. Mirrors
+    // `base_editor::pick`, which rebuilds for the same reason after a runtime
+    // flatten. A no-op if nothing is resident yet (then the first bake is
+    // already flattened).
     rebuild.request(body_id);
 
     SpaceportBuild {
@@ -1518,12 +1519,17 @@ fn build_number_quad(
     rot180: bool,
 ) -> Mesh {
     let s = if rot180 { -1.0 } else { 1.0 };
-    // (u, v, along-sign, across-sign): v=0 (image top) → +along (down-runway).
+    // (u, v, along-sign, across-sign): v=0 (image top) → +along (down-runway),
+    // and u=0 (image left) → +across. A pilot on approach at the near threshold
+    // has forward = +heading and up, so their right = heading × up = −across;
+    // mapping the image's left edge to +across therefore puts the text's left on
+    // the pilot's left, so the digits read upright instead of mirrored. The far
+    // end (s = −1) flips both signs to match its opposite approach direction.
     let verts = [
-        (0.0f32, 0.0f32, 1.0f64, -1.0f64),
-        (1.0, 0.0, 1.0, 1.0),
-        (0.0, 1.0, -1.0, -1.0),
-        (1.0, 1.0, -1.0, 1.0),
+        (0.0f32, 0.0f32, 1.0f64, 1.0f64),
+        (1.0, 0.0, 1.0, -1.0),
+        (0.0, 1.0, -1.0, 1.0),
+        (1.0, 1.0, -1.0, -1.0),
     ];
     let mut positions = Vec::with_capacity(4);
     let mut normals = Vec::with_capacity(4);
@@ -1536,10 +1542,13 @@ fn build_number_quad(
         normals.push([up.x as f32, up.y as f32, up.z as f32]);
         uvs.push([u, v]);
     }
-    // Wind the front face UP (`heading × across = up`): the digits previously
-    // wound face-down and shaded through the back-face path — ambient-only,
-    // reading as a dark smudge instead of white paint.
-    build_mesh(positions, normals, uvs, vec![0, 1, 2, 1, 3, 2])
+    // Wind the front face UP. The material is double-sided, so a back-facing
+    // fragment has its shading normal flipped to −up (facing away from the sun),
+    // shading the digits ambient-only — a dark smudge instead of white paint.
+    // Flipping the across-sign above (to un-mirror the text) reversed the
+    // triangle handedness, so the winding is reversed here (vs. the pre-fix
+    // `0,1,2,1,3,2`) to keep the top face the front, sun-lit one.
+    build_mesh(positions, normals, uvs, vec![0, 2, 1, 1, 2, 3])
 }
 
 /// Rasterize a runway designator string (e.g. "07", "25R") from the ICAO font
@@ -1552,9 +1561,36 @@ fn rasterize_designator(text: &str) -> Option<(u32, u32, Vec<u8>)> {
     let scale = PxScale::from(NUM_RASTER_PX_H as f32);
     let scaled = font.as_scaled(scale);
 
-    let advance: f32 = text.chars().map(|c| scaled.h_advance(font.glyph_id(c))).sum();
-    let w = advance.ceil().max(1.0) as u32;
-    let h = (scaled.ascent() - scaled.descent()).ceil().max(1.0) as u32;
+    // Outline every glyph at its pen position and collect the union of the ink
+    // bounds. The bitmap is then cropped tight to the actual painted pixels, so
+    // the quad centres on the glyphs themselves — not on the font's metric box
+    // (whose side bearings, trailing advance, and baseline/ascent padding would
+    // otherwise push the number off the runway centreline and along-runway).
+    let baseline = scaled.ascent();
+    let mut pen_x = 0.0f32;
+    let mut outlines = Vec::new();
+    let (mut min_x, mut min_y) = (f32::MAX, f32::MAX);
+    let (mut max_x, mut max_y) = (f32::MIN, f32::MIN);
+    for ch in text.chars() {
+        let id = font.glyph_id(ch);
+        let glyph = id.with_scale_and_position(scale, ab_glyph::point(pen_x, baseline));
+        if let Some(outlined) = font.outline_glyph(glyph) {
+            let b = outlined.px_bounds();
+            min_x = min_x.min(b.min.x);
+            min_y = min_y.min(b.min.y);
+            max_x = max_x.max(b.max.x);
+            max_y = max_y.max(b.max.y);
+            outlines.push(outlined);
+        }
+        pen_x += scaled.h_advance(id);
+    }
+    if outlines.is_empty() {
+        return None;
+    }
+    let off_x = min_x.floor() as i32;
+    let off_y = min_y.floor() as i32;
+    let w = (max_x.ceil() as i32 - off_x).max(1) as u32;
+    let h = (max_y.ceil() as i32 - off_y).max(1) as u32;
 
     // White pixels, alpha 0 (transparent) — the glyph coverage fills alpha.
     let mut pixels = vec![0u8; (w * h * 4) as usize];
@@ -1564,24 +1600,17 @@ fn rasterize_designator(text: &str) -> Option<(u32, u32, Vec<u8>)> {
         px[2] = 230;
     }
 
-    let baseline = scaled.ascent();
-    let mut pen_x = 0.0f32;
-    for ch in text.chars() {
-        let id = font.glyph_id(ch);
-        let glyph = id.with_scale_and_position(scale, ab_glyph::point(pen_x, baseline));
-        if let Some(outlined) = font.outline_glyph(glyph) {
-            let bounds = outlined.px_bounds();
-            outlined.draw(|gx, gy, coverage| {
-                let x = bounds.min.x as i32 + gx as i32;
-                let y = bounds.min.y as i32 + gy as i32;
-                if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
-                    let i = ((y as u32 * w + x as u32) * 4) as usize;
-                    let a = (coverage * 255.0).clamp(0.0, 255.0) as u8;
-                    pixels[i + 3] = pixels[i + 3].max(a);
-                }
-            });
-        }
-        pen_x += scaled.h_advance(id);
+    for outlined in &outlines {
+        let bounds = outlined.px_bounds();
+        outlined.draw(|gx, gy, coverage| {
+            let x = bounds.min.x as i32 - off_x + gx as i32;
+            let y = bounds.min.y as i32 - off_y + gy as i32;
+            if x >= 0 && y >= 0 && (x as u32) < w && (y as u32) < h {
+                let i = ((y as u32 * w + x as u32) * 4) as usize;
+                let a = (coverage * 255.0).clamp(0.0, 255.0) as u8;
+                pixels[i + 3] = pixels[i + 3].max(a);
+            }
+        });
     }
     Some((w, h, pixels))
 }
@@ -1924,14 +1953,19 @@ pub(crate) fn place_on_runway(
 
     // Landed: a frozen body-fixed pose at the gear equilibrium. Released to the
     // live bubble by the authority executor's throttle release on throttle-up.
-    sim.simulation.set_ship_state(state);
-    sim.simulation.set_attitude(attitude);
     let pose = body_fixed_pose_from_inertial(body_state, TranslationalState::from(state), attitude);
-    sim.simulation
-        .transition_authority(AuthorityMode::BodyFixed {
-            body: site.body_id,
-            pose,
-        });
+    place_craft(
+        sim,
+        CraftPlacement {
+            state,
+            attitude,
+            authority: AuthorityMode::BodyFixed {
+                body: site.body_id,
+                pose,
+            },
+        },
+        None,
+    );
     // Warp is left at the spawn default (paused); `spawn::apply_initial_warp`
     // sets the final level once on `Loading → Running` per `AutoRun`.
     sim.simulation.set_throttle(0.0);
@@ -1974,11 +2008,11 @@ fn place_approach(
         angular_velocity: DVec3::ZERO,
     };
 
-    sim.simulation
-        .set_ship_state(StateVector { position, velocity });
-    sim.simulation.set_attitude(attitude);
-    sim.simulation
-        .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
+    place_craft(
+        sim,
+        coast_placement(StateVector { position, velocity }, attitude),
+        None,
+    );
     // Warp is left at the spawn default (paused); `spawn::apply_initial_warp`
     // sets the final level once on `Loading → Running` per `AutoRun`.
     sim.simulation.set_throttle(0.0);

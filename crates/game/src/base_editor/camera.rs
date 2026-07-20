@@ -21,7 +21,7 @@ use crate::god_view::{self, GodViewFocus, GodViewInput, GodViewOrbit};
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::structures::StructureRegistry;
 
-use super::{BaseEditor, base_editor_open, compute_focus};
+use super::{BaseEditor, BaseEditorMode, base_editor_open, compute_focus};
 
 pub(super) struct BaseEditorCameraPlugin;
 
@@ -30,17 +30,32 @@ impl Plugin for BaseEditorCameraPlugin {
         // `GodViewOrbit` lives in `god_view::GodViewPlugin`.
         app.add_systems(
             Update,
-            (reset_orbit_on_open, drive_base_editor_camera)
+            (
+                reset_orbit_on_open,
+                drive_base_editor_camera.in_set(god_view::GodViewCameraSet),
+            )
                 .chain()
                 .run_if(base_editor_open),
         );
     }
 }
 
-/// Fresh establishing view whenever the editor opens.
+/// Fresh establishing view whenever the editor opens (or switches focus mode).
+///
+/// When the focus is an existing base — placing buildings or picking a launch
+/// point — it frames the whole base ([`GodViewOrbit::reset_over_base`]), the one
+/// default god-view per base shared with the space-center hub; when picking a
+/// *new* site on open terrain there is no base to frame, so it opens at the close
+/// default. Keyed on `is_changed()` (not just the open edge) so the
+/// PickSite → PlaceBuildings transition re-frames onto the freshly-flattened base
+/// — safe because `BaseEditor` only mutates on genuine open/mode/site changes,
+/// never per-frame.
 fn reset_orbit_on_open(editor: Res<BaseEditor>, mut orbit: ResMut<GodViewOrbit>) {
     if editor.is_changed() && editor.open {
-        orbit.reset();
+        match editor.mode {
+            BaseEditorMode::PlaceBuildings | BaseEditorMode::SelectLaunch => orbit.reset_over_base(),
+            BaseEditorMode::PickSite => orbit.reset(),
+        }
     }
 }
 

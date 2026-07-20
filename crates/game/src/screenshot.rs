@@ -38,11 +38,13 @@ use bevy::{
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
+use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
 use crate::loading::AppState;
 use crate::rendering::ground_terrain::BodyTerrain;
 use crate::rendering::{SimulationState, SolarSystemState};
+use thalos_body_render::HeightSource;
 use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 use crate::space_center::{HubContext, hub_context};
@@ -137,6 +139,15 @@ pub enum ScreenshotPreset {
     /// craft, so anything anchored to the craft (scatter, shadows) goes missing
     /// here first.
     Hub,
+    /// A low oblique survey over a **dry-belt desert** site — the verification
+    /// probe for terrain-per-biome work (landcover palette, the scatter/biome
+    /// gate). Boots the plain orbit scenario (no base), then searches the
+    /// daylight hemisphere for the *driest* low-latitude dry-land direction and
+    /// god-views the surface there, so the shot lands on genuine desert wherever
+    /// the moisture field puts it (seed/rotation-independent). Trees/shrubs
+    /// should be sparse-to-absent here and the ground tan; contrast with the
+    /// green spaceport `spaceport-aerial` shot (equatorial wet belt).
+    DryBelt,
 }
 
 impl ScreenshotPreset {
@@ -146,6 +157,7 @@ impl ScreenshotPreset {
             "" | "1" | "true" | "yes" | "on" | "spaceport" | "spaceport-aerial" | "aerial"
             | "base" => Self::SpaceportAerial,
             "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
+            "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
             other => {
                 eprintln!(
                     "  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial."
@@ -162,13 +174,17 @@ impl ScreenshotPreset {
             // The hub is the PLAY path: the placeholder parking orbit plus the
             // spaceport build (armed by `main.rs` via `boots_hub`).
             Self::Hub => SpawnSituation::ShipOrbit,
+            // Dry-belt frames wild terrain far from any base, so a plain orbit
+            // scenario is enough; the driver poses the camera over the searched
+            // desert site (the craft stays in orbit, irrelevant to the framing).
+            Self::DryBelt => SpawnSituation::ShipOrbit,
         }
     }
 
     /// Whether this preset boots the space-center hub route (spaceport built
     /// with no craft placed, hub opened on reveal) — `main.rs` arms
-    /// `HubSpaceportBuild` + `OpenSpaceCenterOnStart` for it, exactly like the
-    /// start screen's PLAY.
+    /// `HubSpaceportBuild` + `InitialContext(Some(SpaceCenter))` for it, exactly
+    /// like the start screen's PLAY.
     pub fn boots_hub(self) -> bool {
         matches!(self, Self::Hub)
     }
@@ -185,9 +201,10 @@ impl ScreenshotPreset {
                 distance_m: 4200.0,
                 warmup_frames: 180,
                 tail_frames: 24,
+                keep_hud: false,
             },
-            // Matches the hub's establishing view (`HUB_ESTABLISHING_DISTANCE_M`)
-            // so the capture shows what PLAY shows.
+            // Matches the hub's establishing view (`BASE_ESTABLISHING_DISTANCE_M`,
+            // the one god-view framing per base) so the capture shows what PLAY shows.
             Self::Hub => ScreenshotConfig {
                 preset: self,
                 out: PathBuf::from("tools/screenshots/hub.png"),
@@ -195,9 +212,26 @@ impl ScreenshotPreset {
                 height: 1080,
                 azimuth_deg: 35.0,
                 elevation_deg: 42.0,
-                distance_m: 4000.0,
+                distance_m: crate::god_view::BASE_ESTABLISHING_DISTANCE_M as f64,
                 warmup_frames: 240,
                 tail_frames: 24,
+                keep_hud: false,
+            },
+            // Low oblique, close in, so individual trees vs bare desert read
+            // (like an eye-level survey across the ground). A long warmup: cold
+            // tile streaming to a fresh wild site is slow (~15 s — the
+            // cold-streaming floor), and nothing pre-built the terrain here.
+            Self::DryBelt => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/dry_belt.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 35.0,
+                elevation_deg: 16.0,
+                distance_m: 1400.0,
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
             },
         }
     }
@@ -231,6 +265,10 @@ pub struct ScreenshotConfig {
     /// Frames to keep running after the capture so the async GPU readback flushes
     /// to disk before the app exits.
     pub tail_frames: u32,
+    /// Keep the flight HUD + overlays visible in the capture
+    /// (`THALOS_SCREENSHOT_HUD=1`). Default hides them for clean scene shots;
+    /// set it when iterating on the HUD itself.
+    pub keep_hud: bool,
 }
 
 impl ScreenshotConfig {
@@ -270,6 +308,12 @@ impl ScreenshotConfig {
         if let Some(v) = env_parse::<u32>("THALOS_SCREENSHOT_WARMUP") {
             cfg.warmup_frames = v;
         }
+        if let Ok(v) = env::var("THALOS_SCREENSHOT_HUD") {
+            cfg.keep_hud = matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            );
+        }
         Some(cfg)
     }
 }
@@ -302,6 +346,9 @@ struct ScreenshotDriver {
     captured: bool,
     /// Frames since the capture, for the readback-flush tail.
     tail: u32,
+    /// Cached body-fixed direction of the searched dry-belt site (DryBelt preset
+    /// only), resolved once so the framing stays fixed across warmup.
+    dry_site_dir: Option<DVec3>,
 }
 
 pub struct HeadlessScreenshotPlugin;
@@ -445,13 +492,18 @@ fn retarget_ship_camera(
 
 /// Hide the flight HUD and every photo-mode overlay so the capture shows only
 /// the world. Photo mode also gates the gizmo draws (orbits, trajectory, etc.).
+/// Skipped entirely under `THALOS_SCREENSHOT_HUD=1` — the HUD-iteration mode.
 fn hide_overlays(
+    cfg: Res<ScreenshotConfig>,
     mut photo: ResMut<crate::photo_mode::PhotoMode>,
     mut overlays: ParamSet<(
         Query<&mut Visibility, With<crate::hud::HudPanel>>,
         Query<&mut Visibility, With<crate::photo_mode::HideInPhotoMode>>,
     )>,
 ) {
+    if cfg.keep_hud {
+        return;
+    }
     if !photo.active {
         photo.active = true;
     }
@@ -490,10 +542,22 @@ fn drive_headless_screenshot(
         return; // wait until the camera renders into our target
     }
 
-    // Resolve the focus (spaceport pad centre) and pose the camera. If anything
-    // isn't ready yet, hold the frame counter so warmup only starts once we're
-    // actually framing the scene.
-    let Some(ctx) = hub_context(&sim, &solar, &height_sources, &registry, homeworld.0) else {
+    // Resolve the focus and pose the camera. If anything isn't ready yet, hold
+    // the frame counter so warmup only starts once we're actually framing the
+    // scene. Most presets frame the spaceport pad (`hub_context`); the dry-belt
+    // biome probe frames a searched desert site instead.
+    let ctx = if cfg.preset == ScreenshotPreset::DryBelt {
+        dry_site_context(
+            &sim,
+            &solar,
+            &height_sources,
+            homeworld.0,
+            &mut driver.dry_site_dir,
+        )
+    } else {
+        hub_context(&sim, &solar, &height_sources, &registry, homeworld.0)
+    };
+    let Some(ctx) = ctx else {
         return;
     };
     let Ok(root) = root_grid.single() else {
@@ -574,4 +638,117 @@ fn pose_camera(
     *cell = next_cell;
     *transform =
         Transform::from_translation(local).looking_to(to_focus.as_vec3(), look_up.as_vec3());
+}
+
+/// Sample LOD hint (m) for the dry-site search's height / moisture probes — a
+/// coarse focus query, not a placement gate, so a wide hint is fine.
+const DRY_SITE_LOD_M: f32 = 8.0;
+/// Minimum height above the reference radius (m) for a dry-site candidate, so
+/// the search lands on real land, not the shoreline / seabed.
+const DRY_SITE_MIN_HEIGHT_M: f32 = 3.0;
+/// Keep the search below this `|sin(latitude)|` (~46°) so it returns a warm
+/// subtropical desert, not a cold polar barren the treeline would clear anyway.
+const DRY_SITE_MAX_ABS_LAT_SIN: f64 = 0.72;
+
+/// Focus for the [`ScreenshotPreset::DryBelt`] biome probe: the driest sunlit
+/// dry-land site on `body_id`, framed at the surface. Mirrors [`hub_context`]'s
+/// output shape (world-space focus + local up), but instead of a base it
+/// searches for desert via [`find_driest_site`] and caches the body-fixed
+/// direction in `cached_dir` so the framing is stable across warmup. `None`
+/// before body state is available.
+fn dry_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    cached_dir: &mut Option<DVec3>,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let hs = height_sources.get(body_id)?;
+
+    let dir_body = match *cached_dir {
+        Some(d) => d,
+        None => {
+            // Sub-stellar direction in the body-fixed frame (Pyros sits at the
+            // heliocentric origin, so `-body_position` is local noon) → the lit
+            // hemisphere to search.
+            let sun_inertial = (-body_state.position).normalize_or_zero();
+            let sun_body = if sun_inertial == DVec3::ZERO {
+                DVec3::Y
+            } else {
+                (body_state.orientation.inverse() * sun_inertial).normalize()
+            };
+            let d = find_driest_site(hs.as_ref(), sun_body);
+            *cached_dir = Some(d);
+            let moisture = hs.landcover_moisture(d);
+            let lat_deg = d.y.clamp(-1.0, 1.0).asin().to_degrees();
+            info!(
+                target: "thalos::screenshot",
+                "dry-belt site: lat {lat_deg:.0}°, macro moisture {moisture:+.2} (drier = more desert)"
+            );
+            d
+        }
+    };
+
+    let up_world = (body_state.orientation * dir_body).normalize();
+    let height_m = hs
+        .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
+        .unwrap_or(0.0)
+        .max(0.0) as f64;
+    let pad_r = radius_m + height_m;
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * pad_r,
+        up_world,
+        pad_r,
+    })
+}
+
+/// Spiral the daylight hemisphere around `sun_dir_body` and return the
+/// body-fixed direction with the **lowest** macro landcover moisture among
+/// dry-land, low-latitude candidates — the desert the scatter/biome gate should
+/// render treeless. Falls back to the driest land seen, else the sub-stellar
+/// point. Pure query over the [`HeightSource`] (analytic moisture + CPU-fallback
+/// height), so it does not need resident tiles.
+fn find_driest_site(hs: &dyn HeightSource, sun_dir_body: DVec3) -> DVec3 {
+    let sun = sun_dir_body.try_normalize().unwrap_or(DVec3::Y);
+    let t1 = {
+        let seed = if sun.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+        (seed - sun * seed.dot(sun)).normalize()
+    };
+    let t2 = sun.cross(t1).normalize();
+
+    const RINGS: usize = 22;
+    // ~63° from local noon: comfortably lit, and wide enough to reach the
+    // subtropical dry belt (~15–40° latitude) from an equatorial sub-stellar point.
+    const MAX_ANGLE_RAD: f64 = 1.10;
+    let mut best: Option<(f32, DVec3)> = None; // (moisture, dir) — minimise moisture
+    for ring in 0..=RINGS {
+        let theta = MAX_ANGLE_RAD * ring as f64 / RINGS as f64;
+        let (st, ct) = theta.sin_cos();
+        let spokes = ((st * 28.0).ceil() as usize).max(1);
+        for spoke in 0..spokes {
+            let phi = std::f64::consts::TAU * spoke as f64 / spokes as f64;
+            let (sp, cp) = phi.sin_cos();
+            let dir = (sun * ct + (t1 * cp + t2 * sp) * st)
+                .try_normalize()
+                .unwrap_or(sun);
+            if dir.y.abs() > DRY_SITE_MAX_ABS_LAT_SIN {
+                continue;
+            }
+            let Some(h) = hs.sample_height_m(dir.as_vec3(), DRY_SITE_LOD_M) else {
+                continue;
+            };
+            if h <= DRY_SITE_MIN_HEIGHT_M {
+                continue; // ocean / shoreline — want dry LAND desert
+            }
+            let moisture = hs.landcover_moisture(dir);
+            if best.is_none_or(|(bm, _)| moisture < bm) {
+                best = Some((moisture, dir));
+            }
+        }
+    }
+    best.map(|(_, d)| d).unwrap_or(sun)
 }

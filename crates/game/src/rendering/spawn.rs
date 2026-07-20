@@ -30,8 +30,8 @@ use thalos_body_render::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, GpuAtlasMirrorHeightSource,
     MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial,
     RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
-    bake_impostor_albedo_cube, bake_multi_scatter_lut, blank_impostor_cube, build_ring_mesh,
-    cloud_cover_image_for_body,
+    bake_coast_bathymetry_cube, bake_impostor_albedo_cube, bake_multi_scatter_lut,
+    blank_coast_cube, blank_impostor_cube, build_ring_mesh, cloud_cover_image_for_body,
 };
 use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
@@ -221,6 +221,9 @@ pub(super) fn spawn_bodies(
     // (their vacuum atmosphere gate skips the sample; the binding just needs to
     // be a valid, layout-matching texture).
     let blank_ms_lut = blank_multi_scatter_lut(&mut images);
+    // 1×1 coast/bathymetry cube fallback for no-ocean bodies' `BodySky`
+    // (their `ocean.y` gate means it is never sampled).
+    let blank_coast = images.add(blank_coast_cube());
     commands.insert_resource(BlankCloudTextures {
         layer: blank_cloud.clone(),
         distance: blank_cloud_dist.clone(),
@@ -284,6 +287,22 @@ pub(super) fn spawn_bodies(
             let (sky_cloud_cover, _) =
                 cloud_cover_image_for_body(&body.name, &reference_clouds, &mut images);
 
+            // Coast/bathymetry cube for the analytic ocean's far-field
+            // coverage + colour (ADR-0005). Baked from the same runtime
+            // surface the tiles bake from; no-ocean bodies bind the blank
+            // (never sampled — `ocean.y` gates the branch). 1024²/face ≈
+            // 4.9 km texels on Thalos: macro islands (≥ ~10 km, the smallest
+            // the generator produces since relief never breaches) stay
+            // resolved at range instead of fading out as the far authority
+            // takes over — islands must not appear/disappear with camera
+            // distance. ~25 MB, ~6.3 M rayon-parallel macro samples at spawn.
+            let coast_atlas = if body.terrain.ocean_sea_level_m().is_some() {
+                let surface = ProceduralSurface::new(body.radius_m as f32, body.id as u32);
+                images.add(bake_coast_bathymetry_cube(&surface, 1024))
+            } else {
+                blank_coast.clone()
+            };
+
             let sky_material = BodySkyMaterial {
                 atmosphere: ship_atmosphere,
                 atmosphere_extra: BodySkyExtra::default(),
@@ -292,6 +311,10 @@ pub(super) fn spawn_bodies(
                 multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_layer: blank_cloud.clone(),
                 cloud_distance: blank_cloud_dist.clone(),
+                coast_atlas,
+                // Filled by `update_body_terrain_atmosphere` once the body's
+                // udlod terrain spawns (ADR-0006 height-tile lookup).
+                terrain_entity: None,
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),

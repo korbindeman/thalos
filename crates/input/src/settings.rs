@@ -553,7 +553,10 @@ pub mod defaults {
     pub fn game_camera() -> BindingSection {
         section(
             [
+                // Left = click/drag interactions (maneuver handles, body focus,
+                // teleport). Right = orbit the view — the god-view grammar.
                 ("primary", mouse_buttons([MouseButton::Left])),
+                ("orbit", mouse_buttons([MouseButton::Right])),
                 ("motion", vec![BindingSpec::MouseMotion]),
                 ("wheel", vec![BindingSpec::MouseWheel]),
             ],
@@ -619,7 +622,9 @@ pub mod defaults {
     pub fn shipyard() -> BindingSection {
         section(
             [
+                // Left = place / select parts, Right = orbit the build camera.
                 ("primary", mouse_buttons([MouseButton::Left])),
+                ("orbit", mouse_buttons([MouseButton::Right])),
                 ("camera_motion", vec![BindingSpec::MouseMotion]),
                 ("camera_wheel", vec![BindingSpec::MouseWheel]),
                 (

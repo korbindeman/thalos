@@ -2,17 +2,19 @@
 //! body parent translation, ship-layer mesh compensation, ship marker
 //! placement, and per-planet orientation (tidal lock + spin).
 
-use bevy::math::DQuat;
+use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
+use big_space::prelude::CellCoord;
 use thalos_physics_canonical::types::BodyState;
 use thalos_world::{BodyDefinition, BodyId};
 
 use super::screen_marker_radius;
 use super::types::{CelestialBody, ShipMarker, SimulationState, SolarSystemState, TidallyLocked};
-use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
+use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera, ShipCamera};
 use crate::coords::{
     MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, to_render_pos,
 };
+use crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M;
 use crate::flight_plan_view::FlightPlanView;
 use crate::map_view::{LinearMapProjection, MapProjection, MapSnapshot};
 use crate::view::ViewMode;
@@ -51,17 +53,41 @@ fn ghost_position(
 /// the switch, avoiding the f32 cancellation in `looking_at` that
 /// otherwise shows up as scene-wide jitter when transitioning between
 /// distant bodies.
+#[allow(clippy::too_many_arguments)]
 pub fn update_render_origin(
     cache: Res<SolarSystemState>,
     focus: Res<CameraFocus>,
     flight_plan: Option<Res<FlightPlanView>>,
     sim: Res<SimulationState>,
     player: Option<Res<crate::player_controller::PlayerControllerState>>,
+    context: Option<Res<State<crate::game_context::GameContext>>>,
+    god_view_cam: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     mut origin: ResMut<RenderOrigin>,
 ) {
     let Some(ref states) = cache.states else {
         return;
     };
+
+    // In-world god-view modes (space-center hub, base editor) drive the
+    // `ShipCamera` — the big_space `FloatingOrigin` — directly, decoupling it
+    // from `CameraFocus`: the focus target can sit in a parking orbit (or
+    // resolve to the star) while the camera god-views a surface base. Because
+    // `RenderOrigin` is what every render-space entity *outside* big_space
+    // measures from — the sun-shadow cascade cameras above all — it must mirror
+    // that FloatingOrigin, or those entities land ~heliocentric-scale away from
+    // the big_space-rendered world and render nothing (the "no shadows over the
+    // base in the hub" bug). These contexts freeze the sim, so the one-frame-
+    // stale camera pose read here is coherent: there is no warp motion to jitter
+    // the origin, unlike flight — where the fresh focus-target position below is
+    // required to stay locked to the moving craft.
+    if crate::game_context::context_freezes_sim(context.as_deref())
+        && let Ok((cell, transform)) = god_view_cam.single()
+    {
+        origin.position = DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
+            * REAL_SPACE_CELL_SIZE_M as f64
+            + transform.translation.as_dvec3();
+        return;
+    }
 
     let target_position = match focus.target {
         CameraFocusTarget::Body(body_id) => states

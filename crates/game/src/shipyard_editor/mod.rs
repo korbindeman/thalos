@@ -37,29 +37,21 @@ use self::core::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
 
 use crate::coords::EDITOR_LAYER;
 use crate::hud::HudPanel;
-use crate::loading::AppState;
 use crate::photo_mode::HideInPhotoMode;
 
-pub use ui::EditorTextFocus;
 
 /// Whether the in-game shipyard editor is open. A sim-clock pause source.
 ///
-/// **Sole writer of `open`:** the pause menu's SHIPYARD button, Escape via
-/// `pause_menu::handle_escape_input`, and `just game shipyard` startup.
+/// `open` is a **derived mirror** of [`GameContext::Vab`](crate::game_context::GameContext)
+/// (Phase 3): its sole writer is `game_context::mirror_context_to_booleans`. The
+/// VAB is entered by setting `NextState<GameContext>` — the pause menu's SHIPYARD
+/// button, the hub's VAB facility, `just game shipyard` via
+/// [`InitialContext`](crate::game_context::InitialContext), and Escape / Exit
+/// back-out via [`ContextHistory`](crate::game_context::ContextHistory).
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct ShipyardEditor {
     pub open: bool,
 }
-
-/// Open the editor the instant the game finishes loading (set by `main.rs`
-/// for `just game shipyard`). The editor must **not** open during
-/// `AppState::Loading`: while it is open the three `SimStage` sets are gated
-/// off (it's a separate scene), and the terrain/body-state systems that
-/// *complete* loading live in those sets — so opening early would deadlock
-/// the loading screen. Deferring the open to `OnEnter(Running)` keeps the
-/// world load running with the editor closed.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct OpenShipyardOnStart(pub bool);
 
 /// Run condition: the shipyard editor is closed.
 pub fn editor_closed(editor: Option<Res<ShipyardEditor>>) -> bool {
@@ -80,29 +72,12 @@ impl Plugin for ShipyardEditorPlugin {
             .add_plugins(scene::EditorScenePlugin)
             .add_plugins(ui::EditorUiPlugin)
             .init_resource::<ShipyardEditor>()
-            .init_resource::<OpenShipyardOnStart>()
             .add_systems(
                 PreUpdate,
                 sync_editor_ui_gate.before(bevy::picking::PickingSystems::Hover),
             )
-            // Deferred open: only once the world has loaded (see
-            // `OpenShipyardOnStart`).
-            .add_systems(OnEnter(AppState::Running), open_on_start)
             .add_systems(Update, apply_open_state)
             .add_systems(PostUpdate, propagate_editor_render_layers);
-    }
-}
-
-/// Open the editor on entry to `AppState::Running` when launched with
-/// `just game shipyard` (or via the start screen's SHIPYARD button) — after
-/// the world has loaded, never during it.
-fn open_on_start(mut flag: ResMut<OpenShipyardOnStart>, mut editor: ResMut<ShipyardEditor>) {
-    if flag.0 {
-        editor.open = true;
-        // One-shot: `OnEnter(Running)` fires again on every later loading
-        // pass (start-screen runway starts), which must not re-open the
-        // editor. The start screen's SHIPYARD button re-arms this.
-        flag.0 = false;
     }
 }
 
