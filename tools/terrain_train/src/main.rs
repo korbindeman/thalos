@@ -6,6 +6,7 @@ compile_error!("select exactly one of the cpu or gpu features");
 compile_error!("select one of the cpu or gpu features");
 
 mod config;
+mod dem;
 mod grid;
 mod output;
 mod pyramid;
@@ -39,6 +40,9 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "smoke".into());
+    if command == "prepare-dem" {
+        return prepare_dem(args.collect());
+    }
     let flag = args.next().unwrap_or_else(|| "--config".into());
     if flag != "--config" {
         return Err("usage: thalos_terrain_train <prepare|smoke> --config <path>".into());
@@ -60,6 +64,42 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         "smoke" => smoke(&config)?,
         _ => return Err(format!("unknown command {command:?}; expected prepare or smoke").into()),
     }
+    Ok(())
+}
+
+fn prepare_dem(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !arguments.len().is_multiple_of(2) {
+        return Err("prepare-dem options must be --name value pairs".into());
+    }
+    let options: std::collections::HashMap<_, _> = arguments
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+    let required = |name: &str| -> Result<&str, Box<dyn std::error::Error>> {
+        options
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("missing prepare-dem option {name}").into())
+    };
+    let options = dem::PrepareOptions {
+        input: required("--input")?.into(),
+        output: required("--output")?.into(),
+        source_id: required("--source-id")?.into(),
+        split: required("--split")?.into(),
+        expected_sha256: required("--sha256")?.into(),
+        native_metres_per_pixel: required("--native-mpp")?.parse()?,
+        target_metres_per_pixel: required("--target-mpp")?.parse()?,
+        patch_size: required("--patch-size")?.parse()?,
+        stride: required("--stride")?.parse()?,
+    };
+    let count = dem::prepare(&options)?;
+    println!(
+        "prepared {count} verified {} patches in {}",
+        options.split,
+        options.output.display()
+    );
     Ok(())
 }
 

@@ -24,8 +24,45 @@
       "citation": "JAXA/USGS/NASA Kaguya TC DTMs, doi:10.5066/P13D7VMG",
       "native_resolution": "11-37 metres per pixel",
       "license": "CC0-1.0",
-      "artifacts": [],
-      "pin_status": "roi_selection_required"
+      "artifacts": [
+        {
+          "id": "kaguya_mare_contact_train",
+          "split": "train",
+          "stac_item": "TC2W2B0_01_01694N252E3545__TC1W2B0_01_01694N255E3545",
+          "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_01694N252E3545__TC1W2B0_01_01694N255E3545/TC2W2B0_01_01694N252E3545__TC1W2B0_01_01694N255E3545_ba-aligned-DEM.tif",
+          "local_path": "terrain_data/raw/kaguya/mare_contact_train.tif",
+          "sha256": "46b6e8ecbf439cd0f8ca0f8f23c9847a042c061c9b52af95a7d4518523e4f7f6",
+          "bytes": 6458304,
+          "shape_yx": [1257, 1178],
+          "bbox_lon_lat": [-6.122050847196363, 24.719925194961515, -4.928649547289524, 26.003373319914388],
+          "metres_per_pixel": 30.32532008350371
+        },
+        {
+          "id": "kaguya_copernicus_validation",
+          "split": "validation",
+          "stac_item": "TC1W2B0_01_05716N090E3401__TC2W2B0_01_05716N093E3401",
+          "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC1W2B0_01_05716N090E3401__TC2W2B0_01_05716N093E3401/TC1W2B0_01_05716N090E3401__TC2W2B0_01_05716N093E3401_ba-aligned-DEM.tif",
+          "local_path": "terrain_data/raw/kaguya/copernicus_validation.tif",
+          "sha256": "811d67da100242913adbae1495770bf6c424c0cdadccab184a23b5c6813101b1",
+          "bytes": 9940400,
+          "shape_yx": [1995, 1304],
+          "bbox_lon_lat": [-20.352530126784814, 8.51612983705794, -19.514475764789097, 9.797850155583584],
+          "metres_per_pixel": 19.072880418585456
+        },
+        {
+          "id": "kaguya_tycho_holdout",
+          "split": "holdout",
+          "stac_item": "TC2W2B0_01_02700S427E3484__TC1W2B0_01_02700S432E3484",
+          "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_02700S427E3484__TC1W2B0_01_02700S432E3484/TC2W2B0_01_02700S427E3484__TC1W2B0_01_02700S432E3484_ba-aligned-DEM.tif",
+          "local_path": "terrain_data/raw/kaguya/tycho_holdout.tif",
+          "sha256": "58551ea0e083107f3aabcce4ed86e969d08805736bf1e5b425d54811f4b0bf1f",
+          "bytes": 4209915,
+          "shape_yx": [835, 1253],
+          "bbox_lon_lat": [-12.404384528033916, -43.48919655474319, -10.767105427525962, -42.37870020996732],
+          "metres_per_pixel": 38.81533473483186
+        }
+      ],
+      "pin_status": "three_disjoint_s3_rois_pinned"
     },
     {
       "id": "thalos_airless_synthetic_v1",

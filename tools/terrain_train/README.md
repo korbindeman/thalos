@@ -15,3 +15,22 @@ later add CUDA, ROCm, or Burn's Candle backend without changing model code.
 
 `configs/mira_s2.toml` records the production-shaped S2 campaign. It is a
 measurement target, not a claim that its current capacity is final.
+
+## Verified real DEM preparation
+
+Exact Kaguya artifacts and splits are pinned in `terrain_data/manifest.json`.
+The Rust preprocessor refuses a mismatched SHA-256, decodes float32 COG/GeoTIFF,
+resamples to a common physical scale, rejects patches below 99% valid coverage,
+removes per-patch vertical bias, and writes f32 little-endian patches plus an
+index. Example:
+
+```bash
+cargo run -p thalos_terrain_train -- prepare-dem \
+  --input terrain_data/raw/kaguya/copernicus_validation.tif \
+  --output terrain_data/processed/kaguya_s3/validation \
+  --source-id kaguya_copernicus_validation \
+  --split validation \
+  --sha256 811d67da100242913adbae1495770bf6c424c0cdadccab184a23b5c6813101b1 \
+  --native-mpp 19.072880418585456 --target-mpp 40 \
+  --patch-size 256 --stride 128
+```

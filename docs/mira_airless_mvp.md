@@ -399,8 +399,21 @@ disagreed by `1.674274 m RMS` before weighted fusion. CPU and WGPU feature
 graphs both compile. The inspected corpus/Laplacian sheet has crater structure,
 but the two-epoch sampled residual remains noise-like, so this proves the
 data/model/checkpoint/overlap path only and does **not** satisfy MIRA-1's quality
-exit. Exact lunar artifact pins, real-DEM preparation, EMA/resume, campaign
-training, spectral/slope/SFD validation, and GPU VRAM/timing remain open.
+exit.
+
+Three exact CC0 USGS Kaguya/LOLA-aligned S3 teachers are now pinned by URL,
+STAC item, byte size, SHA-256, shape, bounding box, physical resolution, and
+split: a 30.33 m/px mare/highland contact for training, 19.07 m/px Copernicus
+block for validation, and 38.82 m/px Tycho block for holdout. The Rust
+preprocessor verifies the complete download before decoding its float32 COG,
+resamples all three to 40 m/px, rejects patches below 99% valid coverage,
+locally inpaints the remaining small no-data islands, removes vertical bias,
+and produced 23 train / 5 validation / 28 holdout 256² patches. Their
+hillshades were inspected and the split regions do not overlap. The partial
+Tycho download was deliberately rejected by the checksum gate before the
+complete 4,209,915-byte artifact was adopted. The SLDEM2015 macro teacher,
+EMA/resume, combined campaign training, spectral/slope/SFD validation, and GPU
+VRAM/timing remain open.
 
 **Exit:** a fixed-seed patch set shows plausible fresh/old crater morphology,
 no terrestrial drainage signature, seamless overlap interiors, stable repeated

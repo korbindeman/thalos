@@ -15,10 +15,11 @@ metric, SafeTensors, and contact-sheet artifacts below `terrain_runs/`; both are
 ignored. The default backend is Burn Flex/CPU. Verify the portable GPU graph
 with `cargo check -p thalos_terrain_train --no-default-features --features gpu`.
 
-Real-data adoption is intentionally two-step. First select exact SLDEM2015 and
-Kaguya assets and add their URLs, sizes, SHA-256 hashes, spatial extents, and
-licence/citation records to `manifest.json`. Only then may the downloader fetch
-them into `terrain_data/raw/`. A catalog URL is not an artifact pin.
+Real-data adoption is intentionally two-step. Exact Kaguya S3 train,
+validation, and holdout artifacts are now pinned in `manifest.json`; the
+SLDEM2015 macro selection remains open. Add every future artifact's URL, size,
+SHA-256, spatial extent, and licence/citation record before fetching it into
+`terrain_data/raw/`. A catalog URL is not an artifact pin.
 
 Geographic train/validation/holdout blocks must not overlap. Record the split
 at selection time rather than randomly splitting already-extracted patches.
