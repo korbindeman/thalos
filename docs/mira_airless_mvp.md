@@ -423,9 +423,20 @@ train, Copernicus-validation, and Tycho-holdout range hashes are recorded in
 `terrain_data/manifest.json`; all three have 100% valid samples, zero >150 m
 single-pixel impulses, and inspected structurally distinct hillshades.
 
-SLDEM distribution-rights confirmation for derived-weight release, EMA/resume,
-combined campaign training, spectral/slope/SFD validation, and GPU VRAM/timing
-remain open.
+Training now applies the configured EMA after every optimizer step and uses it
+for validation/export. Each epoch checkpoint stores raw and EMA SafeTensors,
+full-precision Adam state, deterministic progress, physical scales, and a
+parameter-path-to-Burn-ID map. Resume remaps Adam slots by path because Burn
+parameter IDs are randomized per process. In the smoke proof, a run resumed
+from epoch 2 through epoch 3 exactly matched an uninterrupted 3-epoch run:
+final loss `0.9612839`, EMA hash
+`f982b142fc91b904a7103b72acb7a0b6fe9dcd6af8dbdf7dc0dd3127054c47ff`,
+and raw hash
+`41858e5b929da18af031f148065c0d68617fec987c09fc1528d40e946be943e6`.
+
+SLDEM distribution-rights confirmation for derived-weight release, combined
+campaign training, spectral/slope/SFD validation, and GPU VRAM/timing remain
+open.
 
 **Exit:** a fixed-seed patch set shows plausible fresh/old crater morphology,
 no terrestrial drainage signature, seamless overlap interiors, stable repeated

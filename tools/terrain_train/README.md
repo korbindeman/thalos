@@ -16,6 +16,13 @@ later add CUDA, ROCm, or Burn's Candle backend without changing model code.
 `configs/mira_s2.toml` records the production-shaped S2 campaign. It is a
 measurement target, not a claim that its current capacity is final.
 
+Training exports the EMA model as `model.safetensors` and the unaveraged model
+as `raw_model.safetensors`. Epoch checkpoints include both weight sets, Adam
+state, and `checkpoint.json`. Set `train.resume = true` to continue to the
+configured total epoch count. Adam slots are remapped by stable parameter path
+on load because Burn parameter IDs are process-local; a resumed run is expected
+to match uninterrupted canonical tensor hashes exactly.
+
 ## Verified real DEM preparation
 
 Exact Kaguya artifacts and splits are pinned in `terrain_data/manifest.json`.

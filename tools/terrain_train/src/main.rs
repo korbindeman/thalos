@@ -193,7 +193,7 @@ fn smoke(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
 
 fn model_card(config: &Config, report: &train::TrainingReport) -> String {
     format!(
-        "# {}\n\nExperimental MIRA-1 S3 airless residual denoiser. Not accepted for package production.\n\n- Framework: Burn {} ({})\n- Seed: {}\n- Samples: {} synthetic, geographic lunar products not yet adopted\n- Patch: {} px at {} m/px\n- Diffusion: {} linear-beta steps, {} deterministic DDIM sample steps\n- Training: {} epochs, {} batches\n- Noise-prediction MSE: {:.6} → {:.6}\n- Runtime: {:.3} s\n- Canonical tensor SHA-256: `{}`\n- Overlap windows: {}, disagreement RMS {:.6} m\n- Repeat determinism max delta: {:.9} m\n- Tensor contract: 8 input channels, one S3 noise channel\n- Limitations: EMA is configured ({:.5}) but not applied in this tracer; real DEMs, spectral/slope/SFD acceptance, and campaign-scale quality remain open.\n- Intended use: offline patch proof only\n",
+        "# {}\n\nExperimental MIRA-1 S3 airless residual denoiser. Not accepted for package production.\n\n- Framework: Burn {} ({})\n- Seed: {}\n- Samples: {} synthetic; pinned lunar teachers are prepared but not yet mixed into this run\n- Patch: {} px at {} m/px\n- Diffusion: {} linear-beta steps, {} deterministic DDIM sample steps\n- Training: {} epochs, {} batches; resumed from epoch {}\n- Noise-prediction MSE: {:.6} → {:.6}\n- Runtime: {:.3} s\n- EMA decay: {:.5}\n- EMA tensor SHA-256: `{}`\n- Raw tensor SHA-256: `{}`\n- Overlap windows: {}, disagreement RMS {:.6} m\n- Repeat determinism max delta: {:.9} m\n- Tensor contract: 8 input channels, one S3 noise channel\n- Limitations: real-data mixing, spectral/slope/SFD acceptance, and campaign-scale quality remain open.\n- Intended use: offline patch proof only\n",
         config.run.name,
         report.burn_version,
         report.backend,
@@ -205,14 +205,16 @@ fn model_card(config: &Config, report: &train::TrainingReport) -> String {
         report.validation.sample_steps,
         report.epochs,
         report.batches,
+        report.resumed_from_epoch,
         report.initial_loss,
         report.final_loss,
         report.elapsed_seconds,
+        report.requested_ema_decay,
         report.model_tensor_sha256,
+        report.raw_model_tensor_sha256,
         report.validation.windows,
         report.validation.overlap_prediction_rms_m,
         report.validation.repeated_generation_max_abs_delta_m,
-        report.requested_ema_decay,
     )
 }
 

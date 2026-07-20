@@ -55,6 +55,14 @@ pub struct Train {
     pub gradient_clip: f32,
     pub num_workers: usize,
     pub device: String,
+    #[serde(default)]
+    pub resume: bool,
+    #[serde(default = "default_checkpoint_every_epochs")]
+    pub checkpoint_every_epochs: usize,
+}
+
+fn default_checkpoint_every_epochs() -> usize {
+    1
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -100,6 +108,9 @@ impl Config {
         }
         if self.train.num_workers > 256 {
             return Err("num_workers exceeds the supported configuration range".into());
+        }
+        if self.train.checkpoint_every_epochs == 0 {
+            return Err("checkpoint_every_epochs must be positive".into());
         }
         Ok(())
     }

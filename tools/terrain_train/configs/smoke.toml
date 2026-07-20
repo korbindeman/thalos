@@ -32,6 +32,8 @@ ema_decay = 0.995
 gradient_clip = 1.0
 num_workers = 0
 device = "auto"
+resume = false
+checkpoint_every_epochs = 1
 
 [validation]
 canvas_width = 128

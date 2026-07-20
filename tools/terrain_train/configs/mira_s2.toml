@@ -32,6 +32,8 @@ ema_decay = 0.9999
 gradient_clip = 1.0
 num_workers = 8
 device = "cuda"
+resume = true
+checkpoint_every_epochs = 1
 
 [validation]
 canvas_width = 768

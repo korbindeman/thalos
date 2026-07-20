@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
+use std::{collections::BTreeMap, io};
 
 use burn::backend::Autodiff;
 #[cfg(feature = "cpu")]
@@ -7,17 +8,18 @@ use burn::backend::Flex;
 #[cfg(feature = "gpu")]
 use burn::backend::Wgpu;
 use burn::grad_clipping::GradientClippingConfig;
-use burn::module::AutodiffModule;
+use burn::module::{AutodiffModule, ParamId};
 use burn::nn::loss::{MseLoss, Reduction};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::prelude::*;
+use burn::record::{DefaultRecorder, Recorder};
 use burn::store::{ModuleSnapshot, SafetensorsStore};
 use burn::tensor::TensorData;
 use burn::tensor::backend::BackendTypes;
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
 use safetensors::SafeTensors;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thalos_terrain_learned::{
     AirlessDenoiser, AirlessDenoiserConfig, CONDITION_CHANNELS, DiffusionSchedule,
@@ -45,9 +47,27 @@ pub struct TrainingReport {
     pub coarse_scale_metres: f32,
     pub requested_device: String,
     pub requested_ema_decay: f32,
+    pub resumed_from_epoch: usize,
     pub configured_workers: usize,
     pub model_tensor_sha256: String,
+    pub raw_model_tensor_sha256: String,
     pub validation: crate::validate::ValidationReport,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CheckpointState {
+    schema_version: u32,
+    run_name: String,
+    seed: u64,
+    patch_size: usize,
+    hidden_channels: usize,
+    completed_epochs: usize,
+    batches: usize,
+    initial_loss: f32,
+    final_loss: f32,
+    target_scale_metres: f32,
+    coarse_scale_metres: f32,
+    parameter_ids: BTreeMap<String, String>,
 }
 
 struct Prepared<'a> {
@@ -94,18 +114,71 @@ pub fn run(
             config.train.gradient_clip,
         )))
         .init();
+    let mut ema_model = model.valid();
     let schedule = DiffusionSchedule::linear(
         config.diffusion.timesteps,
         config.diffusion.beta_start,
         config.diffusion.beta_end,
     )?;
-    let mut rng = ChaCha8Rng::seed_from_u64(config.run.seed ^ 0xa110_e551_u64);
     let started = Instant::now();
     let mut losses = Vec::new();
     let mut batches = 0usize;
+    let mut start_epoch = 0usize;
+    let checkpoint_state_path = output_dir.join("checkpoint.json");
 
-    for _epoch in 0..config.train.epochs {
-        for chunk in prepared.chunks(config.train.batch_size.max(1)) {
+    if config.train.resume && checkpoint_state_path.exists() {
+        let state: CheckpointState =
+            serde_json::from_slice(&std::fs::read(&checkpoint_state_path)?)?;
+        validate_checkpoint(config, &state, target_scale, coarse_scale)?;
+        let mut raw_store =
+            SafetensorsStore::from_file(output_dir.join("checkpoint_model.safetensors"));
+        ensure_loaded(model.load_from(&mut raw_store)?, "raw model")?;
+        let mut ema_store =
+            SafetensorsStore::from_file(output_dir.join("checkpoint_ema.safetensors"));
+        ensure_loaded(ema_model.load_from(&mut ema_store)?, "EMA model")?;
+        let optimizer_record = load_record_like(
+            optimizer.to_record(),
+            &output_dir.join("checkpoint_optimizer"),
+            &device,
+        )?;
+        let current_ids = parameter_ids(&model)?;
+        let mut old_to_new = BTreeMap::new();
+        for (path, old_id) in &state.parameter_ids {
+            let current_id = current_ids.get(path).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("checkpoint parameter path {path:?} is missing"),
+                )
+            })?;
+            old_to_new.insert(
+                ParamId::deserialize(old_id),
+                ParamId::deserialize(current_id),
+            );
+        }
+        let mut remapped_record = optimizer.to_record();
+        remapped_record.clear();
+        for (old_id, record) in optimizer_record {
+            let new_id = old_to_new.get(&old_id).copied().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("checkpoint optimizer references unknown parameter {old_id}"),
+                )
+            })?;
+            remapped_record.insert(new_id, record);
+        }
+        optimizer = optimizer.load_record(remapped_record);
+        start_epoch = state.completed_epochs;
+        batches = state.batches;
+        losses.push(state.initial_loss);
+        losses.push(state.final_loss);
+    }
+
+    let batch_size = config.train.batch_size.max(1);
+    let batches_per_epoch = prepared.len().div_ceil(batch_size);
+    for epoch in start_epoch..config.train.epochs {
+        for (batch_in_epoch, chunk) in prepared.chunks(batch_size).enumerate() {
+            let global_batch = epoch * batches_per_epoch + batch_in_epoch;
+            let mut rng = ChaCha8Rng::seed_from_u64(batch_seed(config.run.seed, global_batch));
             let (input, expected) = batch_tensors(
                 chunk,
                 config,
@@ -120,12 +193,47 @@ pub fn run(
             let loss_value: f32 = loss.clone().into_scalar();
             let gradients = GradientsParams::from_grads(loss.backward(), &model);
             model = optimizer.step(config.train.learning_rate, model, gradients);
+            ema_model = ema_model.ema_update(&model.valid(), config.train.ema_decay);
             losses.push(loss_value);
             batches += 1;
         }
+        let completed_epochs = epoch + 1;
+        if completed_epochs.is_multiple_of(config.train.checkpoint_every_epochs)
+            || completed_epochs == config.train.epochs
+        {
+            save_model(
+                &model.valid(),
+                &output_dir.join("checkpoint_model.safetensors"),
+                "mira_airless_patch_checkpoint_raw",
+            )?;
+            save_model(
+                &ema_model,
+                &output_dir.join("checkpoint_ema.safetensors"),
+                "mira_airless_patch_checkpoint_ema",
+            )?;
+            DefaultRecorder::default().record(
+                optimizer.to_record(),
+                output_dir.join("checkpoint_optimizer"),
+            )?;
+            let state = CheckpointState {
+                schema_version: 1,
+                run_name: config.run.name.clone(),
+                seed: config.run.seed,
+                patch_size: config.data.patch_size,
+                hidden_channels: config.model.base_channels,
+                completed_epochs,
+                batches,
+                initial_loss: losses.first().copied().unwrap_or(f32::NAN),
+                final_loss: losses.last().copied().unwrap_or(f32::NAN),
+                target_scale_metres: target_scale,
+                coarse_scale_metres: coarse_scale,
+                parameter_ids: parameter_ids(&model)?,
+            };
+            std::fs::write(&checkpoint_state_path, serde_json::to_vec_pretty(&state)?)?;
+        }
     }
 
-    let inference_model = model.valid();
+    let inference_model = ema_model;
     let validation = crate::validate::run(
         &inference_model,
         config,
@@ -144,12 +252,19 @@ pub fn run(
         config.validation.canvas_width,
         config.validation.canvas_height,
     )?;
-    let mut store = SafetensorsStore::from_file(output_dir.join("model.safetensors"))
-        .overwrite(true)
-        .metadata("thalos_model", "mira_airless_patch_v0")
-        .metadata("burn_version", "0.21.0");
-    inference_model.save_into(&mut store)?;
+    save_model(
+        &inference_model,
+        &output_dir.join("model.safetensors"),
+        "mira_airless_patch_v0_ema",
+    )?;
+    save_model(
+        &model.valid(),
+        &output_dir.join("raw_model.safetensors"),
+        "mira_airless_patch_v0_raw",
+    )?;
     let model_tensor_sha256 = canonical_safetensors_hash(&output_dir.join("model.safetensors"))?;
+    let raw_model_tensor_sha256 =
+        canonical_safetensors_hash(&output_dir.join("raw_model.safetensors"))?;
 
     Ok(TrainingReport {
         backend: backend_name(),
@@ -163,10 +278,94 @@ pub fn run(
         coarse_scale_metres: coarse_scale,
         requested_device: config.train.device.clone(),
         requested_ema_decay: config.train.ema_decay,
+        resumed_from_epoch: start_epoch,
         configured_workers: config.train.num_workers,
         model_tensor_sha256,
+        raw_model_tensor_sha256,
         validation: validation.report,
     })
+}
+
+fn ensure_loaded(
+    result: burn::store::ApplyResult,
+    label: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if result.is_success() {
+        Ok(())
+    } else {
+        Err(format!("checkpoint {label} load failed: {result:?}").into())
+    }
+}
+
+fn validate_checkpoint(
+    config: &Config,
+    state: &CheckpointState,
+    target_scale: f32,
+    coarse_scale: f32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let compatible = state.schema_version == 1
+        && state.run_name == config.run.name
+        && state.seed == config.run.seed
+        && state.patch_size == config.data.patch_size
+        && state.hidden_channels == config.model.base_channels
+        && state.target_scale_metres.to_bits() == target_scale.to_bits()
+        && state.coarse_scale_metres.to_bits() == coarse_scale.to_bits()
+        && state.completed_epochs <= config.train.epochs;
+    if compatible {
+        Ok(())
+    } else {
+        Err(format!("checkpoint is incompatible with current config: {state:?}").into())
+    }
+}
+
+fn save_model<B: Backend>(
+    model: &AirlessDenoiser<B>,
+    path: &Path,
+    identity: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut store = SafetensorsStore::from_file(path)
+        .overwrite(true)
+        .metadata("thalos_model", identity)
+        .metadata("burn_version", "0.21.0");
+    model.save_into(&mut store)?;
+    Ok(())
+}
+
+fn parameter_ids<B: Backend>(
+    model: &AirlessDenoiser<B>,
+) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error>> {
+    model
+        .collect(None, None, false)
+        .into_iter()
+        .map(|snapshot| {
+            let path = snapshot.full_path();
+            let id = snapshot.tensor_id.ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("trainable parameter {path:?} has no Burn ParamId"),
+                )
+            })?;
+            Ok((path, id.serialize()))
+        })
+        .collect()
+}
+
+fn load_record_like<B: Backend, R: burn::record::Record<B>>(
+    prototype: R,
+    path: &Path,
+    device: &B::Device,
+) -> Result<R, Box<dyn std::error::Error>> {
+    drop(prototype);
+    Ok(DefaultRecorder::default().load(path.to_path_buf(), device)?)
+}
+
+fn batch_seed(run_seed: u64, global_batch: usize) -> u64 {
+    let mut value = run_seed
+        ^ (global_batch as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ 0xa110_e551_d1ff_0510;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
 }
 
 fn batch_tensors(
