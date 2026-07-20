@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "updated": "2026-07-20",
+  "body_family": "airless",
+  "sources": [
+    {
+      "id": "sldem2015_global",
+      "role": "global_macro_teacher",
+      "catalog_url": "https://pgda.gsfc.nasa.gov/products/54",
+      "download_root": "http://imbrium.mit.edu/DATA/SLDEM2015/",
+      "citation": "Barker et al. 2016, Icarus 273, 346-355, doi:10.1016/j.icarus.2015.07.039",
+      "coverage": "60S to 60N",
+      "native_resolution": "512 pixels per degree",
+      "license_status": "verify exact selected artifacts before download or derived-weight distribution",
+      "artifacts": [],
+      "pin_status": "selection_required"
+    },
+    {
+      "id": "kaguya_tc_usgs_dtms",
+      "role": "regional_high_pass_teacher",
+      "catalog_url": "https://registry.opendata.aws/jaxa-usgs-nasa-kaguya-tc-dtms/",
+      "stac_url": "https://stac.astrogeology.usgs.gov/docs/data/moon/kaguyatc/",
+      "s3_root": "s3://astrogeo-ard/moon/kaguya/terrain_camera/usgs_dtms/",
+      "citation": "JAXA/USGS/NASA Kaguya TC DTMs, doi:10.5066/P13D7VMG",
+      "native_resolution": "11-37 metres per pixel",
+      "license": "CC0-1.0",
+      "artifacts": [],
+      "pin_status": "roi_selection_required"
+    },
+    {
+      "id": "thalos_airless_synthetic_v1",
+      "role": "process_and_conditioning_teacher",
+      "generator": "tools/terrain_train/src/synthetic.rs",
+      "algorithm_version": 1,
+      "seed_contract": "ChaCha8Rng from sample seed",
+      "license": "project-owned",
+      "pin_status": "ready"
+    }
+  ],
+  "split_contract": {
+    "train": "geographic blocks selected before patch extraction",
+    "validation": "disjoint named blocks",
+    "holdout": "at least one mare contact and one highland crater field never used for fitting"
+  }
+}

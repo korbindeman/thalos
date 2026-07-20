@@ -18,6 +18,8 @@ members = [
     "crates/big_space",
     "crates/bevy_erosion_filter",
     "crates/terrain_baker",
+    "crates/terrain_learned",
+    "tools/terrain_train",
 ]
 
 [workspace.package]
@@ -29,6 +31,7 @@ thalos_udlod = { path = "crates/udlod" }
 # Vendored fork (crates/big_space). i64 cell precision is the workspace-wide
 # choice; consumers inherit it via `big_space = { workspace = true }`.
 big_space = { path = "crates/big_space", features = ["i64"] }
+burn = { version = "=0.21.0", default-features = false }
 
 # Shared dev defaults stay portable. Platform-specific compiler/linker
 # tuning belongs in local, ignored Cargo config; see `docs/tooling.md`.

@@ -24,3 +24,9 @@ Cargo.lock
 .codex/
 crates/ui/tools/ui_preview/kitchen_sink.png
 rustc-ice-2026-07-20T17_25_42-22912.txt
+# MIRA-1 training data and run artifacts. Manifests/configs stay tracked.
+terrain_data/raw/
+terrain_data/processed/
+terrain_data/synthetic/
+terrain_runs/
+**/__pycache__/

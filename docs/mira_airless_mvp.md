@@ -225,9 +225,13 @@ RAM reconstructed-tile cache
 
 ## 6. Offline bakery
 
-The bakery is a separately runnable toolchain, with model training/inference
-allowed to live in Python/PyTorch while package contracts and validation remain
-Rust-owned.
+The bakery is a separately runnable Rust toolchain. Per ADR-0010, Burn owns one
+backend-generic model, diffusion, and sampling definition across offline
+training and inference. Campaigns may select WGPU, CUDA, ROCm, CPU, or Burn's
+Candle backend without forking model code. Learned crates remain independent of
+Bevy and outside the game dependency graph until a measured optional runtime
+feature needs them; normal play consumes packages and never requires planetary
+diffusion.
 
 ### Production inputs and reproducibility
 
@@ -375,6 +379,28 @@ independent-tile blending and the current analytic crater reference. Pin the
 global and regional lunar inputs, build their Gaussian/Laplacian pyramids and
 geographic holdouts, add labelled synthetic process surfaces, then overfit a
 single stage before training the S0–S3 ladder.
+
+The implementation is split into `thalos_terrain_learned`, containing the
+backend-generic Burn model/sampler contract, and `thalos_terrain_train`, the
+offline corpus/training/validation binary. Checkpoints use portable model
+records and record the Burn version/backend; package output remains independent
+of the training backend.
+
+**Tracer evidence, 2026-07-20:** the Rust smoke command generated 48
+ChaCha8-seeded 64² patches at 250 m/px with labelled mare, crater density,
+gardening, rim, ejecta, and secondary-chain controls, then decomposed them into
+physical S0–S3 Laplacian bands. A compact eight-channel Burn denoiser completed
+10 Flex/autodiff batches in 6.55 s (`0.999119 → 0.972475` noise MSE), wrote
+SafeTensors with canonical tensor SHA-256
+`fd3b2807bc03cee347b1c44852b5b5e24fb843d4291cacf5fa6ceaf4fab63b3c`,
+and ran six shared-coordinate-noise 64² DDIM windows over a 128×96 canvas.
+Repeated inference was bit-identical (`0 m` max delta); overlap predictions
+disagreed by `1.674274 m RMS` before weighted fusion. CPU and WGPU feature
+graphs both compile. The inspected corpus/Laplacian sheet has crater structure,
+but the two-epoch sampled residual remains noise-like, so this proves the
+data/model/checkpoint/overlap path only and does **not** satisfy MIRA-1's quality
+exit. Exact lunar artifact pins, real-DEM preparation, EMA/resume, campaign
+training, spectral/slope/SFD validation, and GPU VRAM/timing remain open.
 
 **Exit:** a fixed-seed patch set shows plausible fresh/old crater morphology,
 no terrestrial drainage signature, seamless overlap interiors, stable repeated
