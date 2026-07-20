@@ -16,8 +16,6 @@ const MOVING_REPROJECTION_STRENGTH = 0.9;
 const MAX_DISTANCE = 1.0e9;
 const WORLEY_RESOLUTION = 32;
 const WORLEY_RESOLUTION_F32 = 32.0;
-const INV_TAU = 0.15915494;
-const INV_PI = 0.31830987;
 
 // ── Thalos fork: body-fixed spherical raymarch ───────────────────────────────
 // Upstream is a Y-up flat-plane demo: the camera sits on the +Y axis and the
@@ -99,10 +97,11 @@ struct Config {
 // true depth occlusion against terrain / the ship hull; the raymarch's own
 // history reads use `history_distance_texture` below.
 @group(1) @binding(3) var cloud_distance_texture: texture_storage_2d<r32float, write>;
-// Planet-fixed equirect coverage (weather) map: u = longitude, v = colatitude,
-// value = local overcast fraction. Linear-filtered, repeat in U.
-@group(1) @binding(4) var coverage_texture: texture_2d<f32>;
-@group(1) @binding(5) var coverage_sampler: sampler;
+// Planet-fixed cubemap weather field: coverage, cloud type, normalized base,
+// normalized top. CLOUD-1 consumes coverage; CLOUD-3 consumes the remaining
+// channels for type-specific vertical structure.
+@group(1) @binding(4) var weather_texture: texture_cube<f32>;
+@group(1) @binding(5) var weather_sampler: sampler;
 // Previous frame's render + distance textures, snapshotted by the render node
 // after each update dispatch. ALL temporal-history reads (same-pixel
 // accumulation, motion reprojection, the saved camera rows) come from these —
@@ -137,12 +136,9 @@ struct RaymarchResult {
 // computed ONCE PER RAY in `raymarch` and passed down; a previous version
 // evaluated them per density sample and dropped the frame rate severalfold.
 
-// Local overcast fraction from the planet-fixed weather map, sampled by the
-// body-fixed unit direction (equirect: u wraps in longitude, v = colatitude).
+// Local overcast fraction from the canonical planet-fixed weather cubemap.
 fn sample_coverage(n: vec3f) -> f32 {
-    let u = atan2(n.z, n.x) * INV_TAU + 0.5;
-    let v = acos(clamp(n.y, -1.0, 1.0)) * INV_PI;
-    return textureSampleLevel(coverage_texture, coverage_sampler, vec2f(u, v), 0.0).r;
+    return textureSampleLevel(weather_texture, weather_sampler, n, 0.0).r;
 }
 
 // World-space tile period of the base atlas, metres (identical on both texel

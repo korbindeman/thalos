@@ -100,9 +100,15 @@ sprint.
 | C1 | Tonemapper A/B: AgX vs Khronos PBR Neutral (ACES rejected) | next | S | after GF-CAL settles exposure | gfx §4.9 · Open Q2 |
 | VEG-R | One `VegLayer` driver folding `grass.rs`/`vegetation.rs`/`rocks.rs` (they triplicate the clipmap lifecycle, diverge on base-clearing) | next | M | Open Q5 call | gfx §4.7 |
 | BL-1 | GPU grass slice 2: compute cull + indirect draw (slice 1 landed behind `GraphicsSettings::gpu_grass`, preview-verified) | next | M | — | vegetation.md |
-| CLOUD-0 | Planet-cloud baseline, probes, and budgets: cloud-specific headless runway/cruise/interior/limb/sunset presets; current 1080p/1440p GPU+memory baseline; artifact inventory and acceptance captures | verify | S–M | agent criteria landed in `codex/cloud-0`; interactive artifact ranking pending | cloud §4 CLOUD-0 |
-| CLOUD-1 | Canonical cloud ownership/schema: one authored `CloudClimate`, one per-body runtime `CloudWeatherField`, `None` authoritative, first weather-derived orbit layer; absorb render mechanism under `body_render` and delete legacy/reference ownership | later | M–L | CLOUD-0 + cloud architecture ADR | cloud §2–§4 |
-| CLOUD-PROG | Planet-scale cloud program phases CLOUD-2…CLOUD-8: scalable temporal targets, multi-scale density, atmosphere lighting, one-world shadows/godrays, orbital projection, living weather, inside-volume polish | later | multi | CLOUD-1 | cloud §3–§4 |
+| CLOUD-0 | Planet-cloud baseline, probes, and budgets: cloud-specific headless runway/cruise/interior/limb/sunset presets; current 1080p/1440p GPU+memory baseline; artifact inventory and acceptance captures | done | S–M | agent probes landed; user identified overall fidelity as the blocker and supplied the Blackrack/KSP visual bar | cloud §4 CLOUD-0 · cloud_baseline.md |
+| CLOUD-1 | Canonical cloud ownership/schema: one authored `CloudClimate`, one per-body runtime `CloudWeatherField`, `None` authoritative, first weather-derived orbit layer; absorb render mechanism under `body_render` and delete legacy/reference ownership | done | M–L | compile + warning-clean; all five headless cloud regimes captured without asset/WGSL/pipeline failure 2026-07-20 | ADR-0007 · cloud §2–§4 |
+| CLOUD-2 | Scalable targets and temporal reconstruction: viewport-relative/interleaved march, history rejection/clamp/upscale, screenshot mode and quality ladder | later | L | CLOUD-1 | cloud §3.3 · §4 |
+| CLOUD-3 | Multi-scale density and range: typed vertical profiles, true 3-D base/detail noise, anti-tiling, empty-space skip and near-to-horizon LOD | later | L | CLOUD-2 | cloud §3.2–§3.3 |
+| CLOUD-4 | Atmosphere-coupled cloud lighting and correct foreground/background media ordering | later | L | CLOUD-3 + F3/F4 substrate | cloud §3.4 |
+| CLOUD-5 | One-world cloud sun transmittance, matched godrays, surface receivers and overcast environment response | later | L | CLOUD-4 + F6 substrate | cloud §3.5 |
+| CLOUD-6 | Density-derived orbital projection and invisible surface/orbit/map handoff | later | M–L | CLOUD-3 | cloud §3.6 |
+| CLOUD-7 | Simulation-time weather advection/growth, fronts/cyclones and authoring/debug tools | later | L | CLOUD-5 + CLOUD-6 | cloud §3.1 · §4 |
+| CLOUD-8 | Inside-volume extinction, precipitation/rain shafts, lightning path and final quality polish | later | M–L | CLOUD-4 + CLOUD-7 | cloud §4 |
 | TM1 | Tiling-material detail: material-ID height-biased weight blend over a texgen material array | later | M | mind the Metal bind budget (F7 note) | gfx §4.6 |
 | TM3 | Collapse the palette/mirror debt onto the `SurfaceQuery` seam — **largely overlaps TM-P1; re-scope against what Phase 1 landed before starting** | later | M | TM-P1 verified | gfx §4.6 · terrain_macro.md |
 | F7 | Metallic branch in `surface_brdf` + one shared view-level scene/atmosphere bind group + prefiltered env from the F3 LUT | later | L | F3/F4 verified | gfx §3 |
@@ -138,4 +144,3 @@ Forks that gate queued work. Resolving one = an ADR + flipping this row
 | Q6 — Slice-6 distant-body path | W17 | gfx §7 |
 | Q7 — TAA / motion vectors under big_space | W13 whole-scene consumers (cloud resolve is independent) | gfx §7 · cloud §2 |
 | Q8 — sky-view LUT: sun-only vs per-dominant-light | F7/F9 polish | gfx §3 F3 caveat |
-| Cloud program architecture — renderer home, weather topology, and cloud-local temporal scope | CLOUD-1 | cloud §5 — recommended choices recorded; accept/revise before implementation |

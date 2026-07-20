@@ -9,7 +9,8 @@ Scope of this file:
     see LICENSE-ASSETS.
   - Vendored third-party crates under crates/ retain their own upstream
     licenses (e.g. crates/avian_fdm is LGPL-3.0-or-later; crates/udlod and
-    crates/volumetric_clouds are MIT / Apache-2.0). See LICENSING.md.
+    crates/body_render/src/clouds retain MIT / Apache-2.0 terms). See
+    LICENSING.md.
   - The name "Thalos" and the Thalos logo are NOT licensed here. See
     LICENSING.md.
 

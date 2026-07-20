@@ -7,7 +7,8 @@ use thalos_physics_canonical::{
     types::BodyStates,
 };
 use thalos_terrain::DynamicSurfaceState;
-use thalos_world::{BodyId, SolarSystemDefinition};
+use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
+use thalos_world::{BodyId, CloudClimate, SolarSystemDefinition};
 
 use crate::SimStage;
 
@@ -53,38 +54,152 @@ impl CloudBandEnvironmentState {
     }
 }
 
-/// Per-body large-scale cloud-coverage weather parameters: the source the
-/// volumetric-cloud renderer projects into its planet-fixed equirect coverage
-/// map (latitude bands + low-frequency variation). This is the future weather
-/// system's write target — evolve the fields (or, later, a full coverage grid)
-/// and bump `version`; the renderer re-uploads on version change.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct CloudWeatherState {
-    /// Noise seed for the large-scale coverage variation.
+/// Per-face resolution of the canonical cubemap weather field. At Thalos's
+/// radius this is weather-system scale (~60 km/texel near a face centre), not
+/// cloud-shape detail; CLOUD-3 supplies the finer 3-D density basis.
+pub const CLOUD_WEATHER_FACE_SIZE: u32 = 256;
+
+/// Mutable, per-body weather authority. Texels are stored face-major in
+/// [`CubemapFace::ALL`] order as RGBA8 = coverage, cloud type, normalized base,
+/// normalized top. Every render projection consumes this field; no projection
+/// owns an independent pattern.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CloudWeatherField {
     pub seed: u64,
-    /// Mean overcast fraction in [0, 1] (0.38 ≈ broken/scattered cloud).
+    pub face_size: u32,
+    pub texels: Vec<[u8; 4]>,
     pub coverage_mean: f32,
-    /// Amplitude of the latitude-band modulation (ITCZ / subtropical dry
-    /// belts / mid-latitude storm tracks), added to the mean.
-    pub band_strength: f32,
-    /// Amplitude of the low-frequency noise variation (clear patches vs.
-    /// overcast regions), centred on the mean.
-    pub variation: f32,
-    /// Re-upload trigger: the renderer regenerates its coverage texture when
-    /// this changes.
+    pub base_altitude_m: f32,
+    pub top_altitude_m: f32,
+    pub albedo: [f32; 3],
+    pub wind_m_s: [f32; 2],
+    /// Consumers re-upload or reject temporal history when this changes.
     pub version: u32,
 }
 
-impl Default for CloudWeatherState {
-    fn default() -> Self {
+impl CloudWeatherField {
+    pub fn from_climate(climate: &CloudClimate) -> Self {
+        let face_size = CLOUD_WEATHER_FACE_SIZE;
+        let mut texels = Vec::with_capacity((face_size * face_size * 6) as usize);
+        let mix_sum = climate.type_mix.iter().copied().sum::<f32>();
+        let type_mix = if mix_sum > 1.0e-6 {
+            climate.type_mix.map(|value| value.max(0.0) / mix_sum)
+        } else {
+            [0.25, 0.55, 0.20]
+        };
+
+        for face in CubemapFace::ALL {
+            for y in 0..face_size {
+                let v = (y as f32 + 0.5) / face_size as f32;
+                for x in 0..face_size {
+                    let u = (x as f32 + 0.5) / face_size as f32;
+                    let dir = face_uv_to_dir(face, u, v).normalize();
+                    let band = latitude_band_profile(dir.y.asin());
+                    let regional = fbm3(dir * 2.5, climate.seed, 4);
+                    let coverage = (climate.coverage
+                        + climate.band_strength * band
+                        + climate.variation * (regional - 0.5))
+                        .clamp(0.0, 1.0);
+
+                    let selector = fbm3(dir * 5.5 + Vec3::splat(17.0), climate.seed ^ 0xC10D, 3);
+                    let cloud_type = if selector < type_mix[0] {
+                        0.08
+                    } else if selector < type_mix[0] + type_mix[1] {
+                        0.50
+                    } else {
+                        0.94
+                    };
+                    let vertical_noise = fbm3(
+                        dir * 3.2 + Vec3::new(31.0, -7.0, 13.0),
+                        climate.seed ^ 0xA11E,
+                        3,
+                    );
+                    let base = match cloud_type {
+                        value if value < 0.25 => 0.08 + 0.10 * vertical_noise,
+                        value if value < 0.75 => 0.12 + 0.18 * vertical_noise,
+                        _ => 0.05 + 0.10 * vertical_noise,
+                    };
+                    let top = match cloud_type {
+                        value if value < 0.25 => 0.22 + 0.15 * vertical_noise,
+                        value if value < 0.75 => 0.48 + 0.25 * vertical_noise,
+                        _ => 0.78 + 0.20 * vertical_noise,
+                    };
+                    let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
+                    texels.push([
+                        encode(coverage),
+                        encode(cloud_type),
+                        encode(base),
+                        encode(top.max(base + 0.02)),
+                    ]);
+                }
+            }
+        }
+
         Self {
-            seed: 0x7A105_C10D5,
-            coverage_mean: 0.38,
-            band_strength: 0.18,
-            variation: 0.45,
+            seed: climate.seed,
+            face_size,
+            texels,
+            coverage_mean: climate.coverage.clamp(0.0, 1.0),
+            base_altitude_m: climate.base_altitude_m.max(0.0),
+            top_altitude_m: (climate.base_altitude_m + climate.thickness_m).max(0.0),
+            albedo: climate.albedo,
+            wind_m_s: climate.wind_m_s,
             version: 0,
         }
     }
+
+    pub fn rgba8_bytes(&self) -> Vec<u8> {
+        self.texels.iter().flatten().copied().collect()
+    }
+}
+
+fn latitude_band_profile(lat: f32) -> f32 {
+    let gauss =
+        |x: f32, center: f32, width: f32| (-((x - center) / width) * ((x - center) / width)).exp();
+    let a = lat.abs();
+    gauss(a, 0.0, 0.10) + 0.7 * gauss(a, 0.96, 0.24)
+        - 0.8 * gauss(a, 0.44, 0.15)
+        - 0.4 * gauss(a, std::f32::consts::FRAC_PI_2, 0.25)
+}
+
+fn hash3(p: IVec3, seed: u64) -> f32 {
+    let mut h = (p.x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        ^ (p.y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
+        ^ (p.z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
+        ^ seed;
+    h ^= h >> 31;
+    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    h ^= h >> 32;
+    (h & 0x00FF_FFFF) as f32 / 16_777_216.0
+}
+
+fn value_noise3(p: Vec3, seed: u64) -> f32 {
+    let i = p.floor();
+    let f = p - i;
+    let u = f * f * (Vec3::splat(3.0) - 2.0 * f);
+    let i = i.as_ivec3();
+    let corner = |dx: i32, dy: i32, dz: i32| hash3(i + IVec3::new(dx, dy, dz), seed);
+    let x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * u.x;
+    let x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * u.x;
+    let x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * u.x;
+    let x11 = corner(0, 1, 1) + (corner(1, 1, 1) - corner(0, 1, 1)) * u.x;
+    let y0 = x00 + (x10 - x00) * u.y;
+    let y1 = x01 + (x11 - x01) * u.y;
+    y0 + (y1 - y0) * u.z
+}
+
+fn fbm3(p: Vec3, seed: u64, octaves: u32) -> f32 {
+    let mut sum = 0.0;
+    let mut amplitude = 0.5;
+    let mut norm = 0.0;
+    let mut q = p;
+    for _ in 0..octaves {
+        sum += amplitude * value_noise3(q, seed);
+        norm += amplitude;
+        amplitude *= 0.5;
+        q = q * 2.03 + Vec3::new(13.1, 7.7, 19.3);
+    }
+    sum / norm.max(f32::EPSILON)
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -96,9 +211,9 @@ pub struct BodyEnvironmentState {
     /// components, so map impostors, ship impostors, terrain skies, and future
     /// weather systems all see the same cloud state.
     pub cloud_bands: Option<CloudBandEnvironmentState>,
-    /// Large-scale volumetric-cloud coverage weather (terrestrial-atmosphere
-    /// bodies). Same ownership rationale as `cloud_bands`.
-    pub cloud_weather: Option<CloudWeatherState>,
+    /// Canonical large-scale volumetric-cloud weather. `None` mirrors an
+    /// authored `CloudClimate::None`; renderers must not install defaults.
+    pub cloud_weather: Option<CloudWeatherField>,
 }
 
 /// Canonical evaluated solar-system state for the current game frame.
@@ -141,11 +256,10 @@ impl SolarSystemState {
         self.environment[body_id].cloud_bands = Some(state);
     }
 
-    pub fn install_cloud_weather(&mut self, body_id: BodyId, state: CloudWeatherState) {
+    pub fn install_cloud_weather(&mut self, body_id: BodyId, state: CloudWeatherField) {
         self.ensure_body_capacity(body_id + 1);
         self.environment[body_id].cloud_weather = Some(state);
     }
-
 }
 
 pub fn sync_solar_system_state(

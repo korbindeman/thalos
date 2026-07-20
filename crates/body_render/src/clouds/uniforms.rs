@@ -99,14 +99,14 @@ pub(crate) struct CloudsImage {
     #[storage_texture(3, image_format = R32Float, access = WriteOnly)]
     pub cloud_distance_image: Handle<Image>,
 
-    /// Planet-fixed equirect coverage (weather) map, sampled by body-fixed
-    /// direction in the raymarch. Linear-filtered, repeat in U. Visibility
+    /// Planet-fixed cubemap weather field, sampled by body-fixed direction in
+    /// the raymarch. Visibility
     /// must be `compute` explicitly — the AsBindGroup default for sampled
     /// textures is vertex|fragment, which fails pipeline validation against
     /// this compute-only pipeline (storage textures default to compute).
-    #[texture(4, visibility(compute))]
+    #[texture(4, visibility(compute), dimension = "cube")]
     #[sampler(5, visibility(compute))]
-    pub coverage_image: Handle<Image>,
+    pub weather_image: Handle<Image>,
 
     /// Previous frame's render texture, snapshotted by the render node after
     /// each `update` dispatch. Sole source for temporal-history reads (and

@@ -1,9 +1,10 @@
 # Planet-scale volumetric clouds
 
-**Status:** proposed program, 2026-07-20. No implementation phase has been
-started. This document is the strategy and technical plan; [backlog.md](backlog.md)
-is the execution queue, while [atmosphere.md](atmosphere.md) remains the spec for
-what the renderer ships today.
+**Status:** active program, 2026-07-20. CLOUD-0 and CLOUD-1 are complete;
+CLOUD-2 is next. This document is the strategy and technical plan;
+[backlog.md](backlog.md) is the execution queue, while
+[atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
+today. Architecture choices are fixed by [ADR-0007](adr/0007-one-weather-field-many-cloud-projections.md).
 
 The target is a Blackrack-class cloud system for a surface-to-orbit flight
 camera: shaped volumes that can be entered, stable planetary weather seen from
@@ -15,28 +16,37 @@ Planning input: the supplied *Planet-scale volumetric clouds for spaceflight*
 note, backed by the public Nubis/Horizon Zero Dawn, Nubis Evolved, Frostbite,
 Hillaire, Skybolt, and Blackrack feature-level references named there.
 
+The supplied KSP/Blackrack captures are the visual acceptance bar: coherent
+planetary storm systems rather than a repeating deck; distinct stratus,
+cumulus, congestus, cumulonimbus, and anvil silhouettes; cauliflower-scale
+detail riding on kilometre-scale mass; deep but coloured self-shadow; bright
+energy-bounded rims; warm sunset transport; and continuity from runway to
+inside-volume flight to orbit. A renderer that is merely clean or technically
+volumetric does not meet this target.
+
 ## 1. What Thalos already has
 
 This is an upgrade, not a greenfield renderer. Preserve these foundations:
 
-- A body-fixed, planet-centred spherical-shell march in
-  `thalos_volumetric_clouds`; it already handles cameras below, inside, and
+- A body-fixed, planet-centred spherical-shell march now owned by
+  `thalos_body_render::clouds`; it already handles cameras below, inside, and
   above the layer without a flat-sky assumption.
 - `big_space`-safe camera inputs and planet-fixed noise/weather coordinates.
-- A per-body `CloudWeatherState` projected into a 512×256 coverage texture.
+- An authored `CloudClimate` and per-body `CloudWeatherField`, projected as a
+  256×256×6 RGBA cubemap carrying coverage/type/base/top.
 - Per-pixel cloud hit distance and deterministic composition inside the
   fullscreen `BodySky` atmosphere pass, including opaque-scene occlusion.
 - Static-view accumulation and moving-view reprojection in the body-fixed
   frame.
-- A separate orbital reference-cloud representation, proving the render stack
-  already has both near and far insertion points.
+- A first orbital projection in `SolidPlanetMaterial` sampling the same
+  weather cubemap as the near renderer.
 
 The current result falls short for structural reasons:
 
-1. **Three sources describe one cloud system.** Near clouds use constants in
-   `game::rendering::clouds`; the world schema's `CloudCover` drives the legacy
-   reference path; the orbital impostor uses separately authored images.
-   `clouds: None` is therefore not authoritative.
+1. **CLOUD-1 has unified authority, not fidelity.** Near and orbital clouds now
+   share one field and `clouds: None` is authoritative, but the near density
+   still reduces that richer field to coverage and the orbit layer is only a
+   first surface-following projection.
 2. **The density field is one repeating deck.** One scalar coverage channel,
    one global base/top, a triplanar 2-D base atlas, and one 3-D erosion texture
    cannot express fronts, stratus versus convective profiles, or spatially
@@ -117,8 +127,8 @@ top-level rendering subsystem beside `thalos_body_render`.
 
 ### 3.1 Authored climate and runtime weather
 
-Replace the current `CloudCover`/constant split with one schema. The precise
-Rust layout is a CLOUD-1 design task, but it must cover:
+The former `CloudCover`/constant split is replaced by `CloudClimate`. Its
+shipping Rust layout covers:
 
 - seed and mean coverage;
 - permitted altitude range and type mix;
@@ -268,13 +278,37 @@ User-verifiable:
 - One short current-build session confirms which visual failures are most
   objectionable before fidelity work is prioritized.
 
-**Status (2026-07-20):** agent-verifiable work is complete on
-`codex/cloud-0`. Five regime presets, temporal/quality/pose overrides, Vulkan
+**Status (2026-07-20):** complete. Five regime presets,
+temporal/quality/pose overrides, Vulkan
 GPU timing, exact target-memory reporting, 1080p/1440p captures, and the
 artifact inventory are recorded in `docs/cloud_baseline.md`. The 1440p High
 sunset probe measures 11.06 ms mean on the development RTX 4070 Ti versus the
-provisional 3.5 ms target; persistent cloud textures total 135.98 MiB. The
-interactive ranking session above remains, so CLOUD-0 is `verify`, not `done`.
+provisional 3.5 ms target; persistent cloud textures total 135.98 MiB. The user
+confirmed that fidelity across the supplied captures—not one isolated artifact—is
+the priority and supplied the Blackrack/KSP acceptance bar above.
+
+### CLOUD-1 exit criteria
+
+- `CloudClimate` is the sole authored terrestrial-cloud configuration and
+  `None` creates no runtime weather or visible clouds.
+- Every cloudy body receives one deterministic, seam-safe
+  `CloudWeatherField`; coverage, type, base, and top survive the CPU→GPU
+  contract even where the current marcher does not yet consume all channels.
+- The cloud mechanism lives under `thalos_body_render`; game code only selects
+  the active body and projects environment state.
+- Near and first orbital projections sample the same field. The reference-image
+  selector and dormant `BodySky` slab are deleted.
+- The workspace is compile-clean and every CLOUD-0 headless regime still
+  initializes and captures without shader/pipeline errors.
+
+**Status (2026-07-20):** complete on `codex/cloud-0`. `cargo check -p
+thalos_game` and warning-denied scoped Clippy pass; the complete five-preset
+headless cloud suite captured without RON, asset, WGSL, bind-group, or pipeline
+failure. The richer weather cubemap increases the persistent cloud allocation
+to 144,023,552 bytes (137.35 MiB). Captures still show the inherited vertical
+sheet/repetition, weak mass hierarchy, over-bright transport, and poor limb
+result; those are deliberately not disguised with tuning here and remain owned
+by CLOUD-2 through CLOUD-6.
 
 ### Program acceptance matrix
 
@@ -291,8 +325,8 @@ interactive ranking session above remains, so CLOUD-0 is `verify`, not `done`.
 
 ## 5. Risks and decision gates
 
-These choices should be confirmed before CLOUD-1 starts; acceptance should be
-recorded in an ADR because each changes long-lived renderer ownership.
+These choices are accepted in ADR-0007 and form the constraints for every
+later phase:
 
 1. **Weather topology — recommended: cube/2-D array.** It costs more authoring
    plumbing than the current equirect map, but avoids polar concentration and

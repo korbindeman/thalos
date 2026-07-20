@@ -151,9 +151,10 @@ file-deletable dead code" does not exist as separable files:
   schema** types (`BodyArchetype`, `FeatureTerrainConfig`, `CompositionClass`,
   `AtmosphereSpec`, `IceInventory`, `TerrainIntent`, …) deserialized from
   `assets/bodies/*.ron` and read live in `ground_terrain.rs`.
-- `impostor/bake.rs` mixes a dead bake path with **live cloud-cover helpers**
-  (`blank_cloud_cover_image`, `equirect_to_cloud_cover_image_with_rotation`)
-  called via `reference_clouds.rs` from `rendering/spawn.rs`.
+- `impostor/bake.rs` previously mixed the dead bake path with reference-cloud
+  helpers. CLOUD-1 removed those helpers and the body-name-selected
+  `reference_clouds.rs` authority; terrestrial clouds now project the canonical
+  per-body `CloudWeatherField` (ADR-0007).
 
 The genuinely-dead code is the `compile_terrain_config` /
 `compile_initial_static_surface` / `compile_manifest_to_static_surface` /

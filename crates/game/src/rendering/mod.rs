@@ -19,15 +19,15 @@ pub(crate) mod ground_terrain;
 mod lighting;
 mod map_terrain;
 mod materials;
-pub(crate) mod tile_cache;
 pub(crate) mod real_space;
+pub(crate) mod tile_cache;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
 // Re-enable by uncommenting this and the `RockScatterPlugin` registration below.
 // mod rocks;
 mod scene_depth;
 mod spawn;
-mod stock_atmosphere;
 pub(crate) mod ssao;
+mod stock_atmosphere;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
 mod trails;
@@ -79,12 +79,9 @@ pub use types::{
     ShipMarker, track_active_craft,
 };
 
-use bevy::prelude::*;
-pub use thalos_body_render::ReferenceClouds;
-use thalos_body_render::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
-
 use crate::SimStage;
 use crate::solar_system_state::sync_solar_system_state;
+use bevy::prelude::*;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.
 pub use crate::coords::{RenderFrame, RenderOrigin};
 
@@ -128,7 +125,6 @@ impl Plugin for RenderingPlugin {
             .register_type::<CameraExposure>()
             .register_type::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ground_terrain::AtmosphereTuning>()
-            .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
             .init_resource::<ActiveCraft>()
             // The N-craft accessor seam: keep `ActiveCraft` mirroring the active
@@ -142,7 +138,6 @@ impl Plugin for RenderingPlugin {
                     attach_ship_camera_to_big_space
                         .after(setup_big_space)
                         .after(crate::camera::spawn_camera),
-                    load_reference_cloud_sources,
                 ),
             )
             // World spawn is keyed to `WorldState::Live`, not `Startup`: a
@@ -170,7 +165,6 @@ impl Plugin for RenderingPlugin {
                     // swaps) need the same BigSpace attach the boot craft
                     // gets at Startup; no-op once attached (see the fn docs).
                     attach_player_ship_to_big_space,
-                    convert_reference_clouds_when_ready,
                     update_render_origin.after(sync_solar_system_state),
                     update_render_frame.after(sync_solar_system_state),
                     update_body_positions
@@ -230,7 +224,9 @@ impl Plugin for RenderingPlugin {
                     draw_orbits
                         .after(recompute_orbit_trails)
                         .after(update_render_origin)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view),
+                        ),
                     sync_body_icons.run_if(crate::view::in_map_view),
                     double_click_focus_system
                         .after(update_ship_position)

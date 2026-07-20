@@ -20,11 +20,10 @@
 //!     body-fixed positions, so clouds stay glued to the ground, co-rotate
 //!     with the planet, and the horizon is correct at any altitude and at the
 //!     limb;
-//!   * large-scale coverage comes from a planet-fixed equirect **weather map**
-//!     ([`CloudCoverageMap`]), sampled by body-fixed direction and scaled by
-//!     the scalar `clouds_coverage` knob. The map defaults to full coverage
-//!     (scalar knob alone), and the game regenerates it from per-body
-//!     environment state — the hook for the future weather system;
+//!   * large-scale weather comes from a planet-fixed cubemap
+//!     ([`CloudWeatherMap`]), sampled by body-fixed direction. RGBA carries
+//!     coverage, cloud type, normalized base, and normalized top from the
+//!     canonical per-body runtime field;
 //!   * the compute shader stores the *clean* cloud layer (rgb = premultiplied
 //!     in-scatter, a = transmittance) to [`CloudRenderTexture`], plus the
 //!     per-pixel nearest cloud-hit distance to [`CloudDistanceTexture`], for
@@ -43,16 +42,16 @@ use bevy::asset::embedded_asset;
 use bevy::prelude::*;
 use bevy::shader::load_shader_library;
 
-pub use crate::compute::CameraMatrices;
-pub use crate::config::CloudsConfig;
-pub use crate::images::{
-    COVERAGE_HEIGHT, COVERAGE_WIDTH, CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH,
-    cloud_target_memory,
+pub use self::compute::CameraMatrices;
+pub use self::config::CloudsConfig;
+pub use self::images::{
+    CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, cloud_target_memory,
+    cloud_weather_image,
 };
 
-use crate::compute::CloudsComputePlugin;
-use crate::images::build_images;
-use crate::uniforms::CloudsImage;
+use self::compute::CloudsComputePlugin;
+use self::images::build_images;
+use self::uniforms::CloudsImage;
 
 /// Handle to the final cloud render texture (RGBA32F: `rgb` = premultiplied
 /// in-scatter, `a` = transmittance). The game binds this in a fullscreen
@@ -71,16 +70,11 @@ pub struct CloudDistanceTexture {
     pub handle: Handle<Image>,
 }
 
-/// Handle to the planet-fixed equirect coverage (weather) map (R8Unorm,
-/// [`COVERAGE_WIDTH`]×[`COVERAGE_HEIGHT`]): u = longitude (`atan2(z, x)`,
-/// wrapping), v = colatitude (`acos(y)`, clamped), value = local overcast
-/// fraction in [0, 1]. The raymarch multiplies it with the scalar
-/// `clouds_coverage` knob. Defaults to all-1, so until a consumer writes a
-/// real field the scalar knob alone reproduces uniform coverage. The game owns
-/// the contents: rewrite the `Image` asset at this handle (it retains a
-/// MAIN_WORLD copy) to install a weather field.
+/// Handle to the active body's planet-fixed RGBA8 cubemap weather field:
+/// coverage, cloud type, normalized base, normalized top. The game copies the
+/// canonical per-body field here when active body or weather version changes.
 #[derive(Resource, Clone)]
-pub struct CloudCoverageMap {
+pub struct CloudWeatherMap {
     pub handle: Handle<Image>,
 }
 
@@ -115,15 +109,15 @@ fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
     commands.insert_resource(CloudDistanceTexture {
         handle: built.cloud_distance_image.clone(),
     });
-    commands.insert_resource(CloudCoverageMap {
-        handle: built.coverage_image.clone(),
+    commands.insert_resource(CloudWeatherMap {
+        handle: built.weather_image.clone(),
     });
     commands.insert_resource(CloudsImage {
         cloud_render_image: built.cloud_render_image,
         cloud_atlas_image: built.cloud_atlas_image,
         cloud_worley_image: built.cloud_worley_image,
         cloud_distance_image: built.cloud_distance_image,
-        coverage_image: built.coverage_image,
+        weather_image: built.weather_image,
         history_image: built.history_image,
         history_distance_image: built.history_distance_image,
     });

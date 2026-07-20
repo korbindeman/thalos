@@ -15,7 +15,6 @@ thalos_terrain = { path = "../terrain" }
 thalos_physics_local = { path = "../physics_local" }
 thalos_celestial = { path = "../celestial" }
 thalos_shipyard = { path = "../shipyard" }
-thalos_volumetric_clouds = { path = "../volumetric_clouds" }
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
 big_space = { workspace = true }
 # Persisted user settings (user/settings.ron — window mode, vsync, UI scale).

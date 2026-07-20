@@ -1,3 +1,7 @@
+> Upstream provenance snapshot. Thalos absorbs this MIT implementation under
+> `thalos_body_render::clouds`; the usage and limitations below describe the
+> original standalone crate, not Thalos's current integration.
+
 <h1 align="center">
     Bevy Volumetric Clouds
 </h1>

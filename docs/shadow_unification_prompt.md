@@ -216,7 +216,8 @@ hypothesis set, falsifiable tests — before patching anything.
 5. **Then retire the analytic terrain craft-shadow proxy** once craft cast into
    the rig on every receiver — one definition of the craft's shadow.
 6. Optional polish after the above verifies: PCSS contact hardening (W18,
-   reuse `SceneDepthImage`), cloud shadows (W2, project `CloudCoverageMap`).
+   reuse `SceneDepthImage`), cloud shadows (W2/CLOUD-5, integrate the canonical
+   `CloudWeatherField`/density into `CloudSunTransmittance`).
 
 ## Constraints & tooling
 

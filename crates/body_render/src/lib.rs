@@ -1,11 +1,14 @@
 //! Unified celestial-body rendering: one appearance model, two backends.
 //! `shading` = shared lighting/atmosphere/BRDF libraries + uniforms;
-//! `impostor` = distant billboard materials; `ground` = udlod terrain LOD.
+//! `impostor` = distant billboard materials; `ground` = udlod terrain LOD;
+//! `clouds` = body-fixed volumetric and temporal cloud render mechanism.
+pub mod clouds;
 pub mod craft;
 pub mod ground;
 pub mod impostor;
 pub mod shading;
 
+pub use clouds::*;
 pub use craft::*;
 pub use ground::*;
 pub use impostor::*;
@@ -32,6 +35,7 @@ impl Plugin for BodyRenderPlugin {
             app.add_plugins(shading::PlanetLightingPlugin);
         }
         app.add_plugins(impostor::PlanetRenderingPlugin);
+        app.add_plugins(clouds::CloudsPlugin);
         app.add_plugins(ground::ThalosTerrainPlugin);
     }
 }

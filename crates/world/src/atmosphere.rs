@@ -579,13 +579,12 @@ pub struct TerrestrialAtmosphere {
     #[serde(default)]
     pub scattering: Option<AtmosphericScattering>,
 
-    /// Cloud cover layer composited above the surface from reference
-    /// cloud-cover overlays, with shader-side differential rotation.
-    /// Independent of the scattering model — clouds reflect direct
-    /// sunlight at cloud altitude and are darkened by the surface aerial
-    /// perspective at composite time. None disables the layer.
+    /// Authored, quality-neutral cloud climate for this body. The runtime
+    /// weather field, near volume, orbital projection, and cloud shadows all
+    /// derive from this one source. `None` is authoritative and disables every
+    /// cloud projection for the body.
     #[serde(default)]
-    pub clouds: Option<CloudCover>,
+    pub clouds: Option<CloudClimate>,
 
     /// Surface thermodynamics for the **physical** atmosphere used by
     /// aerodynamic forces (drag, and later lift). Distinct from the
@@ -706,19 +705,35 @@ impl TerrestrialAtmosphere {
     }
 }
 
-/// Reference cloud overlay for a terrestrial impostor.
+/// Authored cloud climate shared by every render projection of a body.
 ///
-/// Clouds are read from a reference density cubemap, drifted by
-/// differential rotation (faster at the equator, slower at the poles),
-/// and composited on top of the lit surface. The procedural cloud
-/// generator has been removed for now; bodies without a registered
-/// reference overlay bind a blank cubemap.
+/// This describes stable tendencies and physically meaningful ranges, not a
+/// texture or renderer quality level. The mutable runtime weather field is
+/// generated from it and may later be advected or replaced by a weather
+/// simulation without changing body data.
 #[derive(Debug, Clone, Deserialize)]
-pub struct CloudCover {
+pub struct CloudClimate {
+    /// Stable seed for the initial weather field.
+    #[serde(default = "default_cloud_seed")]
+    pub seed: u64,
+
     /// Total disk coverage fraction in [0, 1]. 0 = clear skies, 1 =
     /// fully overcast. Earth sits around 0.55–0.65; Thalos with a
     /// thinner atmosphere nominally a bit lower.
     pub coverage: f32,
+
+    /// Latitude-band contribution around [`Self::coverage`].
+    #[serde(default = "default_cloud_band_strength")]
+    pub band_strength: f32,
+
+    /// Low-frequency regional variation around [`Self::coverage`].
+    #[serde(default = "default_cloud_variation")]
+    pub variation: f32,
+
+    /// Relative stratus, cumulus, and cumulonimbus weights. Consumers
+    /// normalize this vector; all zero falls back to the default mix.
+    #[serde(default = "default_cloud_type_mix")]
+    pub type_mix: [f32; 3],
 
     /// Linear-space RGB albedo of sunlit clouds. Typically very near
     /// `(1, 1, 1)` — water-vapour clouds are close to spectrally
@@ -741,6 +756,12 @@ pub struct CloudCover {
     #[serde(default = "default_cloud_differential")]
     pub differential_rotation: f32,
 
+    /// Mean body-fixed horizontal wind in metres per second. The initial
+    /// producer uses it for advection identity; later weather evolution may
+    /// supply a spatially varying wind without changing this schema.
+    #[serde(default = "default_cloud_wind_m_s")]
+    pub wind_m_s: [f32; 2],
+
     /// Base altitude of the cloud layer above the surface, in meters.
     /// The volumetric cloud raymarch in the terrain `BodySky` pass treats
     /// the layer as a slab spanning `[base_altitude_m, base_altitude_m +
@@ -761,6 +782,35 @@ pub struct CloudCover {
     /// default, higher values give denser, more opaque cores.
     #[serde(default = "default_cloud_density")]
     pub density: f32,
+
+    /// Weather-potential thresholds used by later precipitation/storm
+    /// projections. They are stored now so those projections do not invent a
+    /// second climate authority.
+    #[serde(default = "default_cloud_precipitation_threshold")]
+    pub precipitation_threshold: f32,
+    #[serde(default = "default_cloud_storm_threshold")]
+    pub storm_threshold: f32,
+
+    /// Quality-neutral characteristic scales for weather organization, base
+    /// volume shape, and erosion detail.
+    #[serde(default = "default_cloud_weather_scale_km")]
+    pub weather_scale_km: f32,
+    #[serde(default = "default_cloud_base_shape_scale_m")]
+    pub base_shape_scale_m: f32,
+    #[serde(default = "default_cloud_detail_scale_m")]
+    pub detail_scale_m: f32,
+}
+fn default_cloud_seed() -> u64 {
+    0x7A105_C10D5
+}
+fn default_cloud_band_strength() -> f32 {
+    0.18
+}
+fn default_cloud_variation() -> f32 {
+    0.45
+}
+fn default_cloud_type_mix() -> [f32; 3] {
+    [0.25, 0.55, 0.20]
 }
 fn default_cloud_albedo() -> [f32; 3] {
     [1.0, 1.0, 1.0]
@@ -771,6 +821,9 @@ fn default_cloud_scroll_rate() -> f32 {
 fn default_cloud_differential() -> f32 {
     0.35
 }
+fn default_cloud_wind_m_s() -> [f32; 2] {
+    [15.0, 2.0]
+}
 fn default_cloud_base_altitude() -> f32 {
     1500.0
 }
@@ -779,6 +832,21 @@ fn default_cloud_thickness() -> f32 {
 }
 fn default_cloud_density() -> f32 {
     1.0
+}
+fn default_cloud_precipitation_threshold() -> f32 {
+    0.72
+}
+fn default_cloud_storm_threshold() -> f32 {
+    0.86
+}
+fn default_cloud_weather_scale_km() -> f32 {
+    900.0
+}
+fn default_cloud_base_shape_scale_m() -> f32 {
+    8_000.0
+}
+fn default_cloud_detail_scale_m() -> f32 {
+    450.0
 }
 fn default_specific_gas_constant() -> f32 {
     DEFAULT_SPECIFIC_GAS_CONSTANT as f32
@@ -853,12 +921,27 @@ mod atmosphere_sample_tests {
     #[test]
     fn vacuum_above_karman_and_for_degenerate_inputs() {
         let a = atmo(80_000.0, earth_like());
-        assert_eq!(a.sample_at_altitude_m(80_000.0, P0, G), AtmosphereSample::VACUUM);
-        assert_eq!(a.sample_at_altitude_m(120_000.0, P0, G), AtmosphereSample::VACUUM);
+        assert_eq!(
+            a.sample_at_altitude_m(80_000.0, P0, G),
+            AtmosphereSample::VACUUM
+        );
+        assert_eq!(
+            a.sample_at_altitude_m(120_000.0, P0, G),
+            AtmosphereSample::VACUUM
+        );
         // No pressure / no gravity / airless body → vacuum.
-        assert_eq!(a.sample_at_altitude_m(0.0, 0.0, G), AtmosphereSample::VACUUM);
-        assert_eq!(a.sample_at_altitude_m(0.0, P0, 0.0), AtmosphereSample::VACUUM);
-        assert_eq!(atmo(0.0, earth_like()).sample_at_altitude_m(0.0, P0, G), AtmosphereSample::VACUUM);
+        assert_eq!(
+            a.sample_at_altitude_m(0.0, 0.0, G),
+            AtmosphereSample::VACUUM
+        );
+        assert_eq!(
+            a.sample_at_altitude_m(0.0, P0, 0.0),
+            AtmosphereSample::VACUUM
+        );
+        assert_eq!(
+            atmo(0.0, earth_like()).sample_at_altitude_m(0.0, P0, G),
+            AtmosphereSample::VACUUM
+        );
     }
 
     #[test]

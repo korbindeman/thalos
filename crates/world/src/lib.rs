@@ -24,7 +24,8 @@ pub use body::{
 // `thalos_atmosphere` crate). Re-export the commonly-named types at the crate
 // root; the full set is under `thalos_world::atmosphere`.
 pub use atmosphere::{
-    AtmosphereParams, AtmosphereProfile, AtmosphereSample, RingSystem, TerrestrialAtmosphere,
+    AtmosphereParams, AtmosphereProfile, AtmosphereSample, CloudClimate, RingSystem,
+    TerrestrialAtmosphere,
 };
 
 // Re-export the terrain config types the body definition aggregates, so

@@ -39,12 +39,11 @@ use bevy::{
     window::{CursorIcon, SystemCursorIcon},
 };
 use big_space::prelude::{BigSpace, CellCoord, Grid};
-use thalos_body_render::HeightSource;
 use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
+use thalos_body_render::{CloudsConfig, HeightSource, cloud_target_memory};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
-use thalos_volumetric_clouds::{CloudsConfig, cloud_target_memory};
 use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
@@ -1097,8 +1096,8 @@ fn write_cloud_probe_report(
         cfg.height,
         screenshot_target_bytes,
         framing,
-        thalos_volumetric_clouds::RENDER_WIDTH,
-        thalos_volumetric_clouds::RENDER_HEIGHT,
+        thalos_body_render::RENDER_WIDTH,
+        thalos_body_render::RENDER_HEIGHT,
         cfg.cloud_quality.name(),
         cfg.cloud_temporal,
         clouds.clouds_raymarch_steps_count,
@@ -1278,7 +1277,11 @@ fn dry_site_context(
 fn find_driest_site(hs: &dyn HeightSource, sun_dir_body: DVec3) -> DVec3 {
     let sun = sun_dir_body.try_normalize().unwrap_or(DVec3::Y);
     let t1 = {
-        let seed = if sun.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+        let seed = if sun.y.abs() < 0.9 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
         (seed - sun * seed.dot(sun)).normalize()
     };
     let t2 = sun.cross(t1).normalize();

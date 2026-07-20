@@ -28,10 +28,10 @@ use big_space::prelude::Grid;
 use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
     AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, GpuAtlasMirrorHeightSource,
-    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, ReferenceClouds, RingLayers, RingMaterial,
-    RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
+    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RingLayers, RingMaterial, RingParams,
+    SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
     bake_coast_bathymetry_cube, bake_impostor_albedo_cube, bake_multi_scatter_lut,
-    blank_coast_cube, blank_impostor_cube, build_ring_mesh, cloud_cover_image_for_body,
+    blank_coast_cube, blank_impostor_cube, build_ring_mesh, cloud_weather_image,
 };
 use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
@@ -43,11 +43,13 @@ use super::ground_terrain::{BodySky, RealSpaceImpostor};
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::scene_depth::SceneDepthImage;
 use super::types::{
-    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, MoonLight, RealSpaceBody,
-    ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
+    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, MoonLight,
+    RealSpaceBody, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight,
+    TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::loading::LoadingTracker;
+use crate::solar_system_state::{CloudWeatherField, SolarSystemState};
 use crate::view::HideInShipView;
 use std::sync::Arc;
 
@@ -103,7 +105,7 @@ fn build_multi_scatter_lut(
 
 /// 1×1 "clear" cloud layer (RGBA32F `(0, 0, 0, 1)` → transmittance 1) used as
 /// the [`BodySkyMaterial::cloud_layer`] fallback. The game swaps in the live
-/// `thalos_volumetric_clouds` texture for the active cloud body; every other
+/// `thalos_body_render::clouds` texture for the active cloud body; every other
 /// body keeps this, so the cloud composite in `body_sky.wgsl` is a no-op there.
 fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
@@ -197,7 +199,7 @@ pub(super) fn spawn_bodies(
     sim: Res<SimulationState>,
     real_root: Res<RealSpaceRoot>,
     scene_depth: Res<SceneDepthImage>,
-    reference_clouds: Res<ReferenceClouds>,
+    mut solar: ResMut<SolarSystemState>,
     mut procedural_install: ProceduralInstallExtras,
     mut loading_tracker: ResMut<LoadingTracker>,
     mut world_state: WorldStateAssets,
@@ -224,6 +226,7 @@ pub(super) fn spawn_bodies(
     // 1×1 coast/bathymetry cube fallback for no-ocean bodies' `BodySky`
     // (their `ocean.y` gate means it is never sampled).
     let blank_coast = images.add(blank_coast_cube());
+    let blank_weather = images.add(cloud_weather_image(vec![0; 4 * 6], 1));
     commands.insert_resource(BlankCloudTextures {
         layer: blank_cloud.clone(),
         distance: blank_cloud_dist.clone(),
@@ -268,6 +271,22 @@ pub(super) fn spawn_bodies(
             .as_ref()
             .map(|a| AtmosphereBlock::from_terrestrial(a, (1.0 / SHIP_SCALE) as f32))
             .unwrap_or_default();
+        // Install the one runtime weather authority from authored climate and
+        // upload its cubemap once for every orbital/body-sky projection. Bodies
+        // with `clouds: None` keep the shared clear cube; no renderer invents a
+        // default field.
+        let body_weather = if let Some(climate) = body
+            .terrestrial_atmosphere
+            .as_ref()
+            .and_then(|atmosphere| atmosphere.clouds.as_ref())
+        {
+            let field = CloudWeatherField::from_climate(climate);
+            let image = images.add(cloud_weather_image(field.rgba8_bytes(), field.face_size));
+            solar.install_cloud_weather(body.id, field);
+            image
+        } else {
+            blank_weather.clone()
+        };
         // Bake the multi-scatter LUT once from the static atmosphere block, and
         // share it across this body's `BodySky` fullscreen pass AND its
         // solid-planet impostor (map + ship). SHIP_SCALE == 1 (1 render unit =
@@ -284,9 +303,6 @@ pub(super) fn spawn_bodies(
             blank_ms_lut.clone()
         };
         if ship_atmosphere.atmos_geom.z > 0.0 {
-            let (sky_cloud_cover, _) =
-                cloud_cover_image_for_body(&body.name, &reference_clouds, &mut images);
-
             // Coast/bathymetry cube for the analytic ocean's far-field
             // coverage + colour (ADR-0005). Baked from the same runtime
             // surface the tiles bake from; no-ocean bodies bind the blank
@@ -307,7 +323,7 @@ pub(super) fn spawn_bodies(
                 atmosphere: ship_atmosphere,
                 atmosphere_extra: BodySkyExtra::default(),
                 scene_depth: scene_depth.handle.clone(),
-                cloud_cover: sky_cloud_cover,
+                cloud_cover: body_weather.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_layer: blank_cloud.clone(),
                 cloud_distance: blank_cloud_dist.clone(),
@@ -507,6 +523,7 @@ pub(super) fn spawn_bodies(
                 },
                 albedo_cube: impostor_cube.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
+                cloud_weather: body_weather.clone(),
             });
             let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
@@ -517,6 +534,7 @@ pub(super) fn spawn_bodies(
                 },
                 albedo_cube: impostor_cube.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
+                cloud_weather: body_weather.clone(),
             });
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
@@ -726,6 +744,7 @@ pub(super) fn spawn_bodies(
                 },
                 albedo_cube: blank_impostor.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
+                cloud_weather: body_weather.clone(),
             });
             let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
@@ -736,6 +755,7 @@ pub(super) fn spawn_bodies(
                 },
                 albedo_cube: blank_impostor.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
+                cloud_weather: body_weather.clone(),
             });
 
             let body_entity = commands

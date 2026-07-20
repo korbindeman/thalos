@@ -25,7 +25,7 @@ use bevy::{
 /// Controls the compute shader which renders the volumetric clouds.
 use std::borrow::Cow;
 
-use crate::config::CloudsConfig;
+use super::config::CloudsConfig;
 
 use super::{
     images::{IMAGE_SIZE, RENDER_HEIGHT, RENDER_WIDTH},
@@ -122,7 +122,7 @@ fn prepare_textures_bind_group(
     let cloud_atlas_view = gpu_images.get(&clouds_image.cloud_atlas_image).unwrap();
     let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
     let cloud_distance_view = gpu_images.get(&clouds_image.cloud_distance_image).unwrap();
-    let coverage_view = gpu_images.get(&clouds_image.coverage_image).unwrap();
+    let weather_view = gpu_images.get(&clouds_image.weather_image).unwrap();
     let history_view = gpu_images.get(&clouds_image.history_image).unwrap();
     let history_distance_view = gpu_images
         .get(&clouds_image.history_distance_image)
@@ -136,8 +136,8 @@ fn prepare_textures_bind_group(
             &cloud_atlas_view.texture_view,
             &cloud_worley_view.texture_view,
             &cloud_distance_view.texture_view,
-            &coverage_view.texture_view,
-            &coverage_view.sampler,
+            &weather_view.texture_view,
+            &weather_view.sampler,
             &history_view.texture_view,
             &history_distance_view.texture_view,
         )),

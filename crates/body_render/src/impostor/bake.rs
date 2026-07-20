@@ -635,14 +635,6 @@ fn cubemap_image<T: Copy + Default>(
     image
 }
 
-fn create_cubemap_image<T: Copy + Default>(
-    cubemap: &thalos_terrain::Cubemap<T>,
-    format: TextureFormat,
-    images: &mut Assets<Image>,
-) -> Handle<Image> {
-    images.add(cubemap_image(cubemap, format))
-}
-
 trait AverageTexel: Copy + Default {
     type Sum: Default;
 
@@ -740,83 +732,6 @@ fn downsample_cubemap<T: AverageTexel>(
     output
 }
 
-/// Project an equirectangular 2D image into an R8Unorm cubemap used as
-/// cloud cover density. Luminance-weighted: density = 0.299·R + 0.587·G +
-/// 0.114·B (per texel, linear 0–255 byte values).
-///
-/// `source` must be an RGBA8 (SRGB or linear) image — the format Bevy's
-/// default JPG loader produces. Other formats panic rather than silently
-/// miscolour.
-pub fn equirect_to_cloud_cover_image(source: &Image, resolution: u32) -> Image {
-    equirect_to_cloud_cover_image_with_rotation(source, resolution, Quat::IDENTITY)
-}
-
-/// Project an equirectangular 2D image into cloud-cover cubemap density,
-/// applying `source_from_output_rotation` before sampling the source image.
-///
-/// The rotation maps each output cubemap direction into the source image's
-/// direction space. For example, a rotation that maps output +Y to source +X
-/// makes the source image's front-center longitude appear at the north pole.
-pub(crate) fn equirect_to_cloud_cover_image_with_rotation(
-    source: &Image,
-    resolution: u32,
-    source_from_output_rotation: Quat,
-) -> Image {
-    let fmt = source.texture_descriptor.format;
-    assert!(
-        matches!(
-            fmt,
-            TextureFormat::Rgba8Unorm | TextureFormat::Rgba8UnormSrgb
-        ),
-        "equirect_to_cloud_cover_image: expected Rgba8Unorm{{Srgb}}, got {fmt:?}",
-    );
-    let src_w = source.texture_descriptor.size.width as usize;
-    let src_h = source.texture_descriptor.size.height as usize;
-    let src_data = source
-        .data
-        .as_ref()
-        .expect("equirect source image has no CPU data");
-
-    let mut cover = Cubemap::<u8>::new(resolution);
-    let inv = 1.0 / resolution as f32;
-    for face in CubemapFace::ALL {
-        let dst = cover.face_data_mut(face);
-        for y in 0..resolution {
-            let v = (y as f32 + 0.5) * inv;
-            for x in 0..resolution {
-                let u = (x as f32 + 0.5) * inv;
-                let dir = source_from_output_rotation
-                    * thalos_terrain::cubemap::face_uv_to_dir(face, u, v);
-                // Equirectangular: longitude from atan2(x, z), latitude
-                // from asin(y). Maps to [0, 1] UV matching source image
-                // layout (longitude → x, latitude → y, north pole at top).
-                let lon = dir.z.atan2(dir.x);
-                let lat = dir.y.clamp(-1.0, 1.0).asin();
-                let su = (lon / std::f32::consts::TAU + 0.5).fract();
-                let sv = 0.5 - lat / std::f32::consts::PI;
-                let sx = ((su * src_w as f32) as usize).min(src_w - 1);
-                let sy = ((sv * src_h as f32) as usize).min(src_h - 1);
-                let i = (sy * src_w + sx) * 4;
-                let r = src_data[i] as f32;
-                let g = src_data[i + 1] as f32;
-                let b = src_data[i + 2] as f32;
-                let lum = 0.299 * r + 0.587 * g + 0.114 * b;
-                dst[(y * resolution + x) as usize] = lum.clamp(0.0, 255.0) as u8;
-            }
-        }
-    }
-    cubemap_image(&cover, TextureFormat::R8Unorm)
-}
-
-/// 1×1 black cubemap used when a body has no cloud layer. Binding slots
-/// must still be populated — WGSL has no optional texture bindings — so
-/// airless bodies get a blank cube that the shader multiplies by zero
-/// coverage.
-pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
-    let blank = Cubemap::<u8>::new(1);
-    create_cubemap_image(&blank, TextureFormat::R8Unorm, images)
-}
-
 /// Pack a slice of Pod data into a [`ShaderBuffer`] without
 /// touching the asset storage. Pair with [`Assets::add`] on the main
 /// thread.
@@ -828,9 +743,7 @@ pub fn blank_cloud_cover_image(images: &mut Assets<Image>) -> Handle<Image> {
 /// right stride; a zero-size GPU buffer is not a valid binding and wgpu
 /// will reject it, so we always upload at least one element's worth of
 /// zeroed data.
-fn storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(
-    data: &[T],
-) -> ShaderBuffer {
+fn storage_buffer_from_slice<T: bytemuck::Pod + bytemuck::Zeroable>(data: &[T]) -> ShaderBuffer {
     let bytes: Vec<u8> = if data.is_empty() {
         // One zeroed element keeps the binding valid; shader loops read 0
         // elements because the accompanying count/range is zero.

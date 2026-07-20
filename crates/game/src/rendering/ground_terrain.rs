@@ -24,10 +24,9 @@ use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock,
-    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS,
-    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, TerrainShadingStyle,
-    rendered_height_range,
+    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock, GpuAtlasHeightMirrorComponent,
+    GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS, PipelineTileProvider, SyntheticTerrainMode,
+    SyntheticTileProvider, TerrainShadingStyle, rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
@@ -1206,9 +1205,9 @@ pub(super) fn update_body_terrain_atmosphere(
     //      shader can multiply it into the ambient occlusion.
     // .8 = AO config: drives the per-material AO gate/debug flag (inspection.w).
     cloud_io: (
-        Option<Res<thalos_volumetric_clouds::CloudRenderTexture>>,
-        Option<Res<thalos_volumetric_clouds::CloudsConfig>>,
-        Option<Res<thalos_volumetric_clouds::CloudDistanceTexture>>,
+        Option<Res<thalos_body_render::CloudRenderTexture>>,
+        Option<Res<thalos_body_render::CloudsConfig>>,
+        Option<Res<thalos_body_render::CloudDistanceTexture>>,
         Res<super::clouds::ActiveCloudBody>,
         Option<Res<super::spawn::BlankCloudTextures>>,
         Res<AtmosphereTuning>,
@@ -1394,8 +1393,7 @@ pub(super) fn update_body_terrain_atmosphere(
                 // jitters as the camera moves). The shader rebuilds the near root
                 // from this precise altitude instead.
                 let sea_r = body.radius_m + sea_level_m as f64;
-                let cam_alt_sea =
-                    ((camera_inertial - body_state.position).length() - sea_r) as f32;
+                let cam_alt_sea = ((camera_inertial - body_state.position).length() - sea_r) as f32;
                 (
                     // x = ocean radius (m), y = enable, z = wall-clock wave-scroll
                     // time (real seconds — sim time pauses at warp-pause and runs
@@ -1519,45 +1517,46 @@ pub(super) fn update_body_terrain_atmosphere(
         // `THALOS_FLATTEN_VERTEX=0` zeroes the block — a live A/B diagnostic
         // lever for attributing base-ground artifacts to this override vs the
         // baked tiles.
-        static VERTEX_FLATTEN_ENABLED: std::sync::LazyLock<bool> =
-            std::sync::LazyLock::new(|| {
-                !matches!(
-                    std::env::var("THALOS_FLATTEN_VERTEX").as_deref(),
-                    Ok("0") | Ok("false") | Ok("off")
-                )
-            });
+        static VERTEX_FLATTEN_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            !matches!(
+                std::env::var("THALOS_FLATTEN_VERTEX").as_deref(),
+                Ok("0") | Ok("false") | Ok("off")
+            )
+        });
         if !*VERTEX_FLATTEN_ENABLED {
             mat.extras.flatten = FlattenBlock::default();
             continue;
         }
         mat.extras.flatten = flatten_registry
             .get(terrain.body_id)
-            .and_then(|handle| handle.read().ok().map(|regions| {
-                if regions.len() <= MAX_FLATTEN_REGIONS {
-                    FlattenBlock::pack(regions.iter().map(|r| &r.flatten))
-                } else {
-                    // More pads than uniform slots: keep those nearest the
-                    // camera — only pads near the view can show LOD error.
-                    let cam_dir_body = states
-                        .get(terrain.body_id)
-                        .map(|bs| bs.orientation.inverse() * (camera_inertial - bs.position))
-                        .and_then(|v| v.try_normalize())
-                        .unwrap_or(DVec3::Y);
-                    let mut sorted: Vec<_> = regions.iter().collect();
-                    sorted.sort_by(|a, b| {
-                        b.flatten
-                            .center_dir
-                            .dot(cam_dir_body)
-                            .total_cmp(&a.flatten.center_dir.dot(cam_dir_body))
-                    });
-                    FlattenBlock::pack(
-                        sorted
-                            .into_iter()
-                            .take(MAX_FLATTEN_REGIONS)
-                            .map(|r| &r.flatten),
-                    )
-                }
-            }))
+            .and_then(|handle| {
+                handle.read().ok().map(|regions| {
+                    if regions.len() <= MAX_FLATTEN_REGIONS {
+                        FlattenBlock::pack(regions.iter().map(|r| &r.flatten))
+                    } else {
+                        // More pads than uniform slots: keep those nearest the
+                        // camera — only pads near the view can show LOD error.
+                        let cam_dir_body = states
+                            .get(terrain.body_id)
+                            .map(|bs| bs.orientation.inverse() * (camera_inertial - bs.position))
+                            .and_then(|v| v.try_normalize())
+                            .unwrap_or(DVec3::Y);
+                        let mut sorted: Vec<_> = regions.iter().collect();
+                        sorted.sort_by(|a, b| {
+                            b.flatten
+                                .center_dir
+                                .dot(cam_dir_body)
+                                .total_cmp(&a.flatten.center_dir.dot(cam_dir_body))
+                        });
+                        FlattenBlock::pack(
+                            sorted
+                                .into_iter()
+                                .take(MAX_FLATTEN_REGIONS)
+                                .map(|r| &r.flatten),
+                        )
+                    }
+                })
+            })
             .unwrap_or_default();
     }
 
@@ -1774,13 +1773,13 @@ fn compute_moonlight(
         let to_body_from_moon = (body_pos - moon_state.position).normalize_or_zero();
         let cos_g = to_star_from_moon.dot(to_body_from_moon).clamp(-1.0, 1.0);
         let g = cos_g.acos();
-        let phase = ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI)
-            .clamp(0.0, 1.0);
+        let phase =
+            ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI).clamp(0.0, 1.0);
 
         // Per-moon reflectance shape: albedo luminance × (angular radius)².
         let color_lin = Color::srgb(moon.color[0], moon.color[1], moon.color[2]).to_linear();
-        let albedo_lum = (0.2126 * color_lin.red + 0.7152 * color_lin.green
-            + 0.0722 * color_lin.blue) as f64;
+        let albedo_lum =
+            (0.2126 * color_lin.red + 0.7152 * color_lin.green + 0.0722 * color_lin.blue) as f64;
         let ang = moon.radius_m / d;
         let shape = albedo_lum * ang * ang;
         let rel = (shape / MOON_REF_SHAPE).clamp(0.0, 1.5);

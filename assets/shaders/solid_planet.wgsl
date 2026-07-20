@@ -65,6 +65,11 @@ struct SolidPlanetParams {
 // (single scattering alone leaves it looking airless from space).
 @group(3) @binding(3) var ms_lut_tex: texture_2d<f32>;
 @group(3) @binding(4) var ms_lut_sampler: sampler;
+// Canonical cloud weather: coverage, type, normalized base, normalized top.
+// CLOUD-1's orbital projection consumes coverage; CLOUD-6 replaces this
+// surface-following first vertical with optical-depth/height moments.
+@group(3) @binding(5) var cloud_weather_tex: texture_cube<f32>;
+@group(3) @binding(6) var cloud_weather_sampler: sampler;
 #endif
 
 // Rotate vector `v` by unit quaternion `q` (xyz = axis·sin, w = cos).
@@ -233,8 +238,8 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // alpha is the water mask (baked: 1 = ocean, 0 = land).
     var surface_albedo = params.albedo.xyz;
     var is_water = false;
+    let n_body = rotate_quat(params.orientation, normal);
     if params.albedo.w >= 0.5 {
-        let n_body = rotate_quat(params.orientation, normal);
         let cube = textureSampleLevel(albedo_cube_tex, albedo_cube_sampler, n_body, 0.0);
         surface_albedo = cube.rgb;
         is_water = cube.a >= 0.5;
@@ -287,6 +292,27 @@ fn fragment(in: VertexOutput) -> FragOutput {
             params.scene,
             1.0,
         );
+    }
+
+    // First weather-derived orbital projection. This deliberately uses the
+    // same cubemap as the near volume rather than a reference photograph. It
+    // is still surface-following (CLOUD-6 adds height moments and limb relief),
+    // but placement and clear-body semantics are already canonical.
+    let weather = textureSampleLevel(
+        cloud_weather_tex,
+        cloud_weather_sampler,
+        n_body,
+        0.0,
+    );
+    let cloud_alpha = smoothstep(0.42, 0.68, weather.r);
+    if cloud_alpha > 0.0 {
+        let cloud_albedo = params.atmosphere.cloud_albedo_coverage.rgb;
+        let cloud_sun = max(dot(normal, sun_dir), 0.0);
+        let cloud_lit = cloud_albedo
+            * sun_flux
+            * SCENE_FLUX_SCALE
+            * (0.14 + 0.86 * sqrt(cloud_sun));
+        lit = mix(lit, cloud_lit, cloud_alpha * 0.92);
     }
 
     // Aerial perspective + daylight haze across the lit disc: integrate the
