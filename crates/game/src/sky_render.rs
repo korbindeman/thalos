@@ -26,8 +26,8 @@ use bevy::math::DVec3;
 use thalos_celestial::Universe;
 use thalos_celestial::generate::{DefaultGenParams, generate_default};
 
-use crate::rendering::CameraExposure;
-use crate::solar_system_state::{SimulationState, SolarSystemState};
+use crate::rendering::{CameraExposure, view_anchor::ViewAnchor};
+use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 use crate::view::ViewMode;
 
 /// Uniform buffer for the stars shader. Matches the `StarsParams`
@@ -140,7 +140,7 @@ impl Plugin for SkyRenderPlugin {
             .add_systems(
                 Update,
                 (
-                    update_atmospheric_star_visibility,
+                    update_atmospheric_star_visibility.after(sync_solar_system_state),
                     (update_stars_brightness, update_galaxy_uniform),
                 )
                     .chain()
@@ -189,17 +189,15 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 /// * disabled above the Kármán line (orbit keeps the full starfield) and on
 ///   airless bodies (no atmosphere to scatter → starry daytime sky).
 ///
-/// This models a *surface observer* standing under a lit sky, so it applies
-/// only to the ship view. The map camera is a god's-eye orbital view with no
-/// such observer — it always keeps the full backdrop. Because the two views
-/// are a mutually-exclusive toggle (only one camera active) and the shared
-/// star/galaxy `brightness` uniform is rewritten every frame, forcing the
-/// factor to 1 while in map view is enough: the ship view still gets the
-/// suppression on the frames it's active.
+/// The observer is the render camera resolved through [`ViewAnchor`], never the
+/// craft: freecam and god-view cameras may cross the terminator or Kármán line
+/// independently of every vehicle in the world. The map camera is a god's-eye
+/// orbital view with no surface observer and always keeps the full backdrop.
 fn update_atmospheric_star_visibility(
     view: Res<ViewMode>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
+    view_anchor: Res<ViewAnchor>,
     mut visibility: ResMut<CelestialBackdropVisibility>,
 ) {
     // The map view has no surface observer — never dim its backdrop.
@@ -208,27 +206,19 @@ fn update_atmospheric_star_visibility(
         return;
     }
 
-    // sin of sun elevation thresholds: full backdrop at/below astronomical
-    // twilight (−18°), fully suppressed at/above the horizon (0°).
-    const SIN_ASTRONOMICAL_TWILIGHT: f32 = -0.309; // sin(-18°)
-
     let mut factor = 1.0_f32;
 
-    if let Some(states) = cache.states.as_ref() {
-        let dominant = sim.simulation.dominant_body();
+    if let (Some(states), Some(anchor)) = (cache.states.as_ref(), view_anchor.resolved) {
         if let (Some(body_state), Some(star_state), Some(body)) = (
-            states.get(dominant),
+            states.get(anchor.body),
             states.first(),
-            sim.system.bodies.get(dominant),
+            sim.system.bodies.get(anchor.body),
         ) {
             // Only atmospheres scatter sunlight into a star-hiding sky.
             if let Some(atmos) = body.terrestrial_atmosphere.as_ref() {
                 let karman = atmos.karman_line_m.max(1.0);
-                let observer = sim.simulation.ship_state().position;
-                let to_obs = observer - body_state.position;
-                let dist = to_obs.length();
-                let altitude = (dist - body.radius_m) as f32;
-                let up = if dist > 1.0 { to_obs / dist } else { DVec3::Y };
+                let altitude = (anchor.cam_body.length() - anchor.radius_m) as f32;
+                let up = body_state.orientation * anchor.cam_dir;
 
                 let to_sun = star_state.position - body_state.position;
                 let sun_len = to_sun.length();
@@ -240,18 +230,26 @@ fn update_atmospheric_star_visibility(
 
                 // sin(sun elevation above the observer's local horizon).
                 let sun_up = up.dot(sun_dir) as f32;
-
-                // 1 with the sun up, ramping to 0 by 18° below the horizon.
-                let twilight = smoothstep(SIN_ASTRONOMICAL_TWILIGHT, 0.0, sun_up);
-                // 1 at the surface, fading to 0 at the Kármán line (orbit).
-                let inside = 1.0 - smoothstep(0.0, karman, altitude);
-
-                factor = 1.0 - inside * twilight;
+                factor = atmospheric_backdrop_factor(altitude, karman, sun_up);
             }
         }
     }
 
     visibility.0 = factor.clamp(0.0, 1.0);
+}
+
+/// Celestial-backdrop visibility for one camera observer under an atmosphere.
+fn atmospheric_backdrop_factor(altitude_m: f32, karman_line_m: f32, sun_up: f32) -> f32 {
+    // sin of sun elevation thresholds: full backdrop at/below astronomical
+    // twilight (−18°), fully suppressed at/above the horizon (0°).
+    const SIN_ASTRONOMICAL_TWILIGHT: f32 = -0.309; // sin(-18°)
+
+    // 1 with the sun up, ramping to 0 by 18° below the horizon.
+    let twilight = smoothstep(SIN_ASTRONOMICAL_TWILIGHT, 0.0, sun_up);
+    // 1 at the surface, fading to 0 at the Kármán line (orbit).
+    let inside = 1.0 - smoothstep(0.0, karman_line_m.max(1.0), altitude_m);
+
+    (1.0 - inside * twilight).clamp(0.0, 1.0)
 }
 
 /// Result of the off-thread sky build: the two meshes ready for upload.
@@ -562,4 +560,31 @@ fn build_star_mesh(universe: &Universe) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::atmospheric_backdrop_factor;
+
+    const KARMAN_LINE_M: f32 = 100_000.0;
+
+    #[test]
+    fn daylight_suppression_uses_observer_altitude() {
+        let surface_camera = atmospheric_backdrop_factor(0.0, KARMAN_LINE_M, 1.0);
+        let space_camera = atmospheric_backdrop_factor(KARMAN_LINE_M, KARMAN_LINE_M, 1.0);
+
+        assert_eq!(surface_camera, 0.0);
+        assert_eq!(space_camera, 1.0);
+    }
+
+    #[test]
+    fn surface_observer_sees_backdrop_only_after_astronomical_twilight() {
+        let daylight = atmospheric_backdrop_factor(0.0, KARMAN_LINE_M, 0.1);
+        let twilight = atmospheric_backdrop_factor(0.0, KARMAN_LINE_M, -0.15);
+        let night = atmospheric_backdrop_factor(0.0, KARMAN_LINE_M, -0.4);
+
+        assert_eq!(daylight, 0.0);
+        assert!(twilight > 0.0 && twilight < 1.0);
+        assert_eq!(night, 1.0);
+    }
 }

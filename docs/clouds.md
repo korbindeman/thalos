@@ -1,9 +1,12 @@
 # Planet-scale volumetric clouds
 
-**Status:** proposed program, 2026-07-20. No implementation phase has been
-started. This document is the strategy and technical plan; [backlog.md](backlog.md)
-is the execution queue, while [atmosphere.md](atmosphere.md) remains the spec for
-what the renderer ships today.
+**Status:** active program, 2026-07-20. CLOUD-0 is complete; its measured
+baseline confirms that the current renderer needs structural replacement, not
+another parameter pass. This document is the strategy and technical plan;
+[backlog.md](backlog.md) is the execution queue, while
+[atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
+today. The long-lived ownership choices are accepted in
+[ADR-0007](adr/0007-one-weather-field-many-cloud-projections.md).
 
 The target is a Blackrack-class cloud system for a surface-to-orbit flight
 camera: shaped volumes that can be entered, stable planetary weather seen from
@@ -14,6 +17,34 @@ water.
 Planning input: the supplied *Planet-scale volumetric clouds for spaceflight*
 note, backed by the public Nubis/Horizon Zero Dawn, Nubis Evolved, Frostbite,
 Hillaire, Skybolt, and Blackrack feature-level references named there.
+
+### Visual target (user references, 2026-07-20)
+
+The user-supplied Blackrack/KSP reference captures are the program's visual
+bar. They do not merely show denser white noise. Their defining qualities are:
+
+- **Recognizable regimes in one sky:** scattered cumulus, congestus and
+  cumulonimbus towers, broad anvils, layered stratus/overcast, and thin shelf
+  structure coexist at distinct heights and scales.
+- **Weather-system coherence:** kilometre-tall towers gather into fronts and
+  storm systems that remain legible across a runway, an aircraft-scale scene,
+  the horizon, and the planet. Individual lobes never read as repeated sprites
+  or vertically extruded coverage texels.
+- **Convincing volume:** crisp sunlit cauliflower detail transitions into soft
+  wisps, deep blue-grey self-shadow, dark rain-bearing cores, continuous
+  interior extinction, and occasional diffuse precipitation/virga shafts.
+- **Atmospheric light:** cloud light follows the sky and air around it — cool
+  shadow fill at noon, warm low-sun transmission and rims, aerial recession,
+  and energy-bounded bright regions rather than clipped white slabs.
+- **One scene:** terrain, craft, water, atmosphere, and clouds agree on depth,
+  sun visibility, ambient response, reflections, and scale. Flying beside or
+  through a cloud must feel like occupying the same world, not compositing a
+  sky effect behind it.
+
+These are acceptance properties, not a mandate to reproduce a particular mod's
+assets or exact art direction. Morphology, scale hierarchy, lighting, temporal
+stability, and surface-to-orbit continuity take precedence over matching a
+single still image.
 
 ## 1. What Thalos already has
 
@@ -268,31 +299,34 @@ User-verifiable:
 - One short current-build session confirms which visual failures are most
   objectionable before fidelity work is prioritized.
 
-**Status (2026-07-20):** agent-verifiable work is complete on
+**Status (2026-07-20): done.** Agent-verifiable work is complete on
 `codex/cloud-0`. Five regime presets, temporal/quality/pose overrides, Vulkan
 GPU timing, exact target-memory reporting, 1080p/1440p captures, and the
 artifact inventory are recorded in `docs/cloud_baseline.md`. The 1440p High
 sunset probe measures 11.06 ms mean on the development RTX 4070 Ti versus the
-provisional 3.5 ms target; persistent cloud textures total 135.98 MiB. The
-interactive ranking session above remains, so CLOUD-0 is `verify`, not `done`.
+provisional 3.5 ms target; persistent cloud textures total 135.98 MiB. The user
+then judged the current result uniformly mediocre against the reference set,
+confirming that morphology, lighting, regime variety, and scale continuity are
+the priority failures. That verdict completes the user-verifiable criterion.
 
 ### Program acceptance matrix
 
 | Scenario | Pass condition |
 |----------|----------------|
-| Runway under broken cumulus | Stable detail, soft self-shadow, blue/overcast fill, terrain/craft shadows align with visible cells |
-| Climb through deck | Continuous extinction and visibility; no sheet pop; rapid yaw rejects history rather than smearing |
-| Cruise beside convection | Kilometer-scale silhouettes plus local cauliflower detail; no obvious repeated atlas cells |
+| Runway under a storm system | A coherent tower/anvil/strata hierarchy dominates the sky without reading as a wallpaper slab; soft self-shadow, cool fill, and terrain/craft shadows align with visible cells |
+| Climb through deck | Continuous extinction, wispy boundary detail, and changing visibility; no sheet pop; rapid yaw rejects history rather than smearing |
+| Cruise beside convection | Kilometre-scale towers, anvils, rain-bearing cores, scattered cells, and local cauliflower detail coexist with no obvious repeated atlas cells |
 | Low-orbit limb | Cloud line lies inside the aerosol limb; reduced-volume/orbit handoff is invisible in motion |
-| High orbit/map | Planet-wide fronts stay coherent and match the weather/shadows seen below |
-| Noon to sunset | Dark bases and bright rims remain energy-bounded; atmosphere transmittance gives natural warm edges |
+| High orbit/map | Planet-wide fronts, broken decks, and storm systems stay coherent and match the weather/shadows seen below |
+| Noon to sunset | Deep blue-grey cores and bright rims remain energy-bounded; atmosphere transmittance produces natural warm edges, lit shafts, and aerial recession rather than white/grey clipping |
 | Timewarp/body rotation | Weather advances in simulation time; history resets cleanly with no trails or ground slip |
-| Solid overcast | Sun, terrain, hull, structures, water, and environment ambient all respond to the same cloud field |
+| Solid overcast | A layered ceiling can coexist with openings and embedded towers; sun, terrain, hull, structures, water, and environment ambient all respond to the same cloud field |
 
 ## 5. Risks and decision gates
 
-These choices should be confirmed before CLOUD-1 starts; acceptance should be
-recorded in an ADR because each changes long-lived renderer ownership.
+These choices were accepted on 2026-07-20 and are recorded in
+[ADR-0007](adr/0007-one-weather-field-many-cloud-projections.md). CLOUD-1 may
+now implement against them.
 
 1. **Weather topology — recommended: cube/2-D array.** It costs more authoring
    plumbing than the current equirect map, but avoids polar concentration and
