@@ -52,6 +52,8 @@ use thalos_body_render::AtmosphereBlock;
 use thalos_body_render::BodyTerrainMaterial;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileTree};
 use thalos_physics_local::HeightSourceRegistry;
+
+use crate::terrain_registry::BodySurfaceRegistry;
 use thalos_world::BodyId;
 
 use super::ground_terrain::{TerrainTier, spawn_body_terrain};
@@ -270,6 +272,7 @@ struct ResidencySpawnParams<'w, 's> {
     /// Per-body tile caches. Held in a resource so retained tile payloads survive
     /// the despawn/respawn this module performs on every tier change.
     tile_cache: ResMut<'w, super::tile_cache::TileCacheRegistry>,
+    surfaces: Res<'w, BodySurfaceRegistry>,
     bodies: Query<'w, 's, (&'static RealSpaceBody, Entity)>,
     ship_camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
     sun_shadow: Res<'w, super::sun_shadow::SunShadowImage>,
@@ -460,6 +463,8 @@ fn try_spawn(
     };
     let flatten = params.flatten.handle(body_id);
     let sun_shadow_maps = params.sun_shadow.handles.clone();
+    let surface = params.surfaces.surface(body_id)?;
+    let surface_fingerprint = params.surfaces.fingerprint(body_id)?;
 
     let terrain = spawn_body_terrain(
         commands,
@@ -474,6 +479,8 @@ fn try_spawn(
         tier,
         sun_shadow_maps,
         &mut params.tile_cache,
+        surface,
+        surface_fingerprint,
     );
 
     // Ocean is no longer a terrain-parented mesh: it is rendered analytically as

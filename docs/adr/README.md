@@ -32,4 +32,6 @@ and why. Read here before reopening a settled choice.
 | [0004](0004-replace-avian-owned-tgs-soft-solver.md) | Replace Avian with an owned TGS-Soft solver crate (`thalos_physics`) | Accepted |
 | [0005](0005-coastline-as-authored-data.md) | The coastline is authored data — scene depth is occlusion-only for water | Partially superseded by ADR-0006 |
 | [0006](0006-water-projects-one-signed-sea-field.md) | Water is a projection of one signed sea-height field — depth never decides coverage | Accepted |
-| [0007](0007-one-weather-field-many-cloud-projections.md) | Planet clouds use one weather field with regime-specific render projections | Accepted |
+| [0007](0007-mira-mvp-runtime-surface.md) | Mira's airless MVP is a runtime `SurfaceQuery` | Superseded by ADR-0008 |
+| [0008](0008-offline-terrain-packages.md) | Offline terrain packages are an authored `SurfaceQuery` backing | Accepted |
+| [0009](0009-one-weather-field-many-cloud-projections.md) | Planet clouds use one weather field with regime-specific render projections | Accepted |

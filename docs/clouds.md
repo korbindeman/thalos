@@ -6,7 +6,7 @@ another parameter pass. This document is the strategy and technical plan;
 [backlog.md](backlog.md) is the execution queue, while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
 today. The long-lived ownership choices are accepted in
-[ADR-0007](adr/0007-one-weather-field-many-cloud-projections.md).
+[ADR-0009](adr/0009-one-weather-field-many-cloud-projections.md).
 
 The target is a Blackrack-class cloud system for a surface-to-orbit flight
 camera: shaped volumes that can be entered, stable planetary weather seen from
@@ -325,7 +325,7 @@ the priority failures. That verdict completes the user-verifiable criterion.
 ## 5. Risks and decision gates
 
 These choices were accepted on 2026-07-20 and are recorded in
-[ADR-0007](adr/0007-one-weather-field-many-cloud-projections.md). CLOUD-1 may
+[ADR-0009](adr/0009-one-weather-field-many-cloud-projections.md). CLOUD-1 may
 now implement against them.
 
 1. **Weather topology — recommended: cube/2-D array.** It costs more authoring

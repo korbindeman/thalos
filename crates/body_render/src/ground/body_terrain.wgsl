@@ -292,10 +292,11 @@ const REGOLITH_MOTTLE_AMT: f32 = 0.16;       // ± broad value mottle
 const REGOLITH_SPECKLE_SCALE: f32 = 0.55;    // 1/period_m → ~1.8 m dust/ejecta
 const REGOLITH_SPECKLE_AMT: f32 = 0.20;      // ± fine value speckle
 const REGOLITH_NORMAL_STRENGTH: f32 = 0.45;  // micro-relief facet tilt
-// Slight overall darkening: the baked highland albedo plus Hapke backscatter
-// at near-opposition reads a touch bright on flat ground; trimming value gives
-// the dusty mid-gray the reference Apollo surface shots have.
-const REGOLITH_VALUE_TRIM: f32 = 0.90;
+// The shared camera exposure is calibrated for the one-world lighting spine;
+// lunar albedos otherwise land close to display white after Hapke's opposition
+// and backscatter response. Keep this regolith-only so mature dust sits in the
+// middle-gray range without changing terrestrial radiance.
+const REGOLITH_VALUE_TRIM: f32 = 0.55;
 
 // ── Altitude + slope material model (snow, treeline, scree) ───────────────
 // Realistic terrain reads as ecological bands stacked by elevation: lush

@@ -17,6 +17,7 @@ members = [
     "crates/volumetric_clouds",
     "crates/big_space",
     "crates/bevy_erosion_filter",
+    "crates/terrain_baker",
 ]
 
 [workspace.package]

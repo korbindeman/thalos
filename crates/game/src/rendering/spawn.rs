@@ -35,7 +35,7 @@ use thalos_body_render::{
 };
 use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
-use thalos_terrain::{ProceduralSurface, TerrainConfig};
+use thalos_terrain::TerrainConfig;
 use thalos_world::BodyKind;
 
 use super::generation::{ProceduralInstallExtras, WorldStateAssets};
@@ -43,8 +43,9 @@ use super::ground_terrain::{BodySky, RealSpaceImpostor};
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::scene_depth::SceneDepthImage;
 use super::types::{
-    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, MoonLight, RealSpaceBody,
-    ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight, TidallyLocked,
+    BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, MoonLight,
+    RealSpaceBody, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight,
+    TidallyLocked,
 };
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::loading::LoadingTracker;
@@ -297,8 +298,11 @@ pub(super) fn spawn_bodies(
             // takes over — islands must not appear/disappear with camera
             // distance. ~25 MB, ~6.3 M rayon-parallel macro samples at spawn.
             let coast_atlas = if body.terrain.ocean_sea_level_m().is_some() {
-                let surface = ProceduralSurface::new(body.radius_m as f32, body.id as u32);
-                images.add(bake_coast_bathymetry_cube(&surface, 1024))
+                let surface = procedural_install
+                    .surfaces
+                    .surface(body.id)
+                    .expect("terrain body has a canonical surface");
+                images.add(bake_coast_bathymetry_cube(surface.as_ref(), 1024))
             } else {
                 blank_coast.clone()
             };
@@ -484,8 +488,11 @@ pub(super) fn spawn_bodies(
                 albedo_linear.blue,
                 1.0,
             );
-            let impostor_surface = ProceduralSurface::new(body.radius_m as f32, body.id as u32);
-            let impostor_cube = images.add(bake_impostor_albedo_cube(&impostor_surface, 256));
+            let surface = procedural_install
+                .surfaces
+                .surface(body.id)
+                .expect("terrain body has a canonical surface");
+            let impostor_cube = images.add(bake_impostor_albedo_cube(surface.as_ref(), 256));
             // Map-scale atmosphere optics for the rim glow + on-disc aerial
             // perspective. Airless procedural bodies have no
             // `terrestrial_atmosphere` → vacuum block → the shader early-outs.
@@ -579,15 +586,10 @@ pub(super) fn spawn_bodies(
             // GPU-atlas mirror with a CPU fallback — and (b) the propagator's
             // coarse orbital collision. Built from the same body params as the
             // ground tile provider (`spawn_body_terrain`) so all three agree.
-            let proc_surface = ProceduralSurface::new(body.radius_m as f32, body.id as u32);
             procedural_install.height_sources.insert_gpu_mirror_source(
                 body.id,
-                GpuAtlasMirrorHeightSource::new(Arc::new(proc_surface)),
+                GpuAtlasMirrorHeightSource::new(Arc::clone(&surface)),
             );
-            procedural_install
-                .terrain_registry
-                .0
-                .insert(body.id, proc_surface);
             world_state.planetshine.by_body.insert(
                 body.id,
                 [albedo_linear.red, albedo_linear.green, albedo_linear.blue],

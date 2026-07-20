@@ -18,6 +18,7 @@ pub mod generic_terrestrial_field;
 pub mod height_generator;
 pub mod icosphere;
 pub mod noise;
+pub mod package;
 pub mod pipeline;
 pub mod procedural;
 pub mod query;
@@ -44,6 +45,12 @@ pub use field_surface::FieldSurface;
 pub use generic_terrestrial_field::*;
 pub use height_generator::*;
 pub use icosphere::Icosphere;
+pub use package::{
+    HeightPyramidSpec, LoadedTerrainPackage, PackageBlob, PackageBlobKind, PackageBorderRule,
+    PackageCodec, PackageError, PackageNode, PackageNodeAddress, PackageProducer, PackageSurface,
+    SCHEMA_VERSION as PACKAGE_SCHEMA_VERSION, TerrainPackageManifest, load_static_package,
+    write_static_package,
+};
 pub use procedural::{
     GENERATOR_VERSION, MacroBiome, ProceduralSurface, climate_cold_lift_m, climate_warmth,
 };

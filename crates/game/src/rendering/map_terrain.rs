@@ -46,8 +46,6 @@
 //! cheap `Distant` atlas tier (~20 MB); since UDLOD cannot share one atlas
 //! across two scales, this is a *second* atlas that re-streams on focus change.
 
-use std::sync::Arc;
-
 use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
 use bevy::light::NotShadowCaster;
 use bevy::math::DVec3;
@@ -62,7 +60,6 @@ use thalos_body_render::{
     AtmosphereBlock, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT,
     MapOceanMaterial, MapOceanParams, PipelineTileProvider, SceneLighting, rendered_height_range,
 };
-use thalos_terrain::{ProceduralSurface, SurfaceQuery};
 use thalos_world::BodyId;
 
 use super::ground_terrain::{
@@ -76,6 +73,7 @@ use super::types::{
 };
 use crate::camera::{CameraFocus, MapCamera};
 use crate::coords::{MAP_LAYER, MAP_SCALE};
+use crate::terrain_registry::BodySurfaceRegistry;
 use crate::view::ViewMode;
 
 /// Cell size of the map terrain's (non-`BigSpace`) grid, in MAP_SCALE render
@@ -168,10 +166,7 @@ impl Plugin for MapTerrainPlugin {
                         .after(crate::camera::spawn_camera),
                 ),
             )
-            .add_systems(
-                Update,
-                attach_map_camera.in_set(crate::SimStage::Sync),
-            );
+            .add_systems(Update, attach_map_camera.in_set(crate::SimStage::Sync));
         }
     }
 }
@@ -210,7 +205,11 @@ fn attach_map_camera(
 /// The body the map should render terrain for this frame: the camera-focus body
 /// when it is a procedural-terrain body zoomed in past the icon dot. `None`
 /// outside map view, when nothing is focused, or when the body is still a dot.
-fn wanted_map_body(_view: &ViewMode, _focus: &CameraFocus, _sim: &SimulationState) -> Option<BodyId> {
+fn wanted_map_body(
+    _view: &ViewMode,
+    _focus: &CameraFocus,
+    _sim: &SimulationState,
+) -> Option<BodyId> {
     // Map view now shows the baked impostor billboard (real continents + oceans
     // from `bake_impostor_albedo_cube`) at every distance, instead of streaming
     // UDLOD terrain — that read as patchy/half-loaded at whole-planet distance.
@@ -237,6 +236,7 @@ fn manage_map_terrain(
     mut state: ResMut<MapTerrainState>,
     sun_shadow: Res<super::sun_shadow::SunShadowImage>,
     mut tile_cache: ResMut<TileCacheRegistry>,
+    surfaces: Res<BodySurfaceRegistry>,
 ) {
     let wanted = wanted_map_body(&view, &focus, &sim);
     if wanted == state.body_id {
@@ -275,6 +275,7 @@ fn manage_map_terrain(
             &mut commands,
             sun_shadow.handles.clone(),
             &mut tile_cache,
+            &surfaces,
         )
     {
         state.entity = Some(entity);
@@ -353,6 +354,7 @@ fn spawn_map_terrain(
     commands: &mut Commands,
     sun_shadow_maps: [Handle<Image>; CASCADE_COUNT],
     tile_cache: &mut TileCacheRegistry,
+    surfaces: &BodySurfaceRegistry,
 ) -> Option<Entity> {
     let body = sim.system.bodies.get(body_id)?;
     if !body.terrain.is_some() {
@@ -363,8 +365,8 @@ fn spawn_map_terrain(
     // (the runway pad is a ship-surface concern). The provider returns
     // normalized heights, so the same surface drives any scale; only the
     // `TerrainModel` min/max (set below in MAP_SCALE units) decode it.
-    let surface: Arc<dyn SurfaceQuery> =
-        Arc::new(ProceduralSurface::new(body.radius_m as f32, body.id as u32));
+    let surface = surfaces.surface(body_id)?;
+    let surface_fingerprint = surfaces.fingerprint(body_id)?;
     let height_range_m = rendered_height_range(surface.as_ref());
 
     // MAP_SCALE geometry: radius and height range scaled to render units.
@@ -379,7 +381,7 @@ fn spawn_map_terrain(
     // Cache the map tiles too, so re-focusing a body doesn't re-bake its sphere.
     // The map has no flatten layer, and its `MAP_SCALE` model gives it a distinct
     // cache namespace from the ship-view terrain of the same body.
-    let provider = tile_cache.wrap_provider(body_id, provider, &config, None);
+    let provider = tile_cache.wrap_provider(body_id, provider, &config, None, surface_fingerprint);
     let mut tile_atlas = TileAtlas::with_provider(&config, provider);
     pin_root_tiles(&mut tile_atlas);
 
@@ -537,7 +539,8 @@ fn update_map_terrain(
     if let Ok((water, mut w_transform, mut w_vis, w_mat_handle)) = water_q.single_mut() {
         w_transform.translation = body_translation;
         if let Some(mut mat) = ocean_materials.get_mut(w_mat_handle) {
-            mat.params.scene = build_terrain_scene_lighting(water.body_id, states, &[], exposure.gain);
+            mat.params.scene =
+                build_terrain_scene_lighting(water.body_id, states, &[], exposure.gain);
         }
         if *w_vis != want {
             *w_vis = want;

@@ -2,11 +2,12 @@
 
 `thalos_udlod` began as `kurtkuehnert/bevy_terrain`, whose design target is
 **preprocessed real-world raster data** (GeoTIFF → on-disk tile pyramids). Thalos
-inverted that: tiles are **synthesized at runtime** from an owned generator
-(`SurfaceQuery`), and there is a *contract* between producer and renderer. That
-ownership is leverage the upstream design cannot use — we know exactly what makes
-a tile's content change, so tiles are safely memoizable. This document records the
-optimization pass that spends that leverage, and what it deliberately did not do.
+replaced that fixed format with an owned `SurfaceQuery` contract between producer
+and renderer. The current producer synthesizes at runtime; ADR-0008 plans a new
+adaptive offline terrain package as another producer. In both cases Thalos knows
+the full content identity, so reconstructed tiles are safely memoizable. This
+document records the optimization pass that spends that leverage, and what it
+deliberately did not do.
 
 ## What the fork had dropped vs upstream (audit result)
 
@@ -51,7 +52,9 @@ MemoryTileCacheProvider   ← survives terrain despawn/respawn (handle held in a
 **The cache key is the design.** Everything that changes a tile's content is
 folded into one namespace (`rendering::tile_cache::namespace_fn`): the generator
 fingerprint (`thalos_terrain::GENERATOR_VERSION`), the body, the model scale, and
-the body's terrain-flatten state.
+the body's terrain-flatten state. Package-backed terrain extends the static half
+with package content hash, reconstruction version, and quality tier; the shipped
+package remains authored source data, not part of this disposable cache.
 
 The subtle part — and the bug that nearly shipped — is that the namespace is
 resolved **per request**, not frozen when the provider is built. The flatten

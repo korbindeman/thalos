@@ -62,12 +62,24 @@ preview-window:
 # placed — the regression probe for view-anchored surface detail);
 # `just screenshot dry-belt` (aliases: dry / desert / biome) surveys the driest
 # sunlit desert site it can find — the verification probe for terrain-per-biome
-# work (landcover palette + the tree/scatter biome gate). Override the framing
+# work (landcover palette + the tree/scatter biome gate). `mira-orbit` and
+# `mira-surface` verify the offline terrain package, LOD, and Hapke regolith.
+# Override the framing
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP.
 screenshot preset="spaceport-aerial":
-    $env:THALOS_SCREENSHOT='{{preset}}'; cargo run -p thalos_game
+    THALOS_SCREENSHOT='{{preset}}' cargo run -p thalos_game
+
+# Offline authored terrain package. The MVP producer is the deterministic
+# airless compiler; ADR-0008's diffusion producer will emit the same package
+# boundary. Output: assets/terrain_packages/<body>.bin.
+bake body="Mira":
+    cargo run --release -p thalos_terrain_baker -- {{body}}
+
+# Validate package schema, content key, node/blob bounds, checksums, and payload.
+validate-bake body="Mira":
+    cargo run --release -p thalos_terrain_baker -- validate {{body}}
 
 # Whole-planet biome map export (headless, agent-readable): renders the true
 # in-game macro palette + a flat biome-class map with per-biome area stats to
@@ -112,4 +124,3 @@ clippy:
 # or tracy-capture) listening on localhost before launch.
 trace:
     cargo run --release -p thalos_game --features profile-tracy
-
