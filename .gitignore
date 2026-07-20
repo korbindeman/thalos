@@ -22,3 +22,5 @@ Cargo.lock
 .claude/*
 !.claude/skills/
 .codex/
+crates/ui/tools/ui_preview/kitchen_sink.png
+rustc-ice-2026-07-20T17_25_42-22912.txt
