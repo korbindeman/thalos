@@ -43,9 +43,9 @@ mod settings_menu;
 mod ship_view;
 mod shipyard_editor;
 mod sim_clock;
-mod space_center;
 mod sky_render;
 mod solar_system_state;
+mod space_center;
 mod spawn;
 mod staging;
 mod star_flare;
@@ -79,9 +79,7 @@ use thalos_input::settings::InputSettings;
 use thalos_physics_canonical::{
     body_trajectory_provider::BodyTrajectoryProvider,
     canonical::{AuthorityMode, Epoch, WorldPhysicsConfig},
-    debug_orbits::{
-        debug_parking_orbit_relative_state, debug_polar_parking_orbit_relative_state,
-    },
+    debug_orbits::{debug_parking_orbit_relative_state, debug_polar_parking_orbit_relative_state},
     gravity_mode::GravityMode,
     simulation::{Simulation, SimulationConfig},
     types::{AttitudeState, ShipParameters, VesselKind},
@@ -120,6 +118,7 @@ use sim_clock::SimClockPlugin;
 use solar_system_state::{SimulationState, SolarSystemStatePlugin};
 use spawn::{SpawnPlugin, SpawnSituation};
 use target::TargetPlugin;
+use terrain_registry::BodySurfaceRegistry;
 use terrain_registry::SharedTerrainRegistry;
 use view::ViewPlugin;
 use warp_to_maneuver::WarpToManeuverPlugin;
@@ -203,6 +202,11 @@ fn main() {
     // ------------------------------------------------------------------
     let system = load_solar_system_from_dir(std::path::Path::new("assets"))
         .expect("Failed to load solar system from assets/");
+    let body_surfaces = BodySurfaceRegistry::load(
+        &system.bodies,
+        std::path::Path::new("assets/terrain_packages"),
+    )
+    .expect("Failed to load body terrain surfaces");
 
     // ------------------------------------------------------------------
     // 1a. (Retired in terrain-rewrite 0b-1.) Procedural bodies now generate
@@ -242,6 +246,9 @@ fn main() {
     // of the same inner Arc<RwLock<...>>, so live propagation and trajectory
     // prediction collide against the same surface the renderer is showing.
     let terrain_registry = SharedTerrainRegistry::new();
+    for (body_id, surface) in body_surfaces.iter() {
+        terrain_registry.insert(body_id, surface);
+    }
     let gravity_impls = gravity_mode.build_with_terrain(
         &system,
         RUNTIME_TIME_SPAN,
@@ -265,7 +272,25 @@ fn main() {
     //      populated later as bakes load), so we err above the worst-case
     //      elevation and let local physics resolve the drop to the surface.
     // ------------------------------------------------------------------
-    let homeworld_name = "Thalos";
+    // Resolve launch/capture intent before choosing the anchor body. Named Mira
+    // modes are ordinary game scenarios; headless presets use the same seam.
+    let spawn_request = std::env::args()
+        .nth(1)
+        .filter(|arg| !arg.trim().is_empty())
+        .or_else(|| std::env::var("THALOS_SPAWN").ok())
+        .unwrap_or_default();
+    let request = spawn_request.trim().to_ascii_lowercase();
+    let screenshot_config = screenshot::ScreenshotConfig::from_env();
+    let homeworld_name = screenshot_config
+        .as_ref()
+        .map(|cfg| cfg.preset.target_body_name())
+        .unwrap_or_else(|| {
+            if request.starts_with("mira") {
+                "Mira"
+            } else {
+                "Thalos"
+            }
+        });
     let homeworld_id = system
         .name_to_id
         .get(homeworld_name)
@@ -286,12 +311,6 @@ fn main() {
     // Spawn mode arrives as a CLI arg from `just game [mode]` (works in any
     // shell), falling back to the `THALOS_SPAWN` env var for a direct
     // `cargo run`. Unset / `menu` → boot to the start screen.
-    let spawn_request = std::env::args()
-        .nth(1)
-        .filter(|arg| !arg.trim().is_empty())
-        .or_else(|| std::env::var("THALOS_SPAWN").ok())
-        .unwrap_or_default();
-    let request = spawn_request.trim().to_ascii_lowercase();
     // `just game shipyard` opens straight into the in-game ship editor: the
     // sim seeds the default parking orbit behind it (and stays paused while
     // the editor is open), so closing the editor drops into normal flight.
@@ -300,7 +319,6 @@ fn main() {
     // `just preview`), renders one scripted camera pose to a PNG, and exits. Its
     // presence forces the preset's scenario so the captured world is fully built,
     // and never the start screen / shipyard. See `crate::screenshot`.
-    let screenshot_config = screenshot::ScreenshotConfig::from_env();
     let headless = screenshot_config.is_some();
 
     let open_shipyard = matches!(request.as_str(), "shipyard" | "editor" | "vab") && !headless;
@@ -323,7 +341,17 @@ fn main() {
     } else if open_shipyard || wants_menu || boot_hub {
         SpawnSituation::ShipOrbit
     } else {
-        SpawnSituation::from_request(&spawn_request)
+        let body_request = request
+            .strip_prefix("mira-")
+            .or_else(|| request.strip_prefix("mira_"))
+            .unwrap_or_else(|| {
+                if request == "mira" {
+                    "orbit"
+                } else {
+                    request.as_str()
+                }
+            });
+        SpawnSituation::from_request(body_request)
     };
 
     let (ship_state, vessel_kind, ship_params, attitude) = if situation == SpawnSituation::Eva {
@@ -544,6 +572,7 @@ fn main() {
             }
         })
         .insert_resource(GameTerrainRegistry(terrain_registry))
+        .insert_resource(body_surfaces)
         .insert_resource(situation)
         // `just game hub` / the headless hub preset: build the spaceport (no
         // craft) behind the boot loading pass and open the space-center hub on

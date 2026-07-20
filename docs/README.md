@@ -32,6 +32,7 @@ The project's design and planning docs. Start here to find the right one.
 | [base_building.md](base_building.md) | In-world surface base editor, structures, ground scatter |
 | [terrain.md](terrain.md) | Consumer-side terrain contract: the tile primitive, LOD, colliders |
 | [terrain_macro.md](terrain_macro.md) | Large-scale terrain: scale ownership, macro landcover phases |
+| [mira_airless_mvp.md](mira_airless_mvp.md) | Mira airless-terrain vertical slice: runtime surface, crater bands, regolith, verification |
 | [terrain_lod_optimization.md](terrain_lod_optimization.md) | The udlod fork's Thalos optimization pass: tile cache, mips, admission |
 | [vegetation.md](vegetation.md) | Planet-scale vegetation plan: cascades, placement, impostors, instancing |
 | [atmosphere.md](atmosphere.md) | Atmosphere/cloud/ocean *rendering*; IBL/reflection probe |

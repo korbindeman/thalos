@@ -5,10 +5,11 @@ engine reads, and how it is rendered, shadowed, collided against, and varied
 over time. Terrain **generation is a black box** behind this contract — it
 produces tiles; nothing in this doc depends on *how*.
 
-> **Generation is archived (2026-06).** The previous generation design (feature
+> **Legacy generation is archived (2026-06).** The previous generation design (feature
 > compiler, field-DAG pipeline spec, migration plan, research surveys) was moved
-> under [`archive/`](archive/) and reframed as a black box. A new generator is
-> being built against the tile contract below. This doc is the *consumer* side:
+> under [`archive/`](archive/) and reframed as a black box. The current runtime
+> generator and the planned offline package bakery both target the tile contract
+> below; see [mira_airless_mvp.md](mira_airless_mvp.md) and ADR-0008. This doc is the *consumer* side:
 > tile contract → rendering → shadows → colliders → dynamic features.
 > Atmospheric optics, ocean, clouds, reflections, and lighting/GI live in
 > [atmosphere.md](atmosphere.md).
@@ -22,10 +23,13 @@ Generation produces tiles; the renderer draws them; the collider, the relief
 shadows, and the future RT reflection geometry all derive from the *same* tile
 height authority.
 
-- **Generation** — a black box (`thalos_terrain`, pure Rust, no Bevy). Input: a
-  body's terrain config. Output: `PlanetSurface` (immutable `StaticSurfaceData`
-  + `DynamicSurfaceLayers`), sampled into tiles on demand. The new generator is
-  built fresh against the tile contract; its internals are not specified here.
+- **Generation** — a black box behind `SurfaceQuery` (`thalos_terrain`, pure
+  Rust, no Bevy). Today procedural bodies use `ProceduralSurface`, while Mira's
+  compatibility MVP loads an immutable offline `BakedSurface` package whose
+  height already uses an adaptive ancestor-fallback residual pyramid. Planned
+  learned production packages use the same contract plus a
+  deterministic close-detail reconstructor. Both are sampled into tiles on
+  demand and expose the same gameplay height authority.
 - **Rendering** — the in-tree `thalos_udlod` fork: UDLOD on an ellipsoidal
   cube-sphere, fed tiles through the runtime `TileProvider` seam, shaded with
   the custom Hapke-family BRDF (`thalos::lighting`), not Bevy PBR. See
@@ -59,15 +63,15 @@ attachment's format, including a border ring that overlaps neighbours:
 | `material` / `splat` | RGBA8 | Optional weight masks for shader-side blending. |
 | *(planned)* `horizon` | packed | Baked relief-shadow horizon angles — see *Surface shadows*. |
 
-**Determinism = pure function of position.** `request_tile(coord)` and
+**Determinism = stable function of source + position.** `request_tile(coord)` and
 `request_tile(child_of_coord)` must agree bit-exactly on shared edges,
-regardless of evaluation order. This holds **iff synthesis is a pure function of
-(ellipsoid position, body params)** — and Thalos deliberately keeps it so:
-there are **no neighbour-aware tile passes**. Erosion is applied **analytically
-via `bevy_erosion_filter`** as a field/heightfield transform, not as a per-tile
-hydraulic pass that would require border exchange between generated neighbours.
-Border coherence therefore falls out of position-purity for free; the tile
-payload never needs cross-tile structure.
+regardless of evaluation order. Runtime procedural synthesis achieves this as a
+pure function of `(ellipsoid position, body params)`. Package-backed synthesis
+achieves it from immutable package bytes, canonical shared borders, package
+content hash, and a versioned seed-consistent reconstruction algorithm. Offline
+generation may use neighbour/context-aware diffusion; the emitted package must
+already reconcile those dependencies so runtime requests remain random-access
+and order-independent.
 
 **One height authority.** The tile's height is the single source of truth for
 **rendered geometry, the physics collider, and any future RT BLAS**. They must
@@ -84,35 +88,33 @@ directly. See *TileProvider interface* under Rendering for the API.
 
 ## Generation (black box)
 
-Generation produces tiles conforming to *The tile contract*. Its internals —
-archetypes, fields, feature placement — are being rebuilt and are intentionally
-**not specified here**. The superseded design is in [`archive/`](archive/)
+Generation produces tiles conforming to *The tile contract*. Current procedural
+internals and Mira's temporary deterministic offline producer remain separate
+from the planned diffusion-package producer described
+in [mira_airless_mvp.md](mira_airless_mvp.md). The superseded compiler design is in [`archive/`](archive/)
 (`terrain-generation-legacy.md`, the pipeline spec + migration, and the `gen/`
 research surveys) and is reference only.
 
-The current authored data surface is `PlanetSurface` = immutable
-`StaticSurfaceData` (cached, expensive) + `DynamicSurfaceLayers` (cheap
-overprints; see *Dynamic features*). The one hard rule generation owes its
-consumers: **the static substrate is the expensive, cached layer; anything
-time-varying is a cheap additive overprint that must not invalidate the static
-cache.**
+The one hard rule generation owes its consumers: **the static substrate is the
+expensive, immutable/cached layer; anything time-varying is a cheap additive
+overprint that must not invalidate the static package or base cache.**
 ## Rendering: ground LOD (M3)
 
 Thalos uses the in-tree `thalos_udlod` fork for surface-scale terrain
 rendering. The fork began as Kurt Kühnert's `bevy_terrain`, which was
-shaped around rendering finite preprocessed raster datasets. That was
-useful as a starting point, but it is the wrong primary model for
-Thalos: our terrain tiles are synthesized at runtime from body data,
-may later be cached opportunistically, and should eventually be
-generated directly on the GPU.
+shaped around rendering finite preprocessed raster datasets. Thalos keeps the
+provider abstraction rather than that fixed dataset format: tiles may come from
+the current runtime generator, a package-backed surface, or cache layers without
+changing atlas residency or rendering.
 
-The fork is therefore **runtime-provider-first**. `TileAtlas` and
+The fork is therefore **provider-first**. `TileAtlas` and
 `TileTree` own residency, fallback, LOD balancing, and shader-visible
 atlas state; `TileProvider` owns the source of tile contents. The
-offline GeoTIFF/preprocess/`DiskTileProvider` path has been removed.
-Persistent reuse should be implemented as a cache provider/wrapper
-around the runtime pipeline, keyed by body config + tile coordinate +
-attachment spec, not as an authored `assets/<terrain>/data` tree.
+offline GeoTIFF/preprocess/`DiskTileProvider` path has been removed. ADR-0008's
+new terrain package is an authored `SurfaceQuery` source, not that legacy data
+tree. Persistent reconstructed-tile reuse remains a cache provider/wrapper,
+keyed by package/generator identity + reconstruction version + tile coordinate
++ attachment spec + dynamic overlays.
 
 **Fork status:** in-tree and divergent by design. The Bevy 0.18 port,
 unconditional `big_space` precision path, CPU-balanced draw tile

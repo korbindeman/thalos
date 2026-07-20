@@ -154,6 +154,12 @@ just game shipyard        # open straight into the in-game ship editor
 just game hub             # straight into the space-center hub over the
                           #   spaceport (the PLAY path minus the start
                           #   screen: base built, no craft placed)
+just game mira            # ship in low Mira orbit (offline package terrain)
+just game mira-eva        # spawn on foot on Mira
+just bake Mira            # rebuild assets/terrain_packages/Mira.bin offline
+just validate-bake Mira   # validate package schema/index/checksums/payload
+just screenshot mira-orbit   # headless cratered-horizon verification
+just screenshot mira-surface # headless close regolith/Hapke verification
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just map                  # whole-planet biome map export → target/world_map.png
                           #   (true macro palette, hillshaded, web-mercator) +
@@ -227,38 +233,51 @@ LOD tiles. It is for process-map exploration before porting good ideas into
 `crates/terrain`; the runtime `ProceduralSurface` generator is the source of
 truth for game output.
 
-## Terrain generation (runtime — no bake)
+## Terrain generation (procedural bodies + Mira offline-package MVP)
 
-Terrain is **generated at runtime**, not baked. Each procedural body builds one
-`thalos_terrain::ProceduralSurface` (an impl of the `SurfaceQuery` seam) in
-`rendering::ground_terrain` as `ProceduralSurface::new(radius, body.id)` — a pure
-analytic function of `(direction, lod)` in f64 body-local coordinates, with no
-disk artifact. There is **no `just bake`, no `target/bakes/`, no cache, no
-startup bake check**. Every terrain-height consumer reads the *same* surface:
+`BodySurfaceRegistry` constructs one canonical `Arc<dyn SurfaceQuery>` per body.
+Most bodies use `ProceduralSurface`, a pure analytic function of `(direction,
+lod)` in f64 body-local coordinates. Mira is the first offline-package body:
+`just bake Mira` writes `assets/terrain_packages/Mira.bin`, and startup validates
+its content key before loading `BakedSurface`. There is no runtime/startup bake
+check: a missing or stale package fails with the explicit bake command. Every
+terrain-height consumer reads the same selected surface:
 
-- **Ground LOD render** — a `FlattenedSurface`-wrapped `ProceduralSurface` feeds
+- **Ground LOD render** — a `FlattenedSurface`-wrapped canonical surface feeds
   the UDLOD tile provider.
 - **Collider / camera terrain floor / runway / descent site / HUD altitude / EVA**
   — the near-surface `HeightSourceRegistry` (a GPU-atlas height mirror over the
-  same `ProceduralSurface`, with a CPU fallback), via
+  same surface, with a CPU fallback), via
   `HeightSource::sample_height_m`.
-- **Propagator collision** — `GameTerrainRegistry` mirrors the `ProceduralSurface`.
+- **Propagator collision** — `GameTerrainRegistry` mirrors the canonical surface.
 
-There is **no sea-level layer**: the continent mask puts the shoreline at height
+For the current Thalos generator there is **no sea-level layer**: the continent mask puts the shoreline at height
 0 (the reference radius), so "sea level" is the constant **0 m** wherever a datum
 is needed (dry-land checks, the camera's terrain floor). Do not read sea level
 from a baked surface — that path is gone.
 
-`ProceduralSurface` is the **Slice 0** generator (competent but simple; height
-tuning and procedural materials/shading are later slices). The old baked pipeline
+Mira's compatibility baker currently wraps the retained deterministic airless
+compiler into a schema-v1 package with an explicit node/blob manifest,
+32→512 adaptive residual height pyramid, ancestor fallback, checksums, exact
+artifact identity, validator, and `PackageSurface`; player devices
+never run the producer. The production
+direction is an offline hierarchical-diffusion bakery that emits adaptive,
+versioned cube-sphere terrain packages; see `docs/mira_airless_mvp.md` and
+ADR-0008. Player devices stream packages through a `PackageSurface` backing and
+reconstruct only bounded close-range detail. The authored package and the
+disposable runtime tile cache are separate layers. Package-backed and procedural
+bodies must still converge on the one `SurfaceQuery` consumer path and one height
+authority.
+
+The old runtime baked pipeline
 — `thalos_bake_dump` (the "dumps"), `thalos_body_editor`, and the game's startup
 `bake_check` — has been **deleted**. The remaining baked-pipeline modules in
 `thalos_terrain` (the `Feature`/`Ocean` compiler, `PlanetSurface`/
-`StaticSurfaceData`, `cache`, stages/tectonics/fields) and the
-`body_render` impostor-bake path are now **dead code slated for removal**; the
-distant-body view is an interim solid-color impostor (Slice 6 replaces it). Do
-not reintroduce a bake/disk-artifact path — extend `ProceduralSurface` (or add a
-new `SurfaceQuery` impl) instead.
+`StaticSurfaceData`, `cache`, stages/tectonics/fields) are retained only as the
+temporary offline Mira producer/global package payload. Do not reconnect them
+to a runtime startup bake or revive the dump/editor flow. MIRA-0's adaptive
+package tracer is complete; MIRA-1/2 replace the producer with diffusion. New bakery
+work follows ADR-0008 and the package spec behind the same `SurfaceQuery` seam.
 
 ## Running and inspecting the game
 
@@ -327,8 +346,9 @@ round-tripping through the user:
   area stats (the design-level "does the planet read right" check).
 - `just screenshot <preset>` — the in-context ground view. Pick the preset that
   frames what you changed: `dry-belt` for desert/biome/scatter work,
-  `spaceport-aerial` / `hub` for the base and the wet-belt look. If no preset
-  frames it, add one (`ScreenshotPreset`) rather than skipping the check.
+  `spaceport-aerial` / `hub` for the base and the wet-belt look, or
+  `mira-orbit` / `mira-surface` for package/Hapke work. If no preset frames it,
+  add one (`ScreenshotPreset`) rather than skipping the check.
 - `just preview` — isolated procedural assets (a tree/rock/grass mesh).
 
 A terrain/biome/scatter change that compiles but hasn't been screenshotted is

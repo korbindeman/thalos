@@ -24,16 +24,13 @@ use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock,
-    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS,
-    PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider, TerrainShadingStyle,
-    rendered_height_range,
+    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock, GpuAtlasHeightMirrorComponent,
+    GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS, PipelineTileProvider, SyntheticTerrainMode,
+    SyntheticTileProvider, TerrainShadingStyle, rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
-use thalos_terrain::{
-    FlattenHandle, FlattenedSurface, ProceduralSurface, SurfaceQuery, flatten_handle,
-};
+use thalos_terrain::{FlattenHandle, FlattenedSurface, SurfaceQuery, flatten_handle};
 use thalos_world::{BodyDefinition, BodyId};
 
 use std::collections::HashMap;
@@ -579,6 +576,8 @@ pub(crate) fn spawn_body_terrain(
     tier: TerrainTier,
     sun_shadow_maps: [Handle<Image>; CASCADE_COUNT],
     tile_cache: &mut TileCacheRegistry,
+    base_surface: Arc<dyn SurfaceQuery>,
+    surface_fingerprint: u64,
 ) -> Entity {
     let radius_m = body.radius_m as f32;
     let tc = tier.config();
@@ -596,10 +595,8 @@ pub(crate) fn spawn_body_terrain(
     // is built from the same body params as the near-surface height source
     // (`install_baked_planet`), so the drawn ground and the collider stay in
     // lockstep without sharing an `Arc`.
-    let terrain_surface: Arc<dyn SurfaceQuery> = Arc::new(FlattenedSurface::new(
-        Arc::new(ProceduralSurface::new(body.radius_m as f32, body.id as u32)),
-        flatten,
-    ));
+    let terrain_surface: Arc<dyn SurfaceQuery> =
+        Arc::new(FlattenedSurface::new(base_surface, flatten));
     let height_range = rendered_height_range(terrain_surface.as_ref());
     let provider_mode = terrain_tile_provider_mode();
     let terrain_height_range = match provider_mode {
@@ -650,7 +647,13 @@ pub(crate) fn spawn_body_terrain(
     // that flatten-invalidation and residency-tier swaps perform) and on disk
     // (surviving the process). See `rendering::tile_cache` — this is what turns a
     // cold ~15 s surface site into a warm one.
-    let provider = tile_cache.wrap_provider(body.id, provider, &config, Some(cache_flatten));
+    let provider = tile_cache.wrap_provider(
+        body.id,
+        provider,
+        &config,
+        Some(cache_flatten),
+        surface_fingerprint,
+    );
 
     let mut tile_atlas = TileAtlas::with_provider(&config, provider);
     pin_root_tiles(&mut tile_atlas);
@@ -1394,8 +1397,7 @@ pub(super) fn update_body_terrain_atmosphere(
                 // jitters as the camera moves). The shader rebuilds the near root
                 // from this precise altitude instead.
                 let sea_r = body.radius_m + sea_level_m as f64;
-                let cam_alt_sea =
-                    ((camera_inertial - body_state.position).length() - sea_r) as f32;
+                let cam_alt_sea = ((camera_inertial - body_state.position).length() - sea_r) as f32;
                 (
                     // x = ocean radius (m), y = enable, z = wall-clock wave-scroll
                     // time (real seconds — sim time pauses at warp-pause and runs
@@ -1519,45 +1521,46 @@ pub(super) fn update_body_terrain_atmosphere(
         // `THALOS_FLATTEN_VERTEX=0` zeroes the block — a live A/B diagnostic
         // lever for attributing base-ground artifacts to this override vs the
         // baked tiles.
-        static VERTEX_FLATTEN_ENABLED: std::sync::LazyLock<bool> =
-            std::sync::LazyLock::new(|| {
-                !matches!(
-                    std::env::var("THALOS_FLATTEN_VERTEX").as_deref(),
-                    Ok("0") | Ok("false") | Ok("off")
-                )
-            });
+        static VERTEX_FLATTEN_ENABLED: std::sync::LazyLock<bool> = std::sync::LazyLock::new(|| {
+            !matches!(
+                std::env::var("THALOS_FLATTEN_VERTEX").as_deref(),
+                Ok("0") | Ok("false") | Ok("off")
+            )
+        });
         if !*VERTEX_FLATTEN_ENABLED {
             mat.extras.flatten = FlattenBlock::default();
             continue;
         }
         mat.extras.flatten = flatten_registry
             .get(terrain.body_id)
-            .and_then(|handle| handle.read().ok().map(|regions| {
-                if regions.len() <= MAX_FLATTEN_REGIONS {
-                    FlattenBlock::pack(regions.iter().map(|r| &r.flatten))
-                } else {
-                    // More pads than uniform slots: keep those nearest the
-                    // camera — only pads near the view can show LOD error.
-                    let cam_dir_body = states
-                        .get(terrain.body_id)
-                        .map(|bs| bs.orientation.inverse() * (camera_inertial - bs.position))
-                        .and_then(|v| v.try_normalize())
-                        .unwrap_or(DVec3::Y);
-                    let mut sorted: Vec<_> = regions.iter().collect();
-                    sorted.sort_by(|a, b| {
-                        b.flatten
-                            .center_dir
-                            .dot(cam_dir_body)
-                            .total_cmp(&a.flatten.center_dir.dot(cam_dir_body))
-                    });
-                    FlattenBlock::pack(
-                        sorted
-                            .into_iter()
-                            .take(MAX_FLATTEN_REGIONS)
-                            .map(|r| &r.flatten),
-                    )
-                }
-            }))
+            .and_then(|handle| {
+                handle.read().ok().map(|regions| {
+                    if regions.len() <= MAX_FLATTEN_REGIONS {
+                        FlattenBlock::pack(regions.iter().map(|r| &r.flatten))
+                    } else {
+                        // More pads than uniform slots: keep those nearest the
+                        // camera — only pads near the view can show LOD error.
+                        let cam_dir_body = states
+                            .get(terrain.body_id)
+                            .map(|bs| bs.orientation.inverse() * (camera_inertial - bs.position))
+                            .and_then(|v| v.try_normalize())
+                            .unwrap_or(DVec3::Y);
+                        let mut sorted: Vec<_> = regions.iter().collect();
+                        sorted.sort_by(|a, b| {
+                            b.flatten
+                                .center_dir
+                                .dot(cam_dir_body)
+                                .total_cmp(&a.flatten.center_dir.dot(cam_dir_body))
+                        });
+                        FlattenBlock::pack(
+                            sorted
+                                .into_iter()
+                                .take(MAX_FLATTEN_REGIONS)
+                                .map(|r| &r.flatten),
+                        )
+                    }
+                })
+            })
             .unwrap_or_default();
     }
 
@@ -1774,13 +1777,13 @@ fn compute_moonlight(
         let to_body_from_moon = (body_pos - moon_state.position).normalize_or_zero();
         let cos_g = to_star_from_moon.dot(to_body_from_moon).clamp(-1.0, 1.0);
         let g = cos_g.acos();
-        let phase = ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI)
-            .clamp(0.0, 1.0);
+        let phase =
+            ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI).clamp(0.0, 1.0);
 
         // Per-moon reflectance shape: albedo luminance × (angular radius)².
         let color_lin = Color::srgb(moon.color[0], moon.color[1], moon.color[2]).to_linear();
-        let albedo_lum = (0.2126 * color_lin.red + 0.7152 * color_lin.green
-            + 0.0722 * color_lin.blue) as f64;
+        let albedo_lum =
+            (0.2126 * color_lin.red + 0.7152 * color_lin.green + 0.0722 * color_lin.blue) as f64;
         let ang = moon.radius_m / d;
         let shape = albedo_lum * ang * ang;
         let rel = (shape / MOON_REF_SHAPE).clamp(0.0, 1.5);

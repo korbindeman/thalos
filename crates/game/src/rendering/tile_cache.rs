@@ -29,16 +29,16 @@
 //! stale can be served, because a stale key is unreachable rather than wrong.
 //! Disk space is reclaimed lazily by [`prune_tile_cache`] at boot.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
 use thalos_body_render::udlod::prelude::{
-    prune_tile_cache, static_namespace, AttachmentConfig, DiskTileCacheProvider,
-    MemoryTileCacheProvider, NamespaceFn, SharedTileCache, TerrainConfig, TileProvider,
+    AttachmentConfig, DiskTileCacheProvider, MemoryTileCacheProvider, NamespaceFn, SharedTileCache,
+    TerrainConfig, TileProvider, prune_tile_cache, static_namespace,
 };
 use thalos_terrain::{FlattenHandle, FlattenRegion, GENERATOR_VERSION};
 use thalos_world::BodyId;
@@ -101,8 +101,9 @@ impl TileCacheRegistry {
         inner: Box<dyn TileProvider>,
         config: &TerrainConfig,
         flatten: Option<FlattenHandle>,
+        surface_fingerprint: u64,
     ) -> Box<dyn TileProvider> {
-        let namespace = self.namespace_fn(body_id, config, flatten);
+        let namespace = self.namespace_fn(body_id, config, flatten, surface_fingerprint);
 
         let disked: Box<dyn TileProvider> = match &self.disk_root {
             Some(root) => Box::new(DiskTileCacheProvider::new(inner, root, namespace.clone())),
@@ -137,9 +138,11 @@ impl TileCacheRegistry {
         body_id: BodyId,
         config: &TerrainConfig,
         flatten: Option<FlattenHandle>,
+        surface_fingerprint: u64,
     ) -> NamespaceFn {
         let mut hasher = DefaultHasher::new();
         GENERATOR_VERSION.hash(&mut hasher);
+        surface_fingerprint.hash(&mut hasher);
         (body_id as u64).hash(&mut hasher);
         // The model's scale (body radius + height envelope) feeds the encoded
         // height range, so a rescaled model (the map view) is a different tile

@@ -16,6 +16,8 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use thalos_physics_local::HeightSourceRegistry;
 
+use crate::terrain_registry::BodySurfaceRegistry;
+
 use super::types::PlanetshineTints;
 
 /// Registry handles `spawn_bodies` needs when registering each procedural
@@ -23,7 +25,7 @@ use super::types::PlanetshineTints;
 #[derive(SystemParam)]
 pub(super) struct ProceduralInstallExtras<'w> {
     pub(super) height_sources: ResMut<'w, HeightSourceRegistry>,
-    pub(super) terrain_registry: Res<'w, crate::GameTerrainRegistry>,
+    pub(super) surfaces: Res<'w, BodySurfaceRegistry>,
 }
 
 /// World-level state the spawn path writes into. Bundled to stay under the

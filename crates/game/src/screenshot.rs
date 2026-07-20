@@ -44,12 +44,13 @@ use crate::camera::ShipCamera;
 use crate::loading::AppState;
 use crate::rendering::ground_terrain::BodyTerrain;
 use crate::rendering::{SimulationState, SolarSystemState};
-use thalos_body_render::HeightSource;
-use thalos_body_render::renderer_tile_lod_m_at;
-use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 use crate::space_center::{HubContext, hub_context};
 use crate::spawn::{Homeworld, SpawnSituation};
 use crate::structures::StructureRegistry;
+use crate::terrain_registry::BodySurfaceRegistry;
+use thalos_body_render::HeightSource;
+use thalos_body_render::renderer_tile_lod_m_at;
+use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 
 // ---------------------------------------------------------------------------
 // F2 window screenshot
@@ -148,6 +149,13 @@ pub enum ScreenshotPreset {
     /// should be sparse-to-absent here and the ground tan; contrast with the
     /// green spaceport `spaceport-aerial` shot (equatorial wet belt).
     DryBelt,
+    /// Mira's cratered horizon from low orbit. Boots the canonical orbit
+    /// scenario around Mira, then frames the daylight surface with enough boom
+    /// distance for curvature and large impact structure to read.
+    MiraOrbit,
+    /// A close oblique survey of Mira regolith. This is the primary verification
+    /// probe for package detail, terrain streaming, and the Hapke phase response.
+    MiraSurface,
 }
 
 impl ScreenshotPreset {
@@ -158,10 +166,10 @@ impl ScreenshotPreset {
             | "base" => Self::SpaceportAerial,
             "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
             "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
+            "mira" | "mira-orbit" | "mira_orbit" => Self::MiraOrbit,
+            "mira-surface" | "mira_surface" | "regolith" => Self::MiraSurface,
             other => {
-                eprintln!(
-                    "  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial."
-                );
+                eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
                 Self::SpaceportAerial
             }
         }
@@ -178,6 +186,15 @@ impl ScreenshotPreset {
             // scenario is enough; the driver poses the camera over the searched
             // desert site (the craft stays in orbit, irrelevant to the framing).
             Self::DryBelt => SpawnSituation::ShipOrbit,
+            Self::MiraOrbit | Self::MiraSurface => SpawnSituation::ShipOrbit,
+        }
+    }
+
+    /// Body that owns the world and terrain framed by this preset.
+    pub fn target_body_name(self) -> &'static str {
+        match self {
+            Self::MiraOrbit | Self::MiraSurface => "Mira",
+            _ => "Thalos",
         }
     }
 
@@ -230,6 +247,36 @@ impl ScreenshotPreset {
                 elevation_deg: 16.0,
                 distance_m: 1400.0,
                 warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+            },
+            Self::MiraOrbit => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/mira_orbit.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 28.0,
+                elevation_deg: 24.0,
+                distance_m: 360_000.0,
+                // A new package content key intentionally cold-misses the tile
+                // cache. Leave enough time for orbital ancestors + detail to
+                // populate on the first verification run, not only a warm run.
+                warmup_frames: 720,
+                tail_frames: 24,
+                keep_hud: false,
+            },
+            Self::MiraSurface => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/mira_surface.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 32.0,
+                elevation_deg: 34.0,
+                distance_m: 46_000.0,
+                // The close crater view is the heaviest cold package probe.
+                // Disk-cache-disabled captures converged their final UDLOD
+                // fallback boundaries at 1,200 frames (900 was still early).
+                warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
             },
@@ -349,6 +396,8 @@ struct ScreenshotDriver {
     /// Cached body-fixed direction of the searched dry-belt site (DryBelt preset
     /// only), resolved once so the framing stays fixed across warmup.
     dry_site_dir: Option<DVec3>,
+    /// Cached rugged, obliquely lit Mira site for both airless presets.
+    airless_site_dir: Option<DVec3>,
 }
 
 pub struct HeadlessScreenshotPlugin;
@@ -369,10 +418,7 @@ impl Plugin for HeadlessScreenshotPlugin {
             )
             // Diagnostic transect across the spaceport basin (headless runs
             // only): resident tile LOD + rendered height vs the basin plane.
-            .add_systems(
-                Update,
-                probe_apron_lod.run_if(in_state(AppState::Running)),
-            );
+            .add_systems(Update, probe_apron_lod.run_if(in_state(AppState::Running)));
     }
 }
 
@@ -404,7 +450,9 @@ fn probe_apron_lod(
     else {
         return;
     };
-    let Some(camera) = camera_q.iter().next() else { return };
+    let Some(camera) = camera_q.iter().next() else {
+        return;
+    };
     let Some(tree) = tile_trees.get(&(terrain_entity, camera)) else {
         return;
     };
@@ -413,7 +461,9 @@ fn probe_apron_lod(
     let pad = site.center_dir * r;
     let view_dist_km = (tree.view_position() - pad).length() / 1000.0;
     let hs = height_sources.get(site.body_id);
-    let offs = [-1200.0f64, -560.0, -520.0, -470.0, -350.0, 0.0, 350.0, 470.0, 520.0, 560.0, 1200.0];
+    let offs = [
+        -1200.0f64, -560.0, -520.0, -470.0, -350.0, 0.0, 350.0, 470.0, 520.0, 560.0, 1200.0,
+    ];
     let lods: Vec<String> = offs
         .iter()
         .map(|off| {
@@ -529,6 +579,7 @@ fn drive_headless_screenshot(
     solar: Res<SolarSystemState>,
     height_sources: Res<HeightSourceRegistry>,
     registry: Res<StructureRegistry>,
+    surfaces: Res<BodySurfaceRegistry>,
     homeworld: Res<Homeworld>,
     root_grid: Query<&Grid, With<BigSpace>>,
     mut camera: Query<(&mut Transform, &mut CellCoord), With<ShipCamera>>,
@@ -546,16 +597,25 @@ fn drive_headless_screenshot(
     // the frame counter so warmup only starts once we're actually framing the
     // scene. Most presets frame the spaceport pad (`hub_context`); the dry-belt
     // biome probe frames a searched desert site instead.
-    let ctx = if cfg.preset == ScreenshotPreset::DryBelt {
-        dry_site_context(
+    let ctx = match cfg.preset {
+        ScreenshotPreset::DryBelt => dry_site_context(
             &sim,
             &solar,
             &height_sources,
             homeworld.0,
             &mut driver.dry_site_dir,
-        )
-    } else {
-        hub_context(&sim, &solar, &height_sources, &registry, homeworld.0)
+        ),
+        ScreenshotPreset::MiraOrbit | ScreenshotPreset::MiraSurface => daylight_surface_context(
+            &sim,
+            &solar,
+            &height_sources,
+            homeworld.0,
+            &surfaces,
+            &mut driver.airless_site_dir,
+        ),
+        ScreenshotPreset::SpaceportAerial | ScreenshotPreset::Hub => {
+            hub_context(&sim, &solar, &height_sources, &registry, homeworld.0)
+        }
     };
     let Some(ctx) = ctx else {
         return;
@@ -601,6 +661,125 @@ fn drive_headless_screenshot(
     driver.captured = true;
 }
 
+/// Stable daylight focus for an uninhabited airless body. The sub-stellar
+/// direction keeps the first visual probe illuminated while azimuth/elevation
+/// expose enough phase angle for Hapke backscatter and limb darkening to read.
+fn daylight_surface_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    surfaces: &BodySurfaceRegistry,
+    cached_dir: &mut Option<DVec3>,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let hs = height_sources.get(body_id)?;
+    let sun_inertial = (-body_state.position).normalize_or_zero();
+    let sun_world = if sun_inertial == DVec3::ZERO {
+        DVec3::Y
+    } else {
+        sun_inertial
+    };
+    let sun_body = (body_state.orientation.inverse() * sun_world).normalize();
+    let dir_body = match *cached_dir {
+        Some(dir) => dir,
+        None => {
+            let dir = find_rugged_airless_site(
+                hs.as_ref(),
+                sun_body,
+                surfaces.airless_landmarks(body_id),
+            );
+            let incidence_deg = dir.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
+            info!(
+                target: "thalos::screenshot",
+                "airless survey site: solar incidence {incidence_deg:.0}°"
+            );
+            *cached_dir = Some(dir);
+            dir
+        }
+    };
+    let up_world = (body_state.orientation * dir_body).normalize();
+    let height_m = hs
+        .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
+        .unwrap_or(0.0) as f64;
+    let surface_r = radius_m + height_m;
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * surface_r,
+        up_world,
+        pad_r: surface_r,
+    })
+}
+
+/// Find a visibly structured airless site while keeping the sun oblique enough
+/// for relief and Hapke backscatter to read. Candidates use a Fibonacci sphere;
+/// each is scored by the elevation range of a ~25 km neighborhood.
+fn find_rugged_airless_site(
+    source: &dyn HeightSource,
+    sun_dir: DVec3,
+    landmarks: &[(DVec3, f32)],
+) -> DVec3 {
+    if let Some((dir, radius_m)) = landmarks
+        .iter()
+        .find(|(dir, _)| (0.30..=0.75).contains(&dir.dot(sun_dir)))
+    {
+        info!(
+            target: "thalos::screenshot",
+            "airless landmark crater: radius {:.1} km",
+            radius_m / 1000.0
+        );
+        return *dir;
+    }
+
+    const CANDIDATES: usize = 768;
+    const RING_SAMPLES: usize = 10;
+    const RING_ANGLE_RAD: f64 = 0.03;
+    const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
+
+    let mut best = sun_dir;
+    let mut best_score = f32::NEG_INFINITY;
+    for i in 0..CANDIDATES {
+        let y = 1.0 - 2.0 * (i as f64 + 0.5) / CANDIDATES as f64;
+        let radius = (1.0 - y * y).sqrt();
+        let theta = GOLDEN_ANGLE * i as f64;
+        let dir = DVec3::new(radius * theta.cos(), y, radius * theta.sin());
+        let light = dir.dot(sun_dir);
+        // 41–72° incidence: clearly lit, but far enough from noon to reveal
+        // crater walls and exercise Hapke's angular response.
+        if !(0.30..=0.75).contains(&light) {
+            continue;
+        }
+
+        let seed = if dir.dot(DVec3::Y).abs() < 0.95 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        let tangent_a = seed.cross(dir).normalize();
+        let tangent_b = dir.cross(tangent_a).normalize();
+        let mut min_h = f32::INFINITY;
+        let mut max_h = f32::NEG_INFINITY;
+        for ring_i in 0..RING_SAMPLES {
+            let a = std::f64::consts::TAU * ring_i as f64 / RING_SAMPLES as f64;
+            let ring = tangent_a * a.cos() + tangent_b * a.sin();
+            let sample_dir = (dir * RING_ANGLE_RAD.cos() + ring * RING_ANGLE_RAD.sin()).normalize();
+            let h = source
+                .sample_height_m(sample_dir.as_vec3(), 128.0)
+                .unwrap_or(0.0);
+            min_h = min_h.min(h);
+            max_h = max_h.max(h);
+        }
+        let score = max_h - min_h;
+        if score > best_score {
+            best_score = score;
+            best = dir;
+        }
+    }
+    best
+}
+
 /// Place the ship camera at the god-view pose defined by `cfg` around `ctx`'s
 /// focus. Mirrors [`crate::god_view::drive_god_view`], minus the input handling
 /// and pitch clamp (so near-top-down elevations are reachable). Detail systems
@@ -632,7 +811,11 @@ fn pose_camera(
     let to_focus = (focus - camera_world).normalize();
     // At (near) top-down the look direction is anti-parallel to `up`, which makes
     // `looking_to`'s roll reference degenerate — fall back to north.
-    let look_up = if to_focus.dot(up).abs() > 0.99 { north } else { up };
+    let look_up = if to_focus.dot(up).abs() > 0.99 {
+        north
+    } else {
+        up
+    };
 
     let (next_cell, local) = root.translation_to_grid(camera_world);
     *cell = next_cell;
@@ -715,7 +898,11 @@ fn dry_site_context(
 fn find_driest_site(hs: &dyn HeightSource, sun_dir_body: DVec3) -> DVec3 {
     let sun = sun_dir_body.try_normalize().unwrap_or(DVec3::Y);
     let t1 = {
-        let seed = if sun.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+        let seed = if sun.y.abs() < 0.9 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
         (seed - sun * seed.dot(sun)).normalize()
     };
     let t2 = sun.cross(t1).normalize();
