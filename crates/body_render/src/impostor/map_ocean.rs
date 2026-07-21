@@ -7,7 +7,7 @@
 //! against the map terrain: land occludes it, the seabed sits behind it, and the
 //! waterline is an exact analytic curve. No mesh, no facets, no z-fighting, and
 //! no scene-depth copy — the hardware depth buffer does the land/sea sorting.
-//! Replaces the meshed `BodyWaterMaterial` on the map layer.
+//! Map-scale projection of the same analytic ocean authority used in ship view.
 //!
 //! At MAP_SCALE (1 render unit = 1000 km) the body is a ~few-unit sphere, so the
 //! naive ray-sphere quadratic is f32-stable here (unlike the ship path, which is

@@ -745,11 +745,9 @@ this as the primary gameplay height path; `renderer_tile_lod_m_at`
 is now a diagnostic / scale-query helper.
 
 §3.2's walking-jitter root cause is still unresolved; this fix
-doesn't touch the walk math. The shoreline component of §3.5 / the
-"seam" complaint is mitigated independently by bumping
-`WATER_MESH_SUBDIVISIONS` from 6 to 7 (4× the triangle count) so the
-water/terrain intersection no longer reads as a polygon shoreline at
-walking distance.
+doesn't touch the walk math. The old mesh-water shoreline mitigation was
+subsequently superseded by the analytic signed-field ocean projection; the
+dormant planet-scale water mesh has been deleted.
 
 Verified visually post-fix: capsule sits flush against the rendered
 terrain on Thalos at the sub-stellar spawn point, the prior hard

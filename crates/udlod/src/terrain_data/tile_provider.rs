@@ -178,7 +178,11 @@ pub struct MemoryTileCacheProvider {
 impl MemoryTileCacheProvider {
     /// Wrap `inner` with a private cache that stores at most `capacity_tiles`
     /// tile payloads. A capacity of zero disables caching and forwards requests.
-    pub fn new(inner: Box<dyn TileProvider>, namespace: NamespaceFn, capacity_tiles: usize) -> Self {
+    pub fn new(
+        inner: Box<dyn TileProvider>,
+        namespace: NamespaceFn,
+        capacity_tiles: usize,
+    ) -> Self {
         Self::with_shared_cache(inner, namespace, capacity_tiles, SharedTileCache::new())
     }
 

@@ -53,7 +53,7 @@ fn gate_enhanced_input_sources(
     let editor_text_focused = ui_text.is_focused();
     // The start screen owns the frame like the shipyard editor does: every
     // gameplay context deactivates (the system context stays active for
-    // Escape / screenshot). Folded into `editor_open` since the suppression
+    // Escape / screenshot / saved perspective). Folded into `editor_open` since the suppression
     // set is identical.
     let editor_open = editor_open || *app_state.get() == crate::loading::AppState::MainMenu;
     let base_editor_open = base_editor.as_deref().map(|e| e.open).unwrap_or(false);
@@ -64,7 +64,7 @@ fn gate_enhanced_input_sources(
     let gameplay_suppressed = editor_open || base_editor_open || space_center_open;
 
     thalos_input::gating::set_mouse_sources(&mut action_sources, !bevy_ui_pointer_busy);
-    // GameSystemContext stays active for Escape/screenshot. Text entry only
+    // GameSystemContext stays active for Escape/screenshot/perspective save. Text entry only
     // disables gameplay contexts — except the shipyard editor's own text
     // field, which reads raw key events and must swallow everything
     // (including Escape) while focused.

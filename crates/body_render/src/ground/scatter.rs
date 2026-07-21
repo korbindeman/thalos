@@ -535,7 +535,8 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 // subset at identical positions. The finer ring only *adds* the
                 // dropped ("infill") trees on approach; the shared ones never move.
                 if input.keep_fraction < 1.0
-                    && veg_hash(input.seed, key, grid_id, 1, SALT_THIN) >= input.keep_fraction as f64
+                    && veg_hash(input.seed, key, grid_id, 1, SALT_THIN)
+                        >= input.keep_fraction as f64
                 {
                     continue;
                 }
@@ -632,7 +633,11 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
 
                 // Rocks take any orientation (worn stones lying or half-buried at
                 // a jaunty angle); woody plants stand near-upright off the normal.
-                let tilt_range = if sp.layer == VegLayer::Rock { 0.60 } else { 0.12 };
+                let tilt_range = if sp.layer == VegLayer::Rock {
+                    0.60
+                } else {
+                    0.12
+                };
                 let root_body = dir * (input.radius_m + sample.height_m as f64);
                 instances.push(VegInstance {
                     species: chosen as u16,

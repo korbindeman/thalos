@@ -2,8 +2,8 @@
 
 use bevy::prelude::*;
 
-use crate::tokens::*;
 use crate::UiTheme;
+use crate::tokens::*;
 
 /// A labelled boolean toggle. The whole row is the button; clicking flips
 /// `checked`. Consumers react to `Changed<UiCheckbox>`.
@@ -80,7 +80,11 @@ pub fn update_checkbox_visuals(
         let Ok((mut bg, mut border)) = squares.get_mut(child) else {
             continue;
         };
-        let fill = if checkbox.checked { ACCENT } else { Color::NONE };
+        let fill = if checkbox.checked {
+            ACCENT
+        } else {
+            Color::NONE
+        };
         let border_color = if matches!(interaction, Interaction::Hovered | Interaction::Pressed) {
             STROKE_BRIGHT
         } else {

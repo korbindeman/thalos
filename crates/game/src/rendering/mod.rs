@@ -19,6 +19,7 @@ pub(crate) mod ground_terrain;
 mod lighting;
 mod map_terrain;
 mod materials;
+mod ocean;
 pub(crate) mod real_space;
 pub(crate) mod tile_cache;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
@@ -112,6 +113,7 @@ impl Plugin for RenderingPlugin {
             .add_plugins(TerrainResidencyPlugin)
             .add_plugins(map_terrain::MapTerrainPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
+            .add_plugins(ocean::OceanRenderPlugin)
             .add_plugins(grass::GrassRenderPlugin)
             .add_plugins(gpu_grass::GpuGrassPlugin)
             .add_plugins(vegetation::VegetationRenderPlugin)
@@ -189,8 +191,9 @@ impl Plugin for RenderingPlugin {
                     sync_body_render_lod
                         .after(update_real_space_body_positions)
                         .after(pause_surface_terrain_streaming_at_high_warp),
-                    // Experimental stock-Bevy-atmosphere A/B (Settings →
-                    // Graphics). The suppressor must run after the LOD pass:
+                    // Canonical stock Bevy atmosphere. Headless comparisons
+                    // can select the retained legacy renderer process-wide.
+                    // The suppressor must run after the LOD pass:
                     // it overrides the `BodySky` visibility the LOD pass just
                     // wrote, and the LOD pass restores it when toggled off.
                     stock_atmosphere::sync_stock_atmosphere.after(update_real_space_body_positions),

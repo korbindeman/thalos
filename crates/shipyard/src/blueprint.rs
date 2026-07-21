@@ -791,7 +791,11 @@ mod tests {
             .iter()
             .filter_map(|m| m.symmetry_group)
             .collect();
-        assert_eq!(groups.len(), 4, "main / tail / inboard + outboard nacelle groups");
+        assert_eq!(
+            groups.len(),
+            4,
+            "main / tail / inboard + outboard nacelle groups"
+        );
         let s = bp.stats(&cat).expect("meridian stats");
         assert!(s.wing_area_m2 > 0.0, "meridian should report wing area");
         assert!(s.mean_aerodynamic_chord_m > 0.0);
@@ -818,7 +822,10 @@ mod tests {
             },
             &None,
         );
-        assert!(fuselage_pools.is_empty(), "structural fuselage stores nothing");
+        assert!(
+            fuselage_pools.is_empty(),
+            "structural fuselage stores nothing"
+        );
 
         // A wet wing fills its integral box with kerosene; a bigger wing holds
         // proportionally more.
@@ -883,7 +890,10 @@ mod tests {
 
         assert!(s.dry_mass_kg > 0.0 && s.propellant_mass_kg > 0.0);
         for r in [Resource::Methane, Resource::Lox] {
-            let pool = s.resources.get(&r).unwrap_or_else(|| panic!("carries {r:?}"));
+            let pool = s
+                .resources
+                .get(&r)
+                .unwrap_or_else(|| panic!("carries {r:?}"));
             assert!(pool.mass_kg > 0.0, "spawns full of {r:?}");
         }
 
@@ -904,12 +914,16 @@ mod tests {
 
         // Both stage engines must gimbal, or the ascent can't be steered.
         for id in ["typhon", "boreas"] {
-            let CatalogEntry::Engine(e) =
-                cat.resolve(id).unwrap_or_else(|e| panic!("{id} in catalog: {e:?}"))
+            let CatalogEntry::Engine(e) = cat
+                .resolve(id)
+                .unwrap_or_else(|e| panic!("{id} in catalog: {e:?}"))
             else {
                 panic!("{id} should be an engine");
             };
-            assert!(e.gimbal_range_deg > 0.0, "{id} must be gimballed for ascent steering");
+            assert!(
+                e.gimbal_range_deg > 0.0,
+                "{id} must be gimballed for ascent steering"
+            );
         }
     }
 }

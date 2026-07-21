@@ -72,6 +72,8 @@ preview-window:
 # `earth-reference` is the 3:2 ISS-like atmosphere calibration view; it defaults
 # to Bevy raymarching, while THALOS_SCREENSHOT_ATMOSPHERE=custom captures the
 # matched legacy BodySky A/B.
+# `just screenshot latest` replays the active 3-D perspective most recently
+# saved by the player with F8 and writes tools/screenshots/latest_perspective.png.
 # Override the framing
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot

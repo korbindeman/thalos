@@ -256,7 +256,17 @@ fn each_leaf(seed: u64, mut emit: impl FnMut(LeafStamp)) {
 /// placement come from [`each_leaf`]; see it for the fluffy-silhouette design.
 fn draw_leaf_cluster(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
     each_leaf(seed, |l| {
-        stamp_leaf(px, ox, oy, l.cx, l.cy, l.ang, l.len, l.wid, leaf_palette(l.tone, l.s));
+        stamp_leaf(
+            px,
+            ox,
+            oy,
+            l.cx,
+            l.cy,
+            l.ang,
+            l.len,
+            l.wid,
+            leaf_palette(l.tone, l.s),
+        );
     });
 }
 
@@ -298,7 +308,17 @@ fn draw_needle_spray(px: &mut [[f32; 4]], ox: usize, oy: usize, seed: u64) {
     for i in 0..96u32 {
         let t = i as f32 / 96.0;
         let y = top + (bot - top) * t;
-        stamp_leaf(px, ox, oy, stem_x, y, 0.0, w * 0.026, w * 0.008, [0.16, 0.24, 0.15]);
+        stamp_leaf(
+            px,
+            ox,
+            oy,
+            stem_x,
+            y,
+            0.0,
+            w * 0.026,
+            w * 0.008,
+            [0.16, 0.24, 0.15],
+        );
     }
     for li in 0..360u32 {
         let s = seed.wrapping_add((li as u64).wrapping_mul(GOLD));
@@ -482,7 +502,11 @@ fn bark_height(x: f32, y: f32, seed: u64) -> BarkH {
     // Shallow smooth relief: grain a touch recessed; no deep furrows.
     let height = (0.6 + 0.55 * line + 0.30 * broad).clamp(0.0, 1.0);
 
-    BarkH { height, line, broad }
+    BarkH {
+        height,
+        line,
+        broad,
+    }
 }
 
 /// Opaque bark albedo: ONE warm-brown stem tone modulated in value only by the

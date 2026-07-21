@@ -139,7 +139,11 @@ impl Plugin for DebugPlugin {
                 update_debug_surface_teleport_cursor,
                 commit_debug_surface_teleport.after(update_debug_surface_teleport_cursor),
             )
-                .run_if(not_game_paused.and_then(not_in_photo_mode).and_then(in_map_view))
+                .run_if(
+                    not_game_paused
+                        .and_then(not_in_photo_mode)
+                        .and_then(in_map_view),
+                )
                 .after(crate::SimStage::Camera),
         );
     }

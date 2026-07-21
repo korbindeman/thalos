@@ -8,9 +8,7 @@ use bevy::ui::RelativeCursorPosition;
 use crate::shipyard_editor::core::{format_delta_v, format_mass_kg};
 use thalos_shipyard::Resource;
 
-use thalos_ui::{
-    self as ui, ScrollableColumn, SPACE_XS, UiTheme, spawn_heading, tokens,
-};
+use thalos_ui::{self as ui, SPACE_XS, ScrollableColumn, UiTheme, spawn_heading, tokens};
 
 use super::EditorStatsCache;
 

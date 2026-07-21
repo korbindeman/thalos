@@ -30,8 +30,8 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use std::collections::HashMap;
 
-use thalos_input::game::GameInputIntent;
 use crate::shipyard_editor::core::EditorPart;
+use thalos_input::game::GameInputIntent;
 use thalos_shipyard::{
     Attachment, CommandPod, Decoupler, Engine, EngineActivation, Part, PartResources, PartRole,
     Resource, ResourceTotals, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,

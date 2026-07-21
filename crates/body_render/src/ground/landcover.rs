@@ -255,7 +255,10 @@ mod tests {
             lo = lo.min(s.moisture);
             hi = hi.max(s.moisture);
         }
-        assert!(hi - lo > 0.15, "fine moisture should vary across a transect");
+        assert!(
+            hi - lo > 0.15,
+            "fine moisture should vary across a transect"
+        );
         // The macro offset carries through (clamped to range).
         let p = DVec3::new(3_186_000.0, 0.0, 1234.0);
         let wet = sample_landcover(p, 1000.0, 0.8, 0.0);

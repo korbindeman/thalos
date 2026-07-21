@@ -335,9 +335,9 @@ fn update_launch_pick(
     let Some(basin_id) = editor.active_site else {
         return;
     };
-    let Some((pad_r, body_id, dir_body)) =
-        cursor_pad_dir(&sim, &solar, &registry, basin_id, &windows, &cameras, &root_grid)
-    else {
+    let Some((pad_r, body_id, dir_body)) = cursor_pad_dir(
+        &sim, &solar, &registry, basin_id, &windows, &cameras, &root_grid,
+    ) else {
         hover.0 = None;
         return;
     };
@@ -492,8 +492,17 @@ fn apply_launch_placement(
         StructureKind::Runway { half_length_m, .. } => {
             let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
             let Some(clearance_m) = measure_runway_clearance(
-                &sim, body_id, ship_entity, ship_gt, &children_q, &mesh_q, &meshes, parts, gear_q,
-                host_nodes, gear_tuning,
+                &sim,
+                body_id,
+                ship_entity,
+                ship_gt,
+                &children_q,
+                &mesh_q,
+                &meshes,
+                parts,
+                gear_q,
+                host_nodes,
+                gear_tuning,
             ) else {
                 return; // gear / geometry not resident yet — retry (keep latch)
             };
@@ -525,9 +534,14 @@ fn apply_launch_placement(
             relight.pending = true;
         }
         StructureKind::Launchpad { .. } => {
-            let Some(clearance_m) =
-                craft_extent_below(ship_entity, ship_gt, &children_q, &mesh_q, &meshes, Vec3::NEG_Y)
-            else {
+            let Some(clearance_m) = craft_extent_below(
+                ship_entity,
+                ship_gt,
+                &children_q,
+                &mesh_q,
+                &meshes,
+                Vec3::NEG_Y,
+            ) else {
                 return; // meshes not resident yet — retry
             };
             place_on_launchpad(
@@ -602,8 +616,9 @@ fn draw_launch_highlights(
 
     // Body-fixed point → render space (relative to the floating origin), the same
     // large-minus-large f32 map `place::draw_placement_ghost` uses for previews.
-    let to_render =
-        |p_body: DVec3| -> Vec3 { center_render + (orientation * p_body).as_vec3() * SHIP_SCALE as f32 };
+    let to_render = |p_body: DVec3| -> Vec3 {
+        center_render + (orientation * p_body).as_vec3() * SHIP_SCALE as f32
+    };
 
     let base = Color::srgb(0.30, 0.85, 1.0);
     let hot = Color::srgb(1.0, 0.85, 0.30);

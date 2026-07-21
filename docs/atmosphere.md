@@ -6,19 +6,21 @@ clouds, ocean rendering, and image-based lighting (IBL / reflection
 probe).
 
 What runs today: gas-giant materials, Bevy's raymarched rocky-body
-atmosphere on the active render camera, reference cloud-cover overlays,
-an in-impostor water BRDF, and a CPU-painted reflection probe. The old
-`BodySky` single-scatter atmosphere remains only as a debug A/B fallback
-while its non-atmosphere composites are migrated independently.
+atmosphere on the active render camera, one dedicated near/orbital cloud
+composite, an analytic-sphere water BRDF, and a CPU-painted reflection probe.
+The old `BodySky` single-scatter atmosphere remains only as a process-isolated
+headless A/B fallback. It is not a live or persisted graphics mode. Ocean and
+clouds are dedicated composites whose ownership does not change with the
+capture backend.
 
 ## Status
 
 | Area | Today | Future |
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
-| Rocky-body sky | **Bevy `AtmosphereMode::Raymarched` is canonical** (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere). One camera-local atmosphere proxy follows the body selected by `ViewAnchor`; authored Rayleigh scale heights/optical depth feed Bevy's medium, with an Earth aerosol split and ozone absorption. The deterministic `earth-reference` screenshot is the orbital regression probe. The legacy `BodySky` atmosphere is debug-only. | Remove the temporary 0.1 density adapter when terrain and the photometric atmosphere share one radiometric exposure contract; migrate cloud/star composites without restoring a second atmosphere. |
-| Cloud rendering | **Near/mid `BodySky` path:** the vendored compute raymarch described in *Cloud rendering (M4)* below; body-fixed spherical shells, procedural density, a planet-fixed weather map, cloud-depth export, and temporal reprojection. The far impostor still composites a separately authored flat shell. Gas-giant cloud decks remain a distinct system. | The canonical surface-to-orbit replacement is planned in [clouds.md](clouds.md): one per-body weather field, atmosphere-coupled lighting, scalable reconstruction, shared cloud shadows, and a weather-derived orbital projection. |
-| Oceans | One analytic-sphere `BodySky` path (ADR-20260720T185954Z / ADR-20260720T185958Z): signed-field coverage, depth optics, shore response, four body-fixed mipmapped slope-texture cascades, anisotropic horizon filtering, filtered GGX energy, sparse slope-coupled foam, and atmosphere-derived sun/sky reflection. See [ocean.md](ocean.md). | Authored sea state, dynamic spectral displacement/Jacobian cascades, persistent foam, and bounded local shore/wake solvers behind the same analytic planet surface. |
+| Rocky-body sky | **Bevy `AtmosphereMode::Raymarched` is canonical** (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere). One camera-local atmosphere proxy follows the body selected by `ViewAnchor`; authored Rayleigh scale heights/optical depth feed Bevy's medium at physical density, with an Earth aerosol split and ozone absorption. The deterministic `earth-reference` screenshot is the orbital regression probe. Legacy `BodySky` is selectable only through the process-isolated headless comparison override. | Complete terrain/atmosphere radiometric exposure unification without altering the physical optical column; migrate cloud/star composites without restoring a second atmosphere. |
+| Cloud rendering | **Dedicated cloud path:** the body-fixed compute march exports premultiplied radiance/transmittance plus hit depth; `CloudCompositeMaterial` is the sole near/orbital screen compositor and samples the same per-body weather field as `SolidPlanetMaterial`. Cloud lighting binds the active Bevy atmosphere's transmittance + sky-view LUTs. Gas-giant decks remain distinct. | Complete the explicit foreground/background atmosphere split, then shared cloud shadows, environment response, and the reduced-detail limb handoff in [clouds.md](clouds.md). |
+| Oceans | One dedicated analytic-sphere `BodyOceanMaterial` path (ADR-20260720T185954Z / ADR-20260720T185958Z / ADR-20260721T050036Z): signed-field coverage, depth optics, shore response, four body-fixed mipmapped slope-texture cascades, anisotropic horizon filtering, filtered GGX energy, sparse slope-coupled foam, and atmosphere-derived sun/sky reflection. It renders under either atmosphere backend. See [ocean.md](ocean.md). | Authored sea state, dynamic spectral displacement/Jacobian cascades, persistent foam, and bounded local shore/wake solvers behind the same analytic planet surface. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
 > **Rendering vs physics.** This doc covers atmosphere *rendering* (how the sky
@@ -46,11 +48,19 @@ camera sits at render-space zero.
 
 Thalos's authored Rayleigh column remains the source of spectral scattering.
 The adapter uses Bevy's Earth aerosol scattering/absorption split and ozone
-profile. A single `0.1` density multiplier currently reconciles Bevy's
-photometric atmosphere with terrain that still shades in the spine's arbitrary
-scene-flux units. It scales scattering and extinction together, so the
-raymarch remains internally energy-consistent. F7's radiometric unification
-must remove this adapter rather than accumulating more look-specific knobs.
+profile at density multiplier `1.0`. The former `0.1` brightness adapter was
+removed after the matched `cloud-sunset / atmosphere` comparison proved that
+it erased low-sun optical depth: Bevy retained a navy sky and white clouds at a
+1° sun while the physical column reddened both. F7 must reconcile photometric
+atmosphere and spine-shaded surfaces through shared light/exposure units, never
+by changing density and therefore spectral transmittance.
+
+The same unit boundary applies to cloud ambient. Until F7 gives Bevy's
+photometric atmosphere and the Thalos lighting spine one radiometric scale, the
+sky-view LUT contributes normalized chromaticity while the calibrated cloud
+ambient remains the energy authority. Feeding the raw LUT radiance into that
+scene-light domain overwhelmed low-sun direct light and bleached the clouds
+(INC-0014).
 
 `just screenshot earth-reference` supplies the fixed 3:2, low-orbit camera for
 visual regression. `THALOS_SCREENSHOT_ATMOSPHERE=custom|bevy|configured` makes
@@ -58,15 +68,22 @@ matched legacy/canonical captures without mutating saved graphics settings.
 This reference framing is land-only; ocean and cloud appearance are explicitly
 outside its acceptance criteria.
 
+Normal gameplay has no atmosphere-backend selector. BL-28 removed the
+autosaved `legacy_body_sky` checkbox after a live switch crashed the game; that
+control also contradicted the one-canonical-path and isolated-comparison
+decisions. Existing settings files may still contain the old key, which Serde
+ignores during migration. Use `just compare <preset> atmosphere` for every A/B.
+
 `just screenshot runway-atmosphere` is the complementary surface probe: a low,
 near-horizontal camera above the flattened spaceport basin that makes the sky
 and long atmospheric slant path fill the frame. Use
 `just compare runway-atmosphere atmosphere` for the controlled legacy-vs-Bevy
 surface comparison.
 
-The older `BodySkyMaterial` sections below document the retained debug path and
-the cloud/depth composites that still need re-homing. They are not the
-canonical rocky-body atmosphere.
+The older `BodySkyMaterial` sections below document the retained debug
+atmosphere and the optical contract shared with the dedicated ocean material.
+`BodySky` is not the canonical rocky-body atmosphere and no longer owns a
+physical surface.
 
 ## Goals
 
@@ -470,11 +487,10 @@ this yet — they'd need an `ExtendedMaterial` to reach a fragment hook; deferre
 ### Backlog
 
 - **Unify impostor and terrain cloud shadows.** `planet_impostor.wgsl`
-  still owns the full surface-side cloud composite, including the
-  shadow probe and water BRDF. `BodySkyMaterial` now matches the
-  visible cloud layer for terrain LOD, but terrain cloud shadows are
-  still deferred until the ground path has an explicit receiver-side
-  shadow term.
+  still owns its receiver-side cloud shadow probe and water BRDF. The
+  dedicated cloud compositor matches the visible layer across atmosphere
+  backends, but terrain cloud shadows remain deferred until the ground path
+  has an explicit receiver-side shadow term.
 - **MSAA path.** Currently `Msaa::Off` on the ship camera —
   `copy_texture_to_texture` requires matching sample counts, and
   binding a multisampled depth as `texture_depth_2d` would force
@@ -550,21 +566,22 @@ stages:
    (`CloudsConfig` is `Reflect`-registered). A landed/parked
    camera is *static* in this frame, so temporal reprojection converges
    exactly when the view is steady.
-3. **Composite (body_render, `body_sky.wgsl`).** The cloud texture is
-   bound onto `BodySkyMaterial` (`cloud_layer`, plus `cloud_distance`)
-   and composited as the final step of the per-body atmosphere fullscreen
-   pass — over the in-scatter, attenuating the sky behind opaque cloud.
-   This is the home on purpose: a separate transparent quad sorts
-   *unreliably* against the fullscreen atmosphere pass under `big_space`
-   (the atmosphere drew over the clouds at some view angles), whereas
-   compositing inside the pass is deterministic. Occlusion against
+3. **Composite (body_render, `cloud_composite.wgsl`).** The cloud texture and
+   hit-distance texture are bound to one `CloudCompositeMaterial`, the sole
+   fullscreen owner of near-volume and weather-derived orbital clouds. It
+   renders after either Bevy's canonical atmosphere or the explicit legacy
+   `BodySky` A/B; an explicit depth bias resolves their otherwise tied
+   transparent sort points, so changing atmosphere backends cannot hide the
+   clouds. Occlusion against
    geometry (ship hull / terrain) ramps `cloud_vis` from the **per-pixel
    nearest cloud-hit distance** to the band exit (ray-shell intersection,
-   `cloud_band_radii` in `BodySkyExtra`), so geometry under a sparse deck
+   `cloud_band_radii` in the shared per-body parameters), so geometry under a sparse deck
    doesn't dim far-behind clouds and the ship crosses the cloud boundary
-   without a hard pop. `ground_terrain::update_body_terrain_atmosphere`
+   without a hard pop. `rendering::clouds::sync_cloud_composite_materials`
    binds the live textures on the active cloud body and blank fallbacks
-   everywhere else.
+   everywhere else. The current ordering still treats Bevy's already-integrated
+   atmospheric radiance as wholly behind the cloud; CLOUD-4 owns the explicit
+   foreground/background segmentation.
 
 **Weather field (the canonical hook).** `thalos_world::CloudClimate` is the
 sole authored terrestrial-cloud configuration; `clouds: None` creates neither
@@ -616,10 +633,12 @@ For gas giants, "clouds" *are* the cloud deck and live inside
 
 ### Today
 
-The canonical ship-view ocean is the analytic sphere composited by `BodySky`
-(ADR-20260720T185954Z-analytic-planet-water-never-meshed), with coverage and
+The canonical ship-view ocean is the analytic sphere composited by the
+dedicated `BodyOceanMaterial`
+(ADR-20260720T185954Z-analytic-planet-water-never-meshed and
+ADR-20260721T050036Z-ocean-composite-independent-of-atmosphere), with coverage and
 bathymetry sampled from the one signed sea field
-(ADR-20260720T185958Z-water-projects-one-signed-sea-field). `BodySky` samples
+(ADR-20260720T185958Z-water-projects-one-signed-sea-field). The ocean material samples
 four body-fixed scales of one shared mipmapped
 broadband slope texture, using the surface pixel's major/minor axes and 16×
 anisotropic filtering so grazing views preserve resolvable cross-wave detail.

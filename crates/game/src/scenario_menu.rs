@@ -39,8 +39,7 @@ use crate::player_controller::EvaMode;
 use crate::rendering::{PlayerShip, SimulationState};
 use crate::spawn::{
     Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
-    polar_orbit_respawn_state,
-    place_craft,
+    place_craft, polar_orbit_respawn_state,
 };
 
 /// Whether the destruction scenario picker is shown (and the game halted).
@@ -148,7 +147,11 @@ fn setup(mut commands: Commands, theme: Res<UiTheme>) {
                     .with_children(|buttons| {
                         for (situation, label, desc) in [
                             (SpawnSituation::ShipOrbit, "RELAUNCH", "ship in orbit"),
-                            (SpawnSituation::PolarOrbit, "RELAUNCH", "ship in polar orbit"),
+                            (
+                                SpawnSituation::PolarOrbit,
+                                "RELAUNCH",
+                                "ship in polar orbit",
+                            ),
                             (SpawnSituation::Landing, "RELAUNCH", "landing approach"),
                             (SpawnSituation::FinalApproach, "RELAUNCH", "final approach"),
                             (SpawnSituation::Cruise, "RELAUNCH", "cruise · 15,000 ft"),
@@ -331,4 +334,3 @@ pub(crate) fn clear_bubble(commands: &mut Commands, active: &mut ActiveLocalBubb
         commands.entity(terrain_entity).despawn();
     }
 }
-

@@ -30,6 +30,7 @@ mod gpu_grass;
 mod ground_patch;
 mod height_source;
 mod landcover;
+mod ocean_material;
 mod ocean_slope;
 mod pipeline;
 #[cfg(feature = "playground")]
@@ -47,7 +48,6 @@ mod tree_impostor;
 mod tree_material;
 mod tree_mesh;
 mod vegetation;
-mod water_material;
 
 pub use body_material::{
     BodySkyExtra, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT,
@@ -56,9 +56,9 @@ pub use body_material::{
 pub use gpu_grass::{
     GPU_GRASS_BAND_COUNT, GPU_GRASS_BANDS, GPU_GRASS_REACH_M, GPU_GRASS_SNAP_SLACK_M,
     GPU_GRASS_WINDOW_HALF_M, GPU_GRASS_WINDOW_SIZE_PX, GpuGrassAnchor, GpuGrassBand,
-    GpuGrassMaterial, GpuGrassMaterialPlugin, GpuGrassParams, GpuGrassWindow,
-    GpuGrassWindowInput, GrassStyle, build_gpu_grass_template, build_gpu_grass_window,
-    gpu_grass_anchor, gpu_grass_style_table,
+    GpuGrassMaterial, GpuGrassMaterialPlugin, GpuGrassParams, GpuGrassWindow, GpuGrassWindowInput,
+    GrassStyle, build_gpu_grass_template, build_gpu_grass_window, gpu_grass_anchor,
+    gpu_grass_style_table,
 };
 pub use ground_patch::{GroundPatchMaterial, GroundPatchMaterialPlugin};
 pub use height_source::{
@@ -67,10 +67,10 @@ pub use height_source::{
     horizon_sun_visibility,
 };
 pub use landcover::{LandcoverSample, sample_landcover};
+pub use ocean_material::BodyOceanMaterial;
 pub use ocean_slope::{
-    OCEAN_CASCADE_DOMAINS_M, OceanSpectrumProjection, OceanWaveFrame,
-    bake_ocean_slope_texture, ocean_packet_phase_speeds, ocean_wave_frame,
-    project_ocean_spectrum,
+    OCEAN_CASCADE_DOMAINS_M, OceanSpectrumProjection, OceanWaveFrame, bake_ocean_slope_texture,
+    ocean_packet_phase_speeds, ocean_wave_frame, project_ocean_spectrum,
 };
 pub use pipeline::{
     PipelineTileProvider, rendered_height_m, rendered_height_range, renderer_tile_lod_m_at,
@@ -112,7 +112,6 @@ pub use vegetation::{
     GrassTileMesh, build_grass_clump_mesh, build_grass_field_mesh, build_grass_tile_mesh,
     grass_tile_frame, grass_tile_key, grass_tiles_per_side,
 };
-pub use water_material::{BodyWaterMaterial, BodyWaterParams};
 
 pub struct ThalosTerrainPlugin;
 
@@ -132,11 +131,11 @@ impl Plugin for ThalosTerrainPlugin {
                 .after(thalos_udlod::prelude::TileAtlas::update),
         );
         app.add_plugins(TerrainMaterialPlugin::<BodyTerrainMaterial>::default());
-        // Sky and water both use the standard Bevy MaterialPlugin — they
-        // render through the regular forward pipeline (fullscreen quad and
-        // icosphere mesh respectively), not thalos_udlod's UDLOD pipeline.
+        // Sky and ocean both use the standard Bevy MaterialPlugin — they
+        // render through the regular forward pipeline as fullscreen analytic
+        // projections, not thalos_udlod's UDLOD pipeline.
         app.add_plugins(MaterialPlugin::<BodySkyMaterial>::default());
-        app.add_plugins(MaterialPlugin::<BodyWaterMaterial>::default());
+        app.add_plugins(MaterialPlugin::<BodyOceanMaterial>::default());
         // Grass blades + scattered trees/shrubs render through the regular
         // forward pipeline too — decoration meshes, not UDLOD geometry.
         // None of the decoration materials run a depth prepass today (the grass
@@ -160,7 +159,6 @@ impl Plugin for ThalosTerrainPlugin {
         app.add_plugins(MaterialPlugin::<TreeBakeMaterial>::default());
         body_material::embed_body_terrain_shader(app);
         sky_material::embed_body_sky_shader(app);
-        water_material::embed_body_water_shader(app);
         vegetation::embed_grass_shader(app);
         gpu_grass::embed_gpu_grass_shader(app);
         tree_material::embed_tree_shader(app);

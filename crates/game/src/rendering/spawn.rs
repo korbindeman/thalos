@@ -27,20 +27,22 @@ use bevy::prelude::*;
 use big_space::prelude::Grid;
 use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
-    AtmosphereBlock, GasGiantLayers, GasGiantMaterial, GasGiantParams, GpuAtlasMirrorHeightSource,
-    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RingLayers, RingMaterial, RingParams,
-    SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
-    bake_coast_bathymetry_cube, bake_impostor_albedo_cube, bake_multi_scatter_lut,
-    bake_ocean_slope_texture, ocean_packet_phase_speeds,
-    blank_coast_cube, blank_impostor_cube, build_ring_mesh, cloud_weather_image,
+    AtmosphereBlock, CloudCompositeMaterial, GasGiantLayers, GasGiantMaterial, GasGiantParams,
+    GpuAtlasMirrorHeightSource, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RingLayers,
+    RingMaterial, RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial,
+    SolidPlanetParams, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
+    bake_multi_scatter_lut, bake_ocean_slope_texture, blank_coast_cube, blank_impostor_cube,
+    build_ring_mesh, cloud_weather_image, ocean_packet_phase_speeds,
 };
-use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
+use thalos_body_render::{BodyOceanMaterial, BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_terrain::TerrainConfig;
 use thalos_world::BodyKind;
 
+use super::clouds::BodyClouds;
 use super::generation::{ProceduralInstallExtras, WorldStateAssets};
 use super::ground_terrain::{BodySky, RealSpaceImpostor};
+use super::ocean::BodyOcean;
 use super::real_space::{RealSpaceRoot, real_space_grid};
 use super::scene_depth::SceneDepthImage;
 use super::types::{
@@ -105,9 +107,9 @@ fn build_multi_scatter_lut(
 }
 
 /// 1×1 "clear" cloud layer (RGBA32F `(0, 0, 0, 1)` → transmittance 1) used as
-/// the [`BodySkyMaterial::cloud_layer`] fallback. The game swaps in the live
-/// `thalos_body_render::clouds` texture for the active cloud body; every other
-/// body keeps this, so the cloud composite in `body_sky.wgsl` is a no-op there.
+/// the [`CloudCompositeMaterial::cloud_layer`] fallback. The game swaps in the
+/// live `thalos_body_render::clouds` texture for the active cloud body; every
+/// other body keeps this, so its dedicated cloud composite is a no-op.
 fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
@@ -128,10 +130,10 @@ fn blank_cloud_layer(images: &mut Assets<Image>) -> Handle<Image> {
     images.add(image)
 }
 
-/// Blank fallback cloud textures shared by every body's `BodySky`.
-/// `ground_terrain::update_body_terrain_atmosphere` binds the live volumetric
-/// textures on the active cloud body and rebinds these on every other body,
-/// so a body that stops being active sheds its stale cloud layer.
+/// Blank fallback cloud textures shared by every body's cloud compositor.
+/// `clouds::sync_cloud_composite_materials` binds the live volumetric textures
+/// on the active cloud body and rebinds these on every other body, so a body
+/// that stops being active sheds its stale cloud layer.
 #[derive(Resource, Clone)]
 pub(super) struct BlankCloudTextures {
     pub layer: Handle<Image>,
@@ -139,7 +141,7 @@ pub(super) struct BlankCloudTextures {
 }
 
 /// 1×1 far-sentinel cloud-distance fallback (R32F `1e9` = "no cloud on this
-/// ray") for [`BodySkyMaterial::cloud_distance`]; same swap policy as
+/// ray") for [`CloudCompositeMaterial::cloud_distance`]; same swap policy as
 /// [`blank_cloud_layer`].
 fn blank_cloud_distance(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
@@ -349,16 +351,29 @@ pub(super) fn spawn_bodies(
                 atmosphere: ship_atmosphere,
                 atmosphere_extra: BodySkyExtra::default(),
                 scene_depth: scene_depth.handle.clone(),
-                cloud_cover: body_weather.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
-                cloud_layer: blank_cloud.clone(),
-                cloud_distance: blank_cloud_dist.clone(),
                 coast_atlas,
                 ocean_slope: ocean_slope.clone(),
                 // Filled by `update_body_terrain_atmosphere` once the body's
                 // udlod terrain spawns (ADR-20260720T185958Z-water-projects-one-signed-sea-field height-tile lookup).
                 terrain_entity: None,
             };
+            if body.terrain.ocean_sea_level_m().is_some() {
+                commands.spawn((
+                    Mesh3d(billboard_mesh.clone()),
+                    MeshMaterial3d(world_state.ocean_materials.add(BodyOceanMaterial {
+                        optical: sky_material.clone(),
+                    })),
+                    bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                    NoFrustumCulling,
+                    NotShadowCaster,
+                    NotShadowReceiver,
+                    Visibility::Hidden,
+                    ChildOf(real_body_entity),
+                    Name::new(format!("{} Ocean", body.name)),
+                    BodyOcean { body_id: body.id },
+                ));
+            }
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
                 MeshMaterial3d(sky_materials.add(sky_material)),
@@ -372,6 +387,30 @@ pub(super) fn spawn_bodies(
                 ChildOf(real_body_entity),
                 Name::new(format!("{} Sky", body.name)),
                 BodySky { body_id: body.id },
+            ));
+
+            // Canonical cloud composite. It is deliberately a sibling of the
+            // custom BodySky entity: the stock-atmosphere toggle may hide the
+            // latter, but cloud visibility and ordering remain unchanged.
+            let cloud_material = CloudCompositeMaterial {
+                atmosphere: ship_atmosphere,
+                params: BodySkyExtra::default(),
+                scene_depth: scene_depth.handle.clone(),
+                weather: body_weather.clone(),
+                cloud_layer: blank_cloud.clone(),
+                cloud_distance: blank_cloud_dist.clone(),
+            };
+            commands.spawn((
+                Mesh3d(billboard_mesh.clone()),
+                MeshMaterial3d(world_state.cloud_materials.add(cloud_material)),
+                bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER),
+                NoFrustumCulling,
+                NotShadowCaster,
+                NotShadowReceiver,
+                Visibility::Hidden,
+                ChildOf(real_body_entity),
+                Name::new(format!("{} Clouds", body.name)),
+                BodyClouds { body_id: body.id },
             ));
         }
 

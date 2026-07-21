@@ -163,11 +163,12 @@ the RGBA8 256²×6 weather cube. This is a 70.4% reduction from CLOUD-1's
 ## 2026-07-21 CLOUD-2/3 completion
 
 The completed path sizes all four view/history targets from the physical
-viewport, updates one rotating 3×3 pixel class per valid-history frame, rejects
-history across camera/FOV/body/weather/simulation/target discontinuities, clamps
-reprojected radiance to a 3×3 current neighborhood, and reconstructs with
-bilinear history plus hit-aware full-resolution filtering. Reference mode is
-full-resolution, full-frame, and temporal-off.
+viewport, updates one rotating 3×3 pixel class per valid-history frame while
+the view is screen-static, and raymarches every current pixel during camera
+motion. It rejects history across camera/FOV/body/weather/simulation/target
+discontinuities, clamps reprojected radiance to a 3×3 current neighborhood, and
+reconstructs with bilinear history plus hit-aware full-resolution filtering.
+Reference mode is full-resolution, full-frame, and temporal-off.
 
 Matched corrected Baseline captures at a 1920×1080 viewport use a 1280×720
 cloud target and one stable lobe-scale directional shadow probe:
@@ -184,6 +185,22 @@ The budget gate is the densest sunset probe at 2560×1440 High: a 1712×960
 cloud target, 96 view steps, one shadow probe, **2.471 ms mean / 2.476 ms p95**,
 and 71,507,968 bytes (68.20 MiB) persistent allocation. This is inside the
 provisional 3.5 ms High target; the old fixed-target High sunset was 11.06 ms.
+
+### Moving-camera correction (BL-29)
+
+A live runway pan exposed large rectangular trails, especially around the
+high-contrast forward-scattering lobe. The deterministic `cloud-motion /
+cloud-reconstruction` matrix separated raw, dense-history, and production
+history while slewing 18° through the last 36 warm-up frames. Reusing untraced
+history pixels—even with only one frame of age—remained visibly wrong because
+one nearest-hit distance cannot transport an entire translucent ray integral.
+
+The corrected production path keeps 3×3 amortization only while screen-static.
+Every moving-view pixel now performs a fresh march; coherent body-fixed history
+may stabilize that current result but never replaces it. The final 1920×1080
+Baseline capture is visually aligned with dense history (raw→production MAE
+1.74/255, RMS 3.00/255) with **2.73 ms moving-frame p95**, inside the 3.5 ms
+budget. See [INC-0016](incidents/0016-cloud-sparse-history-motion-smear.md).
 
 CLOUD-3 retains typed stratus/cumulus/storm profiles, multi-domain 64³
 base/detail noise, boundary erosion, and continuous weather sampling. The first

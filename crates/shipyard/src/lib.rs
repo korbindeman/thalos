@@ -44,11 +44,11 @@ pub use catalog::{
     fuselage_surface_area, fuselage_volume, gear_dry_mass, pod_visual_profile,
     wing_mean_aerodynamic_chord, wing_panel_area,
 };
+pub use cockpit_mesh::build_cockpit_mesh;
 pub use engine_mesh::{
     JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
     jet_nacelle_centers, jet_nacelle_length,
 };
-pub use cockpit_mesh::build_cockpit_mesh;
 pub use fuselage_mesh::{
     build_fuselage_mesh, host_mount_geometry, skin_radius as fuselage_skin_radius,
     v_offset_at as fuselage_v_offset_at,

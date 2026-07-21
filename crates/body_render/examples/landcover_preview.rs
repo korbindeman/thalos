@@ -55,7 +55,10 @@ fn main() {
         }
     }
 
-    for (name, img) in [("landcover_color", &color), ("landcover_coverage", &coverage)] {
+    for (name, img) in [
+        ("landcover_color", &color),
+        ("landcover_coverage", &coverage),
+    ] {
         let path = format!("{OUT_DIR}/{name}.png");
         img.save(&path).expect("write PNG");
         println!("wrote {path} ({SIZE}×{SIZE}, {SPAN_M} m span)");

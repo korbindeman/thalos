@@ -139,7 +139,12 @@ struct SurfaceGroundSun {
 /// `strength`, sun elevation, and per-fragment flux. The *sky* itself is the
 /// physical `SkyViewLut`; these are the terrain-bounce and direct-disc terms it
 /// does not model.
-fn surface_ground_sun(tau_zenith: Vec3, strength: f32, sun_elev: f32, flux: f32) -> SurfaceGroundSun {
+fn surface_ground_sun(
+    tau_zenith: Vec3,
+    strength: f32,
+    sun_elev: f32,
+    flux: f32,
+) -> SurfaceGroundSun {
     let scene_radiance = flux.max(0.0) * SCENE_FLUX_SCALE;
     let sun_up = sun_elev.clamp(0.0, 1.0);
     let tau_eff = tau_zenith.max(Vec3::ZERO) * strength.max(0.0);

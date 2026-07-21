@@ -12,9 +12,7 @@
 
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
-use thalos_ui::{
-    self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_heading, spawn_menu_row,
-};
+use thalos_ui::{self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_heading, spawn_menu_row};
 
 use crate::base_editor::BaseEditor;
 use crate::game_context::{ContextHistory, GameContext, back_out};
@@ -88,7 +86,13 @@ fn setup(mut commands: Commands, theme: Res<UiTheme>) {
                     ..default()
                 })
                 .with_children(|buttons| {
-                    spawn_menu_row(buttons, &theme, HubButton::EditBase, "EDIT BASE", "reshape the site");
+                    spawn_menu_row(
+                        buttons,
+                        &theme,
+                        HubButton::EditBase,
+                        "EDIT BASE",
+                        "reshape the site",
+                    );
                     spawn_menu_row(buttons, &theme, HubButton::Vab, "VAB", "assemble a craft");
                     spawn_divider(buttons);
                     spawn_menu_row(buttons, &theme, HubButton::Exit, "EXIT", "Esc");
@@ -97,7 +101,10 @@ fn setup(mut commands: Commands, theme: Res<UiTheme>) {
 }
 
 /// Show/hide the whole panel on the hub open/close edge.
-fn update_visibility(sc: Res<SpaceCenter>, mut roots: Query<&mut Visibility, With<SpaceCenterUiRoot>>) {
+fn update_visibility(
+    sc: Res<SpaceCenter>,
+    mut roots: Query<&mut Visibility, With<SpaceCenterUiRoot>>,
+) {
     if !sc.is_changed() {
         return;
     }
@@ -149,4 +156,3 @@ fn handle_clicks(
         }
     }
 }
-

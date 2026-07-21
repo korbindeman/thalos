@@ -69,7 +69,8 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::{
-    RenderPlugin, diagnostic::RenderDiagnosticsPlugin,
+    RenderPlugin,
+    diagnostic::RenderDiagnosticsPlugin,
     settings::{Backends, RenderCreation, WgpuSettings},
 };
 use bevy::window::ExitCondition;
@@ -284,7 +285,7 @@ fn main() {
     let screenshot_config = screenshot::ScreenshotConfig::from_env();
     let homeworld_name = screenshot_config
         .as_ref()
-        .map(|cfg| cfg.preset.target_body_name())
+        .map(|cfg| cfg.target_body_name())
         .unwrap_or_else(|| {
             if request.starts_with("mira") {
                 "Mira"
@@ -330,7 +331,7 @@ fn main() {
     let boot_hub = matches!(request.as_str(), "hub" | "space-center" | "spacecenter")
         || screenshot_config
             .as_ref()
-            .is_some_and(|cfg| cfg.preset.boots_hub());
+            .is_some_and(|cfg| cfg.boots_hub());
     let auto_run = spawn::AutoRun::from_env();
     // Bare launch → start screen, behind the boot load of the placeholder
     // parking-orbit world. `THALOS_AUTO_RUN` skips the menu (straight into
@@ -338,7 +339,7 @@ fn main() {
     let wants_menu = matches!(request.as_str(), "" | "menu" | "title");
     let menu_boot = wants_menu && !open_shipyard && !auto_run.enabled && !headless;
     let situation = if let Some(cfg) = &screenshot_config {
-        cfg.preset.spawn_situation()
+        cfg.spawn_situation()
     } else if open_shipyard || wants_menu || boot_hub {
         SpawnSituation::ShipOrbit
     } else {

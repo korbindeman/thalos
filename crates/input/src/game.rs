@@ -51,6 +51,10 @@ pub struct ScreenshotAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct SavePerspectiveAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct ToggleFreeCamAction;
 
 #[derive(InputAction)]
@@ -213,6 +217,7 @@ pub struct PrecisionUltraAction;
 pub struct GameInputIntent {
     pub escape: bool,
     pub screenshot: bool,
+    pub save_perspective: bool,
     pub toggle_free_cam: bool,
     pub toggle_sas: bool,
     pub warp_to_maneuver: bool,
@@ -330,6 +335,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<ScreenshotAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.system.bindings("screenshot")),
+            ),
+            (
+                Action::<SavePerspectiveAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.system.bindings("save_perspective")),
             ),
             (
                 Action::<ToggleFreeCamAction>::new(),
@@ -608,10 +618,12 @@ fn collect_system_intent(
     mut intent: ResMut<GameInputIntent>,
     escape: Query<(&Action<EscapeAction>, &ActionEvents)>,
     screenshot: Query<(&Action<ScreenshotAction>, &ActionEvents)>,
+    save_perspective: Query<(&Action<SavePerspectiveAction>, &ActionEvents)>,
     toggle_free_cam: Query<(&Action<ToggleFreeCamAction>, &ActionEvents)>,
 ) {
     intent.escape = started(&escape);
     intent.screenshot = started(&screenshot);
+    intent.save_perspective = started(&save_perspective);
     intent.toggle_free_cam = started(&toggle_free_cam);
 }
 
@@ -1025,6 +1037,16 @@ mod tests {
         app.update();
         let intent = app.world().resource::<GameInputIntent>();
         assert!(intent.throttle_up);
+    }
+
+    #[test]
+    fn f8_emits_saved_perspective_intent() {
+        let mut app = input_app();
+
+        press_key(&mut app, KeyCode::F8);
+        app.update();
+
+        assert!(app.world().resource::<GameInputIntent>().save_perspective);
     }
 
     #[test]

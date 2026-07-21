@@ -1247,21 +1247,21 @@ pub fn update_tapes(
     let alt_step = nice_step((altitude_disp.abs() * 0.04).max(10.0));
     for (tick, mut node, mut text, mut vis) in &mut alt_ticks {
         apply_tape_tick(
-            altitude_disp, alt_step, tick.slot, true, TAPE_H, &mut node, &mut text, &mut vis,
+            altitude_disp,
+            alt_step,
+            tick.slot,
+            true,
+            TAPE_H,
+            &mut node,
+            &mut text,
+            &mut vis,
         );
     }
     let vs_disp = format::vertical_speed_value(vertical_speed, units.system);
     let vs_step = nice_step((vs_disp.abs() * 0.08).max(2.0));
     for (tick, mut node, mut text, mut vis) in &mut vs_ticks {
         apply_tape_tick(
-            vs_disp,
-            vs_step,
-            tick.slot,
-            true,
-            VS_TAPE_H,
-            &mut node,
-            &mut text,
-            &mut vis,
+            vs_disp, vs_step, tick.slot, true, VS_TAPE_H, &mut node, &mut text, &mut vis,
         );
     }
 
@@ -1454,7 +1454,11 @@ fn tick_label(value: f64, step: f64) -> String {
 /// (~200× larger) don't collapse to `k` during normal flight.
 fn signed_speed(v: f64, system: crate::units_settings::UnitSystem) -> String {
     let v = format::vertical_speed_value(v, system);
-    let k_threshold = if system.is_imperial() { 10_000.0 } else { 1000.0 };
+    let k_threshold = if system.is_imperial() {
+        10_000.0
+    } else {
+        1000.0
+    };
     if v.abs() >= k_threshold {
         format!("{:+.1}k", v / 1000.0)
     } else {

@@ -33,7 +33,11 @@ fn lod_m_for(lod: u32) -> f32 {
 
 /// Build an orthonormal tangent basis at `dir`.
 fn tangent_basis(dir: DVec3) -> (DVec3, DVec3) {
-    let up = if dir.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+    let up = if dir.y.abs() < 0.9 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
     let east = up.cross(dir).normalize();
     let north = dir.cross(east).normalize();
     (east, north)
@@ -96,8 +100,8 @@ fn main() {
         // Arc parameter s in metres, from -arc_span to +arc_span around centre.
         let crossing_at = |lod_m: f32| -> Option<f64> {
             let mut prev_s = -arc_span_m;
-            let mut prev_h =
-                surface.sample_height_m(step_dir(center, north, prev_s / RADIUS_M).as_vec3(), lod_m);
+            let mut prev_h = surface
+                .sample_height_m(step_dir(center, north, prev_s / RADIUS_M).as_vec3(), lod_m);
             for k in 1..=steps {
                 let s = -arc_span_m + 2.0 * arc_span_m * k as f64 / steps as f64;
                 let h =
@@ -117,10 +121,10 @@ fn main() {
         let fine_cross = crossing_at(0.3);
         let slope = fine_cross.map(|s0| {
             let d = 50.0;
-            let hp =
-                surface.sample_height_m(step_dir(center, north, (s0 + d) / RADIUS_M).as_vec3(), 0.3);
-            let hm =
-                surface.sample_height_m(step_dir(center, north, (s0 - d) / RADIUS_M).as_vec3(), 0.3);
+            let hp = surface
+                .sample_height_m(step_dir(center, north, (s0 + d) / RADIUS_M).as_vec3(), 0.3);
+            let hm = surface
+                .sample_height_m(step_dir(center, north, (s0 - d) / RADIUS_M).as_vec3(), 0.3);
             ((hp - hm) as f64 / (2.0 * d)).abs()
         });
 
@@ -140,7 +144,9 @@ fn main() {
                     println!("     lod_m {lod_m:>9.2} m → waterline at s = {s:>+9.1} m");
                     positions.push(s);
                 }
-                None => println!("     lod_m {lod_m:>9.2} m → no crossing in ±{arc_span_m:.0} m arc"),
+                None => {
+                    println!("     lod_m {lod_m:>9.2} m → no crossing in ±{arc_span_m:.0} m arc")
+                }
             }
         }
         if positions.len() >= 2 {

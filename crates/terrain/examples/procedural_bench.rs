@@ -108,7 +108,13 @@ fn time_pass(surface: &ProceduralSurface, lod_m: f64, size: usize, parallel: boo
 }
 
 /// Minimum elapsed over `reps` passes (min = least scheduler/turbo noise).
-fn best_of(surface: &ProceduralSurface, lod_m: f64, size: usize, reps: usize, parallel: bool) -> f64 {
+fn best_of(
+    surface: &ProceduralSurface,
+    lod_m: f64,
+    size: usize,
+    reps: usize,
+    parallel: bool,
+) -> f64 {
     let mut best = f64::INFINITY;
     for _ in 0..reps {
         let (t, _) = time_pass(surface, lod_m, size, parallel);
@@ -124,14 +130,18 @@ fn main() {
 
     let surface = ProceduralSurface::new(RADIUS_M as f32, 1);
     let samples = (size * size) as f64;
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
 
     println!(
         "ProceduralSurface tile-synthesis bench — Thalos R={:.0} km, {size}×{size} = {:.0} samples/tile, best-of-{reps}, {cores} cores",
         RADIUS_M / 1000.0,
         samples,
     );
-    println!("(measures the per-pixel FIELD eval — `sample_d`; cube-sphere projection's 2nd world_position, height encode, and the material-mask pass live in body_render and are not included)\n");
+    println!(
+        "(measures the per-pixel FIELD eval — `sample_d`; cube-sphere projection's 2nd world_position, height encode, and the material-mask pass live in body_render and are not included)\n"
+    );
 
     // Warm caches / branch predictors before the first measured LOD.
     let _ = time_pass(&surface, 1.0, size.min(128), false);
@@ -160,7 +170,14 @@ fn main() {
 
         println!(
             "{:>4} {:>10.1} m {:>7.1} | {:>10.2} {:>9.1} {:>8.1} | {:>10.2} {:>6.1}×",
-            lod, lod_m, perlin, ms1, ns_samp, msmps, msp, t1 / tp,
+            lod,
+            lod_m,
+            perlin,
+            ms1,
+            ns_samp,
+            msmps,
+            msp,
+            t1 / tp,
         );
         fit_pts.push((perlin, ms1));
     }
@@ -185,11 +202,29 @@ fn main() {
     let floor = 11.0 * b; // warp + continent
     let variable = (fine_perlin - 11.0) * b; // hills + mountains at finest LOD
 
-    println!("\nCost decomposition (linear fit, finest tile = {:.1} perlin/px):", fine_perlin);
-    println!("  fixed overhead (projection+albedo+loop) : {:>6.2} ms  ({:>4.0}%)", overhead, 100.0 * overhead / t_fine);
-    println!("  warp+continent floor (LOD-invariant)    : {:>6.2} ms  ({:>4.0}%)  <- multi-res target", floor, 100.0 * floor / t_fine);
-    println!("  hills+mountains (variable, fine LOD)     : {:>6.2} ms  ({:>4.0}%)", variable, 100.0 * variable / t_fine);
-    println!("  per-octave cost                          : {:>6.3} ms/octave/tile", b);
+    println!(
+        "\nCost decomposition (linear fit, finest tile = {:.1} perlin/px):",
+        fine_perlin
+    );
+    println!(
+        "  fixed overhead (projection+albedo+loop) : {:>6.2} ms  ({:>4.0}%)",
+        overhead,
+        100.0 * overhead / t_fine
+    );
+    println!(
+        "  warp+continent floor (LOD-invariant)    : {:>6.2} ms  ({:>4.0}%)  <- multi-res target",
+        floor,
+        100.0 * floor / t_fine
+    );
+    println!(
+        "  hills+mountains (variable, fine LOD)     : {:>6.2} ms  ({:>4.0}%)",
+        variable,
+        100.0 * variable / t_fine
+    );
+    println!(
+        "  per-octave cost                          : {:>6.3} ms/octave/tile",
+        b
+    );
 
     if cores > 0 {
         let pool = cores.saturating_sub(2).max(2);
@@ -197,6 +232,8 @@ fn main() {
             "\nProjected cold-view wall-clock for the finest tile on the real eval pool (~{pool} threads): ~{:.0} ms/tile.",
             t_fine / pool as f64,
         );
-        println!("The runtime bakes up to 4 such tiles concurrently; a fresh surface needs dozens → the multi-second cold-stream wait.");
+        println!(
+            "The runtime bakes up to 4 such tiles concurrently; a fresh surface needs dozens → the multi-second cold-stream wait."
+        );
     }
 }

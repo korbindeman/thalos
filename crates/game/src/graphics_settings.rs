@@ -103,11 +103,6 @@ pub struct GraphicsSettings {
     /// Multisample anti-aliasing level for the main 3D view. `Off` keeps SMAA;
     /// a multisampled level replaces it. See [`MsaaSetting`].
     pub msaa: MsaaSetting,
-    /// Debug A/B fallback to the superseded custom `BodySky` atmosphere.
-    /// Normal rendering uses Bevy's `AtmosphereMode::Raymarched`; this exists
-    /// only to produce matched legacy comparison frames while the migration is
-    /// being visually verified.
-    pub legacy_body_sky: bool,
 }
 
 impl Default for GraphicsSettings {
@@ -120,10 +115,22 @@ impl Default for GraphicsSettings {
             // MSAA depth-resolve path is opt-in from the Graphics tab until it
             // has been runtime-verified.
             msaa: MsaaSetting::Off,
-            // Bevy raymarching is canonical; the custom BodySky is an opt-in
-            // debug comparison only.
-            legacy_body_sky: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stale_legacy_atmosphere_setting_is_ignored() {
+        let parsed: GraphicsSettings = ron::from_str(
+            "(clouds:true,grass:true,gpu_grass:true,msaa:Off,legacy_body_sky:true)",
+        )
+        .expect("removed debug setting should not invalidate an existing settings file");
+
+        assert_eq!(parsed, GraphicsSettings::default());
     }
 }
 

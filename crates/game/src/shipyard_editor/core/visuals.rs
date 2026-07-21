@@ -20,9 +20,9 @@ use thalos_shipyard::material::{ShipPartExtension, ShipPartMaterial};
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CatalogEntry, CommandPod, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, MaterialKind, Part, PartCatalog,
-    PartMaterial, PodGeometry, Ship, SurfaceMount, SurfaceMountKind, Wing,
-    build_cockpit_mesh, build_control_surface_mesh, build_fuselage_mesh, build_gear_bay_mesh,
-    build_gear_mesh, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh,
+    PartMaterial, PodGeometry, Ship, SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh,
+    build_control_surface_mesh, build_fuselage_mesh, build_gear_bay_mesh, build_gear_mesh,
+    build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh,
     host_mount_geometry, jet_nacelle_length, landing_gear_base, pod_visual_profile,
     stainless_steel_base,
 };
@@ -409,8 +409,12 @@ pub(super) fn rebuild_wing_visuals(
             }
         }
         let top_d = host_top_diameter(&host_nodes, mount.parent);
-        let (parent_radius, _) =
-            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
+        let (parent_radius, _) = host_mount_geometry(
+            hosts.get(mount.parent).ok(),
+            top_d,
+            mount.station,
+            mount.angle,
+        );
         let mesh = meshes.add(build_wing_mesh(wing, mount.angle, parent_radius));
         let material = if Some(e) == state.selected {
             assets.selected_material.clone()
@@ -474,10 +478,7 @@ pub(super) fn rebuild_nacelle_visuals(
     state: Res<EditorState>,
     engines: Query<
         (Entity, &Engine, &SurfaceMount, Option<&Children>),
-        (
-            Or<(Added<Engine>, Changed<SurfaceMount>)>,
-            With<EditorPart>,
-        ),
+        (Or<(Added<Engine>, Changed<SurfaceMount>)>, With<EditorPart>),
     >,
     wings: Query<&Wing>,
     surface_mounts: Query<&SurfaceMount>,
@@ -580,8 +581,12 @@ pub(super) fn rebuild_gear_visuals(
             }
         }
         let top_d = host_top_diameter(&host_nodes, mount.parent);
-        let (parent_radius, _) =
-            host_mount_geometry(hosts.get(mount.parent).ok(), top_d, mount.station, mount.angle);
+        let (parent_radius, _) = host_mount_geometry(
+            hosts.get(mount.parent).ok(),
+            top_d,
+            mount.station,
+            mount.angle,
+        );
         let mesh = meshes.add(build_gear_mesh(gear, mount.angle, parent_radius));
         let material = if Some(e) == state.selected {
             assets.selected_material.clone()
@@ -694,7 +699,10 @@ pub(super) fn update_part_transforms(
     // (already rigid-rotated) translation from the previous frame, which the
     // rigid rotation below would then rotate a second time. Two passes keep
     // every parent upright and freshly positioned before its child reads it.
-    let position_mount = |transforms: &mut Query<&mut Transform, (With<Part>, With<EditorPart>)>,
+    let position_mount = |transforms: &mut Query<
+        &mut Transform,
+        (With<Part>, With<EditorPart>),
+    >,
                           part: Entity,
                           mount: &SurfaceMount| {
         let Ok(parent_t) = transforms.get(mount.parent).map(|t| t.translation) else {
@@ -1131,8 +1139,14 @@ pub(super) fn update_part_shader_params(
         let Some(mut mat) = ship_materials.get_mut(&handle.0) else {
             continue;
         };
-        let params =
-            ship_part_params(nodes, tank, fuselage, dec, adapter, mat.extension.params.seed);
+        let params = ship_part_params(
+            nodes,
+            tank,
+            fuselage,
+            dec,
+            adapter,
+            mat.extension.params.seed,
+        );
         mat.extension.params.length = params.length;
         mat.extension.params.radius_top = params.radius_top;
         mat.extension.params.radius_bottom = params.radius_bottom;
@@ -1220,7 +1234,10 @@ pub(super) fn propagate_coupled_material(
     attachments: Query<(Entity, &Attachment), With<EditorPart>>,
     mut params: ParamSet<(
         Query<(Entity, &PartMaterial), With<EditorPart>>,
-        Query<(Entity, &mut PartMaterial), (Or<(With<Decoupler>, With<Adapter>)>, With<EditorPart>)>,
+        Query<
+            (Entity, &mut PartMaterial),
+            (Or<(With<Decoupler>, With<Adapter>)>, With<EditorPart>),
+        >,
     )>,
 ) {
     // Build parent → bottom-attached-child entity map.

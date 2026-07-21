@@ -53,7 +53,9 @@ impl Plugin for BaseEditorCameraPlugin {
 fn reset_orbit_on_open(editor: Res<BaseEditor>, mut orbit: ResMut<GodViewOrbit>) {
     if editor.is_changed() && editor.open {
         match editor.mode {
-            BaseEditorMode::PlaceBuildings | BaseEditorMode::SelectLaunch => orbit.reset_over_base(),
+            BaseEditorMode::PlaceBuildings | BaseEditorMode::SelectLaunch => {
+                orbit.reset_over_base()
+            }
             BaseEditorMode::PickSite => orbit.reset(),
         }
     }

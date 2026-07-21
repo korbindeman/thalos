@@ -234,7 +234,10 @@ impl Plugin for CraftRenderPlugin {
 /// and seed [`CraftShadowMaps`] with it, so every craft material has a valid depth
 /// binding before any live cascade is pushed. `gate.x == 0` means it is never
 /// actually sampled.
-fn setup_craft_shadow_fallback(mut images: ResMut<Assets<Image>>, mut maps: ResMut<CraftShadowMaps>) {
+fn setup_craft_shadow_fallback(
+    mut images: ResMut<Assets<Image>>,
+    mut maps: ResMut<CraftShadowMaps>,
+) {
     let mut depth = Image::new_uninit(
         Extent3d {
             width: 1,

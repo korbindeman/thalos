@@ -30,6 +30,12 @@ const KNOWN_PRESETS: &[&str] = &[
     "mira-orbit",
     "mira-surface",
     "mira-eva",
+    "cloud-runway",
+    "cloud-motion",
+    "cloud-cruise",
+    "cloud-interior",
+    "cloud-limb",
+    "cloud-sunset",
 ];
 const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_SIZE",
@@ -122,6 +128,21 @@ const TERRAIN_REGOLITH_FILTER_VARIANTS: &[Variant] = &[
     },
 ];
 
+const CLOUD_RECONSTRUCTION_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "raw",
+        value: "raw",
+    },
+    Variant {
+        label: "dense-history",
+        value: "dense",
+    },
+    Variant {
+        label: "sparse-history",
+        value: "sparse",
+    },
+];
+
 const AXES: &[Axis] = &[
     Axis {
         name: "atmosphere",
@@ -147,6 +168,11 @@ const AXES: &[Axis] = &[
         name: "terrain-regolith-filter",
         env_key: "THALOS_TERRAIN_INSPECTION",
         variants: TERRAIN_REGOLITH_FILTER_VARIANTS,
+    },
+    Axis {
+        name: "cloud-reconstruction",
+        env_key: "THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION",
+        variants: CLOUD_RECONSTRUCTION_VARIANTS,
     },
 ];
 
@@ -250,9 +276,14 @@ fn run() -> Result<(), String> {
     let mut capture_paths = Vec::with_capacity(args.axis.variants.len());
     for (index, variant) in args.axis.variants.iter().enumerate() {
         let path = out_dir.join(format!("{:02}_{}.png", index + 1, variant.label));
+        let report_path = path.with_extension("jsonl");
         if path.exists() {
             fs::remove_file(&path)
                 .map_err(|error| format!("remove stale {}: {error}", path.display()))?;
+        }
+        if report_path.exists() {
+            fs::remove_file(&report_path)
+                .map_err(|error| format!("remove stale {}: {error}", report_path.display()))?;
         }
         println!(
             "[{}/{}] {}={}",
@@ -266,6 +297,7 @@ fn run() -> Result<(), String> {
             .current_dir(&workspace)
             .env("THALOS_SCREENSHOT", &args.preset)
             .env("THALOS_SCREENSHOT_OUT", &path)
+            .env("THALOS_SCREENSHOT_REPORT", &report_path)
             .env(args.axis.env_key, variant.value);
         command.env(dynamic_library_env_key(), &dynamic_library_path);
         let status = command

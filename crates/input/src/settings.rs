@@ -493,6 +493,7 @@ pub mod defaults {
             [
                 ("escape", keys([KeyCode::Escape])),
                 ("screenshot", keys([KeyCode::F2])),
+                ("save_perspective", keys([KeyCode::F8])),
                 ("toggle_free_cam", keys([KeyCode::F4])),
             ],
             [],
@@ -685,6 +686,7 @@ mod tests {
         let settings = InputSettings::from_ron_str(source).expect("assets/input.ron should parse");
         assert_eq!(settings.version, INPUT_SETTINGS_VERSION);
         assert!(!settings.game.system.bindings("escape").is_empty());
+        assert!(!settings.game.system.bindings("save_perspective").is_empty());
         assert!(!settings.game.flight.axis_positive("pitch").is_empty());
         // The EVA re-board toggle is deliberately unbound (unwired action in
         // an always-active context — a bound key would be consumed and lost).
@@ -800,7 +802,11 @@ mod tests {
         );
         assert!(settings.game.hotas.enabled);
         assert_eq!(
-            settings.game.hotas.axis("pitch").map(|binding| binding.code),
+            settings
+                .game
+                .hotas
+                .axis("pitch")
+                .map(|binding| binding.code),
             Some(65537)
         );
         assert_eq!(

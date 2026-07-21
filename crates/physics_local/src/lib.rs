@@ -353,7 +353,11 @@ pub fn terrain_patch_config(config: &LocalBubbleConfig) -> TerrainPatchConfig {
 /// authored in this tangent frame (height along local `Y`), so composing this
 /// with the body-fixed→SLF rotation gives their SLF pose.
 pub fn patch_basis_rotation(basis: &TerrainPatchBasis) -> DQuat {
-    DQuat::from_mat3(&DMat3::from_cols(basis.tangent_x, basis.normal, basis.tangent_z))
+    DQuat::from_mat3(&DMat3::from_cols(
+        basis.tangent_x,
+        basis.normal,
+        basis.tangent_z,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -415,8 +419,7 @@ pub fn spawn_terrain_collider_patch(
             RigidBody::Kinematic,
             collider,
             Position(
-                frame.rotation_body_to_frame
-                    * (center_surface_body_m - frame.anchor_point_body_m),
+                frame.rotation_body_to_frame * (center_surface_body_m - frame.anchor_point_body_m),
             ),
             Rotation(frame.rotation_body_to_frame * patch_basis_rotation(&basis)),
             LinearVelocity(DVec3::ZERO),
@@ -639,5 +642,4 @@ mod tests {
         ]);
         let _ = collider;
     }
-
 }

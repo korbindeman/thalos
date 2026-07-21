@@ -425,14 +425,33 @@ mod tests {
         // A tandem bogie (wheels_per_leg > 1) renders more geometry than a
         // single-wheel leg and spreads its wheels along the fore/aft (Y) axis.
         let single = build_gear_mesh(&main_gear(), std::f32::consts::PI, 1.25);
-        let bogie = Gear { wheels_per_leg: 4, ..main_gear() };
+        let bogie = Gear {
+            wheels_per_leg: 4,
+            ..main_gear()
+        };
         let m = build_gear_mesh(&bogie, std::f32::consts::PI, 1.25);
-        let single_v = single.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap().len();
-        let bogie_v = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap().len();
-        assert!(bogie_v > single_v, "bogie adds wheels (+beam): {bogie_v} > {single_v}");
+        let single_v = single
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .len();
+        let bogie_v = m
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap()
+            .len();
+        assert!(
+            bogie_v > single_v,
+            "bogie adds wheels (+beam): {bogie_v} > {single_v}"
+        );
         // Fore/aft spread (Y extent) is larger than a single wheel's thickness.
         let (min, max) = extents(&m);
-        assert!(max.y - min.y > 2.0 * bogie.wheel_radius, "wheels spread fore/aft");
+        assert!(
+            max.y - min.y > 2.0 * bogie.wheel_radius,
+            "wheels spread fore/aft"
+        );
     }
 
     #[test]
@@ -488,13 +507,22 @@ mod tests {
         assert_eq!(main.len(), 2, "main gear is a left/right pair");
         let track = main_gear().track_fraction * parent_radius;
         for leg in &main {
-            assert!((leg.strut_top.z + parent_radius).abs() < 1e-4, "strut top at belly skin");
+            assert!(
+                (leg.strut_top.z + parent_radius).abs() < 1e-4,
+                "strut top at belly skin"
+            );
             assert!(leg.susp_dir.z < -0.99, "suspension points belly-ward (−Z)");
             assert!(leg.axle_dir.x.abs() > 0.99, "axle is lateral (±X)");
             assert!(leg.roll_dir.y.abs() > 0.99, "rolls fore/aft (≈Y)");
-            assert!((leg.strut_top.x.abs() - track).abs() < 1e-4, "legs at ±track");
+            assert!(
+                (leg.strut_top.x.abs() - track).abs() < 1e-4,
+                "legs at ±track"
+            );
         }
-        assert!(main[0].strut_top.x * main[1].strut_top.x < 0.0, "one leg each side");
+        assert!(
+            main[0].strut_top.x * main[1].strut_top.x < 0.0,
+            "one leg each side"
+        );
 
         let nose = gear_leg_frames(&nose_gear(), std::f32::consts::PI, parent_radius);
         assert_eq!(nose.len(), 1, "nose gear is a single centred leg");

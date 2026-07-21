@@ -9,9 +9,7 @@
 //! `- =`), surfaced in the hint.
 
 use bevy::prelude::*;
-use thalos_ui::{
-    self as ui, ButtonVariant, CTRL_H, SPACE_SM, UiButton, UiTheme, spawn_button,
-};
+use thalos_ui::{self as ui, ButtonVariant, CTRL_H, SPACE_SM, UiButton, UiTheme, spawn_button};
 
 use super::place::{BuildingDims, PendingKind, Tool};
 use super::{BaseBuildState, BaseEditor, BaseEditorMode};
@@ -28,31 +26,51 @@ const PRESETS: &[Preset] = &[
     Preset {
         label: "Habitat",
         kind: PendingKind::Building,
-        dims: BuildingDims { half_x_m: 6.0, half_z_m: 6.0, height_m: 8.0 },
+        dims: BuildingDims {
+            half_x_m: 6.0,
+            half_z_m: 6.0,
+            height_m: 8.0,
+        },
         radius_m: 0.0,
     },
     Preset {
         label: "Depot",
         kind: PendingKind::Building,
-        dims: BuildingDims { half_x_m: 9.0, half_z_m: 6.0, height_m: 5.0 },
+        dims: BuildingDims {
+            half_x_m: 9.0,
+            half_z_m: 6.0,
+            height_m: 5.0,
+        },
         radius_m: 0.0,
     },
     Preset {
         label: "Tower",
         kind: PendingKind::Building,
-        dims: BuildingDims { half_x_m: 4.0, half_z_m: 4.0, height_m: 20.0 },
+        dims: BuildingDims {
+            half_x_m: 4.0,
+            half_z_m: 4.0,
+            height_m: 20.0,
+        },
         radius_m: 0.0,
     },
     Preset {
         label: "Hangar",
         kind: PendingKind::Building,
-        dims: BuildingDims { half_x_m: 11.0, half_z_m: 8.0, height_m: 9.0 },
+        dims: BuildingDims {
+            half_x_m: 11.0,
+            half_z_m: 8.0,
+            height_m: 9.0,
+        },
         radius_m: 0.0,
     },
     Preset {
         label: "Launchpad",
         kind: PendingKind::Launchpad,
-        dims: BuildingDims { half_x_m: 0.0, half_z_m: 0.0, height_m: 0.0 },
+        dims: BuildingDims {
+            half_x_m: 0.0,
+            half_z_m: 0.0,
+            height_m: 0.0,
+        },
         radius_m: 18.0,
     },
 ];

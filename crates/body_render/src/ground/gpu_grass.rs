@@ -161,11 +161,9 @@ pub fn build_gpu_grass_template() -> Mesh {
     for (band_idx, band) in GPU_GRASS_BANDS.iter().enumerate() {
         let keep_hi =
             band.outer_m as f64 + band.fade_m as f64 + GPU_GRASS_SNAP_SLACK_M + band.cell_m;
-        let keep_lo = (band.inner_m as f64
-            - band.fade_m as f64
-            - GPU_GRASS_SNAP_SLACK_M
-            - band.cell_m)
-            .max(0.0);
+        let keep_lo =
+            (band.inner_m as f64 - band.fade_m as f64 - GPU_GRASS_SNAP_SLACK_M - band.cell_m)
+                .max(0.0);
         let window = (keep_hi / band.cell_m).ceil() as i64;
         for dy in -window..=window {
             for dx in -window..=window {

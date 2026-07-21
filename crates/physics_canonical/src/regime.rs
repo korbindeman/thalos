@@ -415,8 +415,7 @@ fn warp_policy(inputs: &RegimeInputs) -> WarpPolicy {
         WarpConstraint::Unconstrained
     };
 
-    if inputs.karman_line_m > 0.0 && inputs.altitude_above_terrain_buffer_m < inputs.karman_line_m
-    {
+    if inputs.karman_line_m > 0.0 && inputs.altitude_above_terrain_buffer_m < inputs.karman_line_m {
         let one_x = ladder
             .iter()
             .position(|level| (level.speed - 1.0).abs() <= f64::EPSILON)
@@ -672,7 +671,10 @@ mod tests {
         assert_eq!(regime.translation_owner, TranslationOwner::Canonical);
         assert!(!regime.backend_clock_runs);
         assert_eq!(regime.warp.max_level, LADDER.len() - 1);
-        assert_eq!(regime.prediction, PredictionDisplay::Hide(HideReason::Landed));
+        assert_eq!(
+            regime.prediction,
+            PredictionDisplay::Hide(HideReason::Landed)
+        );
         assert_eq!(
             expected_authority(&inputs, &regime),
             AuthorityKind::BodyFixed
@@ -761,7 +763,10 @@ mod tests {
         assert_eq!(regime.rotation_owner, RotationOwner::Kinematic);
         assert!(!regime.backend_clock_runs);
         assert_eq!(regime.ground, GroundState::Contact);
-        assert_eq!(regime.prediction, PredictionDisplay::Hide(HideReason::OnFoot));
+        assert_eq!(
+            regime.prediction,
+            PredictionDisplay::Hide(HideReason::OnFoot)
+        );
         assert!(!regime.terrain_collider_allowed);
         assert_eq!(
             expected_authority(&inputs, &regime),

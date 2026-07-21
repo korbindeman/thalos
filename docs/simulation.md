@@ -113,6 +113,15 @@ must choose deliberately: physical state should derive from canonical
 `sim_time()` or `SolarSystemState`, while purely perceptual shader motion
 may use wall-clock time.
 
+When freecam leaves simulation time under warp control, its *input* still uses
+`Time<Real>`, but its pose is not heliocentric-inertial. Activation latches the
+terrain-backed body already selected by the canonical `ViewAnchor`, captures
+camera position and orientation in that body's rotating frame, and reprojects
+the complete pose after each `SolarSystemState` refresh. This keeps a parked
+view geographically and directionally stable while the body orbits and spins.
+The body is selected once per activation—never chased frame by frame—and a
+view with no resolved terrain body keeps the inertial fallback.
+
 Between orbital truth and every Bevy-side projection is one evaluated
 runtime resource: `SolarSystemState` in `crates/game/src/solar_system_state.rs`.
 `SimulationState` owns the long-lived simulation, system definition, and

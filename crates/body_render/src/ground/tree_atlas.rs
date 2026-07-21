@@ -19,7 +19,10 @@ pub use thalos_texgen::{
 /// `TreeMaterial`. Filterable, clamped, mip-free (the scale-fade shrinks far
 /// cards, so leaf shimmer is bounded without mips for now).
 pub fn build_foliage_atlas() -> Image {
-    upload(thalos_texgen::foliage_atlas(), TextureFormat::Rgba8UnormSrgb)
+    upload(
+        thalos_texgen::foliage_atlas(),
+        TextureFormat::Rgba8UnormSrgb,
+    )
 }
 
 /// Build the companion **foliage material atlas** (bark normal + roughness) as a
@@ -27,7 +30,10 @@ pub fn build_foliage_atlas() -> Image {
 /// **Linear** (`Rgba8Unorm`, NOT sRGB): RGB is a tangent-space normal, A is
 /// roughness — neither is colour data. Same layout/sampler as the albedo atlas.
 pub fn build_foliage_material_atlas() -> Image {
-    upload(thalos_texgen::foliage_material_atlas(), TextureFormat::Rgba8Unorm)
+    upload(
+        thalos_texgen::foliage_material_atlas(),
+        TextureFormat::Rgba8Unorm,
+    )
 }
 
 /// Build the **grass clump-card atlas** as a GPU `Image`, ready to bind on

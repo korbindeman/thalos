@@ -32,6 +32,7 @@
 //! Remaining work (evolving/advected weather, storms, half-res + temporal
 //! upscale) is tracked in `docs/atmosphere.md`.
 
+mod composite;
 mod compute;
 /// Controls the compute shader which renders the volumetric clouds.
 pub mod config;
@@ -40,14 +41,23 @@ mod uniforms;
 
 use bevy::asset::embedded_asset;
 use bevy::prelude::*;
+use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use bevy::shader::load_shader_library;
 
+pub use self::composite::CloudCompositeMaterial;
 pub use self::compute::CameraMatrices;
 pub use self::config::CloudsConfig;
 pub use self::images::{
     CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, cloud_target_memory,
     cloud_target_memory_for, cloud_weather_image,
 };
+
+/// Marker for the one camera view whose atmosphere LUTs feed the global cloud
+/// compute pass. The game attaches it to its ship camera; extraction lets the
+/// render-world prepare step select that view explicitly instead of depending
+/// on arbitrary query iteration when map/probe cameras also own LUTs.
+#[derive(Component, Clone, Copy, ExtractComponent)]
+pub struct CloudView;
 
 use self::compute::CloudsComputePlugin;
 use self::images::build_images;
@@ -93,8 +103,11 @@ impl Plugin for CloudsPlugin {
         // `clouds_compute.wgsl` via `load_embedded_asset!` in `compute.rs`.
         load_shader_library!(app, "shaders/common.wgsl");
         embedded_asset!(app, "shaders/clouds_compute.wgsl");
+        composite::embed_cloud_composite_shader(app);
 
         app.insert_resource(CloudsConfig::default())
+            .add_plugins(ExtractComponentPlugin::<CloudView>::default())
+            .add_plugins(bevy::pbr::MaterialPlugin::<CloudCompositeMaterial>::default())
             .add_plugins(CloudsComputePlugin)
             .add_systems(Startup, clouds_setup)
             .add_systems(Update, resize_cloud_targets);
@@ -160,6 +173,8 @@ fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
         weather_image: built.weather_image,
         history_image: built.history_image,
         history_distance_image: built.history_distance_image,
+        atmosphere_fallback_image: built.atmosphere_fallback_image.clone(),
+        atmosphere_sky_fallback_image: built.atmosphere_fallback_image,
     });
     commands.insert_resource(CameraMatrices {
         translation: Vec3::ZERO,

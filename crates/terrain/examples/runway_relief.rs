@@ -10,7 +10,10 @@ use glam::DVec3;
 use thalos_terrain::ProceduralSurface;
 use thalos_terrain::query::SurfaceQuery;
 
-const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/runway_relief.png");
+const OUT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/runway_relief.png"
+);
 
 fn latlon_dir(lat_deg: f64, lon_deg: f64) -> DVec3 {
     let lat = lat_deg.to_radians();
@@ -114,9 +117,9 @@ fn height_color(h: f64) -> [u8; 3] {
         return [30, 60, 95]; // ocean
     }
     let bands = [
-        (0.0, [70, 110, 55]),     // green lowland
-        (300.0, [95, 120, 60]),   //
-        (900.0, [120, 110, 80]),  // upland brown
+        (0.0, [70, 110, 55]),      // green lowland
+        (300.0, [95, 120, 60]),    //
+        (900.0, [120, 110, 80]),   // upland brown
         (1800.0, [120, 112, 100]), // rock
         (2600.0, [150, 145, 140]), // bare rock
         (3200.0, [235, 238, 245]), // snow

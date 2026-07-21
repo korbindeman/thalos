@@ -357,12 +357,11 @@ where
 
         // Pick the mesh-view layout that matches this view's MSAA + prepass state, so
         // layout-0 agrees with the bind group `SetMeshViewBindGroup<0>` will bind.
-        let mut layout = vec![
-            self.mesh_view_layouts
-                .get_view_layout(key.flags.view_layout_key())
-                .main_layout
-                .clone(),
-        ];
+        let mut layout = vec![self
+            .mesh_view_layouts
+            .get_view_layout(key.flags.view_layout_key())
+            .main_layout
+            .clone()];
 
         layout.push(self.terrain_layout.clone());
         layout.push(self.terrain_view_layout.clone());

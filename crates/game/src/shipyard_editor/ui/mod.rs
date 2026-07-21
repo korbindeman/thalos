@@ -327,7 +327,13 @@ fn surface_status_toasts(
     } else {
         ToastKind::Info
     };
-    spawn_toast(&mut commands, area_entity, &theme, state.status.clone(), kind);
+    spawn_toast(
+        &mut commands,
+        area_entity,
+        &theme,
+        state.status.clone(),
+        kind,
+    );
 }
 
 fn handle_cancel_pending(

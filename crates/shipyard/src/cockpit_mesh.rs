@@ -184,7 +184,10 @@ mod tests {
             .unwrap();
         for n in normals {
             let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-            assert!((len - 1.0).abs() < 1e-3, "normal {n:?} not unit (len {len})");
+            assert!(
+                (len - 1.0).abs() < 1e-3,
+                "normal {n:?} not unit (len {len})"
+            );
         }
         // Ring 0 is the first RADIAL_SEGMENTS vertices.
         for n in &normals[..RADIAL_SEGMENTS as usize] {

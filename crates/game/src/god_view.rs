@@ -21,7 +21,6 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::{CellCoord, Grid};
 
-
 /// Gizmo group for the god-view overlays (launch-point highlights, base-editor
 /// placement ghosts, space-center hover outlines). The **default** gizmo group
 /// is restricted to `MAP_LAYER` (see `rendering::configure_gizmos`), so any

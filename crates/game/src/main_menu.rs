@@ -44,10 +44,9 @@ use bevy::winit::{UpdateMode, WinitSettings};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
-use thalos_ui::{
-    self as ui, SPACE_SM, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens,
-};
+use thalos_ui::{self as ui, SPACE_SM, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens};
 
+use crate::game_context::{GameContext, InitialContext};
 use crate::loading::{
     AppState, LoadDestination, LoadingTracker, StepDesc, WorldState, step, steps_for,
     world_load_steps,
@@ -59,7 +58,6 @@ use crate::rendering::{PlayerShip, SimulationState};
 use crate::runway::{RunwayPlacement, RunwaySite};
 use crate::scenario_menu::respawn_into;
 use crate::settings_menu::SettingsMenu;
-use crate::game_context::{GameContext, InitialContext};
 use crate::space_center::HubSpaceportBuild;
 use crate::spawn::{DescentPlacement, Homeworld, SpawnSituation};
 use crate::surface_settle::SurfaceSettle;
@@ -101,8 +99,14 @@ impl Plugin for MainMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PendingMenuAction>()
             .init_resource::<DevMenuExpanded>()
-            .add_systems(OnEnter(AppState::MainMenu), (spawn_menu, throttle_menu_updates))
-            .add_systems(OnExit(AppState::MainMenu), (despawn_menu, restore_update_rate))
+            .add_systems(
+                OnEnter(AppState::MainMenu),
+                (spawn_menu, throttle_menu_updates),
+            )
+            .add_systems(
+                OnExit(AppState::MainMenu),
+                (despawn_menu, restore_update_rate),
+            )
             .add_systems(
                 Update,
                 (
@@ -246,8 +250,20 @@ fn spawn_menu(mut commands: Commands, theme: Res<UiTheme>, mut dev: ResMut<DevMe
             ))
             .with_children(|panel| {
                 // Primary: the usual PLAY / SETTINGS / QUIT.
-                spawn_menu_row(panel, &theme, MenuAction::Play, "PLAY", "enter the space center");
-                spawn_menu_row(panel, &theme, MenuAction::Settings, "SETTINGS", "window & input");
+                spawn_menu_row(
+                    panel,
+                    &theme,
+                    MenuAction::Play,
+                    "PLAY",
+                    "enter the space center",
+                );
+                spawn_menu_row(
+                    panel,
+                    &theme,
+                    MenuAction::Settings,
+                    "SETTINGS",
+                    "window & input",
+                );
                 spawn_menu_row(panel, &theme, MenuAction::Quit, "QUIT", "");
 
                 spawn_divider(panel);
@@ -276,9 +292,21 @@ fn spawn_menu(mut commands: Commands, theme: Res<UiTheme>, mut dev: ResMut<DevMe
                     ))
                     .with_children(|dev| {
                         for &(situation, label, desc) in SCENARIOS {
-                            spawn_menu_row(dev, &theme, MenuAction::Scenario(situation), label, desc);
+                            spawn_menu_row(
+                                dev,
+                                &theme,
+                                MenuAction::Scenario(situation),
+                                label,
+                                desc,
+                            );
                         }
-                        spawn_menu_row(dev, &theme, MenuAction::Shipyard, "SHIPYARD", "design a craft");
+                        spawn_menu_row(
+                            dev,
+                            &theme,
+                            MenuAction::Shipyard,
+                            "SHIPYARD",
+                            "design a craft",
+                        );
                     });
             });
         });
@@ -359,8 +387,7 @@ fn apply_menu_action(
         return;
     };
     let (mut active, height_sources, mut eva_mode, mut plan, mut selected, homeworld) = respawn;
-    let (mut tracker, mut dest, mut settle, mut runway_placement, mut relaunch, mut descent) =
-        load;
+    let (mut tracker, mut dest, mut settle, mut runway_placement, mut relaunch, mut descent) = load;
     let (world_state, mut next_world) = world;
     let (mut settings, mut initial_context, mut hub_build, mut dev) = ui;
     let (primary_window, mut close_requested, mut app_exit) = exit;
@@ -551,4 +578,3 @@ fn update_dev_visibility(
         }
     }
 }
-

@@ -312,6 +312,16 @@ Document the terrain-height three-mirror design at `terrain_registry.rs`;
 camera.rs submodule split (only when camera work next happens — don't do it
 cold). *(The "one menu-button builder" item was subsumed by package G.)*
 
+**BL-25 (2026-07-21):** freecam now projects one latched `ViewAnchor` body into
+a complete body-fixed camera pose (position + orientation) while warp advances,
+with an inertial fallback when no terrain-backed view body exists. The body ID
+is captured once on entry rather than recomputed by another nearest-body path;
+this keeps `ViewAnchor` the canonical selector and prevents frame-switch jumps.
+
+*Verify (user):* in `just game orbit`, enter freecam (F4), raise warp, and
+confirm a parked surface feature and the camera heading stay fixed. Translate
+or rotate the camera, then repeat to confirm the updated pose stays fixed too.
+
 ### G. UI kit consolidation — LANDED 2026-07-05 ☑ (game-UNVERIFIED)
 
 The "duplicated menu-button builders" finding, solved structurally: a new

@@ -29,8 +29,8 @@ use crate::player_controller::EvaMode;
 use crate::rendering::{CelestialBody, RenderOrigin, ShipMarker, SimulationState};
 use crate::scenario_menu::ScenarioMenu;
 use crate::shipyard_editor::ShipyardEditor;
-use thalos_ui::{ScrollableColumn, UiButton};
 use crate::view::ViewMode;
+use thalos_ui::{ScrollableColumn, UiButton};
 
 /// Default framing distance (metres) when the ship row is clicked. Matches the
 /// value `sync_view_mode_changed` uses when entering map view.
@@ -160,11 +160,8 @@ fn update_visibility(
     mut roots: Query<&mut Visibility, With<BodyTreePanelRoot>>,
 ) {
     let editor_open = shipyard.as_deref().map(|e| e.open).unwrap_or(false);
-    let visible = *view == ViewMode::Map
-        && !pause.active
-        && !scenario.open
-        && !photo.active
-        && !editor_open;
+    let visible =
+        *view == ViewMode::Map && !pause.active && !scenario.open && !photo.active && !editor_open;
     let target = if visible {
         Visibility::Inherited
     } else {
@@ -282,7 +279,16 @@ fn build_subtree(
     }
     if let Some(kids) = children_of.get(&body.id) {
         for child in kids {
-            build_subtree(c, theme, child, children_of, debug_enabled, depth + 1, soi, ship);
+            build_subtree(
+                c,
+                theme,
+                child,
+                children_of,
+                debug_enabled,
+                depth + 1,
+                soi,
+                ship,
+            );
         }
     }
 }
@@ -551,9 +557,7 @@ fn handle_tree_clicks(
 
     // Ship row → focus the ship.
     for interaction in &ship_q {
-        if matches!(interaction, Interaction::Pressed)
-            && focus.target != CameraFocusTarget::Ship
-        {
+        if matches!(interaction, Interaction::Pressed) && focus.target != CameraFocusTarget::Ship {
             focus.focus_on_ship(origin.position);
             focus.target_distance = SHIP_TREE_FOCUS_DISTANCE_M;
         }
@@ -589,8 +593,7 @@ fn handle_tree_clicks(
 
             // Aim from the lit side, biased above/right for a soft terminator.
             if let Some(root) = sim.system.bodies.iter().find(|b| b.parent.is_none())
-                && let Some((_, _, sun_t)) =
-                    bodies.iter().find(|(_, cb, _)| cb.body_id == root.id)
+                && let Some((_, _, sun_t)) = bodies.iter().find(|(_, cb, _)| cb.body_id == root.id)
                 && let Ok((_, _, target_t)) = bodies.get(target_entity)
             {
                 const TILT_UP: f32 = 0.2;

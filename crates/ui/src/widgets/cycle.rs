@@ -3,9 +3,9 @@
 
 use bevy::prelude::*;
 
-use crate::tokens::*;
-use crate::widgets::button::{spawn_button, ButtonVariant};
 use crate::UiTheme;
+use crate::tokens::*;
+use crate::widgets::button::{ButtonVariant, spawn_button};
 
 /// A one-of-N picker. Holds its own option labels so it renders the current
 /// value without help; consumers react to `Changed<UiCycle>` and map `index`

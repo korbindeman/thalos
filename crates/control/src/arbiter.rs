@@ -38,18 +38,13 @@ pub fn arbitrate(demands: &[(DemandSource, ControlDemand)]) -> Arbitration {
     let mut result = Arbitration::NONE;
 
     for &(source, demand) in demands {
-        if demand.attitude.is_active()
-            && result
-                .attitude_owner
-                .is_none_or(|owner| source >= owner)
+        if demand.attitude.is_active() && result.attitude_owner.is_none_or(|owner| source >= owner)
         {
             result.attitude = demand.attitude;
             result.attitude_owner = Some(source);
         }
         if let Some(throttle) = demand.throttle
-            && result
-                .throttle_owner
-                .is_none_or(|owner| source >= owner)
+            && result.throttle_owner.is_none_or(|owner| source >= owner)
         {
             result.throttle = Some(throttle);
             result.throttle_owner = Some(source);
@@ -86,7 +81,10 @@ mod tests {
         // Pilot is highest priority but emits Free (stick released, SAS
         // off): a lower-priority NavMode hold should still win.
         let demands = [
-            (DemandSource::Pilot, ControlDemand::attitude(AttitudeDemand::Free)),
+            (
+                DemandSource::Pilot,
+                ControlDemand::attitude(AttitudeDemand::Free),
+            ),
             (
                 DemandSource::NavMode,
                 ControlDemand::attitude(AttitudeDemand::PointNose(DVec3::Z)),

@@ -17,12 +17,14 @@ use big_space::prelude::{BigSpace, CellCoord, Grid};
 use crate::base_editor::cursor_body_dir;
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::coords::SHIP_SCALE;
+use crate::game_context::{ContextHistory, GameContext};
 use crate::god_view::GodViewGizmos;
 use crate::hud::theme::HudTheme;
 use crate::rendering::{RealSpaceBody, SimulationState, SolarSystemState};
-use crate::game_context::{ContextHistory, GameContext};
 use crate::spawn::Homeworld;
-use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry, StructureSite};
+use crate::structures::{
+    StructureId, StructureKind, StructurePlacement, StructureRegistry, StructureSite,
+};
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
@@ -34,19 +36,22 @@ pub(super) struct SpaceCenterSelectPlugin;
 
 impl Plugin for SpaceCenterSelectPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Startup, setup_hover_label.after(crate::hud::theme::init_theme))
-            .add_systems(
-                Update,
-                (hover_and_enter, draw_hover)
-                    .chain()
-                    // Pick after the god-view camera moves so the raycast reads
-                    // this frame's camera pose (see `cursor_body_dir`).
-                    .after(crate::god_view::GodViewCameraSet)
-                    .run_if(space_center_open),
-            )
-            // Ungated: it also *hides* the callout when the hub closes (or the
-            // cursor leaves every building), so it must run even while closed.
-            .add_systems(Update, update_hover_label);
+        app.add_systems(
+            Startup,
+            setup_hover_label.after(crate::hud::theme::init_theme),
+        )
+        .add_systems(
+            Update,
+            (hover_and_enter, draw_hover)
+                .chain()
+                // Pick after the god-view camera moves so the raycast reads
+                // this frame's camera pose (see `cursor_body_dir`).
+                .after(crate::god_view::GodViewCameraSet)
+                .run_if(space_center_open),
+        )
+        // Ungated: it also *hides* the callout when the hub closes (or the
+        // cursor leaves every building), so it must run even while closed.
+        .add_systems(Update, update_hover_label);
     }
 }
 
@@ -219,8 +224,8 @@ fn structure_render_frame(
     let up = (orientation * site.anchor_dir).as_vec3().normalize();
     let heading = (orientation * site.heading_tangent).as_vec3().normalize();
     let across = heading.cross(up).normalize();
-    let base_render =
-        body_gt.translation() + (orientation * (site.anchor_dir * pad_r)).as_vec3() * SHIP_SCALE as f32;
+    let base_render = body_gt.translation()
+        + (orientation * (site.anchor_dir * pad_r)).as_vec3() * SHIP_SCALE as f32;
     Some(RenderFrame {
         base_render,
         up,
@@ -260,7 +265,13 @@ fn draw_structure_outline(
         StructureKind::Tank { radius_m, height_m } => {
             let r = (radius_m + 0.5) * s;
             draw_ground_ring(gizmos, f.base_render, f.up, r, color);
-            draw_ground_ring(gizmos, f.base_render + f.up * (height_m * s), f.up, r, color);
+            draw_ground_ring(
+                gizmos,
+                f.base_render + f.up * (height_m * s),
+                f.up,
+                r,
+                color,
+            );
         }
         _ => {}
     }
@@ -420,7 +431,8 @@ fn update_hover_label(
         hide(&mut vis);
         return;
     };
-    let top_render = frame.base_render + frame.up * (structure_height_m(&site.kind) * SHIP_SCALE as f32);
+    let top_render =
+        frame.base_render + frame.up * (structure_height_m(&site.kind) * SHIP_SCALE as f32);
     let Ok((camera, cam_gt)) = cameras.single() else {
         hide(&mut vis);
         return;

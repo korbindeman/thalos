@@ -26,17 +26,15 @@ use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::app::{AppExit, ScheduleRunnerPlugin};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
-use bevy::camera::{
-    ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode,
-};
+use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
 // Bevy 0.19: render passes are systems in the `Core3d` schedule.
+use bevy::camera::Hdr;
 use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::prelude::*;
-use bevy::camera::Hdr;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
 use bevy::render::view::window::screenshot::{Screenshot, save_to_disk};
 use bevy::render::{
@@ -53,23 +51,22 @@ use bevy::winit::WinitPlugin;
 
 use std::sync::Arc;
 
+use thalos_body_render::GPU_GRASS_BAND_COUNT;
 use thalos_body_render::{
     BakeParams, CanopyStyle, ConstantHeightSource, GpuGrassMaterial, GpuGrassMaterialPlugin,
     GpuGrassParams, GpuGrassWindowInput, GrassBladeLod, GrassClumpParams, GrassFieldParams,
-    GrassMaterial, GrassMaterialPlugin,
-    GrassParams, GrassProfile, GroundPatchMaterial, GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES,
-    ImpostorAtlasLayout, ImpostorParams, LIGHT_AT_1AU, RockMaterial, RockMaterialPlugin,
-    RockMeshData, RockMeshParams, ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorMaterial,
-    TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin, TreeMeshParams, VegInstance,
-    build_foliage_atlas, build_foliage_material_atlas, build_gpu_grass_template,
-    build_gpu_grass_window, build_grass_card_atlas,
-    build_grass_clump_mesh,
-    build_grass_field_mesh, build_rock_mesh, build_rock_mesh_data, build_tree_mesh,
-    build_tree_mesh_data, combine_impostor_tile_mesh, combine_rock_tile_mesh, fallback_shadow_map,
-    gpu_grass_anchor, gpu_grass_style_table, hemioct_decode, impostor_bake_rotation,
-    make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    GrassMaterial, GrassMaterialPlugin, GrassParams, GrassProfile, GroundPatchMaterial,
+    GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams,
+    LIGHT_AT_1AU, RockMaterial, RockMaterialPlugin, RockMeshData, RockMeshParams,
+    ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorMaterial, TreeImpostorMaterialPlugin,
+    TreeMaterial, TreeMaterialPlugin, TreeMeshParams, VegInstance, build_foliage_atlas,
+    build_foliage_material_atlas, build_gpu_grass_template, build_gpu_grass_window,
+    build_grass_card_atlas, build_grass_clump_mesh, build_grass_field_mesh, build_rock_mesh,
+    build_rock_mesh_data, build_tree_mesh, build_tree_mesh_data, combine_impostor_tile_mesh,
+    combine_rock_tile_mesh, fallback_shadow_map, gpu_grass_anchor, gpu_grass_style_table,
+    hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
+    tree_bounding_sphere,
 };
-use thalos_body_render::GPU_GRASS_BAND_COUNT;
 
 const WIDTH: u32 = 1280;
 const HEIGHT: u32 = 960;
@@ -140,8 +137,7 @@ fn main() {
         )
         .add_systems(
             Update,
-            (orbit_camera, update_preview_shadow, screenshot_key)
-                .chain(),
+            (orbit_camera, update_preview_shadow, screenshot_key).chain(),
         )
         .add_systems(Update, teardown_impostor_bake);
     } else {
@@ -276,21 +272,30 @@ fn objects() -> Vec<Preview> {
         // leaf size — they should read as the same tree, just cheaper, not sparser.
         Preview {
             name: "tree_broadleaf_lod1",
-            kind: AssetKind::Tree(TreeMeshParams { lod: 1, ..broadleaf() }),
+            kind: AssetKind::Tree(TreeMeshParams {
+                lod: 1,
+                ..broadleaf()
+            }),
             view: ViewKind::ThreeQuarter,
             focus_y: 4.4,
             distance: 16.0,
         },
         Preview {
             name: "tree_broadleaf_lod2",
-            kind: AssetKind::Tree(TreeMeshParams { lod: 2, ..broadleaf() }),
+            kind: AssetKind::Tree(TreeMeshParams {
+                lod: 2,
+                ..broadleaf()
+            }),
             view: ViewKind::ThreeQuarter,
             focus_y: 4.4,
             distance: 16.0,
         },
         Preview {
             name: "tree_broadleaf_lod3",
-            kind: AssetKind::Tree(TreeMeshParams { lod: 3, ..broadleaf() }),
+            kind: AssetKind::Tree(TreeMeshParams {
+                lod: 3,
+                ..broadleaf()
+            }),
             view: ViewKind::ThreeQuarter,
             focus_y: 4.4,
             distance: 16.0,
@@ -969,7 +974,11 @@ fn setup_scene(
                 let height_window = images.add(Image::new(
                     extent,
                     TextureDimension::D2,
-                    window.heights.iter().flat_map(|h| h.to_le_bytes()).collect(),
+                    window
+                        .heights
+                        .iter()
+                        .flat_map(|h| h.to_le_bytes())
+                        .collect(),
                     TextureFormat::R32Float,
                     bevy::asset::RenderAssetUsages::RENDER_WORLD,
                 ));
@@ -1009,8 +1018,7 @@ fn setup_scene(
                 gp.phase = Vec4::new(phase.x as f32, phase.y as f32, phase.z as f32, 0.0);
                 for i in 0..GPU_GRASS_BAND_COUNT {
                     let (cx, cy) = anchor.band_cell[i];
-                    gp.band_cell[i] =
-                        UVec4::new(cx as u32, cy as u32, anchor.face as u32, 0);
+                    gp.band_cell[i] = UVec4::new(cx as u32, cy as u32, anchor.face as u32, 0);
                     let (cu, cv) = anchor.band_cell_m[i];
                     let (fx, fy) = anchor.band_frac[i];
                     gp.band_geom[i] = Vec4::new(cu as f32, cv as f32, fx as f32, fy as f32);
@@ -1246,7 +1254,8 @@ fn setup_impostor_bake(
                 far: 100.0,
                 ..OrthographicProjection::default_3d()
             }),
-            Transform::from_translation(cam_center + Vec3::Z * 10.0).looking_at(cam_center, Vec3::Y),
+            Transform::from_translation(cam_center + Vec3::Z * 10.0)
+                .looking_at(cam_center, Vec3::Y),
             RenderLayers::layer(layer),
             ImpostorBakeRig,
             Name::new(name),

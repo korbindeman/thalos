@@ -18,16 +18,13 @@
 //! translucent `BackgroundColor` nodes layered on top — one blur per surface,
 //! not per control.
 
-use bevy::asset::{embedded_asset, RenderAssetUsages};
+use bevy::asset::{RenderAssetUsages, embedded_asset};
 use bevy::camera::Camera;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::ecs::prelude::*;
 use bevy::image::Image;
 use bevy::prelude::*;
-use bevy::render::{
-    RenderApp, RenderStartup,
-};
-use bevy::shader::ShaderRef;
+use bevy::render::{RenderApp, RenderStartup};
 use bevy::render::{
     extract_component::{ExtractComponent, ExtractComponentPlugin},
     extract_resource::{ExtractResource, ExtractResourcePlugin},
@@ -37,6 +34,7 @@ use bevy::render::{
     texture::GpuImage,
     view::ViewTarget,
 };
+use bevy::shader::ShaderRef;
 use bevy::ui_render::prelude::{UiMaterial, UiMaterialPlugin};
 use bevy::ui_render::ui_pass;
 
@@ -311,6 +309,9 @@ pub struct GlassPlugin;
 impl Plugin for GlassPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "glass.wgsl");
-        app.add_plugins((UiMaterialPlugin::<GlassMaterial>::default(), UiBackdropPlugin));
+        app.add_plugins((
+            UiMaterialPlugin::<GlassMaterial>::default(),
+            UiBackdropPlugin,
+        ));
     }
 }

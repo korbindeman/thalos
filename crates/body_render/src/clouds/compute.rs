@@ -1,3 +1,4 @@
+use bevy::pbr::resources::{AtmosphereSampler, AtmosphereTextures};
 use bevy::{
     asset::load_embedded_asset,
     ecs::system::ResMut,
@@ -25,7 +26,7 @@ use bevy::{
 /// Controls the compute shader which renders the volumetric clouds.
 use std::borrow::Cow;
 
-use super::config::CloudsConfig;
+use super::{CloudView, config::CloudsConfig};
 
 use super::{
     images::VOLUME_SIZE,
@@ -73,6 +74,8 @@ fn prepare_uniforms_bind_group(
 
     buffer.clouds_raymarch_steps_count = clouds_config.clouds_raymarch_steps_count;
     buffer.planet_radius = clouds_config.planet_radius;
+    buffer.atmosphere_top_height = clouds_config.atmosphere_top_height;
+    buffer.atmosphere_lut_enabled = u32::from(clouds_config.atmosphere_lut_enabled);
     buffer.clouds_bottom_height = clouds_config.clouds_bottom_height;
     buffer.clouds_top_height = clouds_config.clouds_top_height;
     buffer.clouds_coverage = clouds_config.clouds_coverage;
@@ -94,6 +97,7 @@ fn prepare_uniforms_bind_group(
     buffer.clouds_detail_scale_m = clouds_config.clouds_detail_scale_m;
     buffer.sun_dir = clouds_config.sun_dir;
     buffer.sun_color = clouds_config.sun_color;
+    buffer.cloud_albedo = clouds_config.cloud_albedo;
     buffer.camera_translation = camera.translation;
     buffer.time = time.elapsed_secs_wrapped();
     buffer.reprojection_strength = clouds_config.reprojection_strength;
@@ -129,6 +133,8 @@ fn prepare_textures_bind_group(
     gpu_images: Res<RenderAssets<GpuImage>>,
     clouds_image: Res<CloudsImage>,
     render_device: Res<RenderDevice>,
+    atmosphere_textures: Query<&AtmosphereTextures, With<CloudView>>,
+    atmosphere_sampler: Option<Res<AtmosphereSampler>>,
 ) {
     let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
     let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
@@ -138,18 +144,35 @@ fn prepare_textures_bind_group(
     let history_distance_view = gpu_images
         .get(&clouds_image.history_distance_image)
         .unwrap();
+    let atmosphere_fallback = gpu_images
+        .get(&clouds_image.atmosphere_fallback_image)
+        .unwrap();
+    let atmosphere = atmosphere_textures.iter().next();
+    let transmittance_view = atmosphere
+        .map(|textures| &textures.transmittance_lut.default_view)
+        .unwrap_or(&atmosphere_fallback.texture_view);
+    let sky_view = atmosphere
+        .map(|textures| &textures.sky_view_lut.default_view)
+        .unwrap_or(&atmosphere_fallback.texture_view);
+    let lut_sampler = atmosphere_sampler
+        .as_deref()
+        .map(|sampler| &**sampler)
+        .unwrap_or(&atmosphere_fallback.sampler);
 
     let bind_group = render_device.create_bind_group(
         None,
         &pipeline_cache.get_bind_group_layout(&pipeline.texture_bind_group_layout),
-        &BindGroupEntries::sequential((
-            &cloud_render_view.texture_view,
-            &cloud_worley_view.texture_view,
-            &cloud_distance_view.texture_view,
-            &weather_view.texture_view,
-            &weather_view.sampler,
-            &history_view.texture_view,
-            &history_distance_view.texture_view,
+        &BindGroupEntries::with_indices((
+            (0, &cloud_render_view.texture_view),
+            (1, &cloud_worley_view.texture_view),
+            (2, &cloud_distance_view.texture_view),
+            (3, &weather_view.texture_view),
+            (4, &weather_view.sampler),
+            (5, &history_view.texture_view),
+            (6, &history_distance_view.texture_view),
+            (7, transmittance_view),
+            (8, sky_view),
+            (9, lut_sampler),
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));

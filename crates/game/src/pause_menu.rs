@@ -236,7 +236,10 @@ fn handle_button_clicks(
     // Where the pause menu was opened from (usually Flight; SpaceCenter when
     // paused over the PLAY-rooted hub). Entering a mode remembers it so Escape
     // backs out here.
-    let current = ctx.as_ref().map(|c| *c.get()).unwrap_or(GameContext::Flight);
+    let current = ctx
+        .as_ref()
+        .map(|c| *c.get())
+        .unwrap_or(GameContext::Flight);
     for (interaction, action) in &interactions {
         if !matches!(interaction, Interaction::Pressed) {
             continue;
@@ -302,4 +305,3 @@ fn update_visibility(
         }
     }
 }
-

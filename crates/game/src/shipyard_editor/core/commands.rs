@@ -12,7 +12,9 @@ use thalos_shipyard::{
     SymmetryGroup, SymmetryRole, Wing, default_control_surfaces,
 };
 
-use super::files::{SHIPS_DIR, list_ships, schema_ship_name, ship_path_for_name, ship_path_for_slug};
+use super::files::{
+    SHIPS_DIR, list_ships, schema_ship_name, ship_path_for_name, ship_path_for_slug,
+};
 use super::placement::{host_group_members, surface_mount_from_hit};
 use super::state::{
     BuildOrientation, EditorPart, EditorState, NextSymmetryId, PlacementSnap, SymmetryMode,
@@ -297,21 +299,21 @@ pub(super) fn process_commands(
                         BuildLayout::Vertical
                     });
                     match bp.to_ron() {
-                    Ok(text) => {
-                        let path = ship_path_for_name(&bp.name);
-                        if let Err(e) = std::fs::create_dir_all(SHIPS_DIR) {
-                            state.status = format!("mkdir failed: {e}");
-                        } else {
-                            match std::fs::write(&path, text) {
-                                Ok(()) => {
-                                    state.status = format!("Saved {}", path.display());
-                                    state.refresh_list = true;
+                        Ok(text) => {
+                            let path = ship_path_for_name(&bp.name);
+                            if let Err(e) = std::fs::create_dir_all(SHIPS_DIR) {
+                                state.status = format!("mkdir failed: {e}");
+                            } else {
+                                match std::fs::write(&path, text) {
+                                    Ok(()) => {
+                                        state.status = format!("Saved {}", path.display());
+                                        state.refresh_list = true;
+                                    }
+                                    Err(e) => state.status = format!("Save failed: {e}"),
                                 }
-                                Err(e) => state.status = format!("Save failed: {e}"),
                             }
                         }
-                    }
-                    Err(e) => state.status = format!("Serialize failed: {e}"),
+                        Err(e) => state.status = format!("Serialize failed: {e}"),
                     }
                 }
                 None => state.status = "Failed to collect blueprint".into(),

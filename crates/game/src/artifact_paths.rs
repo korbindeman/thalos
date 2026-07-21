@@ -33,6 +33,12 @@ pub fn jsonl_path_from_env_or(env_key: &str, default_filename: &str) -> PathBuf 
 
 /// Return the canonical path for a diagnostic emitted without a path override.
 pub fn default_jsonl_path(filename: &str) -> PathBuf {
+    default_diagnostic_path(filename)
+}
+
+/// Return the canonical path for any machine-readable runtime artifact that is
+/// not necessarily JSONL (for example the latest saved camera perspective).
+pub fn default_diagnostic_path(filename: &str) -> PathBuf {
     Path::new(DIAGNOSTICS_DIR).join(filename)
 }
 

@@ -8,6 +8,12 @@ other viewport-dependent inputs while supposedly holding them constant.
 ## Canonical workflows
 
 - `just screenshot <preset>` captures one in-context beauty frame.
+- F8 in a live 3-D view + `just screenshot latest` hands the player's exact
+  body-fixed camera position, orientation, lens, and viewport to an agent.
+- F2 desktop screenshots and F8 perspective handoffs show saved/error toasts
+  only after the capture outcome is known, so F2 feedback is never baked into
+  its own image. Neither appears in F1 photo mode, whose clean frame hides the
+  shared toast container.
 - `just compare <preset> <axis>` captures every typed variant for one axis in
   isolated game processes, then assembles one comparison artifact set.
 - `just preview` remains the supplemental isolated-asset path. It does not replace
@@ -19,10 +25,36 @@ Ad-hoc framings set `THALOS_SCREENSHOT_OUT` to a path under
 `tools/agent_scratch/screenshots/`; they do not mint new names beside the
 canonical views. Comparison matrices always use the scratch tree automatically.
 
+## Player-saved perspective handoff
+
+Press F8 while the ship/free camera, space-center hub, or another 3-D god-view
+is active. Thalos writes a versioned handoff to
+`tools/diagnostics/latest_perspective.json` and confirms it with an in-game
+toast. An agent responding to “check my latest perspective” runs:
+
+```text
+just screenshot latest
+```
+
+The result overwrites `tools/screenshots/latest_perspective.png`. The handoff
+stores the camera in the nearest terrain body's fixed frame, plus vertical FOV,
+viewport, target body, and canonical spawn scene. Headless replay projects that
+pose through the fresh body's current transform and uses the real `ShipCamera`,
+so floating-origin shifts do not change the view and all normal render passes
+remain coupled.
+
+This is a camera handoff, not a save game. The recorded simulation time is kept
+as provenance, but replay deliberately boots the named canonical spawn instead
+of partially restoring craft dynamics. It therefore reproduces geographic
+framing and scene configuration; a one-off moving-craft state or weather moment
+still needs a normal screenshot or a dedicated deterministic preset.
+
 Atmosphere has two complementary canonical framings: `earth-reference` for the
 space/orbital limb and `runway-atmosphere` for the near-surface sky, long
 slant-path haze, and terrain/structure recession. Both support the typed
-`atmosphere` comparison axis.
+`atmosphere` comparison axis. The legacy renderer is capture-only: there is no
+live or persisted gameplay atmosphere selector, because sequentially switching
+renderer-global resources inside one process invalidates the isolation contract.
 
 One comparison run changes exactly one declared axis. Any normal screenshot
 framing overrides (`THALOS_SCREENSHOT_SIZE`, `_AZIMUTH`, `_ELEVATION`,

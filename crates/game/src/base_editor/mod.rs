@@ -154,7 +154,8 @@ pub(crate) fn spawn_default_base(
 ) {
     let mats = place::BaseMaterials::create(materials);
     let across = heading.cross(center_dir).normalize();
-    let dir = |along: f64, off: f64| (center_dir * pad_r + heading * along + across * off).normalize();
+    let dir =
+        |along: f64, off: f64| (center_dir * pad_r + heading * along + across * off).normalize();
 
     let launchpad = |r: f32| StructureKind::Launchpad { radius_m: r };
     let building = |hx: f32, hz: f32, h: f32| StructureKind::Building {
@@ -248,7 +249,11 @@ pub(crate) fn spawn_default_base(
     // from this row, so adding/moving hangars grows it to match. ---
     let hangar_alongs = [-750.0, -250.0, 250.0, 750.0];
     for &h_along in &hangar_alongs {
-        place_one(h_along, HANGAR_OFF, building(HANGAR_HALF_X as f32, HANGAR_HALF_Z, 22.0));
+        place_one(
+            h_along,
+            HANGAR_OFF,
+            building(HANGAR_HALF_X as f32, HANGAR_HALF_Z, 22.0),
+        );
     }
 
     // The VAB is the enterable shipyard facility for the space-center hub.
@@ -294,7 +299,15 @@ pub(crate) fn spawn_default_base(
     };
     // Core parallel taxiway: straight, full length.
     connections::spawn_authored_path(
-        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
         connections::ConnectionKind::Taxiway,
         &[
             DVec2::new(pri_half_len - 30.0, TWY_OFF),
@@ -307,9 +320,21 @@ pub(crate) fn spawn_default_base(
     // onto the secondary line and run it out to the far end.
     let c1 = -(pri_half_len - 70.0);
     connections::spawn_authored_path(
-        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
         connections::ConnectionKind::Taxiway,
-        &[DVec2::new(c1, -pri_edge_off), line_at(c1), sp(sec_len, SEC_TWY_T)],
+        &[
+            DVec2::new(c1, -pri_edge_off),
+            line_at(c1),
+            sp(sec_len, SEC_TWY_T),
+        ],
         LINK_FILLET_M,
         0.0,
     );
@@ -318,7 +343,15 @@ pub(crate) fn spawn_default_base(
     for c in [-1400.0, -700.0] {
         let merge = line_at(c);
         connections::spawn_authored_path(
-            commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+            commands,
+            meshes,
+            &mats,
+            root,
+            body_id,
+            basin_site_id,
+            center_dir,
+            heading,
+            pad_r,
             connections::ConnectionKind::Taxiway,
             &[
                 DVec2::new(c, -pri_edge_off),
@@ -341,15 +374,27 @@ pub(crate) fn spawn_default_base(
         cn.push((b.x, b.y, 0.0));
         ce.push((cn.len() - 2, cn.len() - 1));
     };
-    for c in [c1, -2100.0, -1400.0, -700.0, 0.0, 700.0, 1400.0, 2100.0, 2430.0] {
+    for c in [
+        c1, -2100.0, -1400.0, -700.0, 0.0, 700.0, 1400.0, 2100.0, 2430.0,
+    ] {
         stub(DVec2::new(c, TWY_OFF), DVec2::new(c, pri_edge_off));
     }
     for s in [60.0, sec_len * 0.5, sec_len - 60.0] {
         stub(sp(s, SEC_TWY_T), sp(s, SEC_EDGE_T));
     }
     connections::spawn_authored_network(
-        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
-        connections::ConnectionKind::Taxiway, &cn, Some(&ce),
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
+        connections::ConnectionKind::Taxiway,
+        &cn,
+        Some(&ce),
     );
 
     // --- The core apron (auto-generated from the hangar row): one large ramp
@@ -368,7 +413,15 @@ pub(crate) fn spawn_default_base(
     let apron_off0 = TWY_OFF;
     let apron_off1 = HANGAR_OFF + f64::from(HANGAR_HALF_Z) + APRON_BACK_M;
     connections::spawn_authored_apron(
-        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
         (apron_a0 + apron_a1) * 0.5,
         (apron_off0 + apron_off1) * 0.5,
         (apron_a1 - apron_a0) * 0.5,
@@ -382,7 +435,15 @@ pub(crate) fn spawn_default_base(
     let bay_outer = TWY_OFF - TWY_HALF_WIDTH;
     for side in [-1.0, 1.0] {
         connections::spawn_authored_apron(
-            commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+            commands,
+            meshes,
+            &mats,
+            root,
+            body_id,
+            basin_site_id,
+            center_dir,
+            heading,
+            pad_r,
             side * (pri_half_len - 200.0),
             (bay_inner + bay_outer) * 0.5,
             140.0,
@@ -395,7 +456,15 @@ pub(crate) fn spawn_default_base(
     // blockhouse. The VAB's pad-facing door and crawlerway are on the far
     // (`+off`) side, so this stays clear of them. ---
     connections::spawn_authored_path(
-        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
         connections::ConnectionKind::Road,
         &[
             DVec2::new(1100.0, 300.0),               // ops
@@ -419,8 +488,18 @@ pub(crate) fn spawn_default_base(
         (-PAD_ALONG, PAD_OFF, 50.0),                       // 3: west pad
     ];
     connections::spawn_authored_network(
-        commands, meshes, &mats, root, body_id, basin_site_id, center_dir, heading, pad_r,
-        connections::ConnectionKind::Crawlerway, &crawler_nodes, Some(&[(0, 1), (1, 2), (1, 3)]),
+        commands,
+        meshes,
+        &mats,
+        root,
+        body_id,
+        basin_site_id,
+        center_dir,
+        heading,
+        pad_r,
+        connections::ConnectionKind::Crawlerway,
+        &crawler_nodes,
+        Some(&[(0, 1), (1, 2), (1, 3)]),
     );
 }
 

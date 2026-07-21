@@ -155,7 +155,9 @@ impl AttitudeController {
                 self.pitch_trim = 0.0;
                 DVec3::ZERO
             }
-            AttitudeDemand::Hold => self.assisted_hold(attitude, params, effector_authority, flight, dt_s),
+            AttitudeDemand::Hold => {
+                self.assisted_hold(attitude, params, effector_authority, flight, dt_s)
+            }
             AttitudeDemand::PointNose(dir) => {
                 // Pointing owns attitude; drop any captured hold so a later
                 // release back to Hold recaptures the resulting orientation.
@@ -389,9 +391,30 @@ fn pd_to_normalized_torque(
     // (kp/kd) = ω_n/2 — the linear PD's implied desired rate per unit error.
     let rate_gain = omega_n * 0.5;
     DVec3::new(
-        slew_axis(error_body.x, omega_body.x, rate_gain, kd.x, authority.x, moi.x),
-        slew_axis(error_body.y, omega_body.y, rate_gain, kd.y, authority.y, moi.y),
-        slew_axis(error_body.z, omega_body.z, rate_gain, kd.z, authority.z, moi.z),
+        slew_axis(
+            error_body.x,
+            omega_body.x,
+            rate_gain,
+            kd.x,
+            authority.x,
+            moi.x,
+        ),
+        slew_axis(
+            error_body.y,
+            omega_body.y,
+            rate_gain,
+            kd.y,
+            authority.y,
+            moi.y,
+        ),
+        slew_axis(
+            error_body.z,
+            omega_body.z,
+            rate_gain,
+            kd.z,
+            authority.z,
+            moi.z,
+        ),
     )
 }
 
@@ -452,7 +475,14 @@ mod tests {
             orientation: DQuat::IDENTITY,
             angular_velocity: DVec3::ZERO,
         };
-        let t = c.update(AttitudeDemand::Hold, &att, &params(), DVec3::ZERO, None, 0.0);
+        let t = c.update(
+            AttitudeDemand::Hold,
+            &att,
+            &params(),
+            DVec3::ZERO,
+            None,
+            0.0,
+        );
         // At target with zero rate → zero command, no chatter.
         assert_abs_diff_eq!(t.x, 0.0, epsilon = 1e-12);
         assert_abs_diff_eq!(t.y, 0.0, epsilon = 1e-12);
@@ -522,7 +552,14 @@ mod tests {
         assert_eq!(t.x, 0.8);
         assert!(c.hold_target().is_none());
         // Center (Rate ~0) → recaptures the *current* attitude.
-        c.update(AttitudeDemand::Rate(DVec3::ZERO), &att, &p, DVec3::ZERO, None, 0.0);
+        c.update(
+            AttitudeDemand::Rate(DVec3::ZERO),
+            &att,
+            &p,
+            DVec3::ZERO,
+            None,
+            0.0,
+        );
         assert_eq!(c.hold_target(), Some(att.orientation));
     }
 
@@ -548,7 +585,10 @@ mod tests {
         };
         let cmd = c.hold(q, &att, &p, DVec3::ZERO);
         // Pure body-X brake: oppose ω on X, nothing on Y/Z.
-        assert!(cmd.x < 0.0, "expected a braking torque opposing +X ω, got {cmd:?}");
+        assert!(
+            cmd.x < 0.0,
+            "expected a braking torque opposing +X ω, got {cmd:?}"
+        );
         assert_abs_diff_eq!(cmd.y, 0.0, epsilon = 1e-9);
         assert_abs_diff_eq!(cmd.z, 0.0, epsilon = 1e-9);
     }
@@ -566,7 +606,10 @@ mod tests {
             angular_velocity: DVec3::new(0.001, 0.0, 0.0),
         };
         let cmd = point_nose(nose_world, &att, &p, DVec3::ZERO);
-        assert!(cmd.x < 0.0, "expected a braking torque opposing +X ω, got {cmd:?}");
+        assert!(
+            cmd.x < 0.0,
+            "expected a braking torque opposing +X ω, got {cmd:?}"
+        );
         assert_abs_diff_eq!(cmd.y, 0.0, epsilon = 1e-9);
         assert_abs_diff_eq!(cmd.z, 0.0, epsilon = 1e-9);
     }
@@ -594,7 +637,10 @@ mod tests {
         let dt = 1.0 / 60.0;
         let mut max_overshoot = 0.0_f64;
         for _ in 0..1800 {
-            let att = AttitudeState { orientation, angular_velocity: omega };
+            let att = AttitudeState {
+                orientation,
+                angular_velocity: omega,
+            };
             let cmd = c.hold(target, &att, &p, DVec3::ZERO);
             let ang_accel = (cmd * p.max_torque) / p.moment_of_inertia;
             omega += ang_accel * dt;
@@ -604,7 +650,10 @@ mod tests {
         }
         let final_err = (orientation.to_scaled_axis().z - target_angle).abs();
         assert!(final_err < 0.02, "did not settle: {final_err} rad");
-        assert!(max_overshoot < 0.1, "overshoot too large: {max_overshoot} rad");
+        assert!(
+            max_overshoot < 0.1,
+            "overshoot too large: {max_overshoot} rad"
+        );
     }
 
     #[test]
@@ -752,7 +801,11 @@ mod tests {
             Some(&slipping),
             1.0 / 60.0,
         );
-        assert!(cmd.z < 0.0, "+β must command coordinating yaw, got {}", cmd.z);
+        assert!(
+            cmd.z < 0.0,
+            "+β must command coordinating yaw, got {}",
+            cmd.z
+        );
     }
 
     #[test]
@@ -766,7 +819,14 @@ mod tests {
             vel_body: DVec3::new(0.0, 100.0, -100.0 * 0.26_f64.tan()),
             ..flight_at(0.0, 0.0)
         };
-        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, Some(&stalling), 1.0 / 60.0);
+        let cmd = c.update(
+            full_pull,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&stalling),
+            1.0 / 60.0,
+        );
         assert!(
             cmd.x <= 1e-9,
             "full pull at stall AoA must be zeroed, got {}",
@@ -779,12 +839,26 @@ mod tests {
             vel_body: DVec3::new(0.0, 100.0, -100.0 * 0.32_f64.tan()),
             ..flight_at(0.0, 0.0)
         };
-        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, Some(&deep), 1.0 / 60.0);
+        let cmd = c.update(
+            full_pull,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&deep),
+            1.0 / 60.0,
+        );
         assert!(cmd.x < 0.0, "past stall must push, got {}", cmd.x);
 
         // Same pull with no flight state (SAS off / spaceship): raw KSP
         // passthrough, untouched.
-        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, None, 1.0 / 60.0);
+        let cmd = c.update(
+            full_pull,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            None,
+            1.0 / 60.0,
+        );
         assert_eq!(cmd.x, 1.0);
         assert!(!c.assist_status().fbw_active);
     }
@@ -809,7 +883,14 @@ mod tests {
             orientation: DQuat::IDENTITY,
             angular_velocity: DVec3::new(20.0_f64.to_radians(), 0.0, 0.0),
         };
-        let cmd = c.update(full_pull, &pitching_up, &p, PLANE_AERO_AUTHORITY, Some(&flight), 1.0 / 60.0);
+        let cmd = c.update(
+            full_pull,
+            &pitching_up,
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&flight),
+            1.0 / 60.0,
+        );
         assert!(
             cmd.x < 1.0,
             "fast pull must fade early via the predictive α, got {}",
@@ -817,7 +898,14 @@ mod tests {
         );
         assert!(c.assist_status().protection_active);
 
-        let cmd = c.update(full_pull, &still_attitude(), &p, PLANE_AERO_AUTHORITY, Some(&flight), 1.0 / 60.0);
+        let cmd = c.update(
+            full_pull,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            Some(&flight),
+            1.0 / 60.0,
+        );
         assert_eq!(cmd.x, 1.0, "same α at zero rate must be unrestricted");
         assert!(!c.assist_status().protection_active);
     }
@@ -849,7 +937,11 @@ mod tests {
             Some(&stalled),
             1.0 / 60.0,
         );
-        assert!(cmd.x < 0.0, "stall protection must out-vote the hold, got {}", cmd.x);
+        assert!(
+            cmd.x < 0.0,
+            "stall protection must out-vote the hold, got {}",
+            cmd.x
+        );
         assert!(c.assist_status().protection_active);
     }
 
@@ -895,7 +987,11 @@ mod tests {
             last_pitch_err < 0.005,
             "trim failed to null the hold error: {last_pitch_err} rad"
         );
-        assert!(c.pitch_trim() > 0.0, "trim should hold nose-up, got {}", c.pitch_trim());
+        assert!(
+            c.pitch_trim() > 0.0,
+            "trim should hold nose-up, got {}",
+            c.pitch_trim()
+        );
     }
 
     #[test]
@@ -939,7 +1035,14 @@ mod tests {
         assert_eq!(c.pitch_trim(), trim);
 
         // SAS off → everything resets.
-        c.update(AttitudeDemand::Free, &still_attitude(), &p, PLANE_AERO_AUTHORITY, None, 1.0 / 60.0);
+        c.update(
+            AttitudeDemand::Free,
+            &still_attitude(),
+            &p,
+            PLANE_AERO_AUTHORITY,
+            None,
+            1.0 / 60.0,
+        );
         assert_eq!(c.pitch_trim(), 0.0);
         assert!(c.plane_hold_target().is_none());
     }
@@ -964,7 +1067,14 @@ mod tests {
             orientation: DQuat::from_axis_angle(DVec3::X, 0.3),
             angular_velocity: DVec3::ZERO,
         };
-        c.update(AttitudeDemand::Hold, &att, &p, DVec3::ZERO, None, 1.0 / 60.0);
+        c.update(
+            AttitudeDemand::Hold,
+            &att,
+            &p,
+            DVec3::ZERO,
+            None,
+            1.0 / 60.0,
+        );
         assert!(c.plane_hold_target().is_none());
         assert_eq!(c.hold_target(), Some(att.orientation));
         assert!(!c.assist_status().fbw_active);

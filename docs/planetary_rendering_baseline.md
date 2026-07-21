@@ -353,16 +353,15 @@ co-rotating, and horizon-correct at any altitude.
 
 Planet water is **never a mesh**. Two representations:
 
-- **Ship-view ocean**: an **analytic ray-traced sphere inside the BodySky
-  pass** (`thalos::water`): numerically-stable ray-sphere intersection
+- **Ship-view ocean**: an **analytic ray-traced sphere in the dedicated
+  `BodyOceanMaterial` pass** (`thalos::water`): numerically-stable ray-sphere intersection
   (Vieta + CPU f64-fed exact camera height), tested against scene depth so
   terrain correctly occludes/emerges. Shading: Cook–Torrance GGX (α 0.10,
   F0 0.02), two octaves of scrolled finite-difference wave normals (67 m and
   14 m, fading out by 6 km so orbit sees a clean sphere), exponential depth
   absorption from the water column recovered from scene depth
   (shallow-cyan → deep tint over ~14 m), and shoreline feathering over ~3 m of
-  depth. There is also a dormant mesh-based `BodyWaterMaterial`
-  (`TERRAIN_PATH_WATER_ENABLED = false`).
+  depth. The superseded dormant mesh-water material has been deleted.
 - **Map/distant ocean**: baked into the procedural impostor's albedo cubemap
   (flat colour v1).
 
@@ -546,7 +545,7 @@ full-scale planetary renderer" realism:
 | Exposure/light projection | `crates/game/src/rendering/lighting.rs`, `impostor/post_stack.rs` |
 | IBL probe | `crates/game/src/reflection_probe.rs` |
 | Clouds | `crates/body_render/src/clouds/`, `crates/game/src/rendering/clouds.rs` |
-| Water | `shading/shaders/water.wgsl` (inside body_sky), `ground/water_material.rs` (dormant) |
+| Water | `shading/shaders/water.wgsl`, `ground/body_sky.wgsl` compiled by `BodyOceanMaterial` |
 | Vegetation | `crates/body_render/src/ground/{vegetation,scatter,gpu_grass,tree_impostor,landcover}.rs`, drivers in `crates/game/src/rendering/{grass,gpu_grass,vegetation}.rs` |
 | Celestial | `crates/celestial/`, `crates/game/src/sky_render.rs` |
 | Plan / specs | `docs/graphics_fidelity.md`, `docs/terrain.md`, `docs/atmosphere.md`, `docs/vegetation.md` |

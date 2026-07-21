@@ -140,15 +140,17 @@ impl TileProvider for PipelineTileProvider {
             // grid from the one buffer.
             let mut grids: HashMap<(u32, u32), Vec<TilePixel>> = HashMap::new();
             for cfg in &attachments {
-                grids.entry((cfg.texture_size, cfg.border_size)).or_insert_with(|| {
-                    compute_tile_pixels(
-                        surface.as_ref(),
-                        coord,
-                        &model,
-                        cfg.texture_size,
-                        cfg.border_size,
-                    )
-                });
+                grids
+                    .entry((cfg.texture_size, cfg.border_size))
+                    .or_insert_with(|| {
+                        compute_tile_pixels(
+                            surface.as_ref(),
+                            coord,
+                            &model,
+                            cfg.texture_size,
+                            cfg.border_size,
+                        )
+                    });
             }
 
             let mut datas = Vec::with_capacity(attachments.len());
@@ -432,7 +434,9 @@ pub(crate) fn material_masks_from_heights(
     let grad_x = (h_r - h_l) / (2.0 * step_m);
     let grad_y = (h_u - h_d) / (2.0 * step_m);
     let slope = (grad_x * grad_x + grad_y * grad_y).sqrt();
-    let slope_gain = (step_m / SLOPE_REF_STEP_M).max(1.0).powf(SLOPE_SPECTRUM_EXP);
+    let slope_gain = (step_m / SLOPE_REF_STEP_M)
+        .max(1.0)
+        .powf(SLOPE_SPECTRUM_EXP);
     let laplacian = ((h_l + h_r + h_d + h_u) * 0.25 - height_m) / step_m.max(1.0);
 
     let slope_rock = smoothstep(0.20, 0.75, slope * slope_gain);
@@ -508,8 +512,7 @@ fn encode_attachment(
                     // [0, 255]; linear even on the sRGB texture). The ground
                     // shader decodes it and forces its own output alpha to 1.
                     let mut texel = linear_rgb_to_srgba8(p.albedo_linear);
-                    texel[3] =
-                        ((p.moisture.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
+                    texel[3] = ((p.moisture.clamp(-1.0, 1.0) * 0.5 + 0.5) * 255.0).round() as u8;
                     texel
                 })
                 .collect(),

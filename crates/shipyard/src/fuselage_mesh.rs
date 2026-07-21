@@ -257,7 +257,13 @@ pub fn build_fuselage_mesh(fus: &Fuselage, effective_diameter: f32) -> Mesh {
     if let (Some(front), Some(&ring0)) = (stations.first(), ring_bases.first())
         && front.a.max(front.b) < APEX_EPS
     {
-        append_apex_cap(ring0, [0.0, front.y, front.v], true, &mut positions, &mut indices);
+        append_apex_cap(
+            ring0,
+            [0.0, front.y, front.v],
+            true,
+            &mut positions,
+            &mut indices,
+        );
     }
 
     // Tail cap. A pinched tip closes with a rounded apex (shared rim, smooth);
@@ -314,7 +320,12 @@ fn append_apex_cap(
 
 /// Crisp flat cap over a truncated tail tip, with its own centre + rim vertices
 /// so the rim stays a sharp edge. Faces −Y (aft, outward).
-fn append_flat_cap(tail: &Station, n_exp: f32, positions: &mut Vec<[f32; 3]>, indices: &mut Vec<u32>) {
+fn append_flat_cap(
+    tail: &Station,
+    n_exp: f32,
+    positions: &mut Vec<[f32; 3]>,
+    indices: &mut Vec<u32>,
+) {
     let center = positions.len() as u32;
     positions.push([0.0, tail.y, tail.v]);
     let rim_base = positions.len() as u32;
@@ -451,7 +462,10 @@ mod tests {
         assert!((min.y + f.length * 0.5).abs() < 1e-3, "tail at -length/2");
         assert!((max.y - f.length * 0.5).abs() < 1e-3, "top at +length/2");
         // Widest point reaches the barrel half-width.
-        assert!((max.x - f.max_width * 0.5).abs() < 0.05, "barrel half-width in X");
+        assert!(
+            (max.x - f.max_width * 0.5).abs() < 0.05,
+            "barrel half-width in X"
+        );
         assert!(m.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
     }
 
@@ -461,11 +475,23 @@ mod tests {
         // Barrel is full radius; the tail necks well below it.
         let r_barrel = skin_radius(&f, f.max_width, 0.3, std::f32::consts::FRAC_PI_2);
         let r_tail = skin_radius(&f, f.max_width, 0.98, std::f32::consts::FRAC_PI_2);
-        assert!((r_barrel - f.max_width * 0.5).abs() < 1e-3, "barrel = half width");
-        assert!(r_tail < 0.5 * r_barrel, "tail necks down ({r_tail} vs {r_barrel})");
+        assert!(
+            (r_barrel - f.max_width * 0.5).abs() < 1e-3,
+            "barrel = half width"
+        );
+        assert!(
+            r_tail < 0.5 * r_barrel,
+            "tail necks down ({r_tail} vs {r_barrel})"
+        );
         // Centerline sweeps up toward the tail; the barrel stays level.
-        assert!(v_offset_at(&f, f.max_width, 0.3).abs() < 1e-3, "barrel level");
-        assert!(v_offset_at(&f, f.max_width, 1.0) > 0.5 * f.tail_upsweep, "tail upsweep");
+        assert!(
+            v_offset_at(&f, f.max_width, 0.3).abs() < 1e-3,
+            "barrel level"
+        );
+        assert!(
+            v_offset_at(&f, f.max_width, 1.0) > 0.5 * f.tail_upsweep,
+            "tail upsweep"
+        );
     }
 
     #[test]
@@ -483,8 +509,14 @@ mod tests {
         let r_nose = skin_radius(&base, base.max_width, 0.05, 0.0);
         assert!(r_nose < 0.6 * r_barrel, "nose necks toward the tip");
 
-        let conic = Fuselage { nose_bluntness: 0.0, ..base.clone() };
-        let radome = Fuselage { nose_bluntness: 1.0, ..base.clone() };
+        let conic = Fuselage {
+            nose_bluntness: 0.0,
+            ..base.clone()
+        };
+        let radome = Fuselage {
+            nose_bluntness: 1.0,
+            ..base.clone()
+        };
         // Halfway along the nose the rounded radome bulges past the cone.
         let t = base.nose_fraction * 0.5;
         assert!(
@@ -499,7 +531,10 @@ mod tests {
         let f = a220_fuselage();
         let r_up = skin_radius(&f, f.max_width, 0.3, 0.0);
         let r_side = skin_radius(&f, f.max_width, 0.3, std::f32::consts::FRAC_PI_2);
-        assert!((r_up - r_side).abs() < 1e-3, "round section: radius constant in angle");
+        assert!(
+            (r_up - r_side).abs() < 1e-3,
+            "round section: radius constant in angle"
+        );
     }
 
     #[test]
@@ -509,8 +544,16 @@ mod tests {
         // A +Y normal would render the cap dark / inside-out.
         let f = a220_fuselage();
         let m = build_fuselage_mesh(&f, f.max_width);
-        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
-        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let pos = m
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let nor = m
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
         // The cap centre is the unique vertex at (x≈0, y=tail, z≈v_offset) — the
         // rim / last loft ring share its y but sit a half-height off in z.
         let tail_y = -f.length * 0.5;
@@ -536,8 +579,16 @@ mod tests {
             ..a220_fuselage()
         };
         let m = build_fuselage_mesh(&f, f.max_width);
-        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
-        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let pos = m
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let nor = m
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
         let nose_y = f.length * 0.5;
         let mut apex_n = None;
         for (p, n) in pos.iter().zip(nor) {
@@ -552,10 +603,21 @@ mod tests {
     #[test]
     fn closed_tail_apex_faces_aft() {
         // A zero tip Ø necks the tail to a single apex (no flat disc), facing −Y.
-        let f = Fuselage { tail_tip_diameter: 0.0, ..a220_fuselage() };
+        let f = Fuselage {
+            tail_tip_diameter: 0.0,
+            ..a220_fuselage()
+        };
         let m = build_fuselage_mesh(&f, f.max_width);
-        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
-        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let pos = m
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let nor = m
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
         let tail_y = -f.length * 0.5;
         let mut apex_n = None;
         for (p, n) in pos.iter().zip(nor) {
@@ -572,9 +634,15 @@ mod tests {
         let f = a220_fuselage();
         let m = build_fuselage_mesh(&f, 7.0); // double the barrel diameter
         let (_, max) = extents(&m);
-        assert!((max.x - 3.5).abs() < 0.1, "barrel half-width tracks inherited diameter");
+        assert!(
+            (max.x - 3.5).abs() < 0.1,
+            "barrel half-width tracks inherited diameter"
+        );
         // Tail tip scales with it too.
         let r_tail = skin_radius(&f, 7.0, 1.0, 0.0);
-        assert!((r_tail - 0.6).abs() < 0.05, "tail tip radius scales (0.6 = 0.3·2)");
+        assert!(
+            (r_tail - 0.6).abs() < 0.05,
+            "tail tip radius scales (0.6 = 0.3·2)"
+        );
     }
 }

@@ -920,7 +920,7 @@ impl SurfaceColorSpec {
             palettes: vec![
                 // Seabed palettes paint the actual ocean floor (basaltic
                 // crust + abyssal sediment). The water column above is now
-                // rendered by `BodyWaterMaterial` (terrain LOD) and the
+                // rendered by the analytic ocean projection (terrain LOD) and the
                 // impostor's `shade_water` (orbital), so the terrain bake
                 // must NOT pre-tint sub-sea-level texels blue — that would
                 // double-stain the visible water colour.

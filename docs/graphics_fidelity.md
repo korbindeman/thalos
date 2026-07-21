@@ -38,8 +38,9 @@ specific gaps + tuning + one structural split, not missing machinery.
 - **Atmosphere** — Bevy `AtmosphereMode::Raymarched` is the canonical
   rocky-body sky (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere), projected onto one camera-local proxy selected by
   `ViewAnchor`. Authored Rayleigh terms feed an Earth aerosol + ozone medium.
-  The former `BodySky` atmosphere is retained only for debug A/B captures while
-  its cloud/depth composites are migrated independently.
+  The former `BodySky` atmosphere is retained only for process-isolated debug
+  A/B captures—never as a live/persisted graphics setting—while its cloud/depth
+  composites are migrated independently.
 - **Shadows** — a self-managed **3-cascade** ortho sun-shadow rig
   (`rendering/sun_shadow.rs`, `SHADOW_CASTER_LAYER = 8`, 4096², copy-node →
   `Depth32Float`) sampled by terrain/trees/grass/rocks via `thalos::shadow`.
@@ -160,7 +161,7 @@ to be collapsed into the spine column.
 | Terrain | spine | shared | gain | rig (recv) | analytic | analytic | Bevy raymarch |
 | Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
 | Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
-| Water | own GGX (F9 pending) | shared | gain | SceneLighting | atmosphere-derived analytic sky | — | BodySky |
+| Water | own GGX (F9 pending) | shared | gain | SceneLighting | atmosphere-derived analytic sky | — | Bevy raymarch + dedicated ocean composite |
 | Impostor | spine (Hapke) | shared | gain | — | analytic | — | Bevy raymarch |
 | **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
 | **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
@@ -210,7 +211,7 @@ IBL that B builds). See §7 for the rationale.
 | **F7** | Metallic conductor branch in `surface_brdf` + **one shared view-level scene+atmosphere bind group** + roughness-mip prefiltered env from the F3 LUT. | ☐ | High | next |
 | **F8a** | Port **structures** (runway/pads/buildings/tanks) onto `shade_surface` (low-risk half — simple metallic/dielectric, already f64-posed). | ☐ | Med | next |
 | **F8b** | Port **hull** onto `shade_surface`; retire Bevy stock CSM, the CPU reflection probe, and the magic constants. | ☐ | Med-High | next |
-| **F9** | Wire the stubbed `FOLIAGE` / `WATER` branches into `shade_surface`; retire the parallel `shade_foliage` + `body_water.wgsl` BRDFs; re-enable ground-LOD water (`TERRAIN_PATH_WATER_ENABLED`). | ☐ | Med | next |
+| **F9** | Wire the stubbed `FOLIAGE` / `WATER` branches into `shade_surface`; retire the parallel `shade_foliage` + `thalos::water` BRDF wrappers while preserving the analytic `BodyOceanMaterial` projection. The dormant mesh-water path is already deleted. | ☐ | Med | next |
 
 **The keystone is F3+F4+F5+F6** — one atmosphere-derived environment + one
 occlusion field + one shadow world is what delivers the one-world invariants.
@@ -296,7 +297,7 @@ phase dependencies, and acceptance criteria live there.
 | — | Object aerial recession (foliage/rocks → sky haze) | ◐ | — | THIS | `object_aerial_recession`; fold inside `shade_surface` so it can't be forgotten (one-world invariant #5) |
 | W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
 | W15 | Atmosphere-coupled Nubis cloud lighting (powder + multi-scatter octaves + shared sun/sky transmittance) (= CLOUD-4) | ☐ | High | later | cloud §3.4 · Schneider 2023 |
-| W16 | View-relative 3×3 amortized cloud reconstruction, neighborhood-clamped body-fixed history, and screenshot mode (= CLOUD-2) | ☐ | High | later | cloud §3.3; cloud-local resolve is **not gated on W13** |
+| W16 | View-relative cloud reconstruction: screen-static 3×3 amortization, fresh full-pixel motion march, neighborhood-clamped hit-aware body-fixed stabilization, and screenshot mode (= CLOUD-2) | ✅ | High | done | Corrected after live motion exposed translucent-history block trails (INC-0016); deterministic near-sun raw/dense/production matrix is clean at 2.73 ms motion p95. Cloud-local resolve is **not gated on W13**. cloud §3.3 |
 | BL-12 | Open-ocean visual tracer: body-fixed mipmapped broadband slope cascades, anisotropic major/minor footprint filtering, slope-variance GGX handoff, slope-coupled whitecaps, shared atmosphere inputs, low-sun headless probe | ✅ | Med | done | Reopened and fixed after user review 2026-07-21 (INC-0012): closed gradient-noise “worms” removed; resolved cross-wave detail now survives to the horizon. Headless-verified in `ocean_final.png`. [ocean.md](ocean.md) · `just screenshot ocean`. |
 | OCEAN-1 | First measured spectral tracer: validated authored per-body sea state; low/high frequency packets evolved at deep-water dispersion rates behind BL-12's filtered-slope seam; deterministic production + slope-field headless captures | ✅ | Med | done | Phase-0/45 production + diagnostic captures verified; foreground/horizon detail preserved and packet evolution produces a 0.024 diagnostic RMSE. Deliberately stops before the GPU FFT/local-displacement architecture fork. [ocean.md](ocean.md) §6. |
 
@@ -330,7 +331,8 @@ materials** instead of constant colours.
 
 | ID | Item | Status | Effort | Sprint | Notes |
 |---|---|---|---|---|---|
-| W13 | **TAA / temporal resolve** in the **body-fixed** frame | ☐ | Med-High | later | unblocks whole-scene dithered LOD cross-fade + vegetation/edge stability. Cloud reconstruction owns a local depth/motion history (CLOUD-2) and no longer waits on this fork. Motion-vector story under big_space/dual-camera is the deferral reason. **Open Q7** |
+| W13 | **Whole-scene temporal reconstruction foundation** in the **body-fixed** frame: canonical per-view depth + motion vectors (including custom terrain, vegetation, craft, atmosphere composites), projection jitter, exposure, history-reset epoch, render/output extents, and post-upscale UI ordering; validate first with a native-resolution temporal resolve while SMAA remains the universal fallback | ☐ | High | later | unblocks whole-scene dithered LOD cross-fade, vegetation/edge stability, and temporal upscalers. Cloud reconstruction keeps its local depth/motion history (CLOUD-2) but must share cut/view epochs rather than grow a second camera contract. `big_space` / ship↔map view changes are the hard part. **Q7 resolved by ADR-20260721T042905Z-temporal-upscaling-with-optional-dlss** |
+| W13-DLSS | **Optional DLSS Super Resolution / DLAA backend** behind W13's one temporal-upscaler seam; direct Vulkan integration through Bevy's `dlss_wgpu` v4 line (matches Thalos's `wgpu 29`), runtime RTX capability detection, Quality/Balanced/Performance/DLAA settings, and automatic native fallback | ☐ | Med | later | require a 4K GPU-bound baseline before implementation and matched native/DLSS image + frame-time evidence. Build/packaging is feature-gated because the NVIDIA SDK, Vulkan SDK, DLL/SO, and license text are external. First scope explicitly excludes Frame Generation and Ray Reconstruction. ADR-20260721T042905Z-temporal-upscaling-with-optional-dlss |
 | 6b | Dithered mesh↔impostor LOD cross-fade | ☐ | Med | later | gated on W13 |
 | W17 | Slice-6 distant-body view: UDLOD at all ranges, delete the flat-colour impostor branch, re-home limb glow onto BodySky | ☐ | High | later | the interim solid-colour impostor breaks Hapke↔Vegetated reconvergence at the swap. **Open Q6** |
 
@@ -384,7 +386,7 @@ material-local BRDF or palette fork. When a parameter moves, it moves in one pla
 - **Prefiltered env IBL** from the sky-view LUT (W7) replacing the analytic
   hemisphere specular for low-roughness/metallic surfaces.
 - **Wire `FOLIAGE` / `WATER` branches** and retire the parallel `shade_foliage`
-  + `body_water.wgsl` paths.
+  + `thalos::water` BRDF wrappers without changing analytic ocean ownership.
 
 ## Crate boundary — mechanism vs drivers
 
@@ -450,6 +452,11 @@ made (per CLAUDE.md) and reflected into the relevant system spec as they land.
   *not* unique-per-texel textures and *not* runtime VT/GPU-synthesis yet.
 - **One environment from the atmosphere** (sky-view LUT → SH → prefiltered env) is
   the keystone — it unifies ambient + IBL across both universes.
+- **Temporal reconstruction is one substrate, with optional backends**
+  (ADR-20260721T042905Z-temporal-upscaling-with-optional-dlss, 2026-07-21). W13 first makes depth, body-fixed motion, jitter,
+  exposure, reset epochs, render extents, and UI ordering canonical across the
+  real view. DLSS SR/DLAA may then project that substrate on supported RTX/Vulkan
+  systems; it is not a parallel renderer or a mandatory NVIDIA dependency.
 
 ## Open questions for the lead
 
@@ -469,10 +476,6 @@ made (per CLAUDE.md) and reflected into the relevant system spec as they land.
 6. **Slice-6 distant-body view (W17)** — in scope this cycle (UDLOD at all ranges
    + delete the impostor branch + ~2.5k lines of dead bake code), or ride the
    interim impostor and mask the swap with W1?
-7. **TAA gate (W13)** — sanction it as a mid-term whole-scene track (dithered
-   LOD and vegetation/edge stability; needs body-fixed motion vectors under
-   big_space), or stay SMAA-only? Cloud-local reconstruction is decided inside
-   the cloud program and does not wait on this choice.
 8. **Sky-view LUT light model** — LUT the sun only (keep moon/star analytic;
    simpler, recommended) or rebuild sky-view per dominant light (correct moonlit
    reflections, more cost)? Blocks W7's parameterization.

@@ -69,9 +69,7 @@ pub fn init_theme(
 /// colourless). Returned as a pair so the many existing
 /// `let (bg, border) = panel_frame(&theme)` call sites keep working unchanged
 /// — `bg` is simply a nested bundle now.
-pub fn panel_frame(
-    theme: &HudTheme,
-) -> ((MaterialNode<GlassMaterial>, BoxShadow), BorderColor) {
+pub fn panel_frame(theme: &HudTheme) -> ((MaterialNode<GlassMaterial>, BoxShadow), BorderColor) {
     (
         (
             MaterialNode(theme.glass.clone()),

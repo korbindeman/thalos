@@ -64,17 +64,25 @@ fn toggle_photo_mode_input(
 
 fn apply_photo_mode_visibility(
     photo_mode: Res<PhotoMode>,
-    mut all: Query<&mut Visibility, With<HideInPhotoMode>>,
     newly_added: Query<Entity, Added<HideInPhotoMode>>,
+    mut visibility: ParamSet<(
+        Query<&mut Visibility, With<HideInPhotoMode>>,
+        Query<&mut Visibility, With<thalos_ui::ToastArea>>,
+    )>,
 ) {
     if photo_mode.is_changed() {
-        // Mode toggled: flip every tagged entity.
+        // Mode toggled: flip every tagged overlay, including the shared toast
+        // container. Photo mode must keep the viewport clean even when a
+        // capture finishes after F1 was pressed.
         let target = if photo_mode.active {
             Visibility::Hidden
         } else {
             Visibility::Inherited
         };
-        for mut vis in &mut all {
+        for mut vis in visibility.p0().iter_mut() {
+            *vis = target;
+        }
+        for mut vis in visibility.p1().iter_mut() {
             *vis = target;
         }
     } else if photo_mode.active {
@@ -82,7 +90,7 @@ fn apply_photo_mode_visibility(
         // e.g. a ghost body freshly spawned while in photo mode doesn't pop
         // into view for one frame.
         for entity in &newly_added {
-            if let Ok(mut vis) = all.get_mut(entity) {
+            if let Ok(mut vis) = visibility.p0().get_mut(entity) {
                 *vis = Visibility::Hidden;
             }
         }

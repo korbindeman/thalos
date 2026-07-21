@@ -230,7 +230,11 @@ fn mip_chain_bytes(cfg: &AttachmentConfig) -> usize {
     total
 }
 
-fn write_tile(path: &Path, attachments: &[AttachmentConfig], datas: &[AttachmentData]) -> Result<()> {
+fn write_tile(
+    path: &Path,
+    attachments: &[AttachmentConfig],
+    datas: &[AttachmentData],
+) -> Result<()> {
     if datas.len() != attachments.len() {
         return Err(anyhow!(
             "attachment count mismatch: {} data vs {} configs",
@@ -390,7 +394,11 @@ mod tests {
     fn unique_dir(tag: &str) -> PathBuf {
         // Unique per test + process, no rand/clock dependency needed for
         // isolation because each test uses a distinct `tag`.
-        std::env::temp_dir().join(format!("thalos_udlod_disk_cache_{}_{}", std::process::id(), tag))
+        std::env::temp_dir().join(format!(
+            "thalos_udlod_disk_cache_{}_{}",
+            std::process::id(),
+            tag
+        ))
     }
 
     fn cfg(name: &str, size: u32, mips: u32, format: AttachmentFormat) -> AttachmentConfig {
@@ -502,8 +510,13 @@ mod tests {
         // closure re-hashing the live flatten handle.
         let pad_installed = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let flag = Arc::clone(&pad_installed);
-        let namespace: NamespaceFn =
-            Arc::new(move || if flag.load(Ordering::SeqCst) { 0xBBBB } else { 0xAAAA });
+        let namespace: NamespaceFn = Arc::new(move || {
+            if flag.load(Ordering::SeqCst) {
+                0xBBBB
+            } else {
+                0xAAAA
+            }
+        });
 
         let provider = DiskTileCacheProvider::new(
             Box::new(CountingProvider {
@@ -519,7 +532,11 @@ mod tests {
 
         // Warm: still the same terrain, so the cache answers.
         future::block_on(provider.request_tile(coord, &model, &configs)).unwrap();
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "unchanged inputs should hit");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "unchanged inputs should hit"
+        );
 
         // The pad lands. The same tile coordinate now means different ground, and
         // must be re-synthesized rather than served from the pre-pad file.
@@ -556,7 +573,11 @@ mod tests {
         let first = future::block_on(provider.request_tile(coord, &model, &configs)).unwrap();
         let second = future::block_on(provider.request_tile(coord, &model, &configs)).unwrap();
 
-        assert_eq!(calls.load(Ordering::SeqCst), 1, "second request must hit disk");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "second request must hit disk"
+        );
         assert_eq!(first[0].as_rg16().unwrap(), second[0].as_rg16().unwrap());
         let _ = fs::remove_dir_all(&dir);
     }

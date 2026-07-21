@@ -39,7 +39,6 @@ use crate::coords::EDITOR_LAYER;
 use crate::hud::HudPanel;
 use crate::photo_mode::HideInPhotoMode;
 
-
 /// Whether the in-game shipyard editor is open. A sim-clock pause source.
 ///
 /// `open` is a **derived mirror** of [`GameContext::Vab`](crate::game_context::GameContext)
@@ -148,10 +147,7 @@ fn apply_open_state(
 /// Mirror the Bevy-UI hover gate into the editor core's [`EditorUiGate`], so its
 /// picking observers and the placement preview stand down while the cursor is
 /// over panels.
-fn sync_editor_ui_gate(
-    ui_pointer: Res<crate::hud::UiPointerGate>,
-    mut gate: ResMut<EditorUiGate>,
-) {
+fn sync_editor_ui_gate(ui_pointer: Res<crate::hud::UiPointerGate>, mut gate: ResMut<EditorUiGate>) {
     let busy = ui_pointer.hovered;
     if gate.pointer_busy != busy {
         gate.pointer_busy = busy;

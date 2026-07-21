@@ -91,7 +91,13 @@ impl Frame {
                 }
             })
             .unzip();
-        Self { w, h, proj, lat_deg, area_w }
+        Self {
+            w,
+            h,
+            proj,
+            lat_deg,
+            area_w,
+        }
     }
 
     fn lon_deg(&self, i: usize) -> f64 {
@@ -132,7 +138,9 @@ struct Px {
 }
 
 fn main() {
-    let radius_m = env_f64("WORLD_RADIUS_KM").map(|km| km * 1000.0).unwrap_or(3_186_000.0);
+    let radius_m = env_f64("WORLD_RADIUS_KM")
+        .map(|km| km * 1000.0)
+        .unwrap_or(3_186_000.0);
     let seed = env_f64("WORLD_SEED").map(|s| s as u32).unwrap_or(2);
     let surface = ProceduralSurface::new(radius_m as f32, seed);
 
@@ -158,7 +166,10 @@ fn main() {
         _ => Proj::Mercator,
     };
     let biome_mode = !matches!(std::env::var("WORLD_MODE").as_deref(), Ok("hypso"));
-    let w = env_f64("WORLD_W").map(|v| v as usize).unwrap_or(2048).max(64);
+    let w = env_f64("WORLD_W")
+        .map(|v| v as usize)
+        .unwrap_or(2048)
+        .max(64);
     let frame = Frame::new(proj, w);
     let (w, h) = (frame.w, frame.h);
 
@@ -173,8 +184,16 @@ fn main() {
         surface.height_range_m(),
         w,
         h,
-        if proj == Proj::Mercator { "mercator ±85°" } else { "equirect" },
-        if biome_mode { "biome palette" } else { "hypso ramp" },
+        if proj == Proj::Mercator {
+            "mercator ±85°"
+        } else {
+            "equirect"
+        },
+        if biome_mode {
+            "biome palette"
+        } else {
+            "hypso ramp"
+        },
     );
 
     // Pass 1 (parallel rows): one full sample per pixel — height, macro
@@ -211,7 +230,10 @@ fn main() {
             if p.height_m >= 0.0 {
                 land_area += wlat;
             }
-            let bi = MacroBiome::ALL.iter().position(|b| *b == p.biome).unwrap_or(0);
+            let bi = MacroBiome::ALL
+                .iter()
+                .position(|b| *b == p.biome)
+                .unwrap_or(0);
             biome_area[bi] += wlat;
             hmin = hmin.min(p.height_m as f64);
             hmax = hmax.max(p.height_m as f64);
@@ -223,7 +245,11 @@ fn main() {
         land_frac * 100.0,
         hmin,
         hmax,
-        if proj == Proj::Mercator { "   (stats over the ±85° window)" } else { "" },
+        if proj == Proj::Mercator {
+            "   (stats over the ±85° window)"
+        } else {
+            ""
+        },
     );
 
     let mut ranked: Vec<(MacroBiome, f64)> = MacroBiome::ALL
@@ -247,8 +273,11 @@ fn main() {
     // ~0.72 (steppe dominates), 0.88 (bare soil / desert). If p90 never
     // reaches the upper thresholds, no belt tuning of the *palette* will ever
     // produce deserts.
-    let mut dry: Vec<f32> =
-        px.iter().filter(|p| p.height_m >= 0.0).map(|p| 0.5 - 0.5 * p.moisture).collect();
+    let mut dry: Vec<f32> = px
+        .iter()
+        .filter(|p| p.height_m >= 0.0)
+        .map(|p| 0.5 - 0.5 * p.moisture)
+        .collect();
     if !dry.is_empty() {
         dry.sort_by(f32::total_cmp);
         let pct = |q: f64| dry[((dry.len() - 1) as f64 * q) as usize];
@@ -290,7 +319,10 @@ fn main() {
                 if d > 0.72 {
                     ndry += wlat;
                 }
-                let bi = MacroBiome::ALL.iter().position(|b| *b == p.biome).unwrap_or(0);
+                let bi = MacroBiome::ALL
+                    .iter()
+                    .position(|b| *b == p.biome)
+                    .unwrap_or(0);
                 counts[bi] += wlat;
             }
         }
@@ -321,7 +353,11 @@ fn main() {
         RUNWAY_LAT_DEG,
         RUNWAY_LON_DEG,
         site_h,
-        if site_h >= 0.0 { "LAND" } else { "OCEAN — fix the bias!" }
+        if site_h >= 0.0 {
+            "LAND"
+        } else {
+            "OCEAN — fix the bias!"
+        }
     );
 
     // Pass 2: the shaded map. Biome mode renders land in the true macro
@@ -345,7 +381,12 @@ fn main() {
                 let sin_lat = lat.to_radians().sin().abs();
                 let cold_lift = thalos_terrain::climate_cold_lift_m(sin_lat);
                 let warmth = thalos_terrain::climate_warmth(cold_lift);
-                moisture_tinted(hypso_color(z + cold_lift), z + cold_lift, p.moisture, warmth)
+                moisture_tinted(
+                    hypso_color(z + cold_lift),
+                    z + cold_lift,
+                    p.moisture,
+                    warmth,
+                )
             };
             let shade = if z < 0.0 {
                 1.0
@@ -354,10 +395,8 @@ fn main() {
                 let ir = (i + 1).min(w - 1);
                 let jd = j.saturating_sub(1);
                 let ju = (j + 1).min(h - 1);
-                let dzdx =
-                    (px[j * w + ir].height_m - px[j * w + il].height_m) as f64 / (mx * 2.0);
-                let dzdy =
-                    (px[ju * w + i].height_m - px[jd * w + i].height_m) as f64 / (my * 2.0);
+                let dzdx = (px[j * w + ir].height_m - px[j * w + il].height_m) as f64 / (mx * 2.0);
+                let dzdy = (px[ju * w + i].height_m - px[jd * w + i].height_m) as f64 / (my * 2.0);
                 let normal = DVec3::new(-dzdx, -dzdy, 1.0).normalize();
                 (normal.dot(light).max(0.0) * 0.7 + 0.3).clamp(0.0, 1.0)
             };
@@ -382,7 +421,11 @@ fn main() {
         let mut cls = image::RgbImage::new(w as u32, h as u32);
         for j in 0..h {
             for i in 0..w {
-                cls.put_pixel(i as u32, j as u32, image::Rgb(biome_color(px[j * w + i].biome)));
+                cls.put_pixel(
+                    i as u32,
+                    j as u32,
+                    image::Rgb(biome_color(px[j * w + i].biome)),
+                );
             }
         }
         draw_graticule(&mut cls, &frame);
@@ -413,7 +456,11 @@ fn biome_color(b: MacroBiome) -> [u8; 3] {
 fn srgb8(c: [f32; 3]) -> [u8; 3] {
     let enc = |v: f32| {
         let v = v.clamp(0.0, 1.0);
-        let s = if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 };
+        let s = if v <= 0.003_130_8 {
+            12.92 * v
+        } else {
+            1.055 * v.powf(1.0 / 2.4) - 0.055
+        };
         (s * 255.0).round() as u8
     };
     [enc(c[0]), enc(c[1]), enc(c[2])]
@@ -461,7 +508,10 @@ fn mark_site(img: &mut image::RgbImage, frame: &Frame) {
 /// matched to the pixel spacing so the relief cascade fades in as it would near
 /// the camera. Writes target/world_zoom.png.
 fn render_zoom(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
-    let parts: Vec<f64> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    let parts: Vec<f64> = spec
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
     let (clat, clon, half_km) = match parts.as_slice() {
         [a, b, c] => (*a, *b, *c),
         [a, b] => (*a, *b, 200.0),
@@ -536,7 +586,10 @@ fn render_zoom(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
 /// transect), so the shelf width and continental-slope steepness are legible as
 /// numbers, not just pixels.
 fn print_transect(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
-    let parts: Vec<f64> = spec.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+    let parts: Vec<f64> = spec
+        .split(',')
+        .filter_map(|s| s.trim().parse().ok())
+        .collect();
     let [clat, clon, az_deg, len_km] = parts.as_slice() else {
         eprintln!("WORLD_TRANSECT must be \"lat,lon,az_deg,length_km\"");
         return;
@@ -572,11 +625,11 @@ fn hypso_color(z: f64) -> [u8; 3] {
     if z < 0.0 {
         // Deep abyss → shelf → coast.
         let bands = [
-            (-4000.0, [8, 18, 48]),   // abyss
-            (-2000.0, [16, 36, 78]),  //
-            (-400.0, [28, 64, 110]),  // slope
-            (-120.0, [44, 96, 140]),  // shelf
-            (0.0, [70, 130, 165]),    // shallow / coast
+            (-4000.0, [8, 18, 48]),  // abyss
+            (-2000.0, [16, 36, 78]), //
+            (-400.0, [28, 64, 110]), // slope
+            (-120.0, [44, 96, 140]), // shelf
+            (0.0, [70, 130, 165]),   // shallow / coast
         ];
         return ramp(z, &bands);
     }

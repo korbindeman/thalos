@@ -85,7 +85,9 @@ pub fn init_joysticks() -> Option<Joysticks> {
     match Gilrs::new() {
         Ok(gilrs) => Some(Joysticks { gilrs }),
         Err(err) => {
-            warn!("HOTAS: could not start private gilrs instance: {err}; raw joystick axes disabled");
+            warn!(
+                "HOTAS: could not start private gilrs instance: {err}; raw joystick axes disabled"
+            );
             None
         }
     }

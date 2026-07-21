@@ -18,7 +18,9 @@ use bevy::window::PrimaryWindow;
 
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::{ShadowedStandardMaterial, shadowed};
-use thalos_physics_canonical::body_fixed::{body_fixed_pose_from_inertial, body_fixed_surface_velocity};
+use thalos_physics_canonical::body_fixed::{
+    body_fixed_pose_from_inertial, body_fixed_surface_velocity,
+};
 use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::{ActiveLocalBubble, LocalPrimitiveShape, spawn_structure_collider};
@@ -26,14 +28,14 @@ use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
 use crate::camera::{ActiveCamera, ShipCamera};
-use crate::game_context::{ContextHistory, GameContext};
-use crate::spawn::{CraftPlacement, place_craft};
 use crate::coords::{SHIP_LAYER, SHIP_SCALE};
-use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
+use crate::game_context::{ContextHistory, GameContext};
 use crate::rendering::real_space::RealSpaceRoot;
+use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::rendering::{PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
 use crate::runway::craft_extent_below;
 use crate::solar_system_state::sync_solar_system_state;
+use crate::spawn::{CraftPlacement, place_craft};
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
 
 use super::{BaseEditor, BaseEditorMode, base_editor_open, cursor_body_dir};
@@ -633,7 +635,11 @@ fn vertical_attitude(body_state: &BodyState, up_body: DVec3, heading_body: DVec3
     let dorsal = (heading_body - nose * heading_body.dot(nose))
         .try_normalize()
         .unwrap_or_else(|| {
-            let seed = if nose.x.abs() < 0.9 { DVec3::X } else { DVec3::Z };
+            let seed = if nose.x.abs() < 0.9 {
+                DVec3::X
+            } else {
+                DVec3::Z
+            };
             (seed - nose * seed.dot(nose)).normalize()
         });
     let right = nose.cross(dorsal).normalize();
@@ -711,7 +717,8 @@ pub(super) fn place_structure(
         StructureKind::Tank { height_m, .. } => height_m * 0.5,
         _ => 0.0,
     };
-    let (center_body, basis_body) = placement_frame(anchor_dir, heading, across, yaw, pad_r, center_height);
+    let (center_body, basis_body) =
+        placement_frame(anchor_dir, heading, across, yaw, pad_r, center_height);
     let heading_proj = (heading - anchor_dir * heading.dot(anchor_dir)).normalize();
     let id = registry.register(
         body_id,
@@ -721,7 +728,18 @@ pub(super) fn place_structure(
         kind,
         parent_site,
     );
-    spawn_structure_entity(commands, meshes, mats, root, id, body_id, center_body, basis_body, kind, yaw);
+    spawn_structure_entity(
+        commands,
+        meshes,
+        mats,
+        root,
+        id,
+        body_id,
+        center_body,
+        basis_body,
+        kind,
+        yaw,
+    );
     id
 }
 
@@ -901,9 +919,14 @@ fn launch_from_pad(
     // Spawn vertical (rocket nose-up). Rest on the craft's lower end, which for a
     // vertical craft is its `-Y` extent (the engine bell), not its belly `-Z`.
     // None ⇒ meshes not ready; retry next press.
-    let Some(clearance_m) =
-        craft_extent_below(ship_entity, ship_gt, &children_q, &mesh_q, &meshes, Vec3::NEG_Y)
-    else {
+    let Some(clearance_m) = craft_extent_below(
+        ship_entity,
+        ship_gt,
+        &children_q,
+        &mesh_q,
+        &meshes,
+        Vec3::NEG_Y,
+    ) else {
         return;
     };
 
@@ -1057,7 +1080,13 @@ fn draw_placement_ghost(
             }
             let center = box_center_render(center_render, orientation, pv.center_body);
             let rot = (orientation * pv.basis_body).as_quat();
-            draw_kind_outline(&mut gizmos, &pv.kind, center, rot, Color::srgb(1.0, 0.85, 0.3));
+            draw_kind_outline(
+                &mut gizmos,
+                &pv.kind,
+                center,
+                rot,
+                Color::srgb(1.0, 0.85, 0.3),
+            );
         }
     }
 

@@ -13,7 +13,10 @@ use interaction::{
     arrow_drag_end, arrow_drag_start, handle_maneuver_events, maneuver_input,
     slide_sphere_drag_end, slide_sphere_drag_start, sync_node_delta_v,
 };
-use panel::{handle_buttons as maneuver_editor_buttons, setup as setup_maneuver_editor, update_editor as update_maneuver_editor};
+use panel::{
+    handle_buttons as maneuver_editor_buttons, setup as setup_maneuver_editor,
+    update_editor as update_maneuver_editor,
+};
 use render::{
     manage_arrow_handles, manage_node_markers, spawn_snap_indicator, update_arrow_transforms,
     update_snap_indicator,
@@ -158,16 +161,18 @@ impl Plugin for ManeuverPlugin {
                     update_selected_node_view.after(sync_node_delta_v),
                     manage_arrow_handles
                         .after(update_selected_node_view)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
-                    update_arrow_transforms
-                        .after(manage_arrow_handles)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
-                    manage_node_markers
-                        .after(update_selected_node_view)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
-                    update_snap_indicator
-                        .after(maneuver_input)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view),
+                        ),
+                    update_arrow_transforms.after(manage_arrow_handles).run_if(
+                        crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view),
+                    ),
+                    manage_node_markers.after(update_selected_node_view).run_if(
+                        crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view),
+                    ),
+                    update_snap_indicator.after(maneuver_input).run_if(
+                        crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view),
+                    ),
                 )
                     .run_if(crate::pause_menu::not_game_paused)
                     .before(crate::SimStage::Physics),

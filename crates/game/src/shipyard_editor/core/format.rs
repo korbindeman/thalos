@@ -165,5 +165,3 @@ pub fn format_mass_kg(kg: f64) -> String {
         format!("{:.0} kg", kg)
     }
 }
-
-

@@ -381,8 +381,9 @@ impl TerrainFlatten {
         // Re-derive the angular reject for the shifted rectangle.
         let reach_along = offset_along_m.abs() + self.half_along_m;
         let reach_across = offset_across_m.abs() + self.half_across_m;
-        let reach =
-            ((reach_along * reach_along + reach_across * reach_across).sqrt() + self.ramp_m).max(0.0);
+        let reach = ((reach_along * reach_along + reach_across * reach_across).sqrt()
+            + self.ramp_m)
+            .max(0.0);
         self.cos_max = (reach / self.radius_m.max(1.0)).atan().cos();
         self
     }
@@ -399,7 +400,8 @@ impl TerrainFlatten {
         // small relative to the radius the chord matches the arc to well under a
         // millimetre, so the simple projection is exact enough.
         let offset = (dir - self.center_dir) * self.radius_m;
-        let along = (offset.dot(self.tangent_along) - self.offset_along_m).abs() - self.half_along_m;
+        let along =
+            (offset.dot(self.tangent_along) - self.offset_along_m).abs() - self.half_along_m;
         let across =
             (offset.dot(self.tangent_across) - self.offset_across_m).abs() - self.half_across_m;
         if along <= 0.0 && across <= 0.0 {
@@ -637,9 +639,7 @@ pub fn surface_height_range_m(surface: &PlanetSurface, state: &DynamicSurfaceSta
             + runtime_feature_height_margin_m(&surface.static_surface)
             + DETAIL_HEIGHT_MARGIN_M)
             .max(1.0),
-        RuntimeTerrainDetail::AirlessRegolith(params) => {
-            (base + params.amplitude_m.abs()).max(1.0)
-        }
+        RuntimeTerrainDetail::AirlessRegolith(params) => (base + params.amplitude_m.abs()).max(1.0),
         RuntimeTerrainDetail::BasicContinental(params) => {
             base.max(params.height_range_hint_m()).max(1.0)
         }

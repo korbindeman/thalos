@@ -162,9 +162,7 @@ impl Plugin for HudPlugin {
                     // over the god-view. `flight_or_no_context` also keeps HUD
                     // updates running during Loading / MainMenu, as the old
                     // `*_closed` chain did.
-                    .run_if(
-                        not_in_photo_mode.and_then(crate::game_context::flight_or_no_context),
-                    ),
+                    .run_if(not_in_photo_mode.and_then(crate::game_context::flight_or_no_context)),
             )
             .add_systems(Update, input_gate::update_ui_pointer_gate)
             .add_systems(Update, hide_in_photo_mode);

@@ -7,11 +7,11 @@ use bevy::anti_alias::{
     contrast_adaptive_sharpening::ContrastAdaptiveSharpening,
     smaa::{Smaa, SmaaPreset},
 };
+use bevy::camera::Hdr;
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
 use bevy::post_process::effect_stack::ChromaticAberration;
 use bevy::prelude::*;
-use bevy::camera::Hdr;
 use bevy::render::view::{ColorGrading, ColorGradingGlobal, ColorGradingSection, Msaa};
 
 use crate::impostor::film_grain::FilmGrain;

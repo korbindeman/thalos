@@ -136,8 +136,6 @@ struct GpuGrassControl;
 #[derive(Component)]
 struct MsaaControl;
 #[derive(Component)]
-struct LegacyBodySkyControl;
-#[derive(Component)]
 struct ResetGraphicsControl;
 
 // Units tab
@@ -606,21 +604,6 @@ fn build_graphics_tab(
     );
 
     spacer(b);
-
-    spawn_checkbox_row(
-        b,
-        theme,
-        "Legacy custom atmosphere (debug)",
-        settings.legacy_body_sky,
-        LegacyBodySkyControl,
-    );
-    note(
-        b,
-        theme,
-        "Matched A/B fallback only. Bevy's raymarched atmosphere is the normal rendering path.",
-    );
-
-    spacer(b);
     spawn_button(
         b,
         theme,
@@ -1067,7 +1050,6 @@ fn apply_graphics_controls(
     clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
     grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
     gpu_grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GpuGrassControl>)>,
-    legacy_body_sky_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<LegacyBodySkyControl>)>,
     msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
@@ -1084,11 +1066,6 @@ fn apply_graphics_controls(
     for checkbox in &gpu_grass_q {
         if settings.gpu_grass != checkbox.checked {
             settings.gpu_grass = checkbox.checked;
-        }
-    }
-    for checkbox in &legacy_body_sky_q {
-        if settings.legacy_body_sky != checkbox.checked {
-            settings.legacy_body_sky = checkbox.checked;
         }
     }
     for cycle in &msaa_q {

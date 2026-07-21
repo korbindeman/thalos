@@ -310,7 +310,10 @@ pub(crate) fn hub_context(
 }
 
 /// The home base site on `body_id` (the spaceport basin), if any.
-pub(crate) fn home_base_site(registry: &StructureRegistry, body_id: BodyId) -> Option<StructureSite> {
+pub(crate) fn home_base_site(
+    registry: &StructureRegistry,
+    body_id: BodyId,
+) -> Option<StructureSite> {
     registry
         .sites_on(body_id)
         .iter()
@@ -375,6 +378,11 @@ pub(crate) fn enter_base_editor(
         base.mode = BaseEditorMode::PickSite;
         base.active_site = None;
     }
-    enter_context(next, history, GameContext::SpaceCenter, GameContext::BaseEditor);
+    enter_context(
+        next,
+        history,
+        GameContext::SpaceCenter,
+        GameContext::BaseEditor,
+    );
     info!("space center: entering base editor");
 }

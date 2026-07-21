@@ -414,10 +414,7 @@ mod tests {
                 v_s + 0.5 * dt * k2v,
                 accel_slf(p_s + 0.5 * dt * k2p, v_s + 0.5 * dt * k2v),
             );
-            let (k4p, k4v) = (
-                v_s + dt * k3v,
-                accel_slf(p_s + dt * k3p, v_s + dt * k3v),
-            );
+            let (k4p, k4v) = (v_s + dt * k3v, accel_slf(p_s + dt * k3p, v_s + dt * k3v));
             p_s += dt / 6.0 * (k1p + 2.0 * k2p + 2.0 * k3p + k4p);
             v_s += dt / 6.0 * (k1v + 2.0 * k2v + 2.0 * k3v + k4v);
         }
@@ -482,8 +479,6 @@ mod tests {
         assert!((inertial_a.position - inertial_b.position).length() < 1e-9);
         assert!((inertial_a.velocity - inertial_b.velocity).length() < 1e-9);
         assert!(attitude_a.orientation.angle_between(attitude_b.orientation) < 1e-9);
-        assert!(
-            (attitude_a.angular_velocity - attitude_b.angular_velocity).length() < 1e-9
-        );
+        assert!((attitude_a.angular_velocity - attitude_b.angular_velocity).length() < 1e-9);
     }
 }

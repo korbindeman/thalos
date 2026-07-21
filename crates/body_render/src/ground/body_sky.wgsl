@@ -5,9 +5,10 @@
 // ray. The integration interval is clipped by both the body's atmosphere
 // shell and the scene depth from `scene_depth_texture` (a per-frame copy
 // of the main pass's depth attachment maintained by `CopySceneDepthNode`
-// on the game crate's side). It composites the cloud module's body-fixed
-// volumetric result using its per-pixel distance. The game keeps this pass
-// visible while real terrain LOD is active:
+// on the game crate's side). `BodySkyMaterial` compiles this source with
+// `ATMOSPHERE_ONLY`; `BodyOceanMaterial` compiles it with `OCEAN_ONLY`.
+// Atmosphere, ocean, and clouds therefore have separate render ownership while
+// retaining one optical/signed-field implementation.
 //
 //   * Mid  — camera outside the shell but terrain is visible. The pass
 //     produces in-front haze/clouds on terrain pixels and halo on rim pixels.
@@ -23,11 +24,6 @@
     AtmosphereBlock,
     atmosphere_jitter,
     integrate_atmosphere_multiscatter,
-    weather_column_from_texel,
-    orbital_cloud_altitude,
-    orbital_cloud_shade,
-    sample_weather_soft,
-    orbital_cloud_normal_body,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
 #import thalos::water::shade_ocean_detailed
@@ -40,7 +36,7 @@ struct SkyAtmosExtra {
     sun_dir_flux:              vec4<f32>,  // xyz = sun dir (normalized), w = flux
     planet_center_radius:      vec4<f32>,  // xyz = planet center (render-space), w = radius
     world_to_body_orientation: vec4<f32>,  // render-space direction -> body-local cubemap direction
-    cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units), z = airlight ratio, w = cloud-composite-enable flag (1 = bind live clouds)
+    cloud_band_radii:          vec4<f32>,  // z = atmosphere airlight ratio; x/y/w are shared with the separate cloud composite
     ocean:                     vec4<f32>,  // x = ocean sphere radius (render units = m), y = enable (>=0.5), z = shore-wave time reduced to its repeat period, w = camera height above sea (m, CPU f64-precise)
     ocean_color_depth:         vec4<f32>,  // xyz = deep-water linear-RGB tint, w = min optical-depth scale
     ocean_camera_phase:        vec4<f32>,  // xy = f64 camera wind/crosswind coordinate modulo 8192 m
@@ -61,35 +57,14 @@ struct SkyAtmosExtra {
 // unfiltered exact texel reads at fragment coordinates.
 @group(3) @binding(2) var scene_depth_texture: texture_depth_2d;
 
-// Reference cloud-cover cubemap. Matches `PlanetMaterial`'s cloud binding
-// semantically, but lives on this material because the terrain path needs the
-// cloud shell in the fullscreen pass rather than in the terrain material.
-@group(3) @binding(3) var cloud_cover_tex: texture_cube<f32>;
-@group(3) @binding(4) var cloud_cover_sampler: sampler;
-
 // Precomputed multi-scatter LUT (Rgba16Float, 32×32). Each cell stores the
 // average single-scattered radiance arriving at a point from every direction
 // (per unit sun flux × strength), indexed by (u = (sun·zenith + 1) / 2,
 // v = altitude / atmos_top). `integrate_atmosphere_multiscatter` samples it at
 // every view step and adds the second bounce, which is what gives the daytime
 // sky its blue luminance and lets the alpha boost below crush stars at noon.
-@group(3) @binding(5) var ms_lut_tex: texture_2d<f32>;
-@group(3) @binding(6) var ms_lut_sampler: sampler;
-
-// Body-render volumetric cloud raymarch output: rgb = premultiplied
-// in-scatter, a = transmittance. Sampled in
-// screen space with textureLoad and composited over the atmosphere in-scatter
-// below — but only when `cloud_band_radii.w >= 0.5` (the body whose live texture
-// is bound). Bodies with no active cloud layer carry a 1×1 blank here, which the
-// screen-space loads would read out of bounds (→ opaque black sky); the w flag
-// gates the composite so the blank is never sampled.
-@group(3) @binding(7) var cloud_layer_tex: texture_2d<f32>;
-
-// Per-pixel nearest cloud-hit distance from the same raymarch (R32F, metres
-// from the camera; ≥ 1e8 sentinel = no cloud on this ray). Drives the
-// geometry-occlusion ramp below. 1×1 far-sentinel fallback on bodies without
-// an active cloud layer.
-@group(3) @binding(8) var cloud_distance_tex: texture_2d<f32>;
+@group(3) @binding(3) var ms_lut_tex: texture_2d<f32>;
+@group(3) @binding(4) var ms_lut_sampler: sampler;
 
 // Coast/bathymetry cube (ADR-20260720T185957Z-coastline-as-authored-data): signed terrain height about sea level,
 // R16Unorm-encoded over ±COAST_ATLAS_HEIGHT_RANGE_M, indexed by body-fixed
@@ -97,8 +72,8 @@ struct SkyAtmosExtra {
 // The analytic-ocean branch samples it at range for water coverage + colour so
 // the far-field coastline is independent of tile LOD / depth-buffer error.
 // No-ocean bodies bind a 1×1 blank and never sample it (`ocean.y` gate).
-@group(3) @binding(9) var coast_atlas_tex: texture_cube<f32>;
-@group(3) @binding(10) var coast_atlas_sampler: sampler;
+@group(3) @binding(5) var coast_atlas_tex: texture_cube<f32>;
+@group(3) @binding(6) var coast_atlas_sampler: sampler;
 
 // ── Resident-height-tile lookup (ADR-20260720T185958Z-water-projects-one-signed-sea-field) ─────────────────────────────────
 // The analytic-ocean branch samples signed sea height straight from the udlod
@@ -111,14 +86,14 @@ struct SkyAtmosExtra {
 // `thalos_udlod::math::Coordinate::from_world_position`, capped at the pixel's
 // footprint LOD (naga_oil binds udlod's own functions to udlod's bind groups,
 // so they can't be imported here directly — keep both sides in sync).
-@group(3) @binding(11) var tile_height_atlas: texture_2d_array<f32>;
-@group(3) @binding(12) var tile_height_sampler: sampler;
+@group(3) @binding(7) var tile_height_atlas: texture_2d_array<f32>;
+@group(3) @binding(8) var tile_height_sampler: sampler;
 struct SkyTileTreeEntry {
     atlas_index: u32,
     atlas_lod: u32,
 }
-@group(3) @binding(13) var<storage, read> sky_tile_tree: array<SkyTileTreeEntry>;
-@group(3) @binding(14) var<storage, read> sky_tile_origins: array<vec2<u32>>;
+@group(3) @binding(9) var<storage, read> sky_tile_tree: array<SkyTileTreeEntry>;
+@group(3) @binding(10) var<storage, read> sky_tile_origins: array<vec2<u32>>;
 
 // Low- and high-frequency directional slope packets (RG and BA), with a full
 // CPU-authored mip chain. Sampling both packets at separate dispersion phases
@@ -127,8 +102,8 @@ struct SkyTileTreeEntry {
 // specular contours become closed "worms". Explicit texture gradients below
 // preserve cross-view detail at grazing angles while filtering only the
 // severely foreshortened view direction.
-@group(3) @binding(15) var ocean_slope_tex: texture_2d<f32>;
-@group(3) @binding(16) var ocean_slope_sampler: sampler;
+@group(3) @binding(11) var ocean_slope_tex: texture_2d<f32>;
+@group(3) @binding(12) var ocean_slope_sampler: sampler;
 
 // Mirror of `ocean_slope::OCEAN_CASCADE_DOMAINS_M`; change together.
 const OCEAN_CASCADE_DOMAINS_M: array<f32, 4> = array<f32, 4>(
@@ -509,10 +484,6 @@ fn rotate_quat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
     return 2.0 * dot(u, v) * u + (s * s - dot(u, u)) * v + 2.0 * s * cross(u, v);
 }
 
-struct CloudOverlay {
-    premul_rgb: vec3<f32>,
-    opacity: f32,
-}
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // Reconstruct world-space view ray from fragment screen position.
@@ -664,7 +635,11 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var ocean_fp_m = 1.0e9;
     var ocean_fp_minor_m = 1.0e9;
     var ocean_fp_major_dir = vec2<f32>(1.0, 0.0);
-    if sky_atmos_extra.ocean.y >= 0.5 {
+    var ocean_enabled = sky_atmos_extra.ocean.y >= 0.5;
+#ifdef ATMOSPHERE_ONLY
+    ocean_enabled = false;
+#endif
+    if ocean_enabled {
         let r_sea = sky_atmos_extra.ocean.x;
         let h = sky_atmos_extra.ocean.w;              // camera height above sea (m)
         let up = normalize(oc);                        // planet-centre → camera, unit
@@ -825,6 +800,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         }
     }
 
+#ifdef OCEAN_ONLY
+    // Ocean owns a separate transparent projection. Sky pixels must be truly
+    // transparent so Bevy's canonical atmosphere (or the legacy A/B pass)
+    // remains the sole sky renderer, and we avoid paying for its integration.
+    if !water_here {
+        return vec4<f32>(0.0);
+    }
+#endif
+
     if t_exit <= t_enter {
         discard;
     }
@@ -905,213 +889,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let airlight_scale = select(surface_airlight, 1.0, airlight_ratio <= 0.0);
     scatter.in_scatter = scatter.in_scatter * airlight_scale;
 
-    // Composite the cloud module's volumetric layer as a screen-space sample.
-    // Doing it inside this fullscreen pass — after the atmosphere in-scatter — lands the
-    // clouds deterministically on top of the sky; a separate transparent quad
-    // sorted unreliably against this pass under big_space.
-    //
-    // Depth-aware bilateral upscale: the layer is RGBA32F (not filterable)
-    // and lower-resolution than the viewport. Plain bilinear removes blocks
-    // but washes a cloud hit into adjacent clear texels. Weight the same four
-    // taps by cloud-depth agreement with the nearest source texel so smooth
-    // interiors reconstruct while silhouettes remain localized. First-hit
-    // distance changes rapidly across a translucent volume, so the continuous
-    // depth weight must be broad; a tight weight turns ordinary depth gradients
-    // into false contour lines.
-    let cloud_dims = textureDimensions(cloud_layer_tex);
-    let cloud_res = vec2<f32>(cloud_dims);
-    let cloud_uv = in.clip_position.xy / view.viewport.zw;
-    let cloud_p = cloud_uv * cloud_res - 0.5;
-    let cloud_base = floor(cloud_p);
-    let cloud_f = cloud_p - cloud_base;
-    let cloud_bilinear_max = vec2<i32>(i32(cloud_dims.x) - 2, i32(cloud_dims.y) - 4);
-    let cb = clamp(vec2<i32>(cloud_base), vec2<i32>(0, 0), cloud_bilinear_max);
-    let cs00 = textureLoad(cloud_layer_tex, cb, 0);
-    let cs10 = textureLoad(cloud_layer_tex, cb + vec2<i32>(1, 0), 0);
-    let cs01 = textureLoad(cloud_layer_tex, cb + vec2<i32>(0, 1), 0);
-    let cs11 = textureLoad(cloud_layer_tex, cb + vec2<i32>(1, 1), 0);
-    let cd00 = textureLoad(cloud_distance_tex, cb, 0).r;
-    let cd10 = textureLoad(cloud_distance_tex, cb + vec2<i32>(1, 0), 0).r;
-    let cd01 = textureLoad(cloud_distance_tex, cb + vec2<i32>(0, 1), 0).r;
-    let cd11 = textureLoad(cloud_distance_tex, cb + vec2<i32>(1, 1), 0).r;
-    let ref_x = select(0, 1, cloud_f.x >= 0.5);
-    let ref_y = select(0, 1, cloud_f.y >= 0.5);
-    let ref_coord = cb + vec2<i32>(ref_x, ref_y);
-    let cloud_near = textureLoad(cloud_distance_tex, ref_coord, 0).r;
-    let depth_scale = max(cloud_near, 2000.0);
-    let hit_ref = cloud_near < 1.0e8;
-    let hit00 = cd00 < 1.0e8;
-    let hit10 = cd10 < 1.0e8;
-    let hit01 = cd01 < 1.0e8;
-    let hit11 = cd11 < 1.0e8;
-    let dw00 = select(0.0, select(1.0, exp(-abs(cd00 - cloud_near) / depth_scale), hit_ref && hit00), hit_ref == hit00);
-    let dw10 = select(0.0, select(1.0, exp(-abs(cd10 - cloud_near) / depth_scale), hit_ref && hit10), hit_ref == hit10);
-    let dw01 = select(0.0, select(1.0, exp(-abs(cd01 - cloud_near) / depth_scale), hit_ref && hit01), hit_ref == hit01);
-    let dw11 = select(0.0, select(1.0, exp(-abs(cd11 - cloud_near) / depth_scale), hit_ref && hit11), hit_ref == hit11);
-    let w00 = (1.0 - cloud_f.x) * (1.0 - cloud_f.y) * dw00;
-    let w10 = cloud_f.x * (1.0 - cloud_f.y) * dw10;
-    let w01 = (1.0 - cloud_f.x) * cloud_f.y * dw01;
-    let w11 = cloud_f.x * cloud_f.y * dw11;
-    let weight_sum = max(w00 + w10 + w01 + w11, 1.0e-5);
-    let cloud_sample = (cs00 * w00 + cs10 * w10 + cs01 * w01 + cs11 * w11) / weight_sum;
-    // Suppress the cloud where opaque geometry sits in front of it, so close
-    // geometry (the ship hull) isn't painted over by clouds behind it.
-    // `cloud_near` is the per-pixel distance at which the raymarch first hit
-    // actual cloud density on this ray (exported alongside the cloud layer);
-    // if the scene depth is nearer, the cloud is entirely behind the geometry.
-    // `cloud_vis` then ramps from 0 (geometry before the first cloud) to 1
-    // (geometry past the band exit `band_far`, from a ray-shell intersection)
-    // — an approximation of the in-front fraction that makes the ship cross
-    // the cloud boundary smoothly instead of popping. Using the true per-pixel
-    // hit distance (rather than the geometric base-shell crossing) keeps
-    // geometry under a sparse deck from dimming clouds that are actually far
-    // behind it.
-    let r_cloud_base = sky_atmos_extra.cloud_band_radii.x;
-    let r_cloud_top = sky_atmos_extra.cloud_band_radii.y;
-    let cam_r_len = sqrt(oc_len_sq);
-    let disc_cb = b * b - (oc_len_sq - r_cloud_base * r_cloud_base);
-    let disc_ct = b * b - (oc_len_sq - r_cloud_top * r_cloud_top);
-    let sqrt_cb = sqrt(max(disc_cb, 0.0));
-    let sqrt_ct = sqrt(max(disc_ct, 0.0));
-    var band_far = 1.0e30;
-    if cam_r_len < r_cloud_base {
-        // Below the deck: the band ends at the far top-shell exit.
-        band_far = max(-b + sqrt_ct, 0.0);
-    } else if cam_r_len <= r_cloud_top {
-        // Inside the deck: nearest forward shell crossing (top exit, or the
-        // downward base crossing).
-        var bf = -b + sqrt_ct;
-        let base_down = -b - sqrt_cb;
-        if disc_cb > 0.0 && base_down > 0.0 {
-            bf = min(bf, base_down);
-        }
-        band_far = max(bf, 1.0);
-    } else {
-        // Above the deck: exit at the base near root (ray dips through) or
-        // the top far root otherwise.
-        if disc_cb > 0.0 {
-            band_far = max(-b - sqrt_cb, 0.0);
-        } else {
-            band_far = max(-b + sqrt_ct, 0.0);
-        }
-    }
-    var cloud_vis = 1.0;
-    if scene_t < 1.0e29 && r_cloud_top > r_cloud_base {
-        let near = min(cloud_near, band_far);
-        cloud_vis = clamp((scene_t - near) / max(band_far - near, 1.0), 0.0, 1.0);
-    }
-    // `cloud_band_radii.w` is the composite-enable flag, set to 1.0 by
-    // `update_body_terrain_atmosphere` only on the body whose live cloud texture
-    // is bound. On every other body — and when clouds are disabled in graphics
-    // settings (the active cloud body is then cleared) — it is 0.0 and the cloud
-    // layer is skipped. This guard is load-bearing: those bodies carry the 1×1
-    // blank `cloud_layer_tex`, but the screen-space `textureLoad`s above read
-    // texels up to 1919×1077 — out of bounds for a 1×1 texture, which returns
-    // (0,0,0,0) → transmittance 0 → an opaque black sky. Never composite the
-    // blank.
-    // CLOUD-6 orbital projection for the resident-terrain/BodySky LOD. At high
-    // altitude the near-volume march cannot reach the limb; this path samples
-    // the SAME weather cube with height parallax + optical-depth moments so the
-    // 25–90 km handoff shares structure with SolidPlanetMaterial.
-    var cloud = CloudOverlay(vec3<f32>(0.0), 0.0);
-    let camera_altitude = cam_r_len - planet_radius;
-    let orbital_blend = smoothstep(22000.0, 85000.0, camera_altitude);
-    if (orbital_blend > 0.0 && sky_atmos.cloud_albedo_coverage.w > 0.0) {
-        // First hit at shell mid to seed a direction, then re-hit at the local
-        // column altitude so tall systems rise on the limb.
-        let r_cloud_seed = 0.5 * (r_cloud_base + r_cloud_top);
-        let disc_orbit_seed = b * b - (oc_len_sq - r_cloud_seed * r_cloud_seed);
-        if (disc_orbit_seed > 0.0) {
-            let sq_orbit_seed = sqrt(disc_orbit_seed);
-            var t_orbit_seed = -b - sq_orbit_seed;
-            if (t_orbit_seed <= 0.0) {
-                t_orbit_seed = -b + sq_orbit_seed;
-            }
-            if (t_orbit_seed > 0.0) {
-                let seed_hit_w = cam_pos + t_orbit_seed * ray_dir - planet_center;
-                let seed_n_w = normalize(seed_hit_w);
-                let seed_n_l = rotate_quat(
-                    sky_atmos_extra.world_to_body_orientation,
-                    seed_n_w,
-                );
-                let seed_col = weather_column_from_texel(
-                    sample_weather_soft(cloud_cover_tex, cloud_cover_sampler, seed_n_l),
-                );
-                var cloud_n_w = seed_n_w;
-                var cloud_n_l = seed_n_l;
-                if (seed_col.opacity > 1.0e-3) {
-                    let r_orbit = planet_radius + orbital_cloud_altitude(seed_col, sky_atmos);
-                    let disc_orbit = b * b - (oc_len_sq - r_orbit * r_orbit);
-                    if (disc_orbit > 0.0) {
-                        let sq_orbit = sqrt(disc_orbit);
-                        var t_orbit = -b - sq_orbit;
-                        if (t_orbit <= 0.0) {
-                            t_orbit = -b + sq_orbit;
-                        }
-                        if (t_orbit > 0.0) {
-                            cloud_n_w = normalize(cam_pos + t_orbit * ray_dir - planet_center);
-                            cloud_n_l = rotate_quat(
-                                sky_atmos_extra.world_to_body_orientation,
-                                cloud_n_w,
-                            );
-                        }
-                    }
-                }
-                let orbital_weather = sample_weather_soft(
-                    cloud_cover_tex,
-                    cloud_cover_sampler,
-                    cloud_n_l,
-                );
-                let column = weather_column_from_texel(orbital_weather);
-                if (column.opacity > 1.0e-3) {
-                    let n_body_lit = orbital_cloud_normal_body(
-                        cloud_cover_tex,
-                        cloud_cover_sampler,
-                        cloud_n_l,
-                    );
-                    // Body-local perturbed normal → world for lighting.
-                    let q = sky_atmos_extra.world_to_body_orientation;
-                    let q_conj = vec4(-q.xyz, q.w);
-                    let cloud_n_lit_w = rotate_quat(q_conj, n_body_lit);
-                    let sun_dir = sky_atmos_extra.sun_dir_flux.xyz;
-                    let n_dot_l = dot(cloud_n_lit_w, sun_dir);
-                    let view_mu = max(dot(cloud_n_lit_w, -ray_dir), 0.0);
-                    let shade = orbital_cloud_shade(column, n_dot_l, view_mu);
-                    let night = smoothstep(-0.12, 0.08, n_dot_l);
-                    let sun_elev = clamp(n_dot_l, 0.0, 1.0);
-                    let sun_chroma = mix(
-                        vec3<f32>(1.0, 0.45, 0.18),
-                        vec3<f32>(1.0, 0.97, 0.92),
-                        smoothstep(0.05, 0.45, sun_elev),
-                    );
-                    let cloud_radiance = sky_atmos.cloud_albedo_coverage.rgb
-                        * vec3<f32>(0.90, 0.93, 0.97)
-                        * sun_chroma
-                        * sky_atmos_extra.sun_dir_flux.w
-                        * SCENE_FLUX_SCALE
-                        * 0.55
-                        * shade.x
-                        * night;
-                    let orbital_opacity = shade.y * night * orbital_blend;
-                    cloud = CloudOverlay(cloud_radiance * orbital_opacity, orbital_opacity);
-                }
-            }
-        }
-    }
-    if (sky_atmos_extra.cloud_band_radii.w >= 0.5) {
-        let near_cloud = CloudOverlay(
-            cloud_sample.rgb * cloud_vis,
-            (1.0 - cloud_sample.a) * cloud_vis,
-        );
-        // Near volume over orbital projection. In their intended regimes one
-        // side is essentially transparent; the union keeps the 25–90 km
-        // transition continuous instead of one path blanking the other.
-        cloud = CloudOverlay(
-            near_cloud.premul_rgb + cloud.premul_rgb * (1.0 - near_cloud.opacity),
-            1.0 - (1.0 - near_cloud.opacity) * (1.0 - cloud.opacity),
-        );
-    }
-
     // Premultiplied: `rgb` is already weighted by sun flux and β coefficients
     // inside `integrate_atmosphere`. Alpha is the mean opacity over the three
     // channels — the standard `Premultiplied` blend dims what was drawn
@@ -1145,16 +922,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // brightened. Near ground keeps `physical_opacity` (aerial ≈ 0).
         opacity = max(opacity, aerial);
     }
-    let combined_opacity = clamp(
-        1.0 - (1.0 - opacity) * (1.0 - cloud.opacity),
-        0.0,
-        1.0,
-    );
-    // Attenuate the atmosphere in-scatter by the cloud transmittance so opaque
-    // cloud cores hide the sky behind them, then add the cloud's own premult
-    // in-scatter on top. `1 - cloud.opacity` already folds in the depth
-    // suppression above.
-    let sky_rgb = scatter.in_scatter * (1.0 - cloud.opacity) + cloud.premul_rgb;
+    let combined_opacity = clamp(opacity, 0.0, 1.0);
+    let sky_rgb = scatter.in_scatter;
 
     // Analytic ocean composite. Water occludes the seabed already in the
     // framebuffer, so we supply its radiance here and output fully opaque
@@ -1216,15 +985,27 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                 sky_atmos.atmos_geom.z,
             );
         }
-        let surf_trans = (1.0 - opacity) * (1.0 - cloud.opacity);
+        let surf_trans = 1.0 - opacity;
         // `ocean_cov` was resolved in the ocean block from the signed sea
         // field (ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident height tiles → coast-atlas tail). Partial
         // coverage lets the framebuffer seabed show through for the wet
         // shoreline sliver / clear shallows.
-        let out_rgb = sky_rgb + water * surf_trans * ocean_cov;
-        let out_a = mix(combined_opacity, 1.0, ocean_cov);
+        var out_rgb = sky_rgb + water * surf_trans * ocean_cov;
+        var out_a = mix(combined_opacity, 1.0, ocean_cov);
+#ifdef OCEAN_ONLY
+        // This pass sits over an already-rendered atmosphere. Replace only the
+        // signed-field water fraction, carrying its own foreground air column
+        // and water radiance as premultiplied colour. The untouched fraction
+        // leaves the canonical sky/terrain behind it intact.
+        out_rgb = (sky_rgb + water * surf_trans) * ocean_cov;
+        out_a = ocean_cov;
+#endif
         return vec4(out_rgb, out_a);
     }
 
+#ifdef OCEAN_ONLY
+    return vec4<f32>(0.0);
+#else
     return vec4(sky_rgb, combined_opacity);
+#endif
 }

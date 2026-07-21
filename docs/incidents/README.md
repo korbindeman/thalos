@@ -40,3 +40,7 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0010](0010-cloud-detail-period-eighth-scale.md) | Cloud detail collapsed into stipple — authored cell size was treated as an eight-cell tile period | visual | 2026-07-21 |
 | [0011](0011-cloud-hierarchy-resume-strata.md) | Cloud hierarchy posterized volumes — heuristic leaps resumed on repeated height isosurfaces | visual | 2026-07-21 |
 | [0012](0012-ocean-gradient-worms-isotropic-detail-loss.md) | Ocean gradient worms + premature isotropic detail loss | visual | 2026-07-21 |
+| [0013](0013-stock-atmosphere-hid-analytic-ocean.md) | Stock atmosphere hid the analytic ocean | visual | 2026-07-21 |
+| [0014](0014-density-and-lut-units-erased-bevy-sunset.md) | Density and LUT-unit adapters erased the Bevy sunset | visual | 2026-07-21 |
+| [0015](0015-live-atmosphere-backend-switch-crash.md) | Live atmosphere-backend switching escaped the isolated comparison boundary | crash | 2026-07-21 |
+| [0016](0016-cloud-sparse-history-motion-smear.md) | Sparse cloud history smeared during camera motion | visual | 2026-07-21 |

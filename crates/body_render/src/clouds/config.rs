@@ -28,6 +28,14 @@ pub struct CloudsConfig {
     /// Radius of the planet the clouds encompass. Determines the curvature of the cloud layer near
     /// the horizon.
     pub planet_radius: f32,
+    /// Height of the canonical rocky-body atmosphere above the reference
+    /// sphere, in metres. Together with [`Self::planet_radius`] this maps cloud
+    /// samples into Bevy's transmittance / sky-view LUT parameterization.
+    pub atmosphere_top_height: f32,
+    /// Whether the canonical Bevy-atmosphere LUTs are bound for this view.
+    /// The legacy custom-atmosphere A/B keeps the analytic fallback so cloud
+    /// diagnostics remain available without a stock atmosphere entity.
+    pub atmosphere_lut_enabled: bool,
     /// Height of the `clouds_bottom_height` of the cloud layer.
     pub clouds_bottom_height: f32,
     /// Height of the `clouds_top_height` of the cloud layer.
@@ -71,6 +79,10 @@ pub struct CloudsConfig {
     pub sun_dir: Vec4,
     /// Color of the sun (HDR, RGBA).
     pub sun_color: Vec4,
+    /// Linear cloud single-scatter albedo. Kept separate from sun radiance so
+    /// the canonical atmosphere sky-view LUT can illuminate the volume without
+    /// baking a second artist-authored ambient colour into the light source.
+    pub cloud_albedo: Vec4,
     /// Strength of reprojection. 0.0 means we don't mix the current frame with the last frame.
     /// 0.95 means we take 5% of the current frame and 95% of last frame and combine those two to
     /// reduce noise.
@@ -106,6 +118,8 @@ impl Default for CloudsConfig {
             clouds_raymarch_steps_count: 80,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
+            atmosphere_top_height: 100_000.0,
+            atmosphere_lut_enabled: false,
             clouds_bottom_height: 1250.0,
             clouds_top_height: 2400.0,
             clouds_coverage: 0.5,
@@ -125,6 +139,7 @@ impl Default for CloudsConfig {
             clouds_detail_scale_m: 450.0,
             sun_dir: Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0),
             sun_color: Vec4::new(1.0, 0.9, 0.85, 1.0) * 1.4,
+            cloud_albedo: Vec4::ONE,
             reprojection_strength: 0.95,
             ui_visible: true,
             render_resolution: Vec2::new(RENDER_WIDTH as f32, RENDER_HEIGHT as f32),

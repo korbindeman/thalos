@@ -1,19 +1,18 @@
 //! Canonical rocky-body sky: Bevy's raymarched atmosphere, with the superseded
 //! custom `BodySky` atmosphere retained only as a debug A/B fallback.
 //!
-//! Unless [`GraphicsSettings::legacy_body_sky`] is explicitly on, the
-//! atmospheric body selected by the canonical render-camera [`ViewAnchor`] gets a stock
-//! [`Atmosphere`] component on a camera-local proxy entity. The proxy position
+//! The atmospheric body selected by the canonical render-camera [`ViewAnchor`]
+//! gets a stock [`Atmosphere`] component on a camera-local proxy entity. The proxy position
 //! is projected in f64 from [`ViewAnchor`] each frame; this avoids handing
 //! Bevy a planet-grid `GlobalTransform` that can be transiently overwritten by
 //! the atmosphere component's default-placement hook under BigSpace. The ship
 //! camera gets
 //! [`AtmosphereSettings`] with
 //! [`AtmosphereMode::Raymarched`] (the mode built for planets seen from
-//! orbit), and the custom `BodySky` pass is force-hidden.
+//! orbit), and the custom `BodySky` atmosphere pass is force-hidden. Dedicated
+//! ocean and cloud composites remain visible.
 //!
-//! The debug fallback remains useful for matched captures while the retained
-//! `BodySky` composites are migrated independently. Rayleigh coefficients are
+//! The debug fallback remains useful for matched captures. Rayleigh coefficients are
 //! derived from the same authored `AtmosphericScattering` block the custom pass reads
 //! (`β = τ_v / H`); the legacy aerosol value is projected as a relative load
 //! around Bevy's Earth Mie baseline, and Bevy's Earth ozone term is added. This
@@ -24,8 +23,8 @@
 //! artistic knobs (`strength`, `multi_scatter_gain`) are intentionally **not** applied —
 //! they compensate for our unit system, not physical density.
 //!
-//! Settings → Graphics exposes "Legacy custom atmosphere (debug)" solely for
-//! matched A/B verification.
+//! The legacy renderer is selectable only by the process-isolated headless
+//! comparison override; normal gameplay has one atmosphere backend.
 
 use bevy::light::Atmosphere;
 use bevy::light::atmosphere::{Falloff, PhaseFunction, ScatteringMedium, ScatteringTerm};
@@ -40,25 +39,18 @@ use super::view_anchor::ViewAnchor;
 use super::{SimulationState, SolarSystemState};
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_SCALE;
-use crate::graphics_settings::GraphicsSettings;
 use crate::screenshot::ScreenshotConfig;
 
-/// Resolve the interactive setting plus the optional deterministic headless
-/// override. The screenshot resource is absent in normal gameplay, and unlike
-/// mutating `GraphicsSettings` this cannot leak an A/B selection into
-/// `user/settings.ron` through the settings autosave.
-fn enabled(settings: &GraphicsSettings, screenshot: Option<&ScreenshotConfig>) -> bool {
+/// Resolve the optional deterministic headless override. The screenshot
+/// resource is absent in normal gameplay, where Bevy is always canonical.
+fn enabled(screenshot: Option<&ScreenshotConfig>) -> bool {
     screenshot
         .and_then(|cfg| cfg.atmosphere.stock_override())
-        .unwrap_or(!settings.legacy_body_sky)
+        .unwrap_or(true)
 }
 
-fn active_body(
-    settings: &GraphicsSettings,
-    screenshot: Option<&ScreenshotConfig>,
-    view_anchor: &ViewAnchor,
-) -> Option<BodyId> {
-    enabled(settings, screenshot)
+fn active_body(screenshot: Option<&ScreenshotConfig>, view_anchor: &ViewAnchor) -> Option<BodyId> {
+    enabled(screenshot)
         .then_some(view_anchor.resolved)?
         .map(|anchor| anchor.body)
 }
@@ -82,13 +74,11 @@ const BEVY_EARTH_MIE_SCATTERING: f32 = 0.444e-6;
 const BEVY_EARTH_MIE_ABSORPTION: f32 = 3.996e-6;
 const OZONE_CENTER_M: f32 = 45_000.0;
 const OZONE_WIDTH_M: f32 = 18_000.0;
-/// Thalos terrain still emits in the shading spine's arbitrary scene-flux
-/// units, while Bevy's atmosphere is driven by photometric directional-light
-/// luminance. Until those surfaces share one photometric bind group (F7), an
-/// unscaled Earth column overwhelms the darker terrain even though its spectral
-/// shape is correct. This is the one adapter calibration knob, applied to both
-/// scattering and extinction so the raymarch stays energy-consistent.
-const BEVY_ATMOSPHERE_DENSITY_SCALE: f32 = 0.1;
+/// Preserve the authored physical optical column. Brightness differences
+/// between Bevy's photometric atmosphere and spine-shaded surfaces belong to
+/// the shared light/exposure projection (F7), never to atmospheric density:
+/// scaling density down erased low-sun reddening in both sky and clouds.
+const BEVY_ATMOSPHERE_DENSITY_SCALE: f32 = 1.0;
 
 /// Build a stock [`ScatteringMedium`] from the authored scattering block.
 ///
@@ -142,11 +132,11 @@ fn build_medium(scattering: &AtmosphericScattering, atmosphere_height_m: f32) ->
     .with_label("thalos_bevy_earth_atmosphere")
 }
 
-/// Keep the stock-atmosphere components in sync with the toggle.
+/// Keep the stock-atmosphere components in sync with the process selection.
 ///
 /// Enabled: project the active atmospheric body onto one camera-local proxy and
-/// insert [`AtmosphereSettings`] (raymarched) on the ship camera. Disabled:
-/// despawn the proxy — but **keep**
+/// insert [`AtmosphereSettings`] (raymarched) on the ship camera. A legacy
+/// headless comparison process despawns the proxy — but **keeps**
 /// `AtmosphereSettings` on the camera. The extract system only clears the
 /// render world's `ExtractedAtmosphere` for cameras that still carry
 /// `AtmosphereSettings`; removing both in the same frame would strand a stale
@@ -154,7 +144,6 @@ fn build_medium(scattering: &AtmosphericScattering, atmosphere_height_m: f32) ->
 /// settings present and zero `Atmosphere` entities the pass is fully idle.
 pub(super) fn sync_stock_atmosphere(
     mut commands: Commands,
-    settings: Res<GraphicsSettings>,
     screenshot: Option<Res<ScreenshotConfig>>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
@@ -176,7 +165,7 @@ pub(super) fn sync_stock_atmosphere(
         commands.entity(entity).remove::<Atmosphere>();
     }
 
-    let active = enabled(&settings, screenshot.as_deref())
+    let active = enabled(screenshot.as_deref())
         .then_some(view_anchor.resolved)
         .flatten();
     let Some(active) = active else {
@@ -280,14 +269,13 @@ pub(super) fn sync_stock_atmosphere(
 /// look. `update_solid_planet_params` never writes `params.atmosphere`, so
 /// there is no writer conflict.
 pub(super) fn sync_impostor_atmosphere_with_stock(
-    settings: Res<GraphicsSettings>,
     screenshot: Option<Res<ScreenshotConfig>>,
     sim: Res<SimulationState>,
     view_anchor: Res<ViewAnchor>,
     bodies: Query<(&CelestialBody, &SolidPlanetMaterials)>,
     mut materials: ResMut<Assets<SolidPlanetMaterial>>,
 ) {
-    let stock_body = active_body(&settings, screenshot.as_deref(), &view_anchor);
+    let stock_body = active_body(screenshot.as_deref(), &view_anchor);
     let body_defs = sim.simulation.bodies();
     for (body, mats) in &bodies {
         let Some(def) = body_defs.get(body.body_id) else {
@@ -322,18 +310,18 @@ pub(super) fn sync_impostor_atmosphere_with_stock(
     }
 }
 
-/// While the stock atmosphere is on, force the custom `BodySky` pass hidden.
+/// While the stock atmosphere is on, force only the custom `BodySky`
+/// atmosphere pass hidden. Ocean and clouds have dedicated entities.
 ///
 /// Runs after `sync_body_render_lod` (the sky's normal visibility owner,
-/// which re-evaluates every frame), so switching the toggle off needs no
-/// cleanup here — the LOD pass restores the custom sky on the next frame.
+/// which re-evaluates every frame), so a legacy capture override needs no
+/// cleanup here — the LOD pass restores the custom sky for that process.
 pub(super) fn suppress_body_sky_for_stock_atmosphere(
-    settings: Res<GraphicsSettings>,
     screenshot: Option<Res<ScreenshotConfig>>,
     view_anchor: Res<ViewAnchor>,
     mut skies: Query<(&BodySky, &mut Visibility)>,
 ) {
-    let Some(active_body) = active_body(&settings, screenshot.as_deref(), &view_anchor) else {
+    let Some(active_body) = active_body(screenshot.as_deref(), &view_anchor) else {
         return;
     };
     for (sky, mut vis) in &mut skies {

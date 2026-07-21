@@ -8,8 +8,8 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use crate::tokens::*;
 use crate::UiTheme;
+use crate::tokens::*;
 
 /// How a slider's value renders in its value label.
 #[derive(Clone, Copy, Debug, PartialEq)]

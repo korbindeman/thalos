@@ -48,14 +48,14 @@ use thalos_shipyard::sizing::propagate_node_sizes;
 pub use commands::{CollectQuery, collect_blueprint};
 pub use files::SavedShip;
 pub use format::{
-    format_delta_v, format_mass_kg, kind_order,
-    palette_category_label, palette_category_order, palette_part_summary,
+    format_delta_v, format_mass_kg, kind_order, palette_category_label, palette_category_order,
+    palette_part_summary,
 };
 pub use placement::symmetry_edit_target;
 pub use state::{
-    BuildOrientation, CLICK_THRESHOLD_PX, DeselectTracker,
-    EditorPart, EditorState, EditorUiGate, EditorViewCamera, NextSymmetryId,
-    PendingPart, PlacementPreview, PlacementSnap, PreviewGhost, SymmetryMode, TankResizeArrow, TankResizeDrag,
+    BuildOrientation, CLICK_THRESHOLD_PX, DeselectTracker, EditorPart, EditorState, EditorUiGate,
+    EditorViewCamera, NextSymmetryId, PendingPart, PlacementPreview, PlacementSnap, PreviewGhost,
+    SymmetryMode, TankResizeArrow, TankResizeDrag,
 };
 
 /// The current [`thalos_shipyard::PartParams`] of a selected part, read back from its

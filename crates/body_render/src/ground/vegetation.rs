@@ -353,8 +353,7 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
     // the forced-full cover reads as a continuous carpet rather than a sparse
     // grid of tufts. Decided from the tile centre; per-candidate classification
     // below still clears any paving and grades the lawn edge.
-    let lawn_tile =
-        classify_scatter(&input.scatter_regions, center_dir) == ScatterClass::Lawn;
+    let lawn_tile = classify_scatter(&input.scatter_regions, center_dir) == ScatterClass::Lawn;
     let (density, cap) = if lawn_tile {
         (
             input.lawn_density_per_m2.max(input.blades_per_m2),
@@ -408,8 +407,7 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         // Climate-shifted (ecological) altitude: the treeline fade descends
         // with latitude, so polar tundra thins out at low ground exactly like
         // the terrain paint (docs/terrain_macro.md Phase 2).
-        let eco_h =
-            h + thalos_terrain::climate_cold_lift_m(dir.y.abs()) as f32;
+        let eco_h = h + thalos_terrain::climate_cold_lift_m(dir.y.abs()) as f32;
         if !lawn {
             // Acceptance: keep (near-)all candidates on real grassland — the old
             // `smoothstep(0.45, 0.8)` halved density even where the ground *is*
@@ -731,8 +729,8 @@ fn emit_grass_card(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
     // Root = the card base; the fade shrinks the card toward it. w = 1 + variant
     // → CARD sampling atlas column `variant` (a per-clump hash, so neighbouring
     // cards differ).
-    let variant = (blade_hash(spec.seed, key, 0, 21)
-        * thalos_texgen::GRASS_CARD_VARIANTS as f64) as u32
+    let variant = (blade_hash(spec.seed, key, 0, 21) * thalos_texgen::GRASS_CARD_VARIANTS as f64)
+        as u32
         % thalos_texgen::GRASS_CARD_VARIANTS;
     let root_attr = [base.x, base.y, base.z, 1.0 + variant as f32];
     // Two crossed quads, spun by a per-clump azimuth — every clump sharing the
@@ -757,14 +755,8 @@ fn emit_grass_card(buf: &mut GrassMeshBuf, spec: &ClumpSpec) -> u32 {
             buf.colors.push([tint.x, tint.y, tint.z, 1.0]);
             buf.roots.push(root_attr);
         }
-        buf.indices.extend_from_slice(&[
-            start,
-            start + 1,
-            start + 2,
-            start,
-            start + 2,
-            start + 3,
-        ]);
+        buf.indices
+            .extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
     }
     1
 }
@@ -882,8 +874,14 @@ fn push_curved_blade(
     };
     let hw = width_m * 0.5;
     let base = buf.positions.len() as u32;
-    let color_at =
-        |lighten: f32| [tint.x * lighten, tint.y * lighten, tint.z * lighten, blade_h];
+    let color_at = |lighten: f32| {
+        [
+            tint.x * lighten,
+            tint.y * lighten,
+            tint.z * lighten,
+            blade_h,
+        ]
+    };
 
     // Rounded blade normals (the key "fluffy" shading trick — Ghost of Tsushima
     // / AMD GPUOpen): a flat strip on the terrain-up normal lights like a spike.

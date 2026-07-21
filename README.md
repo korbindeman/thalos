@@ -52,6 +52,7 @@ Controls:
 - `M` toggle map view
 - `V` cycle ship camera mode
 - `F2` save a screenshot to `~/Desktop/thalos`
+- `F8` save the current 3-D perspective for agent replay (`just screenshot latest`)
 - `F1` hide / show the HUD
 - Left drag rotates the camera
 - Scroll zooms the camera

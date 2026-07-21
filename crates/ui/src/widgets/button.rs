@@ -6,8 +6,8 @@
 
 use bevy::prelude::*;
 
-use crate::tokens::*;
 use crate::UiTheme;
+use crate::tokens::*;
 
 /// Visual variant of a [`UiButton`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -77,10 +77,7 @@ pub fn spawn_button(
             action,
         ))
         .with_children(|c| {
-            c.spawn((
-                theme.text_for_button(label, variant),
-                ButtonLabel,
-            ));
+            c.spawn((theme.text_for_button(label, variant), ButtonLabel));
         })
         .id()
 }
@@ -124,7 +121,11 @@ pub fn spawn_menu_row(
 
 impl UiTheme {
     /// Label text for a button of the given variant.
-    pub fn text_for_button(&self, label: &str, variant: ButtonVariant) -> (Text, TextFont, TextColor) {
+    pub fn text_for_button(
+        &self,
+        label: &str,
+        variant: ButtonVariant,
+    ) -> (Text, TextFont, TextColor) {
         let mut bundle = self.body_strong(label);
         bundle.1.font_size = FontSize::Px(FS_SMALL + 1.0);
         if variant == ButtonVariant::Primary {
@@ -149,7 +150,11 @@ pub fn style_buttons(
         let (border_c, bg_c, label_c) = match button.variant {
             ButtonVariant::Primary => match interaction {
                 Interaction::Pressed => (ACCENT_DIM, ACCENT_DIM, ON_ACCENT),
-                Interaction::Hovered => (Color::srgba(1.0, 0.86, 0.55, 1.0), Color::srgba(1.0, 0.86, 0.55, 1.0), ON_ACCENT),
+                Interaction::Hovered => (
+                    Color::srgba(1.0, 0.86, 0.55, 1.0),
+                    Color::srgba(1.0, 0.86, 0.55, 1.0),
+                    ON_ACCENT,
+                ),
                 Interaction::None => (ACCENT, ACCENT, ON_ACCENT),
             },
             ButtonVariant::Danger => match interaction {

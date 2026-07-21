@@ -5,8 +5,8 @@
 
 use bevy::prelude::*;
 
-use crate::tokens::*;
 use crate::UiTheme;
+use crate::tokens::*;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ToastKind {

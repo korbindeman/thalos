@@ -24,10 +24,9 @@ use thalos_body_render::udlod::prelude::*;
 use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
 use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock, GpuAtlasHeightMirrorComponent,
-    GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS, PipelineTileProvider, SyntheticTerrainMode,
-    SyntheticTileProvider, TerrainShadingStyle, ocean_wave_frame, project_ocean_spectrum,
-    rendered_height_range,
+    CASCADE_COUNT, FlattenBlock, GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle,
+    MAX_FLATTEN_REGIONS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
+    TerrainShadingStyle, ocean_wave_frame, project_ocean_spectrum, rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
@@ -37,6 +36,7 @@ use thalos_world::{BodyDefinition, BodyId};
 use std::collections::HashMap;
 
 use super::SCREEN_MARKER_RADIUS;
+use super::ocean::BodyOcean;
 use super::tile_cache::TileCacheRegistry;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
@@ -279,15 +279,6 @@ pub(super) struct BodySky {
 #[derive(Component, Debug)]
 pub(crate) struct BodyHalo {
     pub body_id: BodyId,
-}
-
-/// Marker on the per-body water sphere (ship layer). Only spawned when the
-/// baked surface has `sea_level_m = Some(_)`; visibility is paired with
-/// [`BodyTerrain`] so the impostor's inline water BRDF takes over outside
-/// the LOD swap radius.
-#[derive(Component, Debug)]
-pub(super) struct BodyWater {
-    pub(super) body_id: BodyId,
 }
 
 /// Terrain↔impostor handoff, in units of the icon-dot radius: ground-LOD
@@ -783,91 +774,6 @@ pub(crate) fn spawn_body_terrain(
 /// facets read as polygonal seams between water and terrain. 7 keeps the
 /// shoreline tessellation tight enough that the water/terrain
 /// intersection looks like a continuous line at human scale; bump to 8 if
-/// it still aliases at sub-metre stand-off.
-const WATER_MESH_SUBDIVISIONS: u32 = 7;
-
-/// Tiny offset (in metres) lifting the water mesh above the bare body
-/// sphere. Resolves z-fighting between the water mesh and the seafloor
-/// terrain mesh at iso-height texels in favour of water. Sized at 2 m so
-/// it's comfortably above the f32 ULP near body-radius scale (~0.4 m at
-/// 3 Mm) on the bodies we currently ship.
-const WATER_SURFACE_EPSILON_M: f32 = 2.0;
-
-/// Default deep-water tint for the runtime ground-LOD water shell. The
-/// `ProceduralSurface` generator carries no per-body `WaterAppearance` (that
-/// lived on the dead baked pipeline), so every ocean body uses this until a
-/// procedural water-appearance is authored. Matches the impostor water BRDF's
-/// fallback so the two paths agree across the LOD swap. xyz = deep-water linear
-/// RGB; w = minimum optical depth (metres).
-const FALLBACK_WATER_COLOR_DEPTH: [f32; 4] = [0.012, 0.040, 0.090, 120.0];
-
-/// Spawn the per-body ocean shell: a single icosphere at
-/// `body.radius_m + sea_level_m + ε`, parented to the body's grid and hidden at
-/// start so [`sync_body_render_lod`] can flip it in step with [`BodyTerrain`].
-///
-/// **Superseded** by the analytic ray-traced ocean in `body_sky.wgsl`: a
-/// faceted icosphere sags tens of metres below the true sphere at planet scale
-/// (flat triangle chords), so the seabed punches through everywhere but the
-/// vertices. The analytic sphere is smooth at every scale. Retained dormant
-/// until the analytic path is screenshot-verified, then removed.
-#[allow(dead_code)]
-pub(crate) fn spawn_body_water(
-    commands: &mut Commands,
-    body: &BodyDefinition,
-    sea_level_m: f32,
-    ship_parent_entity: Entity,
-    meshes: &mut Assets<Mesh>,
-    water_materials: &mut Assets<BodyWaterMaterial>,
-) -> Entity {
-    let water_radius_m = (body.radius_m as f32 + sea_level_m + WATER_SURFACE_EPSILON_M).max(1.0);
-
-    let color_depth = Vec4::from_array(FALLBACK_WATER_COLOR_DEPTH);
-
-    let mesh = meshes.add(
-        Sphere::new(water_radius_m)
-            .mesh()
-            .ico(WATER_MESH_SUBDIVISIONS)
-            .expect("water mesh ico subdivision is within bevy's supported range"),
-    );
-
-    let params = BodyWaterParams {
-        color_depth,
-        // xyz populated each frame by `update_body_terrain_atmosphere` from
-        // the body's render-space grid origin; w is constant.
-        planet_center_radius: Vec4::new(0.0, 0.0, 0.0, water_radius_m),
-        // x = 1 → metre-scale waves on (this is the surface/SHIP_SCALE path; the
-        // map ocean sets x = 0). w = wave-scroll time, written per frame.
-        time: Vec4::new(1.0, 0.0, 0.0, 0.0),
-    };
-    let material = BodyWaterMaterial {
-        scene: SceneLighting::default(),
-        params,
-    };
-
-    let water_entity = commands
-        .spawn((
-            Mesh3d(mesh),
-            MeshMaterial3d(water_materials.add(material)),
-            Transform::default(),
-            Visibility::Hidden,
-            RenderLayers::layer(SHIP_LAYER),
-            NotShadowCaster,
-            ChildOf(ship_parent_entity),
-            Name::new(format!("{} Water", body.name)),
-            BodyWater { body_id: body.id },
-        ))
-        .id();
-
-    info!(
-        "spawned water surface for '{}' (radius {:.0} km, sea level {:+.1} m)",
-        body.name,
-        body.radius_m / 1000.0,
-        sea_level_m,
-    );
-
-    water_entity
-}
-
 /// Unified per-body render-LOD visibility.
 ///
 /// One pass over each body decides which of its four ship-layer render
@@ -954,7 +860,7 @@ pub(super) fn sync_body_render_lod(
             Without<RealSpaceImpostor>,
             Without<BodySky>,
             Without<BodyHalo>,
-            Without<BodyWater>,
+            Without<BodyOcean>,
         ),
     >,
     mut impostors: Query<
@@ -963,16 +869,7 @@ pub(super) fn sync_body_render_lod(
             Without<BodyTerrain>,
             Without<BodySky>,
             Without<BodyHalo>,
-            Without<BodyWater>,
-        ),
-    >,
-    mut waters: Query<
-        (&BodyWater, &mut Visibility),
-        (
-            Without<BodyTerrain>,
-            Without<RealSpaceImpostor>,
-            Without<BodySky>,
-            Without<BodyHalo>,
+            Without<BodyOcean>,
         ),
     >,
     mut skies: Query<
@@ -981,7 +878,16 @@ pub(super) fn sync_body_render_lod(
             Without<BodyTerrain>,
             Without<RealSpaceImpostor>,
             Without<BodyHalo>,
-            Without<BodyWater>,
+            Without<BodyOcean>,
+        ),
+    >,
+    mut oceans: Query<
+        (&BodyOcean, &mut Visibility),
+        (
+            Without<BodyTerrain>,
+            Without<RealSpaceImpostor>,
+            Without<BodySky>,
+            Without<BodyHalo>,
         ),
     >,
     mut halos: Query<
@@ -990,7 +896,7 @@ pub(super) fn sync_body_render_lod(
             Without<BodyTerrain>,
             Without<RealSpaceImpostor>,
             Without<BodySky>,
-            Without<BodyWater>,
+            Without<BodyOcean>,
         ),
     >,
 ) {
@@ -1088,23 +994,6 @@ pub(super) fn sync_body_render_lod(
         set_vis(&mut vis, want);
     }
 
-    // Water pairs with terrain: only visible inside the LOD swap radius
-    // (and only if terrain is resident — water only spawns alongside
-    // terrain, so this is mainly a safety check). Outside the swap radius
-    // the impostor's inline water BRDF takes over.
-    for (water, mut vis) in &mut waters {
-        let Some((dist, swap, _shell)) = body_metrics(water.body_id) else {
-            continue;
-        };
-        let resident = terrain_resident.contains(&water.body_id);
-        let want = if resident && dist < swap {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        };
-        set_vis(&mut vis, want);
-    }
-
     for (sky, mut vis) in &mut skies {
         let Some((dist, swap, _shell)) = body_metrics(sky.body_id) else {
             continue;
@@ -1115,6 +1004,19 @@ pub(super) fn sync_body_render_lod(
         // from the halo when a terrain entity is up — otherwise the halo
         // is the body's atmosphere representation.
         let resident = terrain_resident.contains(&sky.body_id);
+        let want = if resident && dist < swap {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        set_vis(&mut vis, want);
+    }
+
+    for (ocean, mut vis) in &mut oceans {
+        let Some((dist, swap, _shell)) = body_metrics(ocean.body_id) else {
+            continue;
+        };
+        let resident = terrain_resident.contains(&ocean.body_id);
         let want = if resident && dist < swap {
             Visibility::Inherited
         } else {
@@ -1207,16 +1109,12 @@ pub(crate) struct OceanDebugSettings {
     pub(crate) phase_time_override_s: Option<f64>,
 }
 
-/// Update the per-frame dynamic data on every body's `BodyTerrainMaterial`,
-/// `BodyWaterMaterial`, and `BodySkyMaterial`:
+/// Update the per-frame dynamic data on every body's `BodyTerrainMaterial`
+/// and `BodySkyMaterial`:
 ///
 /// - terrain `planet_extra` (planet center + radius, terminator-wrap knob)
 /// - terrain `scene` (`SceneLighting`: primary star, eclipse occluders,
 ///   ambient; planetshine left zero for now)
-/// - water `scene` (same `SceneLighting` as terrain), water `params.time`
-///   (canonical simulation time for coherent pause/warp), water
-///   `params.planet_center_radius.xyz`
-///   (body render-space centre)
 /// - sky `atmosphere_extra` (sun dir + flux, planet center + radius)
 ///
 /// Must run after `sync_solar_system_state` (for sun direction from ephemeris),
@@ -1225,7 +1123,6 @@ pub(crate) struct OceanDebugSettings {
 pub(super) fn update_body_terrain_atmosphere(
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     terrain_q: Query<(&BodyTerrain, &MeshMaterial3d<BodyTerrainMaterial>)>,
-    water_q: Query<(&BodyWater, &MeshMaterial3d<BodyWaterMaterial>)>,
     sky_q: Query<(&BodySky, &MeshMaterial3d<BodySkyMaterial>)>,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     sim: Res<SimulationState>,
@@ -1233,22 +1130,17 @@ pub(super) fn update_body_terrain_atmosphere(
     exposure: Res<CameraExposure>,
     ocean_debug: Res<OceanDebugSettings>,
     // Combined into one tuple param to stay under Bevy's 16-arg system limit:
-    // .0 = live cloud render texture, .1 = cloud config (heights for occlusion),
-    // .2 = per-pixel cloud-hit distance texture, .3 = which body the cloud
+    // .0 = cloud config (heights for occlusion), .1 = which body the cloud
     // raymarch is currently rendered for (sole writer: `clouds::drive_clouds`),
-    // .4 = blank fallbacks to rebind on bodies that are not the active one,
-    // .5 = live atmosphere airlight tuning,
-    // .6 = sun-shadow map handle + view_proj + params (folded in to stay under
+    // .2 = live atmosphere airlight tuning,
+    // .3 = sun-shadow map handle + view_proj + params (folded in to stay under
     //      Bevy's 16-system-arg limit).
-    // .7 = screen-space AO image (F5); patched onto each terrain material so the
+    // .4 = screen-space AO image (F5); patched onto each terrain material so the
     //      shader can multiply it into the ambient occlusion.
-    // .8 = AO config: drives the per-material AO gate/debug flag (inspection.w).
+    // .5 = AO config: drives the per-material AO gate/debug flag (inspection.w).
     cloud_io: (
-        Option<Res<thalos_body_render::CloudRenderTexture>>,
         Option<Res<thalos_body_render::CloudsConfig>>,
-        Option<Res<thalos_body_render::CloudDistanceTexture>>,
         Res<super::clouds::ActiveCloudBody>,
-        Option<Res<super::spawn::BlankCloudTextures>>,
         Res<AtmosphereTuning>,
         Res<super::sun_shadow::SunShadowState>,
         Option<Res<super::ssao::AoImage>>,
@@ -1274,7 +1166,6 @@ pub(super) fn update_body_terrain_atmosphere(
         >,
     ),
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
-    mut water_materials: ResMut<Assets<BodyWaterMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
 ) {
     let Some(ref states) = cache.states else {
@@ -1283,7 +1174,7 @@ pub(super) fn update_body_terrain_atmosphere(
 
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     // Atmosphere airlight tuning (see `AtmosphereTuning`).
-    let tuning = &cloud_io.5;
+    let tuning = &cloud_io.2;
 
     // Planet center and orientation in render space from each body's grid
     // transform. The real-space grid rotation is body-local → world, so the
@@ -1395,9 +1286,9 @@ pub(super) fn update_body_terrain_atmosphere(
         // Cloud band radii (render units) for the body the cloud raymarch is
         // rendered for, so the sky pass can keep the cloud layer from painting
         // over closer geometry.
-        let cloud_band_radii = if Some(i) == cloud_io.3.0 {
+        let cloud_band_radii = if Some(i) == cloud_io.1.0 {
             cloud_io
-                .1
+                .0
                 .as_ref()
                 .map(|cfg| {
                     Vec4::new(
@@ -1447,11 +1338,8 @@ pub(super) fn update_body_terrain_atmosphere(
                 let wave_time_s = ocean_debug
                     .phase_time_override_s
                     .unwrap_or_else(|| sim.simulation.sim_time());
-                let projection = project_ocean_spectrum(
-                    &state,
-                    body.surface_gravity_m_s2(),
-                    wave_time_s,
-                );
+                let projection =
+                    project_ocean_spectrum(&state, body.surface_gravity_m_s2(), wave_time_s);
                 let camera_body =
                     body_state.orientation.inverse() * (camera_inertial - body_state.position);
                 let frame = ocean_wave_frame(camera_body, &state);
@@ -1549,7 +1437,7 @@ pub(super) fn update_body_terrain_atmosphere(
         // the handle and the render-space → shadow-clip transform. `params.x`
         // is 0 when the pass is inactive (orbit / off-surface), so the shader
         // skips sampling entirely.
-        let sun_shadow = &cloud_io.6;
+        let sun_shadow = &cloud_io.3;
         mat.sun_shadow_map_0 = sun_shadow.images[0].clone();
         mat.sun_shadow_map_1 = sun_shadow.images[1].clone();
         mat.sun_shadow_map_2 = sun_shadow.images[2].clone();
@@ -1557,10 +1445,10 @@ pub(super) fn update_body_terrain_atmosphere(
         // Screen-space AO (F5): bind the live half-res AO image so the shader can
         // multiply it into the ambient occlusion. The gate/debug flag rides
         // `inspection.w` (0 = off via THALOS_SSAO, 1 = apply, 2 = paint raw AO).
-        if let Some(ao) = &cloud_io.7 {
+        if let Some(ao) = &cloud_io.4 {
             mat.ao = ao.handle.clone();
         }
-        mat.extras.inspection.w = cloud_io.8.terrain_flag();
+        mat.extras.inspection.w = cloud_io.5.terrain_flag();
         // Live strength/gain override (keeps the terrain's atmosphere-driven
         // ambient sky fill in step with the sky dome). `< 0` = keep authored.
         if tuning.strength >= 0.0 {
@@ -1652,26 +1540,6 @@ pub(super) fn update_body_terrain_atmosphere(
             .unwrap_or_default();
     }
 
-    // The dormant mesh-water compatibility path follows the same canonical
-    // clock as the analytic ocean. Reduce before f32 upload for long sessions.
-    let wave_time = sim.simulation.sim_time().rem_euclid(4_096.0) as f32;
-    for (water, mat_handle) in &water_q {
-        let Some(mut mat) = water_materials.get_mut(mat_handle) else {
-            continue;
-        };
-        mat.scene = build_terrain_scene_lighting(water.body_id, states, &occluders, exposure.gain);
-        let render_pos = body_render_pos
-            .get(&water.body_id)
-            .copied()
-            .unwrap_or(Vec3::ZERO);
-        // Preserve the spawn-time `.w` (water surface radius) and only
-        // overwrite the centre + time fields.
-        let water_radius = mat.params.planet_center_radius.w;
-        mat.params.planet_center_radius =
-            Vec4::new(render_pos.x, render_pos.y, render_pos.z, water_radius);
-        mat.params.time.w = wave_time;
-    }
-
     for (sky, mat_handle) in &sky_q {
         let Some(extra) = sky_by_body.get(&sky.body_id) else {
             continue;
@@ -1704,21 +1572,6 @@ pub(super) fn update_body_terrain_atmosphere(
         let sky_strength = mat.atmosphere.atmos_geom.z.max(1.0e-3);
         mat.atmosphere_extra.cloud_band_radii.z =
             (tuning.aerial_perspective_strength / sky_strength).max(0.0);
-        // Bind the live volumetric cloud + cloud-distance textures for the
-        // active cloud body (the one `drive_clouds` is rendering); other
-        // bodies keep the blank fallbacks so their atmosphere pass composites
-        // no clouds.
-        if Some(sky.body_id) == cloud_io.3.0 {
-            if let Some(ref cr) = cloud_io.0 {
-                mat.cloud_layer = cr.handle.clone();
-            }
-            if let Some(ref cd) = cloud_io.2 {
-                mat.cloud_distance = cd.handle.clone();
-            }
-        } else if let Some(ref blanks) = cloud_io.4 {
-            mat.cloud_layer = blanks.layer.clone();
-            mat.cloud_distance = blanks.distance.clone();
-        }
         if let Some(clouds) = cache
             .environment
             .get(sky.body_id)

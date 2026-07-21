@@ -105,11 +105,46 @@ fn spawn_header(panel: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
         })
         .with_children(|row| {
             text(row, theme, "MANEUVER NODE", 12.0, theme.text_accent, None);
-            text(row, theme, "", 11.0, theme.text_dim, Some(EditorField::NodeNum));
-            text(row, theme, "", 11.0, theme.text_accent, Some(EditorField::Status));
-            text(row, theme, "", 11.0, theme.text_primary, Some(EditorField::Time));
-            text(row, theme, "", 11.0, theme.text_primary, Some(EditorField::DvTotal));
-            text(row, theme, "", 11.0, theme.text_dim, Some(EditorField::Burn));
+            text(
+                row,
+                theme,
+                "",
+                11.0,
+                theme.text_dim,
+                Some(EditorField::NodeNum),
+            );
+            text(
+                row,
+                theme,
+                "",
+                11.0,
+                theme.text_accent,
+                Some(EditorField::Status),
+            );
+            text(
+                row,
+                theme,
+                "",
+                11.0,
+                theme.text_primary,
+                Some(EditorField::Time),
+            );
+            text(
+                row,
+                theme,
+                "",
+                11.0,
+                theme.text_primary,
+                Some(EditorField::DvTotal),
+            );
+            text(
+                row,
+                theme,
+                "",
+                11.0,
+                theme.text_dim,
+                Some(EditorField::Burn),
+            );
             // Delete / Dismiss button.
             row.spawn((
                 Button,
@@ -168,8 +203,22 @@ fn spawn_axis_row(col: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, axis: Dv
         ..default()
     })
     .with_children(|row| {
-        spawn_button(row, theme, NudgeButton { axis, delta: -10.0 }, "−10", 9.0, 20.0);
-        spawn_button(row, theme, NudgeButton { axis, delta: -1.0 }, "−1", 9.0, 20.0);
+        spawn_button(
+            row,
+            theme,
+            NudgeButton { axis, delta: -10.0 },
+            "−10",
+            9.0,
+            20.0,
+        );
+        spawn_button(
+            row,
+            theme,
+            NudgeButton { axis, delta: -1.0 },
+            "−1",
+            9.0,
+            20.0,
+        );
         // Label + value, centred fixed-width so the buttons don't jump.
         row.spawn((
             Text::new(label.to_string()),
@@ -199,8 +248,22 @@ fn spawn_axis_row(col: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, axis: Dv
             },
             EditorField::AxisValue(axis),
         ));
-        spawn_button(row, theme, NudgeButton { axis, delta: 1.0 }, "+1", 9.0, 20.0);
-        spawn_button(row, theme, NudgeButton { axis, delta: 10.0 }, "+10", 9.0, 20.0);
+        spawn_button(
+            row,
+            theme,
+            NudgeButton { axis, delta: 1.0 },
+            "+1",
+            9.0,
+            20.0,
+        );
+        spawn_button(
+            row,
+            theme,
+            NudgeButton { axis, delta: 10.0 },
+            "+10",
+            9.0,
+            20.0,
+        );
     });
 }
 
@@ -245,8 +308,7 @@ pub(super) fn update_editor(
     mut texts: Query<(&EditorField, &mut Text)>,
     mut colors: Query<(&EditorField, &mut TextColor)>,
 ) {
-    let map_ok =
-        *view == ViewMode::Map && !pause.active && !scenario.open && !photo.active;
+    let map_ok = *view == ViewMode::Map && !pause.active && !scenario.open && !photo.active;
 
     // Resolve the selected node; drop a dangling selection.
     let node = selected
@@ -301,11 +363,18 @@ pub(super) fn update_editor(
             EditorField::Status => status.to_string(),
             EditorField::Time => format!("T{time_until:+.0}s"),
             EditorField::DvTotal => {
-                format!("Δv {}", crate::hud::format::delta_v_fine(total_dv, units.system))
+                format!(
+                    "Δv {}",
+                    crate::hud::format::delta_v_fine(total_dv, units.system)
+                )
             }
             EditorField::Burn => burn_text.clone(),
             EditorField::DeleteLabel => {
-                if executed { "Dismiss".into() } else { "Delete".into() }
+                if executed {
+                    "Dismiss".into()
+                } else {
+                    "Delete".into()
+                }
             }
             EditorField::AxisValue(DvAxis::Prograde) => {
                 crate::hud::format::delta_v_fine(node_dv.prograde, units.system)

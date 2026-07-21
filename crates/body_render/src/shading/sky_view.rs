@@ -245,7 +245,8 @@ fn sky_ray_radiance(
         let tau_view = beta_r * od_r + beta_m_v * od_m;
         let trans_view = vec3_exp(-tau_view);
 
-        let tau_sun = sun_optical_depth(pt, sun_dir, planet_r, atmos_top_r, beta_r, beta_m, h_r, h_m);
+        let tau_sun =
+            sun_optical_depth(pt, sun_dir, planet_r, atmos_top_r, beta_r, beta_m, h_r, h_m);
         let trans_sun = vec3_exp(-tau_sun);
 
         let weight = trans_view * trans_sun * ds;
@@ -328,7 +329,17 @@ mod tests {
     fn bake(sun_dir: Vec3, altitude: f32) -> SkyViewLut {
         let atmos = earth_atmos();
         let ms = MultiScatterLut::bake(&atmos, EARTH_R, 32, 32);
-        SkyViewLut::bake(&atmos, EARTH_R, altitude, sun_dir, Vec3::Y, 10.0, &ms, 48, 64)
+        SkyViewLut::bake(
+            &atmos,
+            EARTH_R,
+            altitude,
+            sun_dir,
+            Vec3::Y,
+            10.0,
+            &ms,
+            48,
+            64,
+        )
     }
 
     #[test]
@@ -371,7 +382,10 @@ mod tests {
             "daytime sky irradiance must be positive, got {day:?}"
         );
         // Blue-dominant (Rayleigh sky fill).
-        assert!(day.z > day.x, "sky irradiance should be blue-dominant: {day:?}");
+        assert!(
+            day.z > day.x,
+            "sky irradiance should be blue-dominant: {day:?}"
+        );
         let night = bake(Vec3::new(0.3, -1.0, 0.0).normalize(), 0.0)
             .ambient_sky_irradiance()
             .length();

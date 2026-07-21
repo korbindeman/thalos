@@ -38,15 +38,11 @@ pub struct BodySkyExtra {
     /// used by terrain/cloud cubemaps.
     pub world_to_body_orientation: Vec4,
     /// Volumetric cloud band radii in render units: x = base (planet_radius +
-    /// base altitude), y = top. Used by `body_sky.wgsl` to suppress the
-    /// composited `cloud_layer` where opaque geometry (ship hull, terrain) sits
-    /// in front of the cloud band. z = aerial-perspective airlight ratio.
-    /// **w = cloud-composite-enable flag**: 1.0 only on the body whose live
-    /// cloud texture is bound; 0.0 everywhere else (and when clouds are disabled
-    /// in graphics settings). The shader skips the cloud composite when w < 0.5,
-    /// because the 1×1 blank fallback bound on inactive bodies is read out of
-    /// bounds by the screen-space `textureLoad` (→ opaque black sky) if
-    /// composited. Zero on bodies with no active cloud layer.
+    /// base altitude), y = top. `CloudCompositeMaterial` uses these to clip and
+    /// blend its near/orbital projections. z = aerial-perspective airlight
+    /// ratio shared with the legacy atmosphere A/B. w = cloud-composite-enable
+    /// flag: 1.0 only for the active body with live cloud textures; 0.0 on
+    /// inactive/non-cloud bodies and when clouds are disabled.
     pub cloud_band_radii: Vec4,
     /// Analytic ocean parameters for `body_sky.wgsl`. The sky pass ray-traces a
     /// math sphere at `ocean.x` and shades it as water wherever that hit sits in
@@ -85,7 +81,7 @@ pub struct BodySkyExtra {
     /// Resident-height-tile lookup parameters
     /// (ADR-20260720T185958Z-water-projects-one-signed-sea-field). The ocean branch
     /// samples signed sea height straight from the udlod height atlas bound at
-    /// bindings 11–14 — the exact texels the visible terrain mesh is displaced
+    /// bindings 7–10 — the exact texels the visible terrain mesh is displaced
     /// from — with the coast atlas as the coarse tail.
     /// x = enable (≥ 0.5 only when the terrain's tile tree + atlas are bound),
     /// y = `lod_count`, z = `tree_size`, w = attachment-0 center size (texels

@@ -502,7 +502,10 @@ mod tests {
         }
         // Seated: the lowest vertex sits just below the origin.
         let min_y = a.positions.iter().fold(f32::INFINITY, |m, v| m.min(v[1]));
-        assert!(min_y < 0.0, "rock base should seat below origin, got {min_y}");
+        assert!(
+            min_y < 0.0,
+            "rock base should seat below origin, got {min_y}"
+        );
     }
 
     #[test]

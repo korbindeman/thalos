@@ -12,7 +12,7 @@ use thalos_shipyard::blueprint::default_params_for;
 use thalos_shipyard::{CatalogEntry, CatalogId, PartCatalog};
 
 use thalos_ui::{
-    self as ui, ButtonDesc, ButtonLabel, ButtonVariant, ScrollableColumn, SPACE_XS, UiButton,
+    self as ui, ButtonDesc, ButtonLabel, ButtonVariant, SPACE_XS, ScrollableColumn, UiButton,
     UiTheme, spawn_heading, tokens,
 };
 

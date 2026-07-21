@@ -28,7 +28,11 @@ fn lod_m_for(lod: u32) -> f32 {
 }
 
 fn tangent_basis(dir: DVec3) -> (DVec3, DVec3) {
-    let up = if dir.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+    let up = if dir.y.abs() < 0.9 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
     let east = up.cross(dir).normalize();
     let north = dir.cross(east).normalize();
     (east, north)
@@ -102,7 +106,11 @@ fn main() {
                 }
             }
             let above_pct = 100.0 * above as f64 / total as f64;
-            let mean_breach = if above > 0 { breach_sum / above as f64 } else { 0.0 };
+            let mean_breach = if above > 0 {
+                breach_sum / above as f64
+            } else {
+                0.0
+            };
             let mean_depth = if above < total {
                 depth_sum / (total - above) as f64
             } else {

@@ -205,7 +205,9 @@ fn section_ring(
     let chord = frame.chord_at(wing, span_fraction);
     perimeter
         .iter()
-        .map(|&(s, u)| center + frame.fore_dir * (s * chord) + frame.thick_dir * (u * chord) - origin)
+        .map(|&(s, u)| {
+            center + frame.fore_dir * (s * chord) + frame.thick_dir * (u * chord) - origin
+        })
         .collect()
 }
 
@@ -265,7 +267,10 @@ fn cap_ring(
 }
 
 fn finish_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     let uv = vec![[0.0_f32, 0.0]; positions.len()];
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
@@ -440,8 +445,7 @@ pub fn control_surface_geometry(
     let mid = 0.5 * (a + b);
     // Aft-wedge chord centroid sits between the hinge and the trailing edge.
     let s_centroid = 0.5 * (s_hinge + -0.5);
-    let centroid =
-        frame.center_at(mid) + frame.fore_dir * (s_centroid * frame.chord_at(wing, mid));
+    let centroid = frame.center_at(mid) + frame.fore_dir * (s_centroid * frame.chord_at(wing, mid));
 
     let span_len = (frame.tip_center - frame.root_center).length() * (b - a);
     let area_m2 = surface.chord_fraction.clamp(0.05, 0.95) * frame.chord_at(wing, mid) * span_len;
@@ -541,10 +545,19 @@ mod tests {
         // and pinched at both edges — unlike the old box (constant thickness).
         let tc = 0.12_f32;
         let yt_max = naca_half_thickness(tc, 0.3);
-        assert!(naca_half_thickness(tc, 0.0).abs() < 1e-6, "sharp/zero LE point");
-        assert!(naca_half_thickness(tc, 1.0).abs() < 1e-4, "closed trailing edge");
+        assert!(
+            naca_half_thickness(tc, 0.0).abs() < 1e-6,
+            "sharp/zero LE point"
+        );
+        assert!(
+            naca_half_thickness(tc, 1.0).abs() < 1e-4,
+            "closed trailing edge"
+        );
         // Peak half-thickness is ~t/2 (full thickness ~= t·chord).
-        assert!((yt_max - 0.5 * tc).abs() < 0.01 * tc + 0.01, "peak ~ t/2, got {yt_max}");
+        assert!(
+            (yt_max - 0.5 * tc).abs() < 0.01 * tc + 0.01,
+            "peak ~ t/2, got {yt_max}"
+        );
         // Convex: midspan thickness sits between the edge and the peak.
         let yt_mid = naca_half_thickness(tc, 0.6);
         assert!(yt_mid > 0.0 && yt_mid < yt_max);
@@ -559,8 +572,16 @@ mod tests {
         let angle = std::f32::consts::FRAC_PI_2;
         let m = build_wing_mesh(&w, angle, 1.0);
         let frame = wing_panel_frame(&w, angle, 1.0);
-        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
-        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let pos = m
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let nor = m
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
         let root_center = frame.center_at(0.0);
         let mut checked = 0;
         for (p, n) in pos.iter().zip(nor) {
@@ -588,15 +609,30 @@ mod tests {
         let angle = std::f32::consts::FRAC_PI_2;
         let m = build_wing_mesh(&w, angle, 1.0);
         let frame = wing_panel_frame(&w, angle, 1.0);
-        let pos = m.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
-        let nor = m.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().as_float3().unwrap();
+        let pos = m
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
+        let nor = m
+            .attribute(Mesh::ATTRIBUTE_NORMAL)
+            .unwrap()
+            .as_float3()
+            .unwrap();
         let near = |target: Vec3| {
-            pos.iter().position(|p| Vec3::from_array(*p).distance(target) < 1e-4)
+            pos.iter()
+                .position(|p| Vec3::from_array(*p).distance(target) < 1e-4)
         };
         let root_c = near(frame.center_at(0.0)).expect("root cap center vertex");
         let tip_c = near(frame.center_at(1.0)).expect("tip cap center vertex");
-        assert!(Vec3::from_array(nor[root_c]).dot(frame.span_dir) < -0.8, "root cap inboard");
-        assert!(Vec3::from_array(nor[tip_c]).dot(frame.span_dir) > 0.8, "tip cap outboard");
+        assert!(
+            Vec3::from_array(nor[root_c]).dot(frame.span_dir) < -0.8,
+            "root cap inboard"
+        );
+        assert!(
+            Vec3::from_array(nor[tip_c]).dot(frame.span_dir) > 0.8,
+            "tip cap outboard"
+        );
     }
 
     #[test]
@@ -619,13 +655,25 @@ mod tests {
         let aft_max_s = aft.iter().map(|&(s, _)| s).fold(f32::MIN, f32::max);
         // Forward spans LE (+0.5) down to the hinge; aft spans the hinge to TE.
         assert!((fwd_max_s - 0.5).abs() < 1e-4, "forward keeps the LE");
-        assert!((fwd_min_s - s_hinge).abs() < 1e-4, "forward stops at the hinge");
-        assert!((aft_max_s - s_hinge).abs() < 1e-4, "aft starts at the hinge");
+        assert!(
+            (fwd_min_s - s_hinge).abs() < 1e-4,
+            "forward stops at the hinge"
+        );
+        assert!(
+            (aft_max_s - s_hinge).abs() < 1e-4,
+            "aft starts at the hinge"
+        );
         assert!((aft_min_s - -0.5).abs() < 1e-4, "aft keeps the TE");
         // Both carry the blunt hinge face (a ± pair at s_hinge).
         let seam = naca_half_thickness(tc, x_hinge);
-        assert!(fwd.iter().any(|&(s, u)| (s - s_hinge).abs() < 1e-4 && u < -0.5 * seam));
-        assert!(aft.iter().any(|&(s, u)| (s - s_hinge).abs() < 1e-4 && u > 0.5 * seam));
+        assert!(
+            fwd.iter()
+                .any(|&(s, u)| (s - s_hinge).abs() < 1e-4 && u < -0.5 * seam)
+        );
+        assert!(
+            aft.iter()
+                .any(|&(s, u)| (s - s_hinge).abs() < 1e-4 && u > 0.5 * seam)
+        );
     }
 
     #[test]
@@ -651,11 +699,20 @@ mod tests {
         let frame = wing_panel_frame(&w, angle, 1.0);
         let fwd = forward_perimeter(w.thickness, 0.5 - hinge_s(0.25));
         let ring = section_ring(&frame, &w, 0.75, &fwd, Vec3::ZERO);
-        let notch_aft = ring.iter().map(|v| (*v - frame.root_center).dot(-frame.fore_dir)).fold(f32::MIN, f32::max);
+        let notch_aft = ring
+            .iter()
+            .map(|v| (*v - frame.root_center).dot(-frame.fore_dir))
+            .fold(f32::MIN, f32::max);
         let clean_full = airfoil_perimeter(w.thickness);
         let clean_ring = section_ring(&frame, &w, 0.75, &clean_full, Vec3::ZERO);
-        let clean_aft = clean_ring.iter().map(|v| (*v - frame.root_center).dot(-frame.fore_dir)).fold(f32::MIN, f32::max);
-        assert!(notch_aft < clean_aft - 0.1, "truncated section stops short of the clean TE");
+        let clean_aft = clean_ring
+            .iter()
+            .map(|v| (*v - frame.root_center).dot(-frame.fore_dir))
+            .fold(f32::MIN, f32::max);
+        assert!(
+            notch_aft < clean_aft - 0.1,
+            "truncated section stops short of the clean TE"
+        );
         assert!(notched.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().len() != clean_n);
     }
 
@@ -673,16 +730,33 @@ mod tests {
         w.control_surfaces = vec![surface];
         let angle = std::f32::consts::FRAC_PI_2;
         let built = build_control_surface_mesh(&w, &surface, angle, 1.0);
-        let pos = built.mesh.attribute(Mesh::ATTRIBUTE_POSITION).unwrap().as_float3().unwrap();
+        let pos = built
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .unwrap()
+            .as_float3()
+            .unwrap();
         assert!(!pos.is_empty());
         // Mesh is relative to the hinge anchor, so the leading (hinge) edge is
         // near the origin and the trailing edge extends aft of it.
-        let min_aft = pos.iter().map(|p| Vec3::from_array(*p).dot(crate::wing_mesh::wing_panel_frame(&w, angle, 1.0).fore_dir)).fold(f32::MAX, f32::min);
+        let min_aft = pos
+            .iter()
+            .map(|p| {
+                Vec3::from_array(*p)
+                    .dot(crate::wing_mesh::wing_panel_frame(&w, angle, 1.0).fore_dir)
+            })
+            .fold(f32::MAX, f32::min);
         // Some vertex sits well behind the hinge (−fore direction).
-        assert!(min_aft < -0.1, "surface should extend aft of its hinge anchor (min_aft {min_aft})");
+        assert!(
+            min_aft < -0.1,
+            "surface should extend aft of its hinge anchor (min_aft {min_aft})"
+        );
         // Hinge axis is roughly spanwise.
         let span_dir = wing_panel_frame(&w, angle, 1.0).span_dir;
-        assert!(built.geometry.hinge_axis.dot(span_dir) > 0.9, "hinge axis ~ spanwise");
+        assert!(
+            built.geometry.hinge_axis.dot(span_dir) > 0.9,
+            "hinge axis ~ spanwise"
+        );
         assert!(built.geometry.area_m2 > 0.0);
     }
 

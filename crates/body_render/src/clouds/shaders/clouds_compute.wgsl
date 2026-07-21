@@ -10,9 +10,10 @@ const CAM_EPSILON = 0.0001;
 // translation column scaled DOWN by 1e-4 (see `drive_clouds`); invert to
 // recover metres for reprojection.
 const CAM_POS_COLUMN_SCALE = 1.0e4;
-// History blend under camera motion — slightly weaker than the steady-view
-// `reprojection_strength`, since the reprojected sample is approximate.
-const MOVING_REPROJECTION_STRENGTH = 0.9;
+// Moving history is only a stabilizer. A cloud ray integrates a translucent
+// interval, so one nearest-hit motion vector cannot justify history-dominant
+// blending the way a single opaque surface can.
+const MOVING_REPROJECTION_STRENGTH = 0.45;
 const MAX_DISTANCE = 1.0e9;
 const WORLEY_RESOLUTION = 64;
 const WORLEY_RESOLUTION_F32 = 64.0;
@@ -73,11 +74,14 @@ struct Config {
     clouds_ambient_color_bottom: vec4f,
     clouds_min_transmittance: f32,
     planet_radius: f32,
+    atmosphere_top_height: f32,
+    atmosphere_lut_enabled: u32,
     forward_scattering_g: f32,
     backward_scattering_g: f32,
     scattering_lerp: f32,
     sun_dir: vec4f,
     sun_color: vec4f,
+    cloud_albedo: vec4f,
     camera_translation: vec3f,
     time: f32,
     reprojection_strength: f32,
@@ -111,6 +115,13 @@ struct Config {
 // paints coherent streak artifacts.
 @group(1) @binding(5) var history_texture: texture_2d<f32>;
 @group(1) @binding(6) var history_distance_texture: texture_2d<f32>;
+// Canonical Bevy-atmosphere LUTs for the active ship view. The render-world
+// bind-group prepare substitutes these directly from `AtmosphereTextures`;
+// custom/legacy atmosphere captures bind a 1x1 fallback and keep
+// `atmosphere_lut_enabled == 0`.
+@group(1) @binding(7) var atmosphere_transmittance_lut: texture_2d<f32>;
+@group(1) @binding(8) var atmosphere_sky_view_lut: texture_2d<f32>;
+@group(1) @binding(9) var atmosphere_lut_sampler: sampler;
 
 struct Ray {
     step_distance: f32,
@@ -298,12 +309,10 @@ fn henyey_greenstein(ray_dot_sun: f32, g: f32) -> f32 {
     return (1.0 - g_squared) / pow(1.0 + g_squared - 2.0 * g * ray_dot_sun, 1.5);
 }
 
-// ── CLOUD-4 atmosphere coupling (analytic first slice) ───────────────────────
-// Full LUT binding (sky-view / transmittance tables from F3/F4) is the finished
-// contract. Until then the volume uses the same exponential-air ideas as the
-// shared atmosphere path: chromatic sun air-mass, sample→camera extinction,
-// powder, and multi-scatter phase octaves. Constants are Thalos/Earth-like
-// (H≈8 km, β_R roughly matching the authored terrestrial scattering scale).
+// ── CLOUD-4 atmosphere coupling ──────────────────────────────────────────────
+// Normal rendering samples the SAME Bevy transmittance and sky-view LUTs that
+// render the rocky-body atmosphere. The analytic branch remains solely as the
+// deterministic fallback for the legacy custom-atmosphere A/B.
 
 const ATMOS_SCALE_HEIGHT_M = 8000.0;
 // Optical depth per metre at sea level × scale height ≈ column optical depth.
@@ -320,12 +329,101 @@ fn atmosphere_air_mass(r: f32, mu: f32) -> f32 {
     return dens * m;
 }
 
+fn atmosphere_outer_radius() -> f32 {
+    return config.planet_radius + max(config.atmosphere_top_height, 1.0);
+}
+
+fn atmosphere_distance_to_top(r: f32, mu: f32) -> f32 {
+    let outer = atmosphere_outer_radius();
+    let disc = max(r * r * (mu * mu - 1.0) + outer * outer, 0.0);
+    return max(-r * mu + sqrt(disc), 0.0);
+}
+
+// Bruneton 2008 transmittance parameterization used byte-for-byte in Bevy's
+// atmosphere LUT producer (`transmittance_lut_r_mu_to_uv`). Keeping the map
+// here lets the cloud compute pass consume the live texture without importing
+// Bevy's bind-group globals (which belong to a different pipeline layout).
+fn atmosphere_transmittance_uv(r_in: f32, mu: f32) -> vec2f {
+    let inner = config.planet_radius;
+    let outer = atmosphere_outer_radius();
+    let r = clamp(r_in, inner, outer);
+    let H = sqrt(max(outer * outer - inner * inner, 0.0));
+    let rho = sqrt(max(r * r - inner * inner, 0.0));
+    let d = atmosphere_distance_to_top(r, mu);
+    let d_min = outer - r;
+    let d_max = rho + H;
+    return vec2f((d - d_min) / max(d_max - d_min, 1.0e-5), rho / max(H, 1.0e-5));
+}
+
+fn sample_atmosphere_transmittance(r: f32, mu: f32) -> vec3f {
+    return textureSampleLevel(
+        atmosphere_transmittance_lut,
+        atmosphere_lut_sampler,
+        atmosphere_transmittance_uv(r, clamp(mu, -1.0, 1.0)),
+        0.0,
+    ).rgb;
+}
+
+fn atmosphere_ray_intersects_ground(r: f32, mu: f32) -> bool {
+    return mu < 0.0
+        && r * r * (mu * mu - 1.0) + config.planet_radius * config.planet_radius >= 0.0;
+}
+
+fn atmosphere_lut_segment_transmittance(
+    start_pos: vec3f,
+    direction: vec3f,
+    distance: f32,
+) -> vec3f {
+    let r = clamp(length(start_pos), config.planet_radius, atmosphere_outer_radius());
+    let mu = clamp(dot(start_pos / max(r, 1.0), direction), -1.0, 1.0);
+    let t = min(distance, atmosphere_distance_to_top(r, mu));
+    let r_t = max(sqrt(max(r * r + t * t + 2.0 * r * mu * t, 0.0)), 1.0);
+    let mu_t = clamp((r * mu + t) / r_t, -1.0, 1.0);
+    if atmosphere_ray_intersects_ground(r, mu) {
+        return min(
+            sample_atmosphere_transmittance(r_t, -mu_t)
+                / max(sample_atmosphere_transmittance(r, -mu), vec3f(1.0e-5)),
+            vec3f(1.0),
+        );
+    }
+    return min(
+        sample_atmosphere_transmittance(r, mu)
+            / max(sample_atmosphere_transmittance(r_t, mu_t), vec3f(1.0e-5)),
+        vec3f(1.0),
+    );
+}
+
+fn atmosphere_sky_zenith_radiance(camera_r_in: f32) -> vec3f {
+    let r = clamp(camera_r_in, config.planet_radius, atmosphere_outer_radius());
+    let rho = sqrt(max(r * r - config.planet_radius * config.planet_radius, 0.0));
+    let cos_beta = clamp(rho / max(r, 1.0), -1.0, 1.0);
+    let horizon_zenith = 3.14159265 - acos(cos_beta);
+    let l = -horizon_zenith; // zenith ray: view_zenith = 0
+    let v = 0.5 + 0.5 * sign(l) * sqrt(abs(l) / 1.57079633);
+    let dims = vec2f(textureDimensions(atmosphere_sky_view_lut));
+    let uv = (vec2f(0.5, v) + 0.5 / dims) * (dims / (dims + 1.0));
+    return textureSampleLevel(
+        atmosphere_sky_view_lut,
+        atmosphere_lut_sampler,
+        uv,
+        0.0,
+    ).rgb;
+}
+
 /// Sun → sample transmittance (RGB). Applied on top of the CPU-fed sun colour
 /// so low solar elevation and low-altitude samples both lose blue.
 fn atmosphere_sun_transmittance(sample_pos: vec3f) -> vec3f {
     let r = max(length(sample_pos), config.planet_radius);
     let up = sample_pos / r;
     let mu = dot(up, config.sun_dir.xyz);
+    // The planet itself occludes the sun below the geometric horizon.
+    let horizon_mu = -sqrt(max(1.0 - (config.planet_radius * config.planet_radius) / (r * r), 0.0));
+    if mu <= horizon_mu {
+        return vec3f(0.0);
+    }
+    if config.atmosphere_lut_enabled != 0u {
+        return sample_atmosphere_transmittance(r, mu);
+    }
     let am = atmosphere_air_mass(r, mu);
     // Column τ ≈ β * H * air_mass_factor; β_sea already per-metre, so × H.
     let tau = ATMOS_BETA_SEA * ATMOS_SCALE_HEIGHT_M * am;
@@ -340,6 +438,9 @@ fn atmosphere_view_transmittance(sample_pos: vec3f, camera_pos: vec3f) -> vec3f 
     let dist = length(delta);
     if (dist < 1.0) {
         return vec3f(1.0);
+    }
+    if config.atmosphere_lut_enabled != 0u {
+        return atmosphere_lut_segment_transmittance(sample_pos, -delta / dist, dist);
     }
     // Midpoint density proxy — good enough for ≤50 km cloud reach.
     let mid = 0.5 * (sample_pos + camera_pos);
@@ -484,6 +585,22 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         config.backward_scattering_g,
         config.scattering_lerp,
     );
+    var ambient_bottom = config.clouds_ambient_color_bottom.rgb;
+    var ambient_top = config.clouds_ambient_color_top.rgb;
+    if config.atmosphere_lut_enabled != 0u {
+        // The sky-view LUT is photometric, while the cloud volume still uses
+        // the spine's scene-flux units. Raw LUT radiance here overwhelms the
+        // reddened direct term and turns low-sun clouds white. Consume the
+        // canonical sky chromaticity, but retain the calibrated scene-flux
+        // ambient energy until F7 gives both paths one radiometric contract.
+        let sky_zenith = atmosphere_sky_zenith_radiance(length(ray_origin));
+        let sky_peak = max(max(sky_zenith.r, sky_zenith.g), max(sky_zenith.b, 1.0e-5));
+        let sky_chroma = sky_zenith / sky_peak;
+        let top_energy = max(max(ambient_top.r, ambient_top.g), ambient_top.b);
+        let bottom_energy = max(max(ambient_bottom.r, ambient_bottom.g), ambient_bottom.b);
+        ambient_top = sky_chroma * config.cloud_albedo.rgb * top_energy;
+        ambient_bottom = sky_chroma * config.cloud_albedo.rgb * bottom_energy;
+    }
 
     var dir_length = ray.dir_length;
     var dist = max_dist;
@@ -522,8 +639,8 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
 
             let h_clamped = clamp(normalized_height, 0.0, 1.0);
             let ambient_light = mix(
-                config.clouds_ambient_color_bottom,
-                config.clouds_ambient_color_top,
+                ambient_bottom,
+                ambient_top,
                 h_clamped
             );
 
@@ -544,7 +661,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 * powder;
             // Lift ambient slightly in deep shade so cores stay legible under
             // low sun_T without re-whitening the sunlit sheet.
-            let amb = ambient_light.rgb * (0.65 + 0.35 * (1.0 - sun_visibility));
+            let amb = ambient_light * (0.65 + 0.35 * (1.0 - sun_visibility));
 
             // Frostbite energy-conserving step, then sample→camera air so
             // in-scatter is pre-attenuated before the BodySky composite.
@@ -605,41 +722,39 @@ struct CloudsOutput {
     dist: f32,
 }
 
-// Bilinear history fetch in texel space (rr ∈ [0,1]² of the render target).
-// Nearest-texel history resampling re-quantises the reprojected position
-// every frame, which itself injects noise; bilinear keeps the accumulation
-// converging under sub-texel camera motion. Clamped two rows short of the
-// top texture rows, which hold the camera-save payload.
-fn sample_history_bilinear(rr: vec2f) -> vec4f {
+// Select one coherent colour/depth history sample from the reprojected 2×2
+// footprint. Distances cannot be bilinearly filtered: mixing a finite hit with
+// the clear sentinel creates a fictitious range, and even two finite depths can
+// straddle different cloud lobes. The expected old-camera range chooses the
+// geometrically closest tap; all-clear footprints return canonical clear.
+fn sample_history_matching(rr: vec2f, expected_dist: f32) -> CloudsOutput {
     let res = config.render_resolution.xy;
     let p = rr * res - 0.5;
     let base = floor(p);
-    let f = p - base;
     let b = vec2i(base);
     let cmax = vec2i(i32(res.x) - 1, i32(res.y) - 3);
     let c00 = clamp(b, vec2i(0, 0), cmax);
     let c11 = clamp(b + vec2i(1, 1), vec2i(0, 0), cmax);
-    let h00 = textureLoad(history_texture, vec2u(c00), 0);
-    let h10 = textureLoad(history_texture, vec2u(vec2i(c11.x, c00.y)), 0);
-    let h01 = textureLoad(history_texture, vec2u(vec2i(c00.x, c11.y)), 0);
-    let h11 = textureLoad(history_texture, vec2u(c11), 0);
-    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
-}
-
-fn sample_history_distance_bilinear(rr: vec2f) -> f32 {
-    let res = config.render_resolution.xy;
-    let p = rr * res - 0.5;
-    let base = floor(p);
-    let f = p - base;
-    let b = vec2i(base);
-    let cmax = vec2i(i32(res.x) - 1, i32(res.y) - 3);
-    let c00 = clamp(b, vec2i(0, 0), cmax);
-    let c11 = clamp(b + vec2i(1, 1), vec2i(0, 0), cmax);
-    let h00 = textureLoad(history_distance_texture, vec2u(c00), 0).r;
-    let h10 = textureLoad(history_distance_texture, vec2u(vec2i(c11.x, c00.y)), 0).r;
-    let h01 = textureLoad(history_distance_texture, vec2u(vec2i(c00.x, c11.y)), 0).r;
-    let h11 = textureLoad(history_distance_texture, vec2u(c11), 0).r;
-    return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+    let coords = array<vec2i, 4>(
+        c00,
+        vec2i(c11.x, c00.y),
+        vec2i(c00.x, c11.y),
+        c11,
+    );
+    var best = CloudsOutput(vec4f(0.0, 0.0, 0.0, 1.0), MAX_DISTANCE);
+    var best_error = MAX_DISTANCE;
+    for (var i = 0u; i < 4u; i += 1u) {
+        let coord = vec2u(coords[i]);
+        let dist = textureLoad(history_distance_texture, coord, 0).r;
+        if dist < 1.0e8 {
+            let error = abs(dist - expected_dist);
+            if error < best_error {
+                best_error = error;
+                best = CloudsOutput(textureLoad(history_texture, coord, 0), dist);
+            }
+        }
+    }
+    return best;
 }
 
 struct HistoryNeighborhood {
@@ -695,8 +810,18 @@ fn clamp_history(history: vec4f, current: vec4f, rr: vec2f) -> vec4f {
     return clipped;
 }
 
+fn camera_position(camera: mat4x4f) -> vec3f {
+    return camera[3].xyz * CAM_POS_COLUMN_SCALE;
+}
+
+fn camera_ray_direction(rr: vec2f, camera: mat4x4f) -> vec3f {
+    let ndc_xy = (rr * 2.0 - vec2f(1.0)) * vec2f(1.0, -1.0);
+    let ray_eye = config.inverse_camera_projection * vec4f(ndc_xy, -1.0, 1.0);
+    return normalize((camera * vec4f(ray_eye.xy, -1.0, 0.0)).xyz);
+}
+
 fn reproject_uv(point: vec3f, old_cam: mat4x4f) -> vec3f {
-    let cam_old = old_cam[3].xyz * CAM_POS_COLUMN_SCALE;
+    let cam_old = camera_position(old_cam);
     let rel = point - cam_old;
     let dv = vec3f(
         dot(old_cam[0].xyz, rel),
@@ -760,27 +885,21 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
         u32(config.render_resolution.y - 1.0) - u32(frag_coord.y),
     );
 
-    // Rotating 3x3 topology: one ninth of valid-history pixels run the full
-    // volume march. The other eight retain/reproject the body-fixed solution;
-    // every location is refreshed once per nine frames. A rejected history
-    // forces a full frame, which makes cuts/resizes/body changes immediately
-    // coherent instead of waiting for the sparse cycle to fill.
+    // A steady view uses the cheap rotating 3×3 topology: history is already
+    // screen-aligned, so one ninth of pixels can refresh each frame. A moving
+    // translucent volume has no single motion depth that can reconstruct its
+    // integrated radiance, even for one frame, so camera motion always traces
+    // every current ray. History may stabilize that fresh result below, but it
+    // never substitutes for current radiance. Invalid history also forces a
+    // coherent full frame after cuts/resizes/body changes.
     let sparse_slot = (current_texel.x % 3u) + 3u * (current_texel.y % 3u);
     let trace_pixel = config.sparse_march == 0u
         || !history_valid
+        || !cam_static
         || sparse_slot == (config.frame_index % 9u);
     if (!trace_pixel) {
         let old_dist = textureLoad(history_distance_texture, current_texel, 0).r;
-        if (cam_static || old_dist >= 1.0e8) {
-            return CloudsOutput(textureLoad(history_texture, current_texel, 0), old_dist);
-        }
-        let projected = reproject_uv(ray_origin + old_dist * ray_dir, old_cam);
-        if (projected.z > 0.5) {
-            return CloudsOutput(
-                sample_history_bilinear(projected.xy),
-                sample_history_distance_bilinear(projected.xy),
-            );
-        }
+        return CloudsOutput(textureLoad(history_texture, current_texel, 0), old_dist);
     }
 
     // Interleaved-gradient phase for the view march; temporal history removes
@@ -826,23 +945,28 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
         let p = ray_origin + result.dist * ray_dir;
         let projected = reproject_uv(p, old_cam);
         if (projected.z > 0.5) {
-                let hist_dist = sample_history_distance_bilinear(projected.xy);
+                let expected_old_dist = length(p - camera_position(old_cam));
+                let history = sample_history_matching(projected.xy, expected_old_dist);
                 // Soft disocclusion: weight history by cloud-depth agreement
                 // instead of a binary reject — hard accept/reject boundaries
                 // themselves pattern as fresh-noise speckle at every edge.
-                // The hit distance carries ~one-step jitter (≈ 5-10 %), so
-                // the ramp starts well above that.
-                let rel_err = abs(hist_dist - result.dist) / max(result.dist, 1.0);
-                let agree = 1.0 - smoothstep(0.15, 0.5, rel_err);
+                // Compare in the OLD camera's metric. Comparing its stored
+                // range to the current-camera range accepted false matches
+                // whenever the camera translated.
+                let rel_err = abs(history.dist - expected_old_dist)
+                    / max(expected_old_dist, 1.0);
+                let depth_agree = 1.0 - smoothstep(0.08, 0.25, rel_err);
+                let opacity_agree = 1.0
+                    - smoothstep(0.08, 0.28, abs(history.color.a - col.a));
                 // The public temporal-strength control gates *both* the
                 // steady same-pixel path and this moving-view path. Previously
                 // setting it to zero still kept 90% motion history, so a
                 // temporal-disabled diagnostic capture was impossible.
-                let sparse_temporal_scale = select(1.0, 0.78, config.sparse_march != 0u);
-                let w = MOVING_REPROJECTION_STRENGTH * sparse_temporal_scale * agree
+                let w = MOVING_REPROJECTION_STRENGTH
+                    * depth_agree * opacity_agree
                     * clamp(config.reprojection_strength, 0.0, 1.0);
                 if (w > 0.01) {
-                    let hist = clamp_history(sample_history_bilinear(projected.xy), col, projected.xy);
+                    let hist = clamp_history(history.color, col, projected.xy);
                     return CloudsOutput(mix(col, hist, w), result.dist);
                 }
         }
@@ -854,16 +978,10 @@ fn get_ray_direction(frag_coord: vec2f) -> vec3f {
     // inverse_camera_projection is also called view_from_clip
     // inverse_camera_view is also called world_from_view; here it is
     // body_from_world × world_from_view, so rays come out body-fixed.
-    let rect_relative = frag_coord / config.render_resolution;
-
-    // Flip the Y co-ordinate from the clouds_top_height to the clouds_bottom_height to enter NDC.
-    let ndc_xy = (rect_relative * 2.0 - vec2f(1.0, 1.0)) * vec2f(1.0, -1.0);
-
-    let ray_clip = vec4f(ndc_xy.xy, -1.0, 1.0);
-    let ray_eye = config.inverse_camera_projection * ray_clip;
-    let ray_world = config.inverse_camera_view * vec4f(ray_eye.xy, -1.0, 0.0);
-
-    return normalize(ray_world.xyz);
+    return camera_ray_direction(
+        frag_coord / config.render_resolution,
+        config.inverse_camera_view,
+    );
 }
 
 @compute @workgroup_size(8, 8, 1)

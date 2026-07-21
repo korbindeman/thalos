@@ -16,8 +16,8 @@
 //!    this fn with a real plume/particle effect when ready — the
 //!    plumbing in (1) stays.
 
-use bevy::prelude::*;
 use crate::shipyard_editor::core::EditorPart;
+use bevy::prelude::*;
 use thalos_shipyard::{Engine, EngineActivation, EngineThrust};
 
 use crate::SimStage;

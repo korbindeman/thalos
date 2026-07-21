@@ -9,7 +9,10 @@ use glam::DVec3;
 use thalos_terrain::ProceduralSurface;
 use thalos_terrain::query::SurfaceQuery;
 
-const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/runway_skyline.png");
+const OUT: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../target/runway_skyline.png"
+);
 
 const RUNWAY_LAT: f64 = 7.6;
 const RUNWAY_LON: f64 = 178.0;

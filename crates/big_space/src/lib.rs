@@ -333,4 +333,3 @@ pub mod precision {
     /// If you see this, no integer [`precision`] feature was enabled, so `i64` was used by default.
     pub type GridPrecision = i64;
 }
-

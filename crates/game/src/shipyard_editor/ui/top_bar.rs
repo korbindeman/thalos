@@ -19,8 +19,8 @@ use crate::shipyard_editor::core::{
 };
 use crate::spawn::SpawnSituation;
 
-use super::hangar::HangarOpen;
 use super::EditorStatsCache;
+use super::hangar::HangarOpen;
 
 #[derive(Component, Clone, Copy, PartialEq)]
 pub(super) enum TopBarAction {
@@ -96,12 +96,47 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
             },
             BackgroundColor(ui::tokens::STROKE),
         ));
-        spawn_button(bar, theme, TopBarAction::Hangar, "HANGAR", ButtonVariant::Ghost, ui::CTRL_H);
-        spawn_button(bar, theme, TopBarAction::Save, "SAVE", ButtonVariant::Ghost, ui::CTRL_H);
-        spawn_button(bar, theme, TopBarAction::New, "NEW", ButtonVariant::Ghost, ui::CTRL_H);
+        spawn_button(
+            bar,
+            theme,
+            TopBarAction::Hangar,
+            "HANGAR",
+            ButtonVariant::Ghost,
+            ui::CTRL_H,
+        );
+        spawn_button(
+            bar,
+            theme,
+            TopBarAction::Save,
+            "SAVE",
+            ButtonVariant::Ghost,
+            ui::CTRL_H,
+        );
+        spawn_button(
+            bar,
+            theme,
+            TopBarAction::New,
+            "NEW",
+            ButtonVariant::Ghost,
+            ui::CTRL_H,
+        );
         // LAUNCH is the headline action — fly the current design.
-        spawn_button(bar, theme, TopBarAction::Launch, "▶  LAUNCH", ButtonVariant::Primary, ui::CTRL_H);
-        spawn_button(bar, theme, TopBarAction::Exit, "EXIT", ButtonVariant::Bare, ui::CTRL_H);
+        spawn_button(
+            bar,
+            theme,
+            TopBarAction::Launch,
+            "▶  LAUNCH",
+            ButtonVariant::Primary,
+            ui::CTRL_H,
+        );
+        spawn_button(
+            bar,
+            theme,
+            TopBarAction::Exit,
+            "EXIT",
+            ButtonVariant::Bare,
+            ui::CTRL_H,
+        );
     });
 }
 

@@ -63,11 +63,11 @@ use thalos_world::{BodyId, StateVector};
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
-use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
-use crate::rendering::terrain_residency::TerrainRebuildRequest;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
+use crate::rendering::terrain_residency::TerrainRebuildRequest;
 use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
 use crate::spawn::{CraftPlacement, SpawnSituation, coast_placement, place_craft};
@@ -192,7 +192,10 @@ fn enable_cruise_engines(
     mut lit: Local<Option<Entity>>,
     situation: Res<SpawnSituation>,
     ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
-    mut activations: Query<&mut EngineActivation, Without<crate::shipyard_editor::core::EditorPart>>,
+    mut activations: Query<
+        &mut EngineActivation,
+        Without<crate::shipyard_editor::core::EditorPart>,
+    >,
 ) {
     if !matches!(*situation, SpawnSituation::Cruise) {
         return;
@@ -442,7 +445,13 @@ fn finish_runway_spawn(
     // landing gear at the loaded static-sag equilibrium.
     gear_geometry: (
         crate::local_physics::PartColliderQuery,
-        Query<(&Gear, &SurfaceMount), (With<Part>, Without<crate::shipyard_editor::core::EditorPart>)>,
+        Query<
+            (&Gear, &SurfaceMount),
+            (
+                With<Part>,
+                Without<crate::shipyard_editor::core::EditorPart>,
+            ),
+        >,
         Query<&AttachNodes>,
         Res<crate::local_physics::GearTuning>,
     ),
@@ -470,8 +479,17 @@ fn finish_runway_spawn(
         };
         let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
         match measure_runway_clearance(
-            &sim, body_id, ship_entity, ship_gt, &children_q, &mesh_q, &meshes, parts, gear_q,
-            host_nodes, gear_tuning,
+            &sim,
+            body_id,
+            ship_entity,
+            ship_gt,
+            &children_q,
+            &mesh_q,
+            &meshes,
+            parts,
+            gear_q,
+            host_nodes,
+            gear_tuning,
         ) {
             Some(c) => c,
             None => return, // craft gear/geometry not ready yet — retry
@@ -626,9 +644,8 @@ pub(crate) fn build_spaceport(
     // Where the offset rectangle actually is — the elevation sampling below
     // must average the ground the flatten will level, not the anchor's
     // surroundings.
-    let basin_center_dir = (center_dir * body_radius_m
-        + basin_across * BASIN_RECT_OFFSET_ACROSS_M)
-        .normalize();
+    let basin_center_dir =
+        (center_dir * body_radius_m + basin_across * BASIN_RECT_OFFSET_ACROSS_M).normalize();
     let basin_center_h = hs
         .sample_height_m(basin_center_dir.as_vec3(), PHYSICS_QUERY_TILE_LOD_M)
         .unwrap_or(center_h as f32) as f64;
@@ -780,7 +797,13 @@ pub(crate) fn build_spaceport(
     // `pair_side` is 0 for both: the 30° heading divergence gives each strip its
     // own true-heading designator numbers, so no L/R suffix pair is needed.
     for (hdg, center_offset, pair_side, half_len, half_wid) in [
-        (heading_tangent, DVec3::ZERO, 0i8, RUNWAY_HALF_LENGTH_M, RUNWAY_HALF_WIDTH_M),
+        (
+            heading_tangent,
+            DVec3::ZERO,
+            0i8,
+            RUNWAY_HALF_LENGTH_M,
+            RUNWAY_HALF_WIDTH_M,
+        ),
         (
             sec_heading,
             sec_center_offset,
@@ -876,7 +899,10 @@ pub(crate) fn measure_runway_clearance(
     parts: &crate::local_physics::PartColliderQuery,
     gear_q: &Query<
         (&Gear, &SurfaceMount),
-        (With<Part>, Without<crate::shipyard_editor::core::EditorPart>),
+        (
+            With<Part>,
+            Without<crate::shipyard_editor::core::EditorPart>,
+        ),
     >,
     host_nodes: &Query<&AttachNodes>,
     gear_tuning: &crate::local_physics::GearTuning,
@@ -919,7 +945,10 @@ fn enable_runway_engines(
     situation: Res<SpawnSituation>,
     site: Option<Res<RunwaySite>>,
     ships: Query<Entity, (With<PlayerShip>, With<crate::staging::StagingPlan>)>,
-    mut activations: Query<&mut EngineActivation, Without<crate::shipyard_editor::core::EditorPart>>,
+    mut activations: Query<
+        &mut EngineActivation,
+        Without<crate::shipyard_editor::core::EditorPart>,
+    >,
 ) {
     if !situation.is_runway() || site.is_none() {
         return;
@@ -1031,7 +1060,11 @@ fn footprint_stats(
             }
         }
     }
-    let mean_h = if count > 0 { sum_h / count as f64 } else { center_h };
+    let mean_h = if count > 0 {
+        sum_h / count as f64
+    } else {
+        center_h
+    };
     (max_h, min_h, mean_h)
 }
 
@@ -1413,7 +1446,10 @@ fn runway_heading_deg(frame: &RunwayFrame) -> f64 {
         });
     let east = up.cross(north).normalize();
     let h = frame.heading;
-    h.dot(east).atan2(h.dot(north)).to_degrees().rem_euclid(360.0)
+    h.dot(east)
+        .atan2(h.dot(north))
+        .to_degrees()
+        .rem_euclid(360.0)
 }
 
 /// Runway designator digit (01–36) from a compass heading, rounded to the
@@ -1467,7 +1503,11 @@ fn spawn_runway_numbers(
             false,
         ),
         (
-            format!("{:02}{}", runway_designator(heading_deg + 180.0), suffix(true)),
+            format!(
+                "{:02}{}",
+                runway_designator(heading_deg + 180.0),
+                suffix(true)
+            ),
             frame.half_length_m - NUM_THRESHOLD_MARGIN_M - NUM_DIGIT_H_M * 0.5,
             true,
         ),
@@ -1495,7 +1535,13 @@ fn spawn_runway_numbers(
         // rasterized aspect ratio so the digits keep the font's proportions.
         let half_along = NUM_DIGIT_H_M * 0.5;
         let half_across = half_along * (w as f64 / h as f64);
-        let mesh = meshes.add(build_number_quad(frame, along_center, half_along, half_across, rot180));
+        let mesh = meshes.add(build_number_quad(
+            frame,
+            along_center,
+            half_along,
+            half_across,
+            rot180,
+        ));
         commands.spawn((
             Mesh3d(mesh),
             MeshMaterial3d(material),
@@ -1839,7 +1885,14 @@ pub(crate) fn craft_ground_clearance(
 ) -> Option<f64> {
     // The craft frame is `+Z` dorsal (up), so the lowest visual point is the
     // greatest extent along `-Z`.
-    craft_extent_below(root_entity, root_gt, children_q, mesh_q, meshes, Vec3::NEG_Z)
+    craft_extent_below(
+        root_entity,
+        root_gt,
+        children_q,
+        mesh_q,
+        meshes,
+        Vec3::NEG_Z,
+    )
 }
 
 /// How far the craft's lowest visual point sits below its origin **along the

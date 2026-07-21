@@ -16,6 +16,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 
+use crate::shipyard_editor::core::EditorPart;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
 use bevy::math::DVec3;
@@ -23,13 +24,12 @@ use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_canonical::types::ShipParameters;
-use crate::shipyard_editor::core::EditorPart;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
-    PodGeometry, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial,
-    ShipyardPlugin, SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh,
-    build_control_surface_mesh, build_fuselage_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
+    PodGeometry, Ship, ShipBlueprint, ShipPartExtension, ShipPartMaterial, ShipyardPlugin,
+    SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh, build_control_surface_mesh,
+    build_fuselage_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
     build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
     landing_gear_base, pod_visual_profile, stainless_steel_base,
 };
@@ -85,10 +85,7 @@ impl Plugin for ShipViewPlugin {
             // (`WorldState::Absent`), and the menu sets the chosen scenario's
             // `SpawnSituation` + vessel kind *before* flipping `Live`, so this
             // builds the right blueprint (or EVA-skips) when it fires.
-            .add_systems(
-                OnEnter(crate::loading::WorldState::Live),
-                spawn_player_ship,
-            )
+            .add_systems(OnEnter(crate::loading::WorldState::Live), spawn_player_ship)
             // Re-acquire the craft when returning to flight from any in-world
             // modal (launch-select / hub / base editor / VAB). Without this the
             // ship camera keeps whatever focus the modal left — on a session's

@@ -11,11 +11,11 @@ use bevy::picking::hover::HoverMap;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 
-use thalos_input::shipyard::ShipyardInputIntent;
 use crate::shipyard_editor::core::{
     BuildOrientation, CLICK_THRESHOLD_PX, EditorState, EditorUiGate, EditorViewCamera,
     TankResizeArrow, TankResizeDrag,
 };
+use thalos_input::shipyard::ShipyardInputIntent;
 
 use crate::coords::EDITOR_LAYER;
 

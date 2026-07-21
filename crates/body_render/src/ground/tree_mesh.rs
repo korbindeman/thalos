@@ -232,8 +232,7 @@ fn push_trunk(b: &mut TreeMeshData, params: &TreeMeshParams, segments: u32) {
         let k = (1.0 - t / 0.18).max(0.0);
         1.0 + 0.55 * k * k
     };
-    let ring_r =
-        |j: u32| (base_r + (top_r - base_r) * (j as f32 / bands as f32)) * flare(j);
+    let ring_r = |j: u32| (base_r + (top_r - base_r) * (j as f32 / bands as f32)) * flare(j);
     // Trunk darkens slightly toward the base (an AO nudge; the bark fragment takes
     // colour from the texture, but the tint is kept for any vertex-colour consumer).
     let ring_col = |j: u32| params.trunk_color * (0.85 + 0.15 * j as f32 / bands as f32);
@@ -256,12 +255,42 @@ fn push_trunk(b: &mut TreeMeshData, params: &TreeMeshParams, segments: u32) {
             let (n0, n1) = (Vec3::new(c0, 0.0, s0), Vec3::new(c1, 0.0, s1));
             // One independent quad = the full cell: BL/BR/TL/TR → corners 0/1/3/2.
             let start = b.positions.len() as u32;
-            b.push_vert(Vec3::new(c0 * rb, yb, s0 * rb), n0, cb, wb, leaf_code(bark, 0));
-            b.push_vert(Vec3::new(c1 * rb, yb, s1 * rb), n1, cb, wb, leaf_code(bark, 1));
-            b.push_vert(Vec3::new(c0 * rt, yt, s0 * rt), n0, ct, wt, leaf_code(bark, 3));
-            b.push_vert(Vec3::new(c1 * rt, yt, s1 * rt), n1, ct, wt, leaf_code(bark, 2));
-            b.indices
-                .extend_from_slice(&[start, start + 1, start + 2, start + 1, start + 3, start + 2]);
+            b.push_vert(
+                Vec3::new(c0 * rb, yb, s0 * rb),
+                n0,
+                cb,
+                wb,
+                leaf_code(bark, 0),
+            );
+            b.push_vert(
+                Vec3::new(c1 * rb, yb, s1 * rb),
+                n1,
+                cb,
+                wb,
+                leaf_code(bark, 1),
+            );
+            b.push_vert(
+                Vec3::new(c0 * rt, yt, s0 * rt),
+                n0,
+                ct,
+                wt,
+                leaf_code(bark, 3),
+            );
+            b.push_vert(
+                Vec3::new(c1 * rt, yt, s1 * rt),
+                n1,
+                ct,
+                wt,
+                leaf_code(bark, 2),
+            );
+            b.indices.extend_from_slice(&[
+                start,
+                start + 1,
+                start + 2,
+                start + 1,
+                start + 3,
+                start + 2,
+            ]);
         }
     }
 }
@@ -739,7 +768,13 @@ fn push_limb(
         let (s, c) = a.sin_cos();
         let radial = (t * c + bi * s).normalize_or(t);
         let (cb, ct) = if i & 1 == 0 { (0, 3) } else { (1, 2) };
-        b.push_vert(base + radial * r0, radial, color * 0.85, wind0, leaf_code(bark, cb));
+        b.push_vert(
+            base + radial * r0,
+            radial,
+            color * 0.85,
+            wind0,
+            leaf_code(bark, cb),
+        );
         b.push_vert(tip + radial * r1, radial, color, wind1, leaf_code(bark, ct));
     }
     for i in 0..seg {
@@ -753,7 +788,11 @@ fn push_limb(
 /// An orthonormal basis `(tangent, bitangent)` spanning the plane perpendicular
 /// to `axis`.
 fn ortho_basis(axis: Vec3) -> (Vec3, Vec3) {
-    let up_ref = if axis.y.abs() > 0.95 { Vec3::X } else { Vec3::Y };
+    let up_ref = if axis.y.abs() > 0.95 {
+        Vec3::X
+    } else {
+        Vec3::Y
+    };
     let t = axis.cross(up_ref).normalize_or(Vec3::X);
     let bi = axis.cross(t).normalize_or(Vec3::Z);
     (t, bi)

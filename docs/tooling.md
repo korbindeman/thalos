@@ -126,8 +126,9 @@ Generated evidence has three deliberately separate homes:
 - `tools/agent_scratch/` is disposable visual working space. Put ad-hoc
   `THALOS_SCREENSHOT_OUT` captures there; `just compare` writes its complete
   matrices under `tools/agent_scratch/screenshots/comparisons/` automatically.
-- `tools/diagnostics/` contains machine-readable runtime output. The memory and
-  grass diagnostics default there, and a bare filename supplied through
+- `tools/diagnostics/` contains machine-readable runtime output. F8 writes the
+  latest player-to-agent camera handoff to `latest_perspective.json`; memory and
+  grass diagnostics also default there, and a bare filename supplied through
   `THALOS_GRASS_LOG`, `THALOS_SHADOW_LOG`, or
   `THALOS_SHIPYARD_SELECT_LOG` is resolved there. An explicit relative path
   with a parent, or an absolute path, is still honored.

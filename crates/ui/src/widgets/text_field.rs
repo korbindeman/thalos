@@ -7,8 +7,8 @@
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
 
-use crate::tokens::*;
 use crate::UiTheme;
+use crate::tokens::*;
 
 /// A single-line editable text field. Consumers read `value` (or react to
 /// `Changed<UiTextField>`) and may write it to sync from the model.
@@ -165,13 +165,13 @@ pub fn update_text_field_visuals(
     for (entity, field, children) in &fields {
         let focused = focus.field == Some(entity);
         let (shown, color, font) = if field.value.is_empty() && !focused {
+            (field.placeholder.clone(), TEXT_FAINT, theme.font_ui.clone())
+        } else if focused {
             (
-                field.placeholder.clone(),
-                TEXT_FAINT,
+                format!("{}▏", field.value),
+                TEXT_PRIMARY,
                 theme.font_ui.clone(),
             )
-        } else if focused {
-            (format!("{}▏", field.value), TEXT_PRIMARY, theme.font_ui.clone())
         } else {
             (field.value.clone(), TEXT_PRIMARY, theme.font_ui.clone())
         };

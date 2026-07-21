@@ -16,7 +16,7 @@ use bevy::asset::{AssetPlugin, RenderAssetUsages};
 use bevy::camera::{ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-use bevy::render::view::screenshot::{save_to_disk, Screenshot};
+use bevy::render::view::screenshot::{Screenshot, save_to_disk};
 use bevy::ui::IsDefaultUiCamera;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
@@ -80,10 +80,7 @@ fn main() {
 
     app.add_plugins(ThalosUiPlugin)
         .add_systems(Startup, setup_scene)
-        .add_systems(
-            Startup,
-            (setup_ui, spawn_demo_toast).after(init_ui_theme),
-        )
+        .add_systems(Startup, (setup_ui, spawn_demo_toast).after(init_ui_theme))
         .run();
 }
 
@@ -113,9 +110,8 @@ fn make_target(images: &mut Assets<Image>) -> Handle<Image> {
         TextureFormat::Rgba8UnormSrgb,
         RenderAssetUsages::RENDER_WORLD,
     );
-    target.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING
-        | TextureUsages::COPY_SRC
-        | TextureUsages::RENDER_ATTACHMENT;
+    target.texture_descriptor.usage =
+        TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_SRC | TextureUsages::RENDER_ATTACHMENT;
     images.add(target)
 }
 
@@ -322,10 +318,31 @@ fn controls_panel(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
                 ..default()
             })
             .with_children(|row| {
-                spawn_button(row, theme, DemoAction, "▶ LAUNCH", ButtonVariant::Primary, CTRL_H);
-                spawn_button(row, theme, DemoAction, "GHOST", ButtonVariant::Ghost, CTRL_H);
+                spawn_button(
+                    row,
+                    theme,
+                    DemoAction,
+                    "▶ LAUNCH",
+                    ButtonVariant::Primary,
+                    CTRL_H,
+                );
+                spawn_button(
+                    row,
+                    theme,
+                    DemoAction,
+                    "GHOST",
+                    ButtonVariant::Ghost,
+                    CTRL_H,
+                );
                 spawn_button(row, theme, DemoAction, "BARE", ButtonVariant::Bare, CTRL_H);
-                spawn_button(row, theme, DemoAction, "DELETE", ButtonVariant::Danger, CTRL_H);
+                spawn_button(
+                    row,
+                    theme,
+                    DemoAction,
+                    "DELETE",
+                    ButtonVariant::Danger,
+                    CTRL_H,
+                );
             });
         spawn_heading(panel, theme, "TOGGLES (LATCHED STATES)", true);
         panel
@@ -335,12 +352,26 @@ fn controls_panel(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
                 ..default()
             })
             .with_children(|row| {
-                let on = spawn_button(row, theme, DemoAction, "MIRROR 2×", ButtonVariant::Ghost, CTRL_H);
+                let on = spawn_button(
+                    row,
+                    theme,
+                    DemoAction,
+                    "MIRROR 2×",
+                    ButtonVariant::Ghost,
+                    CTRL_H,
+                );
                 row.commands_mut()
                     .entity(on)
                     .entry::<UiButton>()
                     .and_modify(|mut b| b.latched = true);
-                spawn_button(row, theme, DemoAction, "SNAP 15°", ButtonVariant::Ghost, CTRL_H);
+                spawn_button(
+                    row,
+                    theme,
+                    DemoAction,
+                    "SNAP 15°",
+                    ButtonVariant::Ghost,
+                    CTRL_H,
+                );
             });
         spawn_heading(panel, theme, "TEXT FIELD", true);
         panel

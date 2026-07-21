@@ -8,17 +8,18 @@
 //! Reuses the same atmosphere uniforms as [`crate::BodyTerrainMaterial`] so a
 //! single per-frame update system writes both.
 //!
-//! ## Manual `AsBindGroup` (ADR-20260720T185958Z-water-projects-one-signed-sea-field)
+//! ## Shared optical `AsBindGroup` (ADR-20260720T185958Z-water-projects-one-signed-sea-field)
 //!
-//! The analytic-ocean branch samples **signed sea height straight from the
+//! [`BodyOceanMaterial`](super::BodyOceanMaterial) delegates this binding
+//! implementation so the analytic-ocean branch samples **signed sea height straight from the
 //! udlod height-tile atlas** — the exact texels the visible terrain mesh is
 //! displaced from — so water coverage/colour are a projection of the one
 //! terrain field instead of a depth-buffer comparison. Those resources
 //! (attachment-0 texture array, tile-tree + origins storage buffers) live in
 //! udlod's render-world registries, not in `Assets`, so the derive can't bind
-//! them: this material implements `AsBindGroup` by hand, keeping the derive's
-//! exact layout for bindings 0–10, appending the tile lookup at 11–14, and
-//! binding the shared mipmapped ocean slope field at 15–16.
+//! them: this shared optical contract implements `AsBindGroup` by hand, keeping the derive's
+//! exact layout for bindings 0–6, appending the tile lookup at 7–10, and
+//! binding the shared mipmapped ocean slope field at 11–12.
 //! The material is mutated every frame by the game's sky update, so the bind
 //! group re-prepares every frame and the lookup never goes stale across
 //! terrain despawn/respawn.
@@ -66,9 +67,6 @@ pub struct BodySkyMaterial {
     /// fragment shader to clip the atmosphere raymarch at opaque geometry,
     /// which is what produces aerial perspective on terrain pixels.
     pub scene_depth: Handle<Image>,
-    /// Reference cloud-cover cubemap shared with the impostor material.
-    /// Bodies without a registered overlay bind the same blank cube fallback.
-    pub cloud_cover: Handle<Image>,
     /// Per-body multi-scatter LUT (32×32 `Rgba16Float`), baked once at spawn by
     /// `thalos_planet_lighting::bake_multi_scatter_lut` and never updated — the
     /// atmosphere parameters are static. `body_sky.wgsl` samples it at every
@@ -79,20 +77,6 @@ pub struct BodySkyMaterial {
     /// without it the midday sky is physically dim and the celestial backdrop
     /// bleeds through. Indexed by `(u = (sun·zenith + 1) / 2, v = h / atmos_top)`.
     pub multi_scatter_lut: Handle<Image>,
-    /// High-fidelity volumetric cloud layer rendered by `body_render::clouds`
-    /// (RGBA32F: rgb = premultiplied in-scatter, a = transmittance), composited
-    /// over the atmosphere in-scatter as the final step of the fullscreen pass.
-    /// Sampled with `textureLoad` (unfilterable float, no sampler). The game
-    /// binds the live cloud texture for the active cloud body and a 1×1
-    /// "clear" fallback (a = 1) for every other body, so the composite is a
-    /// no-op where there are no clouds.
-    pub cloud_layer: Handle<Image>,
-    /// Per-pixel nearest cloud-hit distance from the same raymarch (R32F,
-    /// metres from the camera; ≥ 1e8 sentinel = no cloud on the ray). Lets the
-    /// composite occlude clouds against opaque geometry by true depth rather
-    /// than by the geometric shell-band approximation. Bodies without an
-    /// active cloud layer bind a 1×1 far-sentinel fallback.
-    pub cloud_distance: Handle<Image>,
     /// Per-body coast/bathymetry cube (ADR-20260720T185957Z-coastline-as-authored-data): signed terrain height about
     /// sea level, `R16Unorm`-encoded over `±COAST_ATLAS_HEIGHT_RANGE_M`, baked
     /// once at spawn by [`crate::bake_coast_bathymetry_cube`] from the same
@@ -145,10 +129,7 @@ impl AsBindGroup for BodySkyMaterial {
         };
 
         let scene_depth = image(&self.scene_depth)?;
-        let cloud_cover = image(&self.cloud_cover)?;
         let multi_scatter_lut = image(&self.multi_scatter_lut)?;
-        let cloud_layer = image(&self.cloud_layer)?;
-        let cloud_distance = image(&self.cloud_distance)?;
         let coast_atlas = image(&self.coast_atlas)?;
         let ocean_slope = image(&self.ocean_slope)?;
 
@@ -238,78 +219,50 @@ impl AsBindGroup for BodySkyMaterial {
             (
                 3,
                 OwnedBindingResource::TextureView(
-                    TextureViewDimension::Cube,
-                    cloud_cover.texture_view.clone(),
+                    TextureViewDimension::D2,
+                    multi_scatter_lut.texture_view.clone(),
                 ),
             ),
             (
                 4,
                 OwnedBindingResource::Sampler(
                     SamplerBindingType::Filtering,
-                    cloud_cover.sampler.clone(),
-                ),
-            ),
-            (
-                5,
-                OwnedBindingResource::TextureView(
-                    TextureViewDimension::D2,
-                    multi_scatter_lut.texture_view.clone(),
-                ),
-            ),
-            (
-                6,
-                OwnedBindingResource::Sampler(
-                    SamplerBindingType::Filtering,
                     multi_scatter_lut.sampler.clone(),
                 ),
             ),
             (
-                7,
-                OwnedBindingResource::TextureView(
-                    TextureViewDimension::D2,
-                    cloud_layer.texture_view.clone(),
-                ),
-            ),
-            (
-                8,
-                OwnedBindingResource::TextureView(
-                    TextureViewDimension::D2,
-                    cloud_distance.texture_view.clone(),
-                ),
-            ),
-            (
-                9,
+                5,
                 OwnedBindingResource::TextureView(
                     TextureViewDimension::Cube,
                     coast_atlas.texture_view.clone(),
                 ),
             ),
             (
-                10,
+                6,
                 OwnedBindingResource::Sampler(
                     SamplerBindingType::Filtering,
                     coast_atlas.sampler.clone(),
                 ),
             ),
             (
-                11,
+                7,
                 OwnedBindingResource::TextureView(TextureViewDimension::D2Array, tile_atlas_view),
             ),
             (
-                12,
+                8,
                 OwnedBindingResource::Sampler(SamplerBindingType::Filtering, tile_sampler),
             ),
-            (13, OwnedBindingResource::Buffer(tile_tree_buffer)),
-            (14, OwnedBindingResource::Buffer(origins_buffer)),
+            (9, OwnedBindingResource::Buffer(tile_tree_buffer)),
+            (10, OwnedBindingResource::Buffer(origins_buffer)),
             (
-                15,
+                11,
                 OwnedBindingResource::TextureView(
                     TextureViewDimension::D2,
                     ocean_slope.texture_view.clone(),
                 ),
             ),
             (
-                16,
+                12,
                 OwnedBindingResource::Sampler(
                     SamplerBindingType::Filtering,
                     ocean_slope.sampler.clone(),
@@ -326,45 +279,34 @@ impl AsBindGroup for BodySkyMaterial {
         _render_device: &RenderDevice,
         _force_no_bindless: bool,
     ) -> Vec<BindGroupLayoutEntry> {
-        // Bindings 0–10 mirror what the `AsBindGroup` derive generated before
-        // the manual impl (same order, types, and all-stages visibility);
-        // 11–14 are the ADR-20260720T185958Z-water-projects-one-signed-sea-field
-        // height-tile lookup; 15–16 are the shared mipmapped ocean-slope field.
+        // Bindings 0–6 are the atmosphere/ocean material resources; 7–10 are
+        // the ADR-20260720T185958Z height-tile lookup, and 11–12 are the
+        // shared mipmapped ocean-slope field.
         BindGroupLayoutEntries::with_indices(
             ShaderStages::all(),
             (
                 (0, uniform_buffer::<AtmosphereBlock>(false)),
                 (1, uniform_buffer::<BodySkyExtra>(false)),
                 (2, texture_depth_2d()),
+                (3, texture_2d(TextureSampleType::Float { filterable: true })),
+                (4, sampler(SamplerBindingType::Filtering)),
                 (
-                    3,
+                    5,
                     texture_cube(TextureSampleType::Float { filterable: true }),
                 ),
-                (4, sampler(SamplerBindingType::Filtering)),
-                (5, texture_2d(TextureSampleType::Float { filterable: true })),
                 (6, sampler(SamplerBindingType::Filtering)),
                 (
                     7,
-                    texture_2d(TextureSampleType::Float { filterable: false }),
-                ),
-                (
-                    8,
-                    texture_2d(TextureSampleType::Float { filterable: false }),
-                ),
-                (
-                    9,
-                    texture_cube(TextureSampleType::Float { filterable: true }),
-                ),
-                (10, sampler(SamplerBindingType::Filtering)),
-                (
-                    11,
                     texture_2d_array(TextureSampleType::Float { filterable: true }),
                 ),
+                (8, sampler(SamplerBindingType::Filtering)),
+                (9, storage_buffer_read_only_sized(false, None)),
+                (10, storage_buffer_read_only_sized(false, None)),
+                (
+                    11,
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                ),
                 (12, sampler(SamplerBindingType::Filtering)),
-                (13, storage_buffer_read_only_sized(false, None)),
-                (14, storage_buffer_read_only_sized(false, None)),
-                (15, texture_2d(TextureSampleType::Float { filterable: true })),
-                (16, sampler(SamplerBindingType::Filtering)),
             ),
         )
         .to_vec()
@@ -397,6 +339,11 @@ impl Material for BodySkyMaterial {
     ) -> Result<(), SpecializedMeshPipelineError> {
         // Fullscreen quad — no culling.
         descriptor.primitive.cull_mode = None;
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            // The analytic ocean is owned by `BodyOceanMaterial`; this material
+            // is now exclusively the legacy atmosphere A/B.
+            fragment.shader_defs.push("ATMOSPHERE_ONLY".into());
+        }
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             // The terrain atmosphere pass renders on every pixel and clips
             // the raymarch with sampled scene depth instead of via

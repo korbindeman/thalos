@@ -106,11 +106,7 @@ impl BodyDefinition {
         match &self.terrain {
             TerrainConfig::Feature(feature) => {
                 let bar = feature.environment.atmosphere.pressure_bar() as f64;
-                if bar > 0.0 {
-                    bar * ONE_BAR_PA
-                } else {
-                    0.0
-                }
+                if bar > 0.0 { bar * ONE_BAR_PA } else { 0.0 }
             }
             // No feature terrain to read pressure from: assume ~1 bar if a
             // terrestrial atmosphere shell is present, else vacuum.

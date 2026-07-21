@@ -20,32 +20,35 @@
 //! normalized top. The future weather system evolves the field and bumps its
 //! `version`; every render projection then re-uploads the same authority.
 //!
-//! **Compositing.** The cloud texture is *not* drawn by a separate quad — a
-//! fullscreen transparent quad sorts unreliably against the body's fullscreen
-//! `BodySky` atmosphere pass under big_space, so the atmosphere would draw over
-//! the clouds at some camera angles. Instead the texture (and the per-pixel
-//! nearest cloud-hit distance the raymarch exports alongside it) is bound onto
-//! [`thalos_body_render::BodySkyMaterial`] and composited as the final step of
-//! `body_sky.wgsl`, which lands the clouds deterministically on top of the sky
-//! and occludes them against geometry by true depth. The bind happens
-//! per-frame for the [`ActiveCloudBody`], in
-//! `super::ground_terrain::update_body_terrain_atmosphere`. High-altitude
-//! fade-out is handled for free by `BodySky`'s LOD visibility (hidden once the
-//! camera leaves the atmosphere shell).
+//! **Compositing.** One dedicated [`thalos_body_render::CloudCompositeMaterial`]
+//! owns both the near-volume layer and the weather-derived orbital projection.
+//! It renders after either atmosphere backend, so the canonical Bevy atmosphere
+//! cannot hide clouds and the legacy `BodySky` A/B cannot acquire a second
+//! cloud path. [`sync_cloud_composite_materials`] mirrors the active body's
+//! planet/light state and binds the live textures each frame.
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
 use thalos_body_render::{
-    AU_M, CameraMatrices, CloudWeatherMap, CloudsConfig, LIGHT_AT_1AU, WEATHER_FACE_SIZE,
+    AU_M, CameraMatrices, CloudCompositeMaterial, CloudDistanceTexture, CloudRenderTexture,
+    CloudWeatherMap, CloudsConfig, LIGHT_AT_1AU, WEATHER_FACE_SIZE,
 };
 use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
 use crate::graphics_settings::GraphicsSettings;
+use crate::screenshot::ScreenshotConfig;
 
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
+
+/// Per-body fullscreen cloud projection. Separate from `BodySky` so switching
+/// the canonical atmosphere implementation never changes cloud visibility.
+#[derive(Component, Debug)]
+pub(super) struct BodyClouds {
+    pub(super) body_id: BodyId,
+}
 
 // ── Tunable appearance ───────────────────────────────────────────────────────
 /// Global scale on the planet-fixed weather coverage map (which carries the
@@ -88,11 +91,102 @@ impl Plugin for CloudsRenderPlugin {
             .register_type::<CameraMatrices>()
             .init_resource::<ActiveCloudBody>()
             .add_systems(bevy::app::PostStartup, init_cloud_appearance)
-            .add_systems(Update, sync_cloud_weather_map)
+            .add_systems(
+                Update,
+                (
+                    sync_cloud_weather_map,
+                    sync_cloud_composite_visibility
+                        .after(super::ground_terrain::sync_body_render_lod),
+                ),
+            )
             .add_systems(
                 bevy::app::PostUpdate,
-                drive_clouds.after(TransformSystems::Propagate),
+                (
+                    drive_clouds.after(TransformSystems::Propagate),
+                    sync_cloud_composite_materials
+                        .after(drive_clouds)
+                        .after(super::ground_terrain::update_body_terrain_atmosphere),
+                ),
             );
+    }
+}
+
+/// Match the cloud compositor's lifecycle to the resident terrain projection,
+/// independently of `BodySky` (which the canonical Bevy atmosphere hides).
+fn sync_cloud_composite_visibility(
+    terrains: Query<(&super::ground_terrain::BodyTerrain, &Visibility), Without<BodyClouds>>,
+    mut composites: Query<
+        (&BodyClouds, &mut Visibility),
+        Without<super::ground_terrain::BodyTerrain>,
+    >,
+) {
+    let visible_bodies: std::collections::HashSet<BodyId> = terrains
+        .iter()
+        .filter_map(|(terrain, visibility)| {
+            (*visibility != Visibility::Hidden).then_some(terrain.body_id)
+        })
+        .collect();
+    for (clouds, mut visibility) in &mut composites {
+        let want = if visible_bodies.contains(&clouds.body_id) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != want {
+            *visibility = want;
+        }
+    }
+}
+
+/// Mirror the active body's already-resolved planet/sun/orientation state from
+/// its custom sky material, but bind the cloud textures to the dedicated
+/// compositor. This is the one cloud-composition writer; `BodySky` retains only
+/// atmosphere/ocean responsibilities for its explicit debug A/B.
+fn sync_cloud_composite_materials(
+    active: Res<ActiveCloudBody>,
+    cloud_layer: Option<Res<CloudRenderTexture>>,
+    cloud_distance: Option<Res<CloudDistanceTexture>>,
+    blanks: Option<Res<super::spawn::BlankCloudTextures>>,
+    skies: Query<(
+        &super::ground_terrain::BodySky,
+        &MeshMaterial3d<thalos_body_render::BodySkyMaterial>,
+    )>,
+    composites: Query<(&BodyClouds, &MeshMaterial3d<CloudCompositeMaterial>)>,
+    sky_materials: Res<Assets<thalos_body_render::BodySkyMaterial>>,
+    mut cloud_materials: ResMut<Assets<CloudCompositeMaterial>>,
+) {
+    let sky_state: std::collections::HashMap<BodyId, _> = skies
+        .iter()
+        .filter_map(|(sky, handle)| {
+            sky_materials.get(handle).map(|material| {
+                (
+                    sky.body_id,
+                    (material.atmosphere, material.atmosphere_extra),
+                )
+            })
+        })
+        .collect();
+
+    for (clouds, handle) in &composites {
+        let Some((atmosphere, params)) = sky_state.get(&clouds.body_id).copied() else {
+            continue;
+        };
+        let Some(mut material) = cloud_materials.get_mut(handle) else {
+            continue;
+        };
+        material.atmosphere = atmosphere;
+        material.params = params;
+        if active.0 == Some(clouds.body_id) {
+            if let Some(layer) = cloud_layer.as_deref() {
+                material.cloud_layer = layer.handle.clone();
+            }
+            if let Some(distance) = cloud_distance.as_deref() {
+                material.cloud_distance = distance.handle.clone();
+            }
+        } else if let Some(blanks) = blanks.as_deref() {
+            material.cloud_layer = blanks.layer.clone();
+            material.cloud_distance = blanks.distance.clone();
+        }
     }
 }
 
@@ -127,6 +221,7 @@ fn drive_clouds(
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     graphics: Res<GraphicsSettings>,
+    screenshot: Option<Res<ScreenshotConfig>>,
     mut active: ResMut<ActiveCloudBody>,
     mut cam_mat: ResMut<CameraMatrices>,
     mut config: ResMut<CloudsConfig>,
@@ -204,10 +299,13 @@ fn drive_clouds(
     }
     *history_continuity = Some((body_id, weather_version, sim_time));
     active.0 = Some(body_id);
-    let climate = sim.system.bodies[body_id]
+    let atmosphere = sim.system.bodies[body_id]
         .terrestrial_atmosphere
         .as_ref()
-        .and_then(|atmosphere| atmosphere.clouds.as_ref())
+        .expect("active cloud body was filtered by terrestrial atmosphere");
+    let climate = atmosphere
+        .clouds
+        .as_ref()
         .expect("active cloud body was filtered by authored climate");
 
     let to_cam = cam_pos - planet_center;
@@ -265,6 +363,11 @@ fn drive_clouds(
     // Project authored, quality-neutral climate plus dynamic view/light state.
     // Sampling/reconstruction quality remains independently editable.
     config.planet_radius = radius;
+    config.atmosphere_top_height = atmosphere.karman_line_m.max(1.0);
+    config.atmosphere_lut_enabled = screenshot
+        .as_deref()
+        .and_then(|cfg| cfg.atmosphere.stock_override())
+        .unwrap_or(true);
     config.clouds_bottom_height = climate.base_altitude_m.max(0.0);
     config.clouds_top_height =
         (climate.base_altitude_m + climate.thickness_m).max(config.clouds_bottom_height + 1.0);
@@ -274,6 +377,7 @@ fn drive_clouds(
     config.wind_velocity = Vec3::new(climate.wind_m_s[0], climate.wind_m_s[1], 0.0);
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
     let cloud_albedo = Vec3::from_array(climate.albedo).max(Vec3::ZERO);
+    config.cloud_albedo = cloud_albedo.extend(1.0);
 
     // CLOUD-4 first slice: camera-local day factor still sets the baseline
     // sun/ambient chromaticity; the volume shader then multiplies a per-sample
@@ -290,7 +394,13 @@ fn drive_clouds(
     // Albedo is applied once here; the volume does not re-multiply climate
     // albedo, so keep it a touch under 1.0 to leave headroom for phase peaks.
     let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
-    let sun_rgb = sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
+    let sun_rgb = if config.atmosphere_lut_enabled {
+        // The shader samples the canonical transmittance LUT at every cloud
+        // point, so keep this source neutral and apply atmosphere colour once.
+        albedo * scene_flux * SUN_FLUX_SCALE
+    } else {
+        sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance
+    };
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
     // Sky-like ambient: more blue at the top, greyer fill under overcast cores.
     let horizon_ambient = 0.28 + 0.72 * day_blend;

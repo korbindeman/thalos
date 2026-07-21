@@ -57,17 +57,12 @@ pub enum StructureKind {
     },
     /// A launchpad — a circular slab draped on the pad that a craft can be
     /// placed on / launched from (the base editor's **L** action).
-    Launchpad {
-        radius_m: f32,
-    },
+    Launchpad { radius_m: f32 },
     /// A storage tank (propellant / fluids) — a vertical cylinder draped on the
     /// pad. A stand-in for the tank-farm volume that flanks a launchpad;
     /// authored as part of the default base, and a first-class editable kind
     /// (select / move / delete) like any other structure.
-    Tank {
-        radius_m: f32,
-        height_m: f32,
-    },
+    Tank { radius_m: f32, height_m: f32 },
 }
 
 /// An enterable facility a player reaches from the space-center hub, tagged onto

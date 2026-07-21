@@ -399,8 +399,7 @@ fn latitude_moisture(sin_lat: f64) -> f64 {
     let equator = MOIST_EQUATOR_AMT * (1.0 - smoothstep(0.08, 0.35, s));
     let subtropic =
         -MOIST_SUBTROPIC_AMT * (smoothstep(0.28, 0.40, s) * (1.0 - smoothstep(0.55, 0.70, s)));
-    let midlat =
-        MOIST_MIDLAT_AMT * (smoothstep(0.60, 0.72, s) * (1.0 - smoothstep(0.86, 0.94, s)));
+    let midlat = MOIST_MIDLAT_AMT * (smoothstep(0.60, 0.72, s) * (1.0 - smoothstep(0.86, 0.94, s)));
     let polar = -MOIST_POLAR_AMT * smoothstep(0.90, 0.98, s);
     MOIST_BIAS + equator + subtropic + midlat + polar
 }
@@ -702,8 +701,7 @@ impl ProceduralSurface {
         // Combine relief with the macro base: sea-level crossings belong to the
         // LOD-invariant macro field alone — sub-sea relief shoals to awash
         // reefs instead of breaching (see `combine_macro_and_relief`).
-        let height =
-            combine_macro_and_relief(macro_h, uplift + hills + swell + mountains + seabed);
+        let height = combine_macro_and_relief(macro_h, uplift + hills + swell + mountains + seabed);
 
         // Authored, erosion-sculpted mountain ranges near the runway. Additive
         // and footprint-gated (zero outside every envelope), so they don't
@@ -751,8 +749,8 @@ impl ProceduralSurface {
 
         // Fractal crenulation warp. Amplitude in metres of coastline
         // displacement; wavelengths from COAST_CREN_WL_M down ~4 octaves.
-        let amp_m = COAST_CREN_AMP_SMOOTH_M
-            + (COAST_CREN_AMP_RUGGED_M - COAST_CREN_AMP_SMOOTH_M) * rug;
+        let amp_m =
+            COAST_CREN_AMP_SMOOTH_M + (COAST_CREN_AMP_RUGGED_M - COAST_CREN_AMP_SMOOTH_M) * rug;
         let cq = p / COAST_CREN_WL_M;
         let cren_warp = DVec3::new(
             fbm(cq, self.seed ^ 0xC4E1, COAST_CREN_OCT),
@@ -1358,8 +1356,8 @@ fn combine_macro_and_relief(macro_h: f64, relief: f64) -> f64 {
             2.0 * OFFSHORE_SHALLOW_CLEAR_M,
             -macro_h,
         );
-        let compressed = -OFFSHORE_SHALLOW_CLEAR_M
-            + (hs + OFFSHORE_SHALLOW_CLEAR_M) * OFFSHORE_SHALLOW_KEEP;
+        let compressed =
+            -OFFSHORE_SHALLOW_CLEAR_M + (hs + OFFSHORE_SHALLOW_CLEAR_M) * OFFSHORE_SHALLOW_KEEP;
         hs = hs + (compressed - hs) * w;
     }
     hs

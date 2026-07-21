@@ -302,7 +302,12 @@ fn minimum_spanning_tree(nodes: &[Node]) -> Vec<(usize, usize)> {
 /// up, Z = across). Each edge is a flat strip of `width_m` from one node's edge
 /// to the next's, inset by their bounding radii so the paving meets the
 /// footprints rather than overlapping them.
-fn build_strip_mesh(nodes: &[Node], edges: &[(usize, usize)], width_m: f64, lift_m: f32) -> Option<Mesh> {
+fn build_strip_mesh(
+    nodes: &[Node],
+    edges: &[(usize, usize)],
+    width_m: f64,
+    lift_m: f32,
+) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -346,7 +351,13 @@ fn build_strip_mesh(nodes: &[Node], edges: &[(usize, usize)], width_m: f64, lift
 
 /// Build a filled apron rectangle centred at `(along, across)` in the site frame
 /// with the given half-extents (m).
-fn build_apron_mesh(along: f64, across: f64, half_along: f64, half_across: f64, lift_m: f32) -> Option<Mesh> {
+fn build_apron_mesh(
+    along: f64,
+    across: f64,
+    half_along: f64,
+    half_across: f64,
+    lift_m: f32,
+) -> Option<Mesh> {
     let mut positions: Vec<[f32; 3]> = Vec::new();
     let mut normals: Vec<[f32; 3]> = Vec::new();
     let mut uvs: Vec<[f32; 2]> = Vec::new();
@@ -445,7 +456,11 @@ fn build_path_mesh(center: &[DVec2], width_m: f64, lift_m: f32) -> Option<Mesh> 
         } else {
             DVec2::ZERO
         };
-        let dir = (dir_in + dir_out).normalize_or(if dir_in != DVec2::ZERO { dir_in } else { dir_out });
+        let dir = (dir_in + dir_out).normalize_or(if dir_in != DVec2::ZERO {
+            dir_in
+        } else {
+            dir_out
+        });
         let perp = DVec2::new(-dir.y, dir.x);
         for side in [1.0, -1.0] {
             let q = *p + perp * (hw * side);
@@ -489,7 +504,10 @@ fn finish_mesh(
     if indices.is_empty() {
         return None;
     }
-    let mut mesh = Mesh::new(PrimitiveTopology::TriangleList, RenderAssetUsages::default());
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);

@@ -14,6 +14,7 @@
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use thalos_body_render::{BodyOceanMaterial, CloudCompositeMaterial};
 use thalos_physics_local::HeightSourceRegistry;
 
 use crate::terrain_registry::BodySurfaceRegistry;
@@ -33,4 +34,6 @@ pub(super) struct ProceduralInstallExtras<'w> {
 #[derive(SystemParam)]
 pub(super) struct WorldStateAssets<'w> {
     pub(super) planetshine: ResMut<'w, PlanetshineTints>,
+    pub(super) cloud_materials: ResMut<'w, Assets<CloudCompositeMaterial>>,
+    pub(super) ocean_materials: ResMut<'w, Assets<BodyOceanMaterial>>,
 }

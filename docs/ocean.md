@@ -8,7 +8,7 @@ without creating a second water authority.
 The visual target is a low, open-water view with dark blue-green volume,
 directional nested waves, a broken sun road, sparse coherent whitecaps, and a
 horizon that belongs to the same atmosphere as the sky. BL-12 established those
-signals in the shipping `BodySky` path; OCEAN-1 adds the first authored,
+signals in the shipping analytic projection; OCEAN-1 adds the first authored,
 dispersion-aware spectral tracer behind the same filtered-slope seam. The
 production FFT/local-simulation program is still staged rather than implied by
 these image-space fields.
@@ -41,7 +41,8 @@ these image-space fields.
 
 ## 2. Shipped visual slices (BL-12 + OCEAN-1)
 
-`body_sky.wgsl` resolves the wave field at the analytic sea hit, then passes its
+`BodyOceanMaterial` compiles the shared `body_sky.wgsl` optical source in
+ocean-only mode, resolves the wave field at the analytic sea hit, then passes its
 filtered slope, statistical roughness, and breakup signal into
 `thalos::water::shade_ocean_detailed`. The BRDF also receives the signed-field
 bathymetry and the atmosphere inputs already used by other surface shaders.
@@ -52,7 +53,7 @@ bathymetry and the atmosphere inputs already used by other surface shaders.
 | Wave slopes | One shared 256² RGBA8 texture stores deterministic low- and high-frequency directional packets (128 unique Fourier carriers each). Four overlapping physical domains (8192, 1024, 128, and 16 m) provide swell through capillary detail without exposing a handful of carriers. |
 | Evolution | Each cascade samples both packets. CPU derives their representative deep-water phase velocities `sqrt(gλ/2π)` from body gravity and advances phase from canonical simulation time, so pause/time warp and captures share one clock. This is a measured two-packet tracer, not a JONSWAP/TMA claim. |
 | Precision | CPU computes the camera's wind/crosswind coordinates modulo an 8192 m body-fixed domain and reduces every spectral phase to one texture cycle in f64; WGSL receives only small camera-relative coordinates and 0..1 phases. |
-| Distance filtering | The texture carries a full CPU-authored mip chain and a 16× anisotropic repeat sampler. `BodySky` derives the surface pixel's major (view-tangent) and minor axes, then uses `textureSampleGrad`; the horizon filters the deeply foreshortened direction while retaining cross-wave detail. Mip-omitted slope variance becomes GGX alpha. |
+| Distance filtering | The texture carries a full CPU-authored mip chain and a 16× anisotropic repeat sampler. `BodyOceanMaterial` derives the surface pixel's major (view-tangent) and minor axes, then uses `textureSampleGrad`; the horizon filters the deeply foreshortened direction while retaining cross-wave detail. Mip-omitted slope variance becomes GGX alpha. |
 | Reflection | Dielectric Fresnel and GGX combine the canonical direct sun with `compute_surface_sky`/`sky_ambient_irradiance`; the old constant sky tint is gone. |
 | Transmission | Existing signed-field water column drives the shallow-to-deep volume colour; shallow seabed response and BL-10 shoreline optics remain intact. |
 | Foam | Sparse open-water source requires an exceptional resolved slope and coherent spectrum breakup; shore breakers and swash reuse that breakup. No history yet. |
@@ -81,14 +82,19 @@ flowchart LR
   Hit --> Volume["Depth-dependent volume colour"]
   Normal --> BRDF
   Normal --> Foam["Steep-slope foam source"]
-  BRDF --> Composite["BodySky ocean composite"]
+  BRDF --> Composite["Dedicated BodyOcean composite"]
   Volume --> Composite
   Foam --> Composite
 ```
 
 Mechanism lives in `thalos_body_render`; the game-side driver only projects
-simulation/body/camera state into the render uniforms. That boundary remains
-valid when procedural bands become GPU-produced spectral textures.
+simulation/body/camera state into the render uniforms. The ocean is a dedicated
+fullscreen sibling of atmosphere and clouds (ADR-20260721T050036Z): selecting
+Bevy or the legacy atmosphere never changes water ownership. `BodySkyMaterial`
+and `BodyOceanMaterial` compile one shared optical shader with mutually
+exclusive atmosphere/ocean definitions and delegate one bind implementation,
+so the signed-field lookup and spectral path cannot drift. That boundary
+remains valid when procedural bands become GPU-produced spectral textures.
 
 ## 4. Verification
 
@@ -194,6 +200,7 @@ These are explicit `OCEAN-PROG` scope, not hidden TODOs in the shader.
 
 - [ADR-20260720T185954Z-analytic-planet-water-never-meshed](adr/20260720T185954Z-analytic-planet-water-never-meshed.md)
 - [ADR-20260720T185958Z-water-projects-one-signed-sea-field](adr/20260720T185958Z-water-projects-one-signed-sea-field.md)
+- [ADR-20260721T050036Z-ocean-composite-independent-of-atmosphere](adr/20260721T050036Z-ocean-composite-independent-of-atmosphere.md)
 - [INC-0012](incidents/0012-ocean-gradient-worms-isotropic-detail-loss.md)
 - [Atmospheres, Oceans, and Lighting](atmosphere.md)
 - [Graphics fidelity plan](graphics_fidelity.md)

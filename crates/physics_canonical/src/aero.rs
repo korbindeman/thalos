@@ -245,8 +245,7 @@ pub fn evaluate_aero(
         - cfg.roll_damp * rho_v_s * b * b * omega_body.y;
 
     // Yaw about +Z. Restoring drives β→0 (weathervane); +yaw = nose right.
-    let yaw = -cfg.yaw_stability * q * s * b * beta
-        + cfg.yaw_control * q * s * b * controls.yaw
+    let yaw = -cfg.yaw_stability * q * s * b * beta + cfg.yaw_control * q * s * b * controls.yaw
         - cfg.yaw_damp * rho_v_s * b * b * omega_body.z;
 
     let torque = DVec3::new(pitch, roll, yaw);
@@ -315,7 +314,14 @@ mod tests {
     fn lift_up_drag_back_in_level_flight() {
         // Forward (+Y), slight descent (−Z) → positive AoA.
         let v = DVec3::new(0.0, 100.0, -3.0);
-        let out = evaluate_aero(v, DVec3::ZERO, 1.225, 0.0, &wing(), ControlInputs::default());
+        let out = evaluate_aero(
+            v,
+            DVec3::ZERO,
+            1.225,
+            0.0,
+            &wing(),
+            ControlInputs::default(),
+        );
         assert!(out.force.z > 0.0, "lift up (+Z), got {}", out.force.z);
         assert!(out.force.y < 0.0, "drag opposes +Y, got {}", out.force.y);
     }
@@ -326,24 +332,60 @@ mod tests {
         let v = DVec3::new(0.0, 100.0, -10.0);
         let out = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &wing(), ControlInputs::default());
         // Restoring pitch moment must be nose-down: about −X (τx < 0).
-        assert!(out.torque.x < 0.0, "pitch should restore (nose down), got {}", out.torque.x);
+        assert!(
+            out.torque.x < 0.0,
+            "pitch should restore (nose down), got {}",
+            out.torque.x
+        );
     }
 
     #[test]
     fn cm0_trims_at_positive_alpha() {
-        let cfg = AeroConfig { cm0: 0.03, ..wing() };
+        let cfg = AeroConfig {
+            cm0: 0.03,
+            ..wing()
+        };
         let alpha_trim = cfg.cm0 / cfg.pitch_stability;
         // Below trim AoA the moment pitches the nose up, above it down, and at
         // trim it vanishes — a hands-off stable cruise attitude.
         let v_level = DVec3::new(0.0, 100.0, 0.0); // α = 0 < α_trim
-        let up = evaluate_aero(v_level, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
-        assert!(up.torque.x > 0.0, "below trim should pitch up, got {}", up.torque.x);
+        let up = evaluate_aero(
+            v_level,
+            DVec3::ZERO,
+            1.0,
+            0.0,
+            &cfg,
+            ControlInputs::default(),
+        );
+        assert!(
+            up.torque.x > 0.0,
+            "below trim should pitch up, got {}",
+            up.torque.x
+        );
         let v_trim = DVec3::new(0.0, 100.0, -100.0 * alpha_trim.tan());
-        let trim = evaluate_aero(v_trim, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
+        let trim = evaluate_aero(
+            v_trim,
+            DVec3::ZERO,
+            1.0,
+            0.0,
+            &cfg,
+            ControlInputs::default(),
+        );
         assert_relative_eq!(trim.torque.x, 0.0, epsilon = 1.0);
         let v_high = DVec3::new(0.0, 100.0, -20.0); // α ≈ 11° > α_trim
-        let down = evaluate_aero(v_high, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
-        assert!(down.torque.x < 0.0, "above trim should pitch down, got {}", down.torque.x);
+        let down = evaluate_aero(
+            v_high,
+            DVec3::ZERO,
+            1.0,
+            0.0,
+            &cfg,
+            ControlInputs::default(),
+        );
+        assert!(
+            down.torque.x < 0.0,
+            "above trim should pitch down, got {}",
+            down.torque.x
+        );
     }
 
     #[test]
@@ -351,7 +393,11 @@ mod tests {
         // Flow from the right (+β): nose should yaw right to align (τz < 0).
         let v = DVec3::new(10.0, 100.0, 0.0);
         let out = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &wing(), ControlInputs::default());
-        assert!(out.torque.z < 0.0, "yaw should restore toward wind, got {}", out.torque.z);
+        assert!(
+            out.torque.z < 0.0,
+            "yaw should restore toward wind, got {}",
+            out.torque.z
+        );
     }
 
     #[test]
@@ -361,7 +407,11 @@ mod tests {
         let v = DVec3::new(0.0, 120.0, 0.0);
         let omega = DVec3::new(2.0, 2.0, 2.0);
         let out = evaluate_aero(v, omega, 1.0, 0.0, &wing(), ControlInputs::default());
-        assert!(out.torque.x < 0.0, "pitch rate damped, got {}", out.torque.x);
+        assert!(
+            out.torque.x < 0.0,
+            "pitch rate damped, got {}",
+            out.torque.x
+        );
         assert!(out.torque.y < 0.0, "roll rate damped, got {}", out.torque.y);
         assert!(out.torque.z < 0.0, "yaw rate damped, got {}", out.torque.z);
     }
@@ -369,16 +419,41 @@ mod tests {
     #[test]
     fn pull_pitches_nose_up() {
         let v = DVec3::new(0.0, 120.0, 0.0);
-        let ctrl = ControlInputs { pitch: 1.0, ..Default::default() };
+        let ctrl = ControlInputs {
+            pitch: 1.0,
+            ..Default::default()
+        };
         let out = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &wing(), ctrl);
-        assert!(out.torque.x > 0.0, "pull should pitch nose up (+X), got {}", out.torque.x);
+        assert!(
+            out.torque.x > 0.0,
+            "pull should pitch nose up (+X), got {}",
+            out.torque.x
+        );
     }
 
     #[test]
     fn drag_scales_with_speed_squared() {
-        let body = AeroConfig { reference_area_m2: 2.0, cd0: 1.0, ..Default::default() };
-        let f1 = evaluate_aero(DVec3::new(0.0, 50.0, 0.0), DVec3::ZERO, 1.0, 0.0, &body, ControlInputs::default());
-        let f2 = evaluate_aero(DVec3::new(0.0, 100.0, 0.0), DVec3::ZERO, 1.0, 0.0, &body, ControlInputs::default());
+        let body = AeroConfig {
+            reference_area_m2: 2.0,
+            cd0: 1.0,
+            ..Default::default()
+        };
+        let f1 = evaluate_aero(
+            DVec3::new(0.0, 50.0, 0.0),
+            DVec3::ZERO,
+            1.0,
+            0.0,
+            &body,
+            ControlInputs::default(),
+        );
+        let f2 = evaluate_aero(
+            DVec3::new(0.0, 100.0, 0.0),
+            DVec3::ZERO,
+            1.0,
+            0.0,
+            &body,
+            ControlInputs::default(),
+        );
         assert_relative_eq!(f2.force.length() / f1.force.length(), 4.0, epsilon = 1e-9);
     }
 
@@ -387,7 +462,10 @@ mod tests {
         // M_dd = 0.82 → M_crit ≈ 0.71. Same true airspeed: drag should be
         // unchanged with compressibility disabled (speed_of_sound = 0),
         // mildly higher just past divergence, and several × CD0 near Mach 1.
-        let cfg = AeroConfig { mach_drag_divergence: 0.82, ..wing() };
+        let cfg = AeroConfig {
+            mach_drag_divergence: 0.82,
+            ..wing()
+        };
         let a = 320.0;
         let v = DVec3::new(0.0, 0.95 * a, 0.0);
         let no_mach = evaluate_aero(v, DVec3::ZERO, 0.4, 0.0, &cfg, ControlInputs::default());
@@ -408,7 +486,11 @@ mod tests {
 
     #[test]
     fn flaps_add_lift_and_drag_and_raise_the_stall_ceiling() {
-        let cfg = AeroConfig { flap_dcl: 0.6, flap_dcd: 0.05, ..wing() };
+        let cfg = AeroConfig {
+            flap_dcl: 0.6,
+            flap_dcd: 0.05,
+            ..wing()
+        };
         let v = DVec3::new(0.0, 60.0, 0.0);
         let clean = evaluate_aero(v, DVec3::ZERO, 1.2, 0.0, &cfg, ControlInputs::default());
         let landing = evaluate_aero(
@@ -417,7 +499,10 @@ mod tests {
             1.2,
             0.0,
             &cfg,
-            ControlInputs { flap: 1.0, ..Default::default() },
+            ControlInputs {
+                flap: 1.0,
+                ..Default::default()
+            },
         );
         assert!(landing.force.z > clean.force.z, "flaps must add lift");
         assert!(landing.force.y < clean.force.y, "flaps must add drag");
@@ -425,15 +510,24 @@ mod tests {
         // At stall AoA the clean wing is clamped; flaps must still lift more
         // (the clamp ceiling rises with the flap camber).
         let v_stall = DVec3::new(0.0, 60.0, -60.0 * cfg.stall_alpha.tan() * 1.2);
-        let clean_stall =
-            evaluate_aero(v_stall, DVec3::ZERO, 1.2, 0.0, &cfg, ControlInputs::default());
+        let clean_stall = evaluate_aero(
+            v_stall,
+            DVec3::ZERO,
+            1.2,
+            0.0,
+            &cfg,
+            ControlInputs::default(),
+        );
         let flap_stall = evaluate_aero(
             v_stall,
             DVec3::ZERO,
             1.2,
             0.0,
             &cfg,
-            ControlInputs { flap: 1.0, ..Default::default() },
+            ControlInputs {
+                flap: 1.0,
+                ..Default::default()
+            },
         );
         assert!(
             flap_stall.force.z > clean_stall.force.z,
@@ -448,7 +542,10 @@ mod tests {
             1.2,
             0.0,
             &cfg,
-            ControlInputs { flap: 0.5, ..Default::default() },
+            ControlInputs {
+                flap: 0.5,
+                ..Default::default()
+            },
         );
         let q_s = 0.5 * 1.2 * 60.0 * 60.0 * cfg.reference_area_m2;
         let takeoff_dcd = (clean.force.y - takeoff.force.y) / q_s;
@@ -462,7 +559,11 @@ mod tests {
 
     #[test]
     fn spoilers_dump_lift_and_add_drag() {
-        let cfg = AeroConfig { spoiler_dcl: -0.08, spoiler_dcd: 0.035, ..wing() };
+        let cfg = AeroConfig {
+            spoiler_dcl: -0.08,
+            spoiler_dcd: 0.035,
+            ..wing()
+        };
         let v = DVec3::new(0.0, 150.0, -3.0);
         let clean = evaluate_aero(v, DVec3::ZERO, 1.0, 0.0, &cfg, ControlInputs::default());
         let braked = evaluate_aero(
@@ -471,7 +572,10 @@ mod tests {
             1.0,
             0.0,
             &cfg,
-            ControlInputs { spoiler: 1.0, ..Default::default() },
+            ControlInputs {
+                spoiler: 1.0,
+                ..Default::default()
+            },
         );
         assert!(braked.force.z < clean.force.z, "spoilers must dump lift");
         assert!(braked.force.y < clean.force.y, "spoilers must add drag");
@@ -493,8 +597,23 @@ mod tests {
         };
         // Tumbling with sideslip: should both damp and restore, never amplify.
         let v = DVec3::new(8.0, 80.0, 0.0);
-        let out = evaluate_aero(v, DVec3::new(0.0, 0.0, 1.0), 1.0, 0.0, &capsule, ControlInputs::default());
-        assert!(out.torque.z < 0.0, "capsule should weathervane + damp yaw, got {}", out.torque.z);
-        assert!(out.force.y < 0.0, "capsule drag opposes motion, got {}", out.force.y);
+        let out = evaluate_aero(
+            v,
+            DVec3::new(0.0, 0.0, 1.0),
+            1.0,
+            0.0,
+            &capsule,
+            ControlInputs::default(),
+        );
+        assert!(
+            out.torque.z < 0.0,
+            "capsule should weathervane + damp yaw, got {}",
+            out.torque.z
+        );
+        assert!(
+            out.force.y < 0.0,
+            "capsule drag opposes motion, got {}",
+            out.force.y
+        );
     }
 }

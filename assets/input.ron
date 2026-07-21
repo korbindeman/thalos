@@ -6,6 +6,7 @@
             bindings: {
                 "escape": [Key(Escape)],
                 "screenshot": [Key(F2)],
+                "save_perspective": [Key(F8)],
                 "toggle_free_cam": [Key(F4)],
             },
         ),

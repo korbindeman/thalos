@@ -468,7 +468,10 @@ impl ShipBlueprint {
     /// `center_body_m` is the panel's aerodynamic centre (≈ quarter-chord at
     /// ~40% span); `fore_dir`/`thick_dir`/`span_dir` are the airfoil basis
     /// (chord-forward / lift-normal / spanwise) in the body frame.
-    pub fn wing_aero_panels(&self, catalog: &PartCatalog) -> Result<Vec<WingAeroPanel>, CatalogError> {
+    pub fn wing_aero_panels(
+        &self,
+        catalog: &PartCatalog,
+    ) -> Result<Vec<WingAeroPanel>, CatalogError> {
         let entries: Vec<&CatalogEntry> = self
             .parts
             .iter()
@@ -533,8 +536,8 @@ impl ShipBlueprint {
                         return None;
                     }
                     let mid = 0.5 * (s0 + s1);
-                    let chord_mid = *root_chord as f64
-                        + (*tip_chord as f64 - *root_chord as f64) * mid;
+                    let chord_mid =
+                        *root_chord as f64 + (*tip_chord as f64 - *root_chord as f64) * mid;
                     let spanned_area_m2 = *span as f64 * (s1 - s0) * chord_mid;
                     let centroid_local = frame.center_at(mid as f32);
                     Some(AeroSurfaceWindow {
@@ -900,9 +903,11 @@ fn node_offset(
     node: &str,
 ) -> Option<Vec3> {
     match (entry, params) {
-        (CatalogEntry::Pod(p), _) => {
-            (node == "bottom").then_some(Vec3::new(0.0, -effective_d * p.geometry.length_factor(), 0.0))
-        }
+        (CatalogEntry::Pod(p), _) => (node == "bottom").then_some(Vec3::new(
+            0.0,
+            -effective_d * p.geometry.length_factor(),
+            0.0,
+        )),
         (CatalogEntry::Engine(_), _) => match node {
             "top" => Some(Vec3::ZERO),
             "bottom" => Some(Vec3::new(0.0, -effective_d * 0.9, 0.0)),

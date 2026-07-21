@@ -3,9 +3,9 @@
 use bevy::prelude::*;
 use bevy::ui_render::prelude::MaterialNode;
 
+use crate::UiTheme;
 use crate::glass::GlassMaterial;
 use crate::tokens::*;
-use crate::UiTheme;
 
 /// A `Node` pre-configured as a floating panel: rounded, padded, column flex.
 /// Compose with [`UiTheme::glass`] for the frosted surface.
