@@ -54,13 +54,36 @@ pub struct BodySkyExtra {
     /// every scale, with no mesh. x = ocean sphere radius in render units
     /// (`planet_radius + sea_level_m`; render space is 1 unit = 1 m on
     /// SHIP_LAYER, so this is just metres). y = enable flag (1 on ocean bodies,
-    /// 0 disables the whole branch). zw reserved.
+    /// 0 disables the whole branch). z = shore-breaker time reduced to its
+    /// exact repeat period in f64; w = the camera's f64-computed height above
+    /// sea level in metres.
     pub ocean: Vec4,
     /// Deep-water linear-RGB tint (xyz) + minimum optical-depth scale (w),
     /// matching the impostor water BRDF fallback so the ground↔impostor handoff
     /// stays consistent. Only read when `ocean.y >= 0.5`.
     pub ocean_color_depth: Vec4,
-    /// Resident-height-tile lookup parameters (ADR-20260720T185958Z-water-projects-one-signed-sea-field). The ocean branch
+    /// xy = camera's body-fixed wind/crosswind coordinates modulo the periodic
+    /// wave domain, computed in f64 before upload. The shader adds its small
+    /// camera-relative hit offset. This keeps metre-scale waves stable at
+    /// planet radius and across floating-origin rebases.
+    pub ocean_camera_phase: Vec4,
+    /// Low/high frequency packet phase in texture cycles for each physical
+    /// cascade, reduced from canonical simulation time in f64 on the CPU.
+    pub ocean_low_phase: Vec4,
+    pub ocean_high_phase: Vec4,
+    /// Resolved slope amplitude for the 8192/1024/128/16 m cascades.
+    pub ocean_slope_amplitudes: Vec4,
+    /// x = independent swell angle from wind in the local tangent plane,
+    /// y = swell energy 0..1, z = open-water foam slope onset,
+    /// w = slope-field diagnostic view enable.
+    pub ocean_spectrum: Vec4,
+    /// Body-local wind/crosswind basis used by the directional wave table.
+    /// xyz are unit vectors; w is unused. Kept explicit so the shader's
+    /// camera-relative evaluation uses the same directions as the CPU phase.
+    pub ocean_wind_basis: Vec4,
+    pub ocean_crosswind_basis: Vec4,
+    /// Resident-height-tile lookup parameters
+    /// (ADR-20260720T185958Z-water-projects-one-signed-sea-field). The ocean branch
     /// samples signed sea height straight from the udlod height atlas bound at
     /// bindings 11–14 — the exact texels the visible terrain mesh is displaced
     /// from — with the coast atlas as the coarse tail.
@@ -84,6 +107,13 @@ impl Default for BodySkyExtra {
             cloud_band_radii: Vec4::ZERO,
             ocean: Vec4::ZERO,
             ocean_color_depth: Vec4::ZERO,
+            ocean_camera_phase: Vec4::ZERO,
+            ocean_low_phase: Vec4::ZERO,
+            ocean_high_phase: Vec4::ZERO,
+            ocean_slope_amplitudes: Vec4::ZERO,
+            ocean_spectrum: Vec4::ZERO,
+            ocean_wind_basis: Vec4::ZERO,
+            ocean_crosswind_basis: Vec4::ZERO,
             tile_lookup: Vec4::ZERO,
             tile_atlas_uv: Vec4::ZERO,
         }

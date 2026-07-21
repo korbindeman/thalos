@@ -7,127 +7,43 @@
 // sphere is perfectly smooth from orbit to sea level.
 //
 // This library supplies the surface shading the sky pass calls once it has the
-// ocean hit point: two-octave scrolled wave normals, a Cook-Torrance GGX water
-// BRDF (sun glint + Fresnel), and a depth-graded subsurface colour driven by
-// the water-column thickness read from the scene-depth buffer (shallows cyan,
-// deep blue). Calibrated to `planet_impostor.wgsl::shade_water` so the
+// ocean hit point: a filtered body-fixed slope field, a Cook-Torrance GGX
+// water BRDF (sun glint + Fresnel), and a depth-graded subsurface colour driven
+// by the water-column thickness read from the scene-depth buffer (shallows
+// cyan, deep blue). Calibrated to `planet_impostor.wgsl::shade_water` so the
 // ground↔impostor LOD handoff does not pop.
 
 #define_import_path thalos::water
 
+#import thalos::lighting::{
+    SCENE_FLUX_SCALE,
+    compute_surface_sky,
+    env_brdf_approx,
+    sky_ambient_irradiance,
+}
+
 const PI_WATER: f32 = 3.14159265358979;
 
-// ── 3-octave value noise for wave normals. Inline (not the impostor's fbm,
-// whose octave counts/frequencies are tuned for cubemap evaluation). ─────────
+// ── Filtered slope-field input ────────────────────────────────────────────
+//
+// The detailed body-sky path supplies resolved slopes from its shared
+// mipmapped broadband texture. Keeping the BRDF downstream of that seam is
+// deliberate: the eventual FFT simulation can replace the producer without a
+// second water material or a lighting rewrite. Far/map callers pass a neutral
+// slope plus the statistical roughness of the unresolved spectrum.
 
-fn h2o_hash3(p: vec3<f32>) -> f32 {
-    let q = sin(vec3<f32>(
-        dot(p, vec3<f32>(127.1, 311.7, 74.7)),
-        dot(p, vec3<f32>(269.5, 183.3, 246.1)),
-        dot(p, vec3<f32>(113.5, 271.9, 124.6)),
-    ));
-    return fract(sin(dot(q, vec3<f32>(43.81, 17.23, 95.71))) * 43758.5453);
+struct OceanWaveSample {
+    normal_body: vec3<f32>,
+    alpha_ggx: f32,
+    whitecap: f32,
+    breakup: f32,
 }
 
-fn h2o_vnoise(p: vec3<f32>) -> f32 {
-    let i = floor(p);
-    let f = fract(p);
-    let u = f * f * (3.0 - 2.0 * f);
-    let c000 = h2o_hash3(i);
-    let c100 = h2o_hash3(i + vec3<f32>(1.0, 0.0, 0.0));
-    let c010 = h2o_hash3(i + vec3<f32>(0.0, 1.0, 0.0));
-    let c110 = h2o_hash3(i + vec3<f32>(1.0, 1.0, 0.0));
-    let c001 = h2o_hash3(i + vec3<f32>(0.0, 0.0, 1.0));
-    let c101 = h2o_hash3(i + vec3<f32>(1.0, 0.0, 1.0));
-    let c011 = h2o_hash3(i + vec3<f32>(0.0, 1.0, 1.0));
-    let c111 = h2o_hash3(i + vec3<f32>(1.0, 1.0, 1.0));
-    let x00 = mix(c000, c100, u.x);
-    let x10 = mix(c010, c110, u.x);
-    let x01 = mix(c001, c101, u.x);
-    let x11 = mix(c011, c111, u.x);
-    let y0 = mix(x00, x10, u.y);
-    let y1 = mix(x01, x11, u.y);
-    return mix(y0, y1, u.z);
-}
-
-fn h2o_vfbm3(p: vec3<f32>) -> f32 {
-    var sum: f32 = 0.0;
-    var amp: f32 = 0.5;
-    var pos = p;
-    for (var i: i32 = 0; i < 3; i = i + 1) {
-        sum = sum + amp * h2o_vnoise(pos);
-        pos = pos * 2.04;
-        amp = amp * 0.5;
-    }
-    return sum;
-}
-
-// Stable tangent frame from the geometric sphere normal. Column 0 = tangent,
-// column 1 = bitangent.
-fn h2o_tangent_frame(n: vec3<f32>) -> mat2x3<f32> {
-    let ref_up = select(
-        vec3<f32>(0.0, 1.0, 0.0),
-        vec3<f32>(1.0, 0.0, 0.0),
-        abs(n.y) > 0.99,
-    );
-    let t = normalize(cross(ref_up, n));
-    let b = cross(n, t);
-    return mat2x3<f32>(t, b);
-}
-
-// Two-octave scrolled noise normal perturbation. `view_dist_m` is the
-// camera-to-fragment distance in metres; the perturbation fades to zero past
-// ~6 km so distant/orbital water reads as a smooth sphere modulated only by the
-// GGX statistical-slope lobe — the same model the impostor uses past the swap.
-// `amp_scale` scales the whole perturbation: the shore-shoaling term passes
-// < 1 so chop calms as the water shallows (BL-10).
-fn water_wave_normal(
-    world_pos: vec3<f32>,
-    geo_n: vec3<f32>,
-    t: f32,
-    view_dist_m: f32,
-    amp_scale: f32,
-) -> vec3<f32> {
-    let near_m = 80.0;
-    let far_m = 6000.0;
-    let fade =
-        clamp(1.0 - (view_dist_m - near_m) / (far_m - near_m), 0.0, 1.0) * amp_scale;
-    if fade <= 0.005 {
-        return geo_n;
-    }
-
-    let tf = h2o_tangent_frame(geo_n);
-    let tan_v = tf[0];
-    let bit_v = tf[1];
-
-    // Wavelengths λ_lo ≈ 67 m, λ_hi ≈ 14 m. Surface scroll velocity in m/s,
-    // applied along the tangent axes so waves travel across the sphere rather
-    // than translating in world space (which slips at the frame poles).
-    let f_lo = 0.015;
-    let f_hi = 0.07;
-    let v_lo = 0.45;
-    let v_hi = 1.10;
-
-    let scroll_lo = tan_v * (t * v_lo) + bit_v * (t * v_lo * 0.5);
-    let scroll_hi = tan_v * (-t * v_hi * 0.6) + bit_v * (t * v_hi);
-
-    let p_lo = world_pos * f_lo + scroll_lo;
-    let p_hi = world_pos * f_hi + scroll_hi;
-
-    let eps = 0.5;
-    let h0_lo = h2o_vfbm3(p_lo);
-    let h0_hi = h2o_vfbm3(p_hi);
-    let dt_lo = h2o_vfbm3(p_lo + tan_v * eps) - h0_lo;
-    let db_lo = h2o_vfbm3(p_lo + bit_v * eps) - h0_lo;
-    let dt_hi = h2o_vfbm3(p_hi + tan_v * eps) - h0_hi;
-    let db_hi = h2o_vfbm3(p_hi + bit_v * eps) - h0_hi;
-
-    let amp_lo = 1.4 * fade;
-    let amp_hi = 0.7 * fade;
-    let slope_t = amp_lo * dt_lo + amp_hi * dt_hi;
-    let slope_b = amp_lo * db_lo + amp_hi * db_hi;
-
-    return normalize(geo_n - tan_v * slope_t - bit_v * slope_b);
+fn rotate_by_quat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+    let u = q.xyz;
+    return 2.0 * dot(u, v) * u
+        + (q.w * q.w - dot(u, u)) * v
+        + 2.0 * q.w * cross(u, v);
 }
 
 // ── Water BRDF (Cook-Torrance, GGX + Smith-Schlick + Schlick Fresnel).
@@ -223,8 +139,9 @@ const BREAKER_SPEED_M_S: f32 = 5.0;      // shoreward crest speed
 // shoreward with time; they steepen (normal ridges) and break into foam in a
 // narrow surf window (~0.2–3 m depth — a couple of lines, not a ruled field),
 // and a thin churned swash edge rides the last half metre.
-fn shade_ocean(
-    hit_ws: vec3<f32>,
+fn shade_ocean_detailed(
+    geo_n_body: vec3<f32>,
+    body_to_world: vec4<f32>,
     geo_n: vec3<f32>,
     view_dir: vec3<f32>,
     view_dist: f32,
@@ -237,6 +154,14 @@ fn shade_ocean(
     shore_dist_m: f32,
     shore_dir: vec3<f32>,
     footprint_m: f32,
+    wave_slope: vec2<f32>,
+    wave_alpha_ggx: f32,
+    wave_breakup: f32,
+    foam_slope_onset: f32,
+    wind_basis: vec3<f32>,
+    crosswind_basis: vec3<f32>,
+    sky_tau_zenith: vec3<f32>,
+    atmosphere_strength: f32,
 ) -> vec3<f32> {
     // Shore effects fade with view distance (they are a near-field treatment;
     // at range the GGX slope lobe + subsurface colour carry the ocean).
@@ -245,9 +170,29 @@ fn shade_ocean(
     // Shoaling: open-sea chop calms as the bottom rises, so inshore water goes
     // glassier and the breaker lines read against it.
     let shoal = (1.0 - smoothstep(1.0, SHOAL_DEPTH_M, depth_m)) * shore_view_t;
-    var n = water_wave_normal(hit_ws, geo_n, time, view_dist, 1.0 - 0.7 * shoal);
+    let resolved_slope = wave_slope * (1.0 - 0.7 * shoal);
+    let gradient_body =
+        wind_basis * resolved_slope.x + crosswind_basis * resolved_slope.y;
+    var waves: OceanWaveSample;
+    waves.normal_body = rotate_by_quat(
+        body_to_world,
+        normalize(geo_n_body - gradient_body),
+    );
+    waves.alpha_ggx = mix(wave_alpha_ggx, 0.045, shoal);
+    waves.breakup = wave_breakup;
+    waves.whitecap = smoothstep(
+        foam_slope_onset,
+        foam_slope_onset + 0.12,
+        length(resolved_slope),
+    )
+        * smoothstep(0.62, 0.90, wave_breakup);
+    var n = waves.normal_body;
 
-    var foam = 0.0;
+    // Open-water whitecaps are sparse compression events from the same wave
+    // phases that shape the normal, so bright streaks sit on crests rather than
+    // crawling as independent noise. The production persistent/advection field
+    // will replace this source term without changing the foam shading below.
+    var foam = waves.whitecap * 0.55;
     if (shore_dist_m < SHORE_FX_DIST_M && shore_view_t > 0.003) {
         // Resolution guards: fade each pattern out as one screen pixel grows
         // toward its feature size (its mean is ~0, so fading to zero is the
@@ -266,17 +211,18 @@ fn shade_ocean(
         // A narrow foam stripe rides just behind each crest, broken up
         // along-shore (~30 m clumps) so the lines are ragged, not ruled.
         let stripe = exp(-pow((crest - 0.2) * 5.5, 2.0));
-        let breakup = h2o_vfbm3(hit_ws * 0.033 + vec3<f32>(0.0, time * 0.05, 0.0));
         let foam_breaker =
-            breaker_zone * stripe * smoothstep(0.35, 0.60, breakup) * stripe_res;
+            breaker_zone * stripe * waves.breakup * stripe_res;
         // Swash foam: a thin always-on bright line at the water's edge (the
         // last ~15 cm) plus intermittent noisy patches in the last half
         // metre — not the solid white strip a high constant base painted.
-        let swash_n = h2o_vfbm3(hit_ws * 0.09 + vec3<f32>(time * -0.10, 0.0, 0.0));
         let foam_edge = (1.0 - smoothstep(0.02, 0.15, depth_m)) * 0.85
             + (1.0 - smoothstep(0.05, 0.6, depth_m))
-                * (0.10 + 0.60 * smoothstep(0.48, 0.72, swash_n));
-        foam = clamp(foam_breaker + foam_edge * noise_res, 0.0, 1.0) * shore_view_t;
+                * (0.10 + 0.60 * waves.breakup);
+        foam = max(
+            foam,
+            clamp(foam_breaker + foam_edge * noise_res, 0.0, 1.0) * shore_view_t,
+        );
         // Swell ridges: tilt the normal along the shore direction on the crest
         // profile so the incoming wave fronts catch light before they break.
         // Same resolution guard, or the ridge speculars dither at range.
@@ -288,38 +234,95 @@ fn shade_ocean(
     let n_dot_v = max(dot(n, view_dir), 0.0);
     let f0 = 0.02;
     let f_nv = f0 + (1.0 - f0) * pow(max(1.0 - n_dot_v, 0.0), 5.0);
-    // GGX α = 0.10 — Cox-Munk wind-driven slope σ ≈ 6–8°.
-    let alpha_ggx = 0.10;
-    // Same BRDF scale as the Hapke land path so flux calibration matches.
-    let brdf_scale = 0.5;
+    let alpha_ggx = waves.alpha_ggx;
 
     let subsurface = water_subsurface(color_depth, column_m);
 
-    // Base reflected-sky blue at grazing angles. The sky pass paints physically
-    // correct in-scatter on top (aerial perspective), so this is just the dim
-    // ambient reflection, not the full sky radiance.
-    let sky_tint = vec3<f32>(0.35, 0.55, 0.95);
-    // Fade the ambient sky-fill across the terminator (sun elevation vs the
-    // GEOMETRIC normal, so waves don't flicker it). Without this the flat 0.15
-    // floor lights the whole planet on the distant impostor — the night-side
-    // ocean glows. The sun BRDF already vanishes at night via its own n·l;
-    // moonlight, when present, is a separate additive term (not here).
-    let day = smoothstep(-0.15, 0.15, dot(geo_n, sun_dir));
-    let ambient = 0.15 * day;
-
-    var lit = (f_nv * sky_tint + (1.0 - f_nv) * subsurface) * ambient;
-
+    // One-world lighting: derive water's direct beam and hemispheric sky from
+    // the same atmosphere/flux function as terrain and foliage. The incoming
+    // `sun_flux` is already SCENE_FLUX_SCALE'd for historical callers; undo it
+    // before the shared helper applies that scale once.
+    let sky = compute_surface_sky(
+        sky_tau_zenith,
+        atmosphere_strength,
+        geo_n,
+        sun_dir,
+        sun_flux / max(SCENE_FLUX_SCALE, 1.0e-4),
+    );
     let sun_brdf = water_brdf(n, view_dir, sun_dir, n_dot_v, f_nv, alpha_ggx, f0, subsurface);
-    lit = lit + sun_brdf * sun_flux * brdf_scale;
+    let direct = sun_brdf * sky.sun_color * sky.sun_scale;
+
+    let ambient_irradiance = sky_ambient_irradiance(sky, n, geo_n);
+    let subsurface_ambient =
+        (1.0 - f_nv) * subsurface * ambient_irradiance * 0.54;
+    let reflected = reflect(-view_dir, n);
+    let reflected_sky = mix(
+        sky.ground_radiance,
+        sky.sky_radiance,
+        smoothstep(-0.12, 0.20, dot(reflected, geo_n)),
+    );
+    let dfg = env_brdf_approx(alpha_ggx, n_dot_v);
+    // Keep the clear-sky hemisphere subordinate to the direct sun road. The
+    // atmosphere helper is an irradiance approximation rather than a
+    // prefiltered radiance probe, so an energy calibration is still required
+    // until F7/F9 supply the shared prefiltered environment.
+    let environment_specular = reflected_sky * (dfg.x * f0 + dfg.y) * 0.60;
+    var lit = direct + subsurface_ambient + environment_specular;
 
     // Foam: bright rough diffuse replacing the water response (it also kills
     // the glint — foam is matte). Lit by the same sun + ambient calibration.
     if (foam > 0.001) {
-        let foam_albedo = vec3<f32>(0.60, 0.62, 0.63);
+        let foam_albedo = vec3<f32>(0.68, 0.70, 0.70);
         let foam_lit = foam_albedo
-            * (max(dot(geo_n, sun_dir), 0.0) * sun_flux * brdf_scale / PI_WATER
-                + ambient * 2.5);
-        lit = mix(lit, foam_lit, foam);
+            * (max(dot(geo_n, sun_dir), 0.0) * sky.sun_color * sky.sun_scale / PI_WATER
+                + ambient_irradiance * 0.90);
+        lit = mix(lit, foam_lit, clamp(foam, 0.0, 0.85));
     }
     return lit;
+}
+
+// Stable far/map compatibility entry point. Those paths have no resolved slope
+// texture, so they pass a neutral normal and the calibrated statistical
+// roughness of the unresolved sea. Keeping this wrapper avoids a second
+// distant-ocean BRDF while the detailed body-sky path carries the filtered
+// body-fixed field and authored atmosphere inputs.
+fn shade_ocean(
+    hit_ws: vec3<f32>,
+    geo_n: vec3<f32>,
+    view_dir: vec3<f32>,
+    view_dist: f32,
+    time: f32,
+    sun_dir: vec3<f32>,
+    sun_flux: f32,
+    color_depth: vec4<f32>,
+    column_m: f32,
+    depth_m: f32,
+    shore_dist_m: f32,
+    shore_dir: vec3<f32>,
+    footprint_m: f32,
+) -> vec3<f32> {
+    return shade_ocean_detailed(
+        geo_n,
+        vec4<f32>(0.0, 0.0, 0.0, 1.0),
+        geo_n,
+        view_dir,
+        view_dist,
+        time,
+        sun_dir,
+        sun_flux,
+        color_depth,
+        column_m,
+        depth_m,
+        shore_dist_m,
+        shore_dir,
+        footprint_m,
+        vec2<f32>(0.0),
+        0.14,
+        0.5,
+        0.22,
+        vec3<f32>(1.0, 0.0, 0.0),
+        vec3<f32>(0.0, 0.0, 1.0),
+        vec3<f32>(0.046, 0.108, 0.264),
+        1.0,
+    );
 }

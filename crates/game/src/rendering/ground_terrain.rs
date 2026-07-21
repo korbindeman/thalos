@@ -26,7 +26,8 @@ use thalos_body_render::{
     BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
     BodyWaterMaterial, BodyWaterParams, CASCADE_COUNT, FlattenBlock, GpuAtlasHeightMirrorComponent,
     GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS, PipelineTileProvider, SyntheticTerrainMode,
-    SyntheticTileProvider, TerrainShadingStyle, rendered_height_range,
+    SyntheticTileProvider, TerrainShadingStyle, ocean_wave_frame, project_ocean_spectrum,
+    rendered_height_range,
 };
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::VesselKind;
@@ -1197,6 +1198,15 @@ impl Default for AtmosphereTuning {
     }
 }
 
+/// Ocean field inspection controls. Production defaults are inert; the
+/// headless screenshot harness enables these explicitly for deterministic
+/// topology/phase captures.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub(crate) struct OceanDebugSettings {
+    pub(crate) slope_view: bool,
+    pub(crate) phase_time_override_s: Option<f64>,
+}
+
 /// Update the per-frame dynamic data on every body's `BodyTerrainMaterial`,
 /// `BodyWaterMaterial`, and `BodySkyMaterial`:
 ///
@@ -1204,7 +1214,8 @@ impl Default for AtmosphereTuning {
 /// - terrain `scene` (`SceneLighting`: primary star, eclipse occluders,
 ///   ambient; planetshine left zero for now)
 /// - water `scene` (same `SceneLighting` as terrain), water `params.time`
-///   (`Time<Real>::elapsed_secs` for wave scroll), water `params.planet_center_radius.xyz`
+///   (canonical simulation time for coherent pause/warp), water
+///   `params.planet_center_radius.xyz`
 ///   (body render-space centre)
 /// - sky `atmosphere_extra` (sun dir + flux, planet center + radius)
 ///
@@ -1220,7 +1231,7 @@ pub(super) fn update_body_terrain_atmosphere(
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
-    time: Res<Time<Real>>,
+    ocean_debug: Res<OceanDebugSettings>,
     // Combined into one tuple param to stay under Bevy's 16-arg system limit:
     // .0 = live cloud render texture, .1 = cloud config (heights for occlusion),
     // .2 = per-pixel cloud-hit distance texture, .3 = which body the cloud
@@ -1413,7 +1424,17 @@ pub(super) fn update_body_terrain_atmosphere(
         // SHIP_LAYER is 1 unit = 1 m, so the radius is just metres. Sea level is
         // 0 for runtime procedural oceans (shoreline pinned at the reference
         // radius); `None` (airless / ancient-dry) disables the branch.
-        let (ocean, ocean_color_depth) = match body.terrain.ocean_sea_level_m() {
+        let (
+            ocean,
+            ocean_color_depth,
+            ocean_camera_phase,
+            ocean_low_phase,
+            ocean_high_phase,
+            ocean_slope_amplitudes,
+            ocean_spectrum,
+            ocean_wind_basis,
+            ocean_crosswind_basis,
+        ) = match body.terrain.ocean_sea_level_m() {
             Some(sea_level_m) => {
                 // w = camera height above the sea sphere, computed in f64 so the
                 // shader's ray-sphere intersection is stable at planet radius
@@ -1422,20 +1443,56 @@ pub(super) fn update_body_terrain_atmosphere(
                 // from this precise altitude instead.
                 let sea_r = body.radius_m + sea_level_m as f64;
                 let cam_alt_sea = ((camera_inertial - body_state.position).length() - sea_r) as f32;
+                let state = body.ocean.unwrap_or_default();
+                let wave_time_s = ocean_debug
+                    .phase_time_override_s
+                    .unwrap_or_else(|| sim.simulation.sim_time());
+                let projection = project_ocean_spectrum(
+                    &state,
+                    body.surface_gravity_m_s2(),
+                    wave_time_s,
+                );
+                let camera_body =
+                    body_state.orientation.inverse() * (camera_inertial - body_state.position);
+                let frame = ocean_wave_frame(camera_body, &state);
+                let (deep_r, deep_g, deep_b) = state.deep_water_color;
                 (
-                    // x = ocean radius (m), y = enable, z = wall-clock wave-scroll
-                    // time (real seconds — sim time pauses at warp-pause and runs
-                    // fast under warp), w = camera altitude above sea.
+                    // x = ocean radius (m), y = enable, z = shore-wave time
+                    // reduced to its 14 s repeat period in f64, w = camera
+                    // altitude above sea. Spectral packet phases are separate
+                    // below; no large epoch is uploaded as f32.
                     Vec4::new(
                         planet_radius + sea_level_m,
                         1.0,
-                        time.elapsed_secs(),
+                        wave_time_s.rem_euclid(14.0) as f32,
                         cam_alt_sea,
                     ),
-                    Vec4::from_array(FALLBACK_WATER_COLOR_DEPTH),
+                    Vec4::new(deep_r, deep_g, deep_b, state.optical_depth_m.max(0.1)),
+                    frame.camera_phase_m,
+                    projection.low_phase,
+                    projection.high_phase,
+                    projection.slope_amplitudes,
+                    Vec4::new(
+                        frame.swell_angle_rad,
+                        state.swell_energy.clamp(0.0, 1.0),
+                        state.foam_slope_onset.max(0.01),
+                        if ocean_debug.slope_view { 1.0 } else { 0.0 },
+                    ),
+                    frame.wind_basis,
+                    frame.crosswind_basis,
                 )
             }
-            None => (Vec4::ZERO, Vec4::ZERO),
+            None => (
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+            ),
         };
         let (tile_lookup, tile_atlas_uv) = tile_lookup_by_body
             .get(&i)
@@ -1455,6 +1512,13 @@ pub(super) fn update_body_terrain_atmosphere(
                 cloud_band_radii,
                 ocean,
                 ocean_color_depth,
+                ocean_camera_phase,
+                ocean_low_phase,
+                ocean_high_phase,
+                ocean_slope_amplitudes,
+                ocean_spectrum,
+                ocean_wind_basis,
+                ocean_crosswind_basis,
                 tile_lookup,
                 tile_atlas_uv,
             },
@@ -1588,11 +1652,9 @@ pub(super) fn update_body_terrain_atmosphere(
             .unwrap_or_default();
     }
 
-    // Use real (wall-clock) elapsed seconds for wave scroll — canonical sim
-    // time pauses at warp-pause and ticks faster than wall time during warp,
-    // both of which would make wave motion read as wrong against the visible
-    // motion of the body itself.
-    let wave_time = time.elapsed_secs();
+    // The dormant mesh-water compatibility path follows the same canonical
+    // clock as the analytic ocean. Reduce before f32 upload for long sessions.
+    let wave_time = sim.simulation.sim_time().rem_euclid(4_096.0) as f32;
     for (water, mat_handle) in &water_q {
         let Some(mut mat) = water_materials.get_mut(mat_handle) else {
             continue;

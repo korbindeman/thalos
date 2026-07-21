@@ -87,6 +87,10 @@ Status of in-flight work (now tracked by substrate in the doc's §4):
   **sky-view-LUT→IBL (F3/F4), AO (F5)** ◐ and **shadow-rig unification (F6)** ☑
   (landed 2026-07-02, see the Shadows bullet) — the rest of this sprint's
   foundation.
+- **Ocean spectral tracer (OCEAN-1)** ✅ — validated per-body `OceanState`,
+  low/high frequency packets with gravity-derived deep-water dispersion,
+  canonical simulation-clock phase, and deterministic production/slope-field
+  headless probes. Full FFT displacement/Jacobian fields remain OCEAN-PROG.
 - **Terrain tiling-material detail, hull/structure spine port, LOD chain** ☐ — next.
 
 ### Shared shader library rule
@@ -158,6 +162,8 @@ just game mira            # ship in low Mira orbit (offline package terrain)
 just game mira-eva        # spawn on foot on Mira
 just bake Mira            # rebuild assets/terrain_packages/Mira.bin offline
 just validate-bake Mira   # validate package schema/index/checksums/payload
+just screenshot ocean       # headless low-sun open-ocean material probe
+just screenshot ocean-slopes # headless slope/mip-variance diagnostic
 just screenshot mira-orbit   # headless cratered-horizon verification
 just screenshot mira-surface # headless close regolith/Hapke verification
 just screenshot mira-eva     # canonical EVA-site horizon/LOD verification
@@ -346,7 +352,11 @@ builds the world for a named **preset** (`spaceport-aerial`, which boots the
 `runway` scenario so the whole spaceport + settled terrain + parked aircraft come
 up behind the loading screen; `hub`, which boots the `just game hub` route —
 the space-center view exactly as PLAY presents it, craft left in orbit — the
-regression probe for view-anchored surface detail; and `dry-belt` (aliases
+regression probe for view-anchored surface detail; `ocean`, which searches for
+deep water under a low sun and frames the off-axis glitter path to expose wave
+scale, filtering, foam, and atmospheric coupling; `ocean-slopes`, which uses
+the same frame but false-colours resolved slope + mip variance (optionally at a
+fixed `THALOS_SCREENSHOT_OCEAN_TIME`); and `dry-belt` (aliases
 `dry` / `desert` / `biome`), which boots a plain orbit scenario then searches
 the daylight hemisphere for the **driest sunlit dry-land site** and low-obliquely
 surveys the surface there — the verification probe for **terrain-per-biome** work
@@ -451,8 +461,9 @@ round-tripping through the user:
 - `just screenshot <preset>` — the in-context ground view. Pick the preset that
   frames what you changed: `dry-belt` for desert/biome/scatter work,
   `spaceport-aerial` / `hub` for the base and the wet-belt look, or
-  `mira-orbit` / `mira-surface` for package/Hapke work, or `mira-eva` for the
-  canonical eye-level spawn and horizon/LOD coverage. If no preset frames it,
+  `ocean` for open-water material work, `mira-orbit` / `mira-surface` for
+  package/Hapke work, or `mira-eva` for the canonical eye-level spawn and
+  horizon/LOD coverage. If no preset frames it,
   add one (`ScreenshotPreset`) rather than skipping the check.
 - `just preview` — isolated procedural assets (a tree/rock/grass mesh).
 

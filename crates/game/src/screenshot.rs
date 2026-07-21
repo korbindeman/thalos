@@ -48,7 +48,7 @@ use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
 use crate::loading::AppState;
-use crate::rendering::ground_terrain::BodyTerrain;
+use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::space_center::{hub_context, HubContext};
 use crate::spawn::{Homeworld, SpawnSituation};
@@ -164,6 +164,13 @@ pub enum ScreenshotPreset {
     /// `THALOS_SCREENSHOT_ATMOSPHERE=custom` produces the matched legacy
     /// `BodySky` A/B without changing any other input.
     EarthReference,
+    /// Eye-level open-ocean validation shot. Selects deep water under a low sun
+    /// and aligns the view near the specular path so wave scale, sun glitter,
+    /// whitecaps, horizon energy, and atmospheric coupling are all visible.
+    Ocean,
+    /// Same framing as [`Self::Ocean`], but replaces the water BRDF with a
+    /// false-colour resolved-slope / filtered-roughness diagnostic.
+    OceanSlopes,
     /// Mira's cratered horizon from low orbit. Boots the canonical orbit
     /// scenario around Mira, then frames the daylight surface with enough boom
     /// distance for curvature and large impact structure to read.
@@ -277,6 +284,8 @@ impl ScreenshotPreset {
             Self::Hub => "hub",
             Self::DryBelt => "dry-belt",
             Self::EarthReference => "earth-reference",
+            Self::Ocean => "ocean",
+            Self::OceanSlopes => "ocean-slopes",
             Self::MiraOrbit => "mira-orbit",
             Self::MiraSurface => "mira-surface",
             Self::MiraEva => "mira-eva",
@@ -301,6 +310,10 @@ impl ScreenshotPreset {
             "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
             "earth-reference" | "earth_reference" | "earth-ref" | "atmosphere" | "atmo" => {
                 Self::EarthReference
+            }
+            "ocean" | "open-ocean" | "open_ocean" | "sea" | "water" => Self::Ocean,
+            "ocean-slopes" | "ocean_slopes" | "sea-slopes" | "slope-field" => {
+                Self::OceanSlopes
             }
             "mira" | "mira-orbit" | "mira_orbit" => Self::MiraOrbit,
             "mira-surface" | "mira_surface" | "regolith" => Self::MiraSurface,
@@ -333,7 +346,7 @@ impl ScreenshotPreset {
             // Dry-belt frames wild terrain far from any base, so a plain orbit
             // scenario is enough; the driver poses the camera over the searched
             // desert site (the craft stays in orbit, irrelevant to the framing).
-            Self::DryBelt => SpawnSituation::ShipOrbit,
+            Self::DryBelt | Self::Ocean | Self::OceanSlopes => SpawnSituation::ShipOrbit,
             Self::EarthReference => SpawnSituation::Runway,
             Self::MiraOrbit | Self::MiraSurface => SpawnSituation::ShipOrbit,
             Self::MiraEva => SpawnSituation::Eva,
@@ -628,6 +641,47 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            Self::Ocean => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/ocean.png"),
+                width: 1920,
+                height: 1080,
+                // The ocean-site search chooses a point whose low sun lies
+                // opposite local east; this small offset keeps the glitter
+                // road off-centre so both lit and unlit slopes stay legible.
+                azimuth_deg: 22.0,
+                elevation_deg: 1.5,
+                distance_m: 600.0,
+                // A cold wild-ocean site still needs terrain tiles for the
+                // signed sea-field mask and the cloud history needs to settle.
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/ocean.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::OceanSlopes => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/ocean_slopes.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 22.0,
+                elevation_deg: 1.5,
+                distance_m: 600.0,
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/ocean_slopes.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
             Self::MiraOrbit => ScreenshotConfig {
                 preset: self,
                 out: PathBuf::from("tools/screenshots/mira_orbit.png"),
@@ -789,6 +843,8 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_CLOUD_TEMPORAL` — 0/off disables all history.
     /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
     /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults beside PNG).
+    /// - `THALOS_SCREENSHOT_OCEAN_TIME` — optional fixed canonical ocean time
+    ///   in seconds (ocean diagnostics/phase comparisons only).
     pub fn from_env() -> Option<Self> {
         let raw = env::var("THALOS_SCREENSHOT").ok()?;
         let mut cfg = ScreenshotPreset::parse(&raw).defaults();
@@ -921,6 +977,8 @@ struct ScreenshotDriver {
     /// Cached body-fixed direction of the searched dry-belt site (DryBelt preset
     /// only), resolved once so the framing stays fixed across warmup.
     dry_site_dir: Option<DVec3>,
+    /// Cached deep-water direction for the low-sun open-ocean preset.
+    ocean_site_dir: Option<DVec3>,
     /// Cached rugged, obliquely lit Mira site for both airless presets.
     airless_site_dir: Option<DVec3>,
 }
@@ -930,7 +988,10 @@ pub struct HeadlessScreenshotPlugin;
 impl Plugin for HeadlessScreenshotPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScreenshotDriver>()
-            .add_systems(Startup, setup_screenshot_target)
+            .add_systems(
+                Startup,
+                (setup_screenshot_target, configure_ocean_diagnostic),
+            )
             .add_systems(
                 Update,
                 (retarget_ship_camera, hide_overlays, configure_cloud_capture),
@@ -984,6 +1045,14 @@ fn configure_cloud_capture(
         clouds.clouds_coverage,
     );
     *applied = true;
+}
+
+fn configure_ocean_diagnostic(
+    cfg: Res<ScreenshotConfig>,
+    mut ocean_debug: ResMut<OceanDebugSettings>,
+) {
+    ocean_debug.slope_view = matches!(cfg.preset, ScreenshotPreset::OceanSlopes);
+    ocean_debug.phase_time_override_s = env_parse("THALOS_SCREENSHOT_OCEAN_TIME");
 }
 
 /// Diagnostic: for each probe offset across the basin (metres from the pad
@@ -1169,6 +1238,13 @@ fn drive_headless_screenshot(
             homeworld.0,
             &mut driver.dry_site_dir,
         ),
+        ScreenshotPreset::Ocean | ScreenshotPreset::OceanSlopes => ocean_site_context(
+            &sim,
+            &solar,
+            &height_sources,
+            homeworld.0,
+            &mut driver.ocean_site_dir,
+        ),
         ScreenshotPreset::MiraOrbit | ScreenshotPreset::MiraSurface => daylight_surface_context(
             &sim,
             &solar,
@@ -1251,6 +1327,108 @@ fn drive_headless_screenshot(
         .spawn(Screenshot::image(target))
         .observe(save_to_disk(cfg.out.clone()));
     driver.captured = true;
+}
+
+/// Resolve a stable deep-water focus whose low sun sits opposite local east.
+/// The preset looks just beside that specular path, making the capture
+/// sensitive to both resolved slopes and filtered horizon glitter. The focus
+/// itself is the analytic sea sphere, not seabed.
+fn ocean_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    cached_dir: &mut Option<DVec3>,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let hs = height_sources.get(body_id)?;
+    let sun_world = (-body_state.position).normalize_or_zero();
+    let sun_world = if sun_world == DVec3::ZERO {
+        DVec3::Y
+    } else {
+        sun_world
+    };
+
+    let dir_body = match *cached_dir {
+        Some(dir) => dir,
+        None => {
+            let dir = find_ocean_site(hs.as_ref(), body_state.orientation, sun_world);
+            let up_world = (body_state.orientation * dir).normalize();
+            let sun_elevation_deg = up_world.dot(sun_world).clamp(-1.0, 1.0).asin().to_degrees();
+            let depth_m = -hs
+                .sample_height_m(dir.as_vec3(), OCEAN_SITE_LOD_M)
+                .unwrap_or(0.0);
+            info!(
+                target: "thalos::screenshot",
+                "ocean site: depth {depth_m:.0} m, sun elevation {sun_elevation_deg:.1}°"
+            );
+            *cached_dir = Some(dir);
+            dir
+        }
+    };
+
+    let up_world = (body_state.orientation * dir_body).normalize();
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * radius_m,
+        up_world,
+        pad_r: radius_m,
+    })
+}
+
+const OCEAN_SITE_LOD_M: f32 = 256.0;
+
+/// Search the globe for deep water at 10–32° sun elevation, preferring a
+/// site where the sun's tangent direction is opposite local east. That makes
+/// the fixed ocean framing deterministic and naturally backlights the waves.
+fn find_ocean_site(source: &dyn HeightSource, body_to_world: DQuat, sun_world: DVec3) -> DVec3 {
+    const CANDIDATES: usize = 2_048;
+    const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
+
+    let mut best = DVec3::Y;
+    let mut best_score = f64::NEG_INFINITY;
+    for i in 0..CANDIDATES {
+        let y = 1.0 - 2.0 * (i as f64 + 0.5) / CANDIDATES as f64;
+        let ring_r = (1.0 - y * y).sqrt();
+        let theta = GOLDEN_ANGLE * i as f64;
+        let dir_body = DVec3::new(ring_r * theta.cos(), y, ring_r * theta.sin());
+        let height_m = source
+            .sample_height_m(dir_body.as_vec3(), OCEAN_SITE_LOD_M)
+            .unwrap_or(0.0) as f64;
+        if height_m > -250.0 {
+            continue;
+        }
+
+        let up_world = (body_to_world * dir_body).normalize();
+        let sun_sine = up_world.dot(sun_world);
+        if !(0.17..=0.53).contains(&sun_sine) {
+            continue;
+        }
+        let seed = if up_world.dot(DVec3::Y).abs() < 0.99 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        let east = seed.cross(up_world).normalize();
+        let sun_tangent = (sun_world - up_world * sun_sine).normalize_or_zero();
+        let glint_alignment = sun_tangent.dot(-east);
+        if glint_alignment < 0.75 {
+            continue;
+        }
+
+        // Depth gives margin against remote islands entering the low horizon;
+        // alignment dominates so the same framing keeps the glitter visible.
+        let target_sun_sine = 0.32;
+        let score =
+            glint_alignment * 8_000.0 - (sun_sine - target_sun_sine).abs() * 2_000.0 - height_m;
+        if score > best_score {
+            best_score = score;
+            best = dir_body;
+        }
+    }
+    best
 }
 
 /// Stable daylight focus for an uninhabited airless body. The sub-stellar

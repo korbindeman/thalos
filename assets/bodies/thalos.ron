@@ -20,6 +20,19 @@
             ForgivingLandingTerrain,
         ],
     )),
+    ocean: Some((
+        // Calm/moderate reference sea. Directions are body-local axes; the
+        // renderer projects them onto the local tangent plane.
+        wind_axis_body: (0.21, 0.93, 0.31),
+        wind_speed_10m_m_s: 11.0,
+        significant_wave_height_m: 2.4,
+        dominant_wavelength_m: 150.0,
+        swell_axis_body: (-0.37, 0.78, 0.50),
+        swell_energy: 0.34,
+        deep_water_color: (0.012, 0.040, 0.090),
+        optical_depth_m: 120.0,
+        foam_slope_onset: 0.22,
+    )),
     terrestrial_atmosphere: Some((
         // Kármán line at 80 km — well above 5 × max(H_R, H_M) = 40 km so
         // the raymarch captures the full column, with a wide transition

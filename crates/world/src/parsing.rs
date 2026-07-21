@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::atmosphere::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
+use crate::ocean::OceanState;
 use serde::Deserialize;
 use thalos_terrain::{TectonicConfig, TerrainConfig};
 
@@ -36,6 +37,8 @@ pub struct BodyDetailsFile {
     #[serde(default)]
     pub terrain: Option<TerrainConfig>,
     #[serde(default)]
+    pub ocean: Option<OceanState>,
+    #[serde(default)]
     pub tectonics: Option<TectonicConfig>,
     #[serde(default)]
     pub atmosphere: Option<AtmosphereParams>,
@@ -58,6 +61,8 @@ pub struct BodyFile {
     pub orbit: Option<OrbitFile>,
     #[serde(default)]
     pub terrain: Option<TerrainConfig>,
+    #[serde(default)]
+    pub ocean: Option<OceanState>,
     #[serde(default)]
     pub tectonics: Option<TectonicConfig>,
     #[serde(default)]
@@ -156,6 +161,9 @@ pub fn load_solar_system_with_bodies(
             if details.terrain.is_some() {
                 body.terrain = details.terrain;
             }
+            if details.ocean.is_some() {
+                body.ocean = details.ocean;
+            }
             if details.tectonics.is_some() {
                 body.tectonics = details.tectonics;
             }
@@ -209,6 +217,24 @@ fn load_solar_system_impl(file: &SolarSystemFile) -> Result<SolarSystemDefinitio
 
         let terrain = b.terrain.clone().unwrap_or(TerrainConfig::None);
         let tectonics = b.tectonics.clone();
+        match (terrain.ocean_sea_level_m(), b.ocean) {
+            (Some(_), Some(ocean)) => ocean
+                .validate()
+                .map_err(|reason| format!("body '{}' has invalid ocean state: {reason}", b.name))?,
+            (Some(_), None) => {
+                return Err(format!(
+                    "body '{}' has ocean terrain but no authored ocean state",
+                    b.name
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(format!(
+                    "body '{}' authors ocean state but its terrain has no sea level",
+                    b.name
+                ));
+            }
+            (None, None) => {}
+        }
 
         bodies.push(BodyDefinition {
             id,
@@ -224,6 +250,7 @@ fn load_solar_system_impl(file: &SolarSystemFile) -> Result<SolarSystemDefinitio
             soi_radius_m: 0.0, // filled below once all bodies exist
             orbital_elements,
             terrain,
+            ocean: b.ocean,
             tectonics,
             atmosphere: b.atmosphere.clone(),
             terrestrial_atmosphere: b.terrestrial_atmosphere.clone(),

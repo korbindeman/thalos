@@ -1,6 +1,7 @@
 //! Body and system data types — the authored physical/orbital definition.
 
 use crate::atmosphere::{AtmosphereParams, RingSystem, TerrestrialAtmosphere};
+use crate::ocean::OceanState;
 use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -46,6 +47,10 @@ pub struct BodyDefinition {
     pub soi_radius_m: f64,
     pub orbital_elements: Option<OrbitalElements>,
     pub terrain: TerrainConfig,
+    /// Authored state for an ocean-bearing terrain. Wave phase is runtime
+    /// state derived from simulation time; this owns only stable per-body sea
+    /// conditions and appearance.
+    pub ocean: Option<OceanState>,
     /// Optional tectonic structural prior. When present, bodies carry a
     /// plate graph (mesh + plates + boundaries + per-cell distance fields)
     /// that the editor visualizes and a future `SurfaceField` height

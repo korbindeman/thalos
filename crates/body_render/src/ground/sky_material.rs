@@ -17,7 +17,8 @@
 //! (attachment-0 texture array, tile-tree + origins storage buffers) live in
 //! udlod's render-world registries, not in `Assets`, so the derive can't bind
 //! them: this material implements `AsBindGroup` by hand, keeping the derive's
-//! exact layout for bindings 0–10 and appending the tile lookup at 11–14.
+//! exact layout for bindings 0–10, appending the tile lookup at 11–14, and
+//! binding the shared mipmapped ocean slope field at 15–16.
 //! The material is mutated every frame by the game's sky update, so the bind
 //! group re-prepares every frame and the lookup never goes stale across
 //! terrain despawn/respawn.
@@ -102,6 +103,11 @@ pub struct BodySkyMaterial {
     /// Airless / no-ocean bodies bind [`crate::blank_coast_cube`] and never
     /// sample it (`ocean.y` gates the branch).
     pub coast_atlas: Handle<Image>,
+    /// Shared periodic broadband ocean slopes. The sky shader samples this at
+    /// multiple physical scales with explicit anisotropic gradients, so
+    /// grazing views retain cross-wave detail while filtering only the
+    /// foreshortened direction. RG and BA contain independent spectra.
+    pub ocean_slope: Handle<Image>,
     /// Main-world entity of this body's udlod terrain (the one carrying
     /// `TileAtlas`), used to resolve the height-tile atlas + tile tree in
     /// `unprepared_bind_group`. `None` (or a stale entity after a terrain
@@ -144,6 +150,7 @@ impl AsBindGroup for BodySkyMaterial {
         let cloud_layer = image(&self.cloud_layer)?;
         let cloud_distance = image(&self.cloud_distance)?;
         let coast_atlas = image(&self.coast_atlas)?;
+        let ocean_slope = image(&self.ocean_slope)?;
 
         // Resolve this body's resident height-tile atlas + tile tree from
         // udlod's render-world registries. The tile tree is keyed per
@@ -294,6 +301,20 @@ impl AsBindGroup for BodySkyMaterial {
             ),
             (13, OwnedBindingResource::Buffer(tile_tree_buffer)),
             (14, OwnedBindingResource::Buffer(origins_buffer)),
+            (
+                15,
+                OwnedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    ocean_slope.texture_view.clone(),
+                ),
+            ),
+            (
+                16,
+                OwnedBindingResource::Sampler(
+                    SamplerBindingType::Filtering,
+                    ocean_slope.sampler.clone(),
+                ),
+            ),
         ];
 
         Ok(UnpreparedBindGroup {
@@ -307,7 +328,8 @@ impl AsBindGroup for BodySkyMaterial {
     ) -> Vec<BindGroupLayoutEntry> {
         // Bindings 0–10 mirror what the `AsBindGroup` derive generated before
         // the manual impl (same order, types, and all-stages visibility);
-        // 11–14 are the ADR-20260720T185958Z-water-projects-one-signed-sea-field height-tile lookup.
+        // 11–14 are the ADR-20260720T185958Z-water-projects-one-signed-sea-field
+        // height-tile lookup; 15–16 are the shared mipmapped ocean-slope field.
         BindGroupLayoutEntries::with_indices(
             ShaderStages::all(),
             (
@@ -341,6 +363,8 @@ impl AsBindGroup for BodySkyMaterial {
                 (12, sampler(SamplerBindingType::Filtering)),
                 (13, storage_buffer_read_only_sized(false, None)),
                 (14, storage_buffer_read_only_sized(false, None)),
+                (15, texture_2d(TextureSampleType::Float { filterable: true })),
+                (16, sampler(SamplerBindingType::Filtering)),
             ),
         )
         .to_vec()

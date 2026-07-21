@@ -30,6 +30,7 @@ mod gpu_grass;
 mod ground_patch;
 mod height_source;
 mod landcover;
+mod ocean_slope;
 mod pipeline;
 #[cfg(feature = "playground")]
 mod playground_material;
@@ -66,6 +67,11 @@ pub use height_source::{
     horizon_sun_visibility,
 };
 pub use landcover::{LandcoverSample, sample_landcover};
+pub use ocean_slope::{
+    OCEAN_CASCADE_DOMAINS_M, OceanSpectrumProjection, OceanWaveFrame,
+    bake_ocean_slope_texture, ocean_packet_phase_speeds, ocean_wave_frame,
+    project_ocean_spectrum,
+};
 pub use pipeline::{
     PipelineTileProvider, rendered_height_m, rendered_height_range, renderer_tile_lod_m_at,
 };

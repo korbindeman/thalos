@@ -13,12 +13,14 @@
 
 pub mod atmosphere;
 pub mod body;
+pub mod ocean;
 pub mod parsing;
 
 pub use body::{
     AU_TO_METERS, BodyDefinition, BodyId, BodyKind, G, OrbitalElements, SolarSystemDefinition,
     StateVector, keplerian_basis, orbital_elements_to_cartesian,
 };
+pub use ocean::OceanState;
 
 // The atmosphere data schemas live here now (folded in from the former
 // `thalos_atmosphere` crate). Re-export the commonly-named types at the crate

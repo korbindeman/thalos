@@ -125,6 +125,7 @@ impl Plugin for RenderingPlugin {
             .register_type::<CameraExposure>()
             .register_type::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ground_terrain::AtmosphereTuning>()
+            .init_resource::<ground_terrain::OceanDebugSettings>()
             .init_resource::<LastCloudBandUpdate>()
             .init_resource::<ActiveCraft>()
             // The N-craft accessor seam: keep `ActiveCraft` mirroring the active

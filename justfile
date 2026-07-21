@@ -64,7 +64,9 @@ preview-window:
 # placed — the regression probe for view-anchored surface detail);
 # `just screenshot dry-belt` (aliases: dry / desert / biome) surveys the driest
 # sunlit desert site it can find — the verification probe for terrain-per-biome
-# work (landcover palette + the tree/scatter biome gate). `mira-orbit` and
+# work (landcover palette + the tree/scatter biome gate); `just screenshot ocean`
+# captures a low-sun, eye-level deep-ocean material probe and `ocean-slopes`
+# captures its resolved-slope / mip-roughness diagnostic. `mira-orbit` and
 # `mira-surface` verifies the landmark crater/package/Hapke view; `mira-eva`
 # reproduces the canonical eye-level EVA spawn and its horizon/LOD coverage.
 # `earth-reference` is the 3:2 ISS-like atmosphere calibration view; it defaults
@@ -77,7 +79,8 @@ preview-window:
 # _ATMOSPHERE (configured/custom/bevy).
 # Cloud probes additionally accept _CAMERA_ALTITUDE, _LOOK_ELEVATION,
 # _SUN_ELEVATION, _CLOUD_QUALITY (low/baseline/high/reference),
-# _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL).
+# _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL). Ocean probes
+# additionally accept THALOS_SCREENSHOT_OCEAN_TIME for deterministic phase.
 screenshot preset="spaceport-aerial":
     {{ if os() == "windows" { "$env:THALOS_SCREENSHOT='" + preset + "'; " } else { "THALOS_SCREENSHOT='" + preset + "' " } }}{{game_command}}
 

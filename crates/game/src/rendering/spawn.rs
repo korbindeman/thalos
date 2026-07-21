@@ -31,6 +31,7 @@ use thalos_body_render::{
     MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RingLayers, RingMaterial, RingParams,
     SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
     bake_coast_bathymetry_cube, bake_impostor_albedo_cube, bake_multi_scatter_lut,
+    bake_ocean_slope_texture, ocean_packet_phase_speeds,
     blank_coast_cube, blank_impostor_cube, build_ring_mesh, cloud_weather_image,
 };
 use thalos_body_render::{BodySkyExtra, BodySkyMaterial};
@@ -227,6 +228,11 @@ pub(super) fn spawn_bodies(
     // (their `ocean.y` gate means it is never sampled).
     let blank_coast = images.add(blank_coast_cube());
     let blank_weather = images.add(cloud_weather_image(vec![0; 4 * 6], 1));
+    // One deterministic broadband slope field serves every ocean body. It is
+    // body-fixed only through each shader's local coordinates; sharing the GPU
+    // allocation does not synchronize phase because bodies have independent
+    // orientations and wave clocks.
+    let ocean_slope = images.add(bake_ocean_slope_texture());
     commands.insert_resource(BlankCloudTextures {
         layer: blank_cloud.clone(),
         distance: blank_cloud_dist.clone(),
@@ -321,6 +327,23 @@ pub(super) fn spawn_bodies(
             } else {
                 blank_coast.clone()
             };
+            if let (Some(_), Some(ocean_state)) =
+                (body.terrain.ocean_sea_level_m(), body.ocean.as_ref())
+            {
+                let (low_speeds, high_speeds) =
+                    ocean_packet_phase_speeds(body.surface_gravity_m_s2());
+                info!(
+                    target: "thalos::ocean",
+                    body = %body.name,
+                    wind_m_s = ocean_state.wind_speed_10m_m_s,
+                    wave_height_m = ocean_state.significant_wave_height_m,
+                    dominant_wavelength_m = ocean_state.dominant_wavelength_m,
+                    swell_energy = ocean_state.swell_energy,
+                    ?low_speeds,
+                    ?high_speeds,
+                    "authored ocean state and representative packet phase speeds"
+                );
+            }
 
             let sky_material = BodySkyMaterial {
                 atmosphere: ship_atmosphere,
@@ -331,6 +354,7 @@ pub(super) fn spawn_bodies(
                 cloud_layer: blank_cloud.clone(),
                 cloud_distance: blank_cloud_dist.clone(),
                 coast_atlas,
+                ocean_slope: ocean_slope.clone(),
                 // Filled by `update_body_terrain_atmosphere` once the body's
                 // udlod terrain spawns (ADR-20260720T185958Z-water-projects-one-signed-sea-field height-tile lookup).
                 terrain_entity: None,

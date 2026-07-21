@@ -18,7 +18,7 @@ while its non-atmosphere composites are migrated independently.
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
 | Rocky-body sky | **Bevy `AtmosphereMode::Raymarched` is canonical** (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere). One camera-local atmosphere proxy follows the body selected by `ViewAnchor`; authored Rayleigh scale heights/optical depth feed Bevy's medium, with an Earth aerosol split and ozone absorption. The deterministic `earth-reference` screenshot is the orbital regression probe. The legacy `BodySky` atmosphere is debug-only. | Remove the temporary 0.1 density adapter when terrain and the photometric atmosphere share one radiometric exposure contract; migrate cloud/star composites without restoring a second atmosphere. |
 | Cloud rendering | **Near/mid `BodySky` path:** the vendored compute raymarch described in *Cloud rendering (M4)* below; body-fixed spherical shells, procedural density, a planet-fixed weather map, cloud-depth export, and temporal reprojection. The far impostor still composites a separately authored flat shell. Gas-giant cloud decks remain a distinct system. | The canonical surface-to-orbit replacement is planned in [clouds.md](clouds.md): one per-body weather field, atmosphere-coupled lighting, scalable reconstruction, shared cloud shadows, and a weather-derived orbital projection. |
-| Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
+| Oceans | One analytic-sphere `BodySky` path (ADR-20260720T185954Z / ADR-20260720T185958Z): signed-field coverage, depth optics, shore response, four body-fixed mipmapped slope-texture cascades, anisotropic horizon filtering, filtered GGX energy, sparse slope-coupled foam, and atmosphere-derived sun/sky reflection. See [ocean.md](ocean.md). | Authored sea state, dynamic spectral displacement/Jacobian cascades, persistent foam, and bounded local shore/wake solvers behind the same analytic planet surface. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
 > **Rendering vs physics.** This doc covers atmosphere *rendering* (how the sky
@@ -89,8 +89,9 @@ canonical rocky-body atmosphere.
   layers, mist banks). Worth a stretch goal but not in M4 scope.
 - Realtime weather simulation. Cloud fields are static reference
   overlays with differential rotation only.
-- Sea state animation beyond a tile-able displacement / normal
-  texture. No Tessendorf, no spectral wave sim.
+- Spectral simulation, displaced local geometry, and persistent foam in the
+  BL-12 visual tracer. They are the next ocean program, not hidden inside the
+  initial shader-only fidelity slice; see [ocean.md §6](ocean.md#6-production-path).
 - Real-scene reflection probe capture. Deferred.
 
 ---
@@ -611,46 +612,35 @@ For gas giants, "clouds" *are* the cloud deck and live inside
 
 ---
 
-## Ocean rendering (M4)
+## Ocean rendering
 
 ### Today
 
-The flat impostor has a built-in water BRDF triggered where sampled
-height is below sea level. `PlanetWaterParams` carries:
+The canonical ship-view ocean is the analytic sphere composited by `BodySky`
+(ADR-20260720T185954Z-analytic-planet-water-never-meshed), with coverage and
+bathymetry sampled from the one signed sea field
+(ADR-20260720T185958Z-water-projects-one-signed-sea-field). `BodySky` samples
+four body-fixed scales of one shared mipmapped
+broadband slope texture, using the surface pixel's major/minor axes and 16×
+anisotropic filtering so grazing views preserve resolvable cross-wave detail.
+Mip-omitted slope energy becomes GGX roughness; exceptional resolved slopes
+source sparse whitecaps; `thalos::water::shade_ocean_detailed` reflects the
+atmosphere-derived sky and sun. Rust supplies f64-reduced wave phase plus
+body-local wind axes so sub-metre detail does not swim at planetary coordinates
+or floating-origin rebases.
 
-- `water_color_depth: Vec4` — xyz is linear-RGB deep-water color, w
-  is minimum optical column depth (in meters; prevents shelf-water
-  artefacts on flat-ocean placeholders).
-- `water_roughness: f32`.
-
-This is good enough for the orbital impostor read. It is **not**
-sufficient for descent or surface-level ocean.
-
-### Target
-
-A dedicated ocean material (not the impostor) once ground LOD ships.
-Required:
-
-- Microfacet specular with sun-glint streak. The sub-solar bright
-  spot spreading into a glint streak with wave roughness is the
-  single biggest "this is wet" cue.
-- Depth-darkened color: deep blue offshore, green-cyan in shallows,
-  driven by terrain depth at sample point.
-- Fresnel reflectivity that increases at grazing angles.
-- Foam at coastlines and where shallow.
-- IBL contribution from the sky cubemap (so reflective oceans show
-  the sky correctly, not just the sun).
+This is the production architecture's shader-only visual tracer. It deliberately
+does not claim spectral displacement, persistent foam history, or vessel/local
+solver coupling; those stages and their handoff contracts live in
+[ocean.md](ocean.md).
 
 ### Where ocean lives
 
-Ocean is the renderer's job, but the *topology* (where ocean is)
-comes from the terrain feature compiler — sea level on
-`AgingOceanicHomeworld` / `GenericTerrestrial` archetypes (M2). The
-ocean material reads the terrain height cubemap (or tile, in M3) to
-decide where it lives.
-
-This is one of the reasons M4 sequences after M3: the same data flow
-that drives ground LOD also drives ocean shoreline.
+Ocean is the renderer's job, but its *topology* is the signed sea-height field
+selected by `SurfaceQuery`. The resident terrain atlas and coast/bathymetry cube
+are two resolutions of that one field; both ground LOD and the analytic water
+projection therefore agree on the shoreline. Future spectral and local fields
+modify detail, never coverage authority.
 
 ---
 
@@ -804,10 +794,10 @@ This is a switch on the body, not per-pixel.
 1. **Cloud authoring schema.** Where does cloud noise / latitude band
    data live? Adjacent to `TerrestrialAtmosphere`, or its own
    schema? Decide before M4 starts.
-2. **Ocean material vs. impostor.** Keep the in-impostor water BRDF
-   for orbit-only views and add a ground-LOD ocean material for
-   close, or unify into one path? Probably unify — duplicate code
-   between projections is a smell.
+2. **Ocean reflection tiers.** F7/F9 provide the shared prefiltered sky
+   environment. Profile and judge that result before choosing whether SSR or a
+   local planar/probe tier earns its cost; analytic sky/sun remains the stable
+   fallback in every case.
 3. **Atmosphere on Vaelen.** Pressure is ~0.015 bar; thick enough to
    register optically, thin enough that "Mars-like Lommel-Seeliger"
    may already be enough without full Bruneton. Decide whether

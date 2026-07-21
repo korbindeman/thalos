@@ -30,7 +30,7 @@
     orbital_cloud_normal_body,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
-#import thalos::water::shade_ocean
+#import thalos::water::shade_ocean_detailed
 
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3 (group 2 is the
 // material-indices storage buffer used by the bindless material allocator).
@@ -41,8 +41,15 @@ struct SkyAtmosExtra {
     planet_center_radius:      vec4<f32>,  // xyz = planet center (render-space), w = radius
     world_to_body_orientation: vec4<f32>,  // render-space direction -> body-local cubemap direction
     cloud_band_radii:          vec4<f32>,  // x = cloud base radius, y = cloud top radius (render units), z = airlight ratio, w = cloud-composite-enable flag (1 = bind live clouds)
-    ocean:                     vec4<f32>,  // x = ocean sphere radius (render units = m), y = enable (>=0.5), z = wave-scroll time (s), w = camera height above sea (m, CPU f64-precise)
+    ocean:                     vec4<f32>,  // x = ocean sphere radius (render units = m), y = enable (>=0.5), z = shore-wave time reduced to its repeat period, w = camera height above sea (m, CPU f64-precise)
     ocean_color_depth:         vec4<f32>,  // xyz = deep-water linear-RGB tint, w = min optical-depth scale
+    ocean_camera_phase:        vec4<f32>,  // xy = f64 camera wind/crosswind coordinate modulo 8192 m
+    ocean_low_phase:           vec4<f32>,  // low-frequency packet phase cycles for 8192/1024/128/16 m domains
+    ocean_high_phase:          vec4<f32>,  // high-frequency packet phase cycles for 8192/1024/128/16 m domains
+    ocean_slope_amplitudes:    vec4<f32>,  // resolved slope amplitudes for those four domains
+    ocean_spectrum:            vec4<f32>,  // x = swell angle, y = swell energy, z = foam slope onset, w = slope debug
+    ocean_wind_basis:          vec4<f32>,  // xyz = body-local dominant-wave tangent
+    ocean_crosswind_basis:     vec4<f32>,  // xyz = body-local crosswind tangent
     tile_lookup:               vec4<f32>,  // x = height-tile lookup enable, y = lod_count, z = tree_size, w = attachment-0 center size (texels/tile edge)
     tile_atlas_uv:             vec4<f32>,  // x = atlas-UV scale (center/texture), y = offset (border/texture), z = height min (m), w = height max (m)
 }
@@ -112,6 +119,180 @@ struct SkyTileTreeEntry {
 }
 @group(3) @binding(13) var<storage, read> sky_tile_tree: array<SkyTileTreeEntry>;
 @group(3) @binding(14) var<storage, read> sky_tile_origins: array<vec2<u32>>;
+
+// Low- and high-frequency directional slope packets (RG and BA), with a full
+// CPU-authored mip chain. Sampling both packets at separate dispersion phases
+// prevents the old broadband cascade from translating as one rigid sheet.
+// Unlike the old scalar-noise derivative this has no isolated extrema whose
+// specular contours become closed "worms". Explicit texture gradients below
+// preserve cross-view detail at grazing angles while filtering only the
+// severely foreshortened view direction.
+@group(3) @binding(15) var ocean_slope_tex: texture_2d<f32>;
+@group(3) @binding(16) var ocean_slope_sampler: sampler;
+
+// Mirror of `ocean_slope::OCEAN_CASCADE_DOMAINS_M`; change together.
+const OCEAN_CASCADE_DOMAINS_M: array<f32, 4> = array<f32, 4>(
+    8192.0, 1024.0, 128.0, 16.0,
+);
+
+struct OceanSlopeSample {
+    slope: vec2<f32>,
+    alpha_ggx: f32,
+    breakup: f32,
+}
+
+fn ocean_rotate_2d(value: vec2<f32>, angle: f32) -> vec2<f32> {
+    let c = cos(angle);
+    let s = sin(angle);
+    return vec2<f32>(c * value.x - s * value.y, s * value.x + c * value.y);
+}
+
+// One frequency packet inside one physical cascade. `major_dir` is the
+// projected camera-ray direction on the sea tangent plane; major/minor
+// footprints are the two axes of one screen pixel's surface ellipse.
+fn sample_ocean_slope_packet(
+    local_m: vec2<f32>,
+    major_footprint_m: f32,
+    minor_footprint_m: f32,
+    major_dir: vec2<f32>,
+    domain_m: f32,
+    phase_cycles: f32,
+    angle: f32,
+    offset: vec2<f32>,
+    use_ba: bool,
+) -> vec3<f32> {
+    let local_rotated = ocean_rotate_2d(local_m, angle);
+    let uv = local_rotated / domain_m
+        - vec2<f32>(phase_cycles, phase_cycles * 0.11)
+        + offset;
+
+    let major_rotated = ocean_rotate_2d(major_dir, angle);
+    let minor_rotated = vec2<f32>(-major_rotated.y, major_rotated.x);
+    // Slightly conservative gradients retain structure until it is genuinely
+    // subpixel. The sampler itself clamps anisotropy to 16×.
+    let uv_major = major_rotated * (major_footprint_m / domain_m) * 0.78;
+    let uv_minor = minor_rotated * (minor_footprint_m / domain_m) * 0.78;
+    let texel = textureSampleGrad(
+        ocean_slope_tex,
+        ocean_slope_sampler,
+        uv,
+        uv_major,
+        uv_minor,
+    );
+    let encoded = select(texel.xy, texel.zw, use_ba);
+    let slope_rotated = encoded * 2.0 - 1.0;
+    let slope_local = ocean_rotate_2d(slope_rotated, -angle);
+    return vec3<f32>(slope_local, encoded.x * 0.63 + encoded.y * 0.37);
+}
+
+fn sample_ocean_slope_cascade(
+    local_m: vec2<f32>,
+    major_footprint_m: f32,
+    minor_footprint_m: f32,
+    major_dir: vec2<f32>,
+    domain_m: f32,
+    low_phase: f32,
+    high_phase: f32,
+    low_angle: f32,
+    high_angle: f32,
+    offset: vec2<f32>,
+) -> vec3<f32> {
+    let low = sample_ocean_slope_packet(
+        local_m, major_footprint_m, minor_footprint_m, major_dir,
+        domain_m, low_phase, low_angle, offset, false,
+    );
+    let high = sample_ocean_slope_packet(
+        local_m, major_footprint_m, minor_footprint_m, major_dir,
+        domain_m, high_phase, high_angle, offset + vec2<f32>(0.37, 0.19), true,
+    );
+    // The packet fields are independently normalized. These weights keep the
+    // combined RMS at ~1 while preserving more energy in the long packet.
+    return vec3<f32>(low.xy * 0.78 + high.xy * 0.62, low.z * 0.58 + high.z * 0.42);
+}
+
+fn sample_ocean_slope_field(
+    rel_body_m: vec3<f32>,
+    major_footprint_m: f32,
+    minor_footprint_m: f32,
+    major_dir: vec2<f32>,
+    camera_phase_m: vec2<f32>,
+    wind_basis: vec3<f32>,
+    crosswind_basis: vec3<f32>,
+) -> OceanSlopeSample {
+    let local_m = camera_phase_m + vec2<f32>(
+        dot(rel_body_m, wind_basis),
+        dot(rel_body_m, crosswind_basis),
+    );
+
+    let swell_angle = sky_atmos_extra.ocean_spectrum.x;
+    let swell_energy = clamp(sky_atmos_extra.ocean_spectrum.y, 0.0, 1.0);
+
+    // Each physical cascade samples low (domain/6..domain/22) and high
+    // (domain/22..domain/92) packets at independently dispersed phases.
+    // Overlapping domains prevent a visible LOD boundary and keep long swell
+    // resolvable where the short-wave mips have converged to zero.
+    let long_wave = sample_ocean_slope_cascade(
+        local_m, major_footprint_m, minor_footprint_m, major_dir,
+        OCEAN_CASCADE_DOMAINS_M[0],
+        sky_atmos_extra.ocean_low_phase.x, sky_atmos_extra.ocean_high_phase.x,
+        swell_angle * swell_energy, 0.00, vec2<f32>(0.07, 0.31),
+    );
+    let medium_wave = sample_ocean_slope_cascade(
+        local_m, major_footprint_m, minor_footprint_m, major_dir,
+        OCEAN_CASCADE_DOMAINS_M[1],
+        sky_atmos_extra.ocean_low_phase.y, sky_atmos_extra.ocean_high_phase.y,
+        0.23 + swell_angle * swell_energy * 0.30, 0.23, vec2<f32>(0.43, 0.13),
+    );
+    let short_wave = sample_ocean_slope_cascade(
+        local_m, major_footprint_m, minor_footprint_m, major_dir,
+        OCEAN_CASCADE_DOMAINS_M[2],
+        sky_atmos_extra.ocean_low_phase.z, sky_atmos_extra.ocean_high_phase.z,
+        -0.38, -0.38, vec2<f32>(0.19, 0.71),
+    );
+    let capillary = sample_ocean_slope_cascade(
+        local_m, major_footprint_m, minor_footprint_m, major_dir,
+        OCEAN_CASCADE_DOMAINS_M[3],
+        sky_atmos_extra.ocean_low_phase.w, sky_atmos_extra.ocean_high_phase.w,
+        0.61, 0.61, vec2<f32>(0.79, 0.47),
+    );
+
+    let long_amp = sky_atmos_extra.ocean_slope_amplitudes.x;
+    let medium_amp = sky_atmos_extra.ocean_slope_amplitudes.y;
+    let short_amp = sky_atmos_extra.ocean_slope_amplitudes.z;
+    let capillary_amp = sky_atmos_extra.ocean_slope_amplitudes.w;
+    var out: OceanSlopeSample;
+    out.slope = long_wave.xy * long_amp
+        + medium_wave.xy * medium_amp
+        + short_wave.xy * short_amp
+        + capillary.xy * capillary_amp;
+
+    // Mips average the resolved normal itself. Transfer the missing variance
+    // into GGX so the distance handoff conserves glitter energy instead of
+    // becoming a smooth mirror. The geometric-mean footprint represents the
+    // area of the anisotropic pixel ellipse; using the major axis alone was
+    // the old detail-killing failure at the horizon.
+    let area_footprint_m = sqrt(max(major_footprint_m * minor_footprint_m, 1.0e-6));
+    let long_unresolved = smoothstep(8192.0 / 180.0, 8192.0 / 18.0, area_footprint_m);
+    let medium_unresolved = smoothstep(1024.0 / 180.0, 1024.0 / 18.0, area_footprint_m);
+    let short_unresolved = smoothstep(128.0 / 180.0, 128.0 / 18.0, area_footprint_m);
+    let capillary_unresolved = smoothstep(16.0 / 180.0, 16.0 / 18.0, area_footprint_m);
+    let omitted_variance = 0.34 * (
+        long_amp * long_amp * long_unresolved
+        + medium_amp * medium_amp * medium_unresolved
+        + short_amp * short_amp * short_unresolved
+        + capillary_amp * capillary_amp * capillary_unresolved
+    );
+    out.alpha_ggx = clamp(sqrt(0.0036 + 2.0 * omitted_variance), 0.06, 0.15);
+    out.breakup = smoothstep(
+        0.30,
+        0.72,
+        long_wave.z * 0.12
+            + medium_wave.z * 0.24
+            + short_wave.z * 0.38
+            + capillary.z * 0.26,
+    );
+    return out;
+}
 
 // Mirror of `thalos_body_render::COAST_ATLAS_HEIGHT_RANGE_M` — change together.
 const COAST_ATLAS_HEIGHT_RANGE_M: f32 = 8000.0;
@@ -481,6 +662,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var ocean_shore_dist_m = 1.0e9;
     var ocean_shore_dir = vec3<f32>(0.0, 0.0, 1.0);
     var ocean_fp_m = 1.0e9;
+    var ocean_fp_minor_m = 1.0e9;
+    var ocean_fp_major_dir = vec2<f32>(1.0, 0.0);
     if sky_atmos_extra.ocean.y >= 0.5 {
         let r_sea = sky_atmos_extra.ocean.x;
         let h = sky_atmos_extra.ocean.w;              // camera height above sea (m)
@@ -520,6 +703,21 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
                     let footprint_rad =
                         pixel_angle * t_ocean / (r_sea * max(mu_hit, 1.0e-3));
                     ocean_fp_m = footprint_rad * r_sea;
+                    ocean_fp_minor_m = pixel_angle * t_ocean;
+                    let ray_dir_l = rotate_quat(
+                        sky_atmos_extra.world_to_body_orientation, ray_dir);
+                    let view_tangent_l = ray_dir_l - hit_dir_l * dot(ray_dir_l, hit_dir_l);
+                    let view_tangent_len = length(view_tangent_l);
+                    if view_tangent_len > 1.0e-5 {
+                        let view_tangent = view_tangent_l / view_tangent_len;
+                        let projected_major = vec2<f32>(
+                            dot(view_tangent, sky_atmos_extra.ocean_wind_basis.xyz),
+                            dot(view_tangent, sky_atmos_extra.ocean_crosswind_basis.xyz),
+                        );
+                        if length(projected_major) > 1.0e-5 {
+                            ocean_fp_major_dir = normalize(projected_major);
+                        }
+                    }
 
                     // ── The one authority: the signed sea field ─────────────
                     let field = sample_sea_field(hit_dir_l, footprint_rad, sea_level_m);
@@ -969,21 +1167,55 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         let hit_ws = cam_pos + t_ocean * ray_dir;
         let geo_n = normalize(hit_ws - planet_center);
         let sun_flux_scaled = sky_atmos_extra.sun_dir_flux.w * SCENE_FLUX_SCALE;
-        let water = shade_ocean(
-            hit_ws,
-            geo_n,
-            -ray_dir,
-            t_ocean,
-            sky_atmos_extra.ocean.z,
-            sky_atmos_extra.sun_dir_flux.xyz,
-            sun_flux_scaled,
-            sky_atmos_extra.ocean_color_depth,
-            ocean_color_column_m,
-            ocean_depth_m,
-            ocean_shore_dist_m,
-            ocean_shore_dir,
+        let q_world_to_body = sky_atmos_extra.world_to_body_orientation;
+        let q_body_to_world = vec4<f32>(-q_world_to_body.xyz, q_world_to_body.w);
+        let rel_body_m = rotate_quat(q_world_to_body, hit_ws - cam_pos);
+        let geo_n_body = rotate_quat(q_world_to_body, geo_n);
+        let wave = sample_ocean_slope_field(
+            rel_body_m,
             ocean_fp_m,
+            ocean_fp_minor_m,
+            ocean_fp_major_dir,
+            sky_atmos_extra.ocean_camera_phase.xy,
+            sky_atmos_extra.ocean_wind_basis.xyz,
+            sky_atmos_extra.ocean_crosswind_basis.xyz,
         );
+        let sky_tau_zenith = sky_atmos.rayleigh_beta_h.xyz * sky_atmos.rayleigh_beta_h.w;
+        var water: vec3<f32>;
+        if sky_atmos_extra.ocean_spectrum.w >= 0.5 {
+            // Diagnostic separates resolved field topology (RG) from the
+            // mip→GGX variance handoff (B), bypassing the sun road and BRDF.
+            water = vec3<f32>(
+                clamp(0.5 + wave.slope.x * 1.8, 0.0, 1.0),
+                clamp(0.5 + wave.slope.y * 1.8, 0.0, 1.0),
+                clamp(wave.alpha_ggx / 0.15, 0.0, 1.0),
+            );
+        } else {
+            water = shade_ocean_detailed(
+                geo_n_body,
+                q_body_to_world,
+                geo_n,
+                -ray_dir,
+                t_ocean,
+                sky_atmos_extra.ocean.z,
+                sky_atmos_extra.sun_dir_flux.xyz,
+                sun_flux_scaled,
+                sky_atmos_extra.ocean_color_depth,
+                ocean_color_column_m,
+                ocean_depth_m,
+                ocean_shore_dist_m,
+                ocean_shore_dir,
+                ocean_fp_m,
+                wave.slope,
+                wave.alpha_ggx,
+                wave.breakup,
+                sky_atmos_extra.ocean_spectrum.z,
+                sky_atmos_extra.ocean_wind_basis.xyz,
+                sky_atmos_extra.ocean_crosswind_basis.xyz,
+                sky_tau_zenith,
+                sky_atmos.atmos_geom.z,
+            );
+        }
         let surf_trans = (1.0 - opacity) * (1.0 - cloud.opacity);
         // `ocean_cov` was resolved in the ocean block from the signed sea
         // field (ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident height tiles → coast-atlas tail). Partial

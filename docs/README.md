@@ -36,6 +36,7 @@ The project's design and planning docs. Start here to find the right one.
 | [terrain_lod_optimization.md](terrain_lod_optimization.md) | The udlod fork's Thalos optimization pass: tile cache, mips, admission |
 | [vegetation.md](vegetation.md) | Planet-scale vegetation plan: cascades, placement, impostors, instancing |
 | [atmosphere.md](atmosphere.md) | Atmosphere/cloud/ocean *rendering*; IBL/reflection probe |
+| [ocean.md](ocean.md) | Ocean rendering: shipped analytic-surface slice, invariants, verification, and spectral/local-simulation path |
 | [clouds.md](clouds.md) | Planet-scale volumetric cloud program: canonical weather, density, temporal reconstruction, lighting, shadows, and orbital LOD |
 | [celestial.md](celestial.md) | Procedural sky model: sources, spectra, cubemap bake |
 | [physics.md](physics.md) | The owned-solver revamp (`thalos_physics`, TGS-Soft) — see ADR-20260720T185956Z-replace-avian-owned-tgs-soft-solver |

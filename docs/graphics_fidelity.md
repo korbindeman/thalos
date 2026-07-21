@@ -160,7 +160,7 @@ to be collapsed into the spine column.
 | Terrain | spine | shared | gain | rig (recv) | analytic | analytic | Bevy raymarch |
 | Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
 | Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
-| Water | own GGX | shared | manual | SceneLighting | tint hack | — | pending re-enable |
+| Water | own GGX (F9 pending) | shared | gain | SceneLighting | atmosphere-derived analytic sky | — | BodySky |
 | Impostor | spine (Hapke) | shared | gain | — | analytic | — | Bevy raymarch |
 | **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
 | **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
@@ -297,6 +297,8 @@ phase dependencies, and acceptance criteria live there.
 | W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
 | W15 | Atmosphere-coupled Nubis cloud lighting (powder + multi-scatter octaves + shared sun/sky transmittance) (= CLOUD-4) | ☐ | High | later | cloud §3.4 · Schneider 2023 |
 | W16 | View-relative 3×3 amortized cloud reconstruction, neighborhood-clamped body-fixed history, and screenshot mode (= CLOUD-2) | ☐ | High | later | cloud §3.3; cloud-local resolve is **not gated on W13** |
+| BL-12 | Open-ocean visual tracer: body-fixed mipmapped broadband slope cascades, anisotropic major/minor footprint filtering, slope-variance GGX handoff, slope-coupled whitecaps, shared atmosphere inputs, low-sun headless probe | ✅ | Med | done | Reopened and fixed after user review 2026-07-21 (INC-0012): closed gradient-noise “worms” removed; resolved cross-wave detail now survives to the horizon. Headless-verified in `ocean_final.png`. [ocean.md](ocean.md) · `just screenshot ocean`. |
+| OCEAN-1 | First measured spectral tracer: validated authored per-body sea state; low/high frequency packets evolved at deep-water dispersion rates behind BL-12's filtered-slope seam; deterministic production + slope-field headless captures | ✅ | Med | done | Phase-0/45 production + diagnostic captures verified; foreground/horizon detail preserved and packet evolution produces a 0.024 diagnostic RMSE. Deliberately stops before the GPU FFT/local-displacement architecture fork. [ocean.md](ocean.md) §6. |
 
 ## 4.6 Terrain material
 
@@ -418,10 +420,10 @@ double churn.
 
 # 6. Verification
 
-I can't see the game — every visual item lands behind a `just game [mode]`
-screenshot from the user. Structural changes are announced before they're made
-(per CLAUDE.md) and reflected into `docs/terrain.md` / `vegetation.md` /
-`atmosphere.md` / `control.md` as they land.
+Static scenes are verified with the headless screenshot harness; interactive
+feel and moment-specific flight behaviour still require a user-run
+`just game [mode]` session. Structural changes are announced before they're
+made (per CLAUDE.md) and reflected into the relevant system spec as they land.
 
 - **Headless regression check:** `just preview` renders the diorama gallery at a
   distance well inside `OBJECT_AERIAL_NEAR_M`, so close-up objects must look

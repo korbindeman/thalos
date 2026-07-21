@@ -762,6 +762,7 @@ mod tests {
             soi_radius_m: 100_000.0,
             orbital_elements: None,
             terrain: thalos_terrain::TerrainConfig::None,
+            ocean: None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,

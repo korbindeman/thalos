@@ -39,3 +39,4 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0009](0009-mira-horizon-regolith-normal-aliasing.md) | Mira's opaque horizon looked transparent — unresolved regolith normals aliased through Hapke | visual | 2026-07-21 |
 | [0010](0010-cloud-detail-period-eighth-scale.md) | Cloud detail collapsed into stipple — authored cell size was treated as an eight-cell tile period | visual | 2026-07-21 |
 | [0011](0011-cloud-hierarchy-resume-strata.md) | Cloud hierarchy posterized volumes — heuristic leaps resumed on repeated height isosurfaces | visual | 2026-07-21 |
+| [0012](0012-ocean-gradient-worms-isotropic-detail-loss.md) | Ocean gradient worms + premature isotropic detail loss | visual | 2026-07-21 |

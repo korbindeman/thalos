@@ -1054,6 +1054,7 @@ mod tests {
             soi_radius_m: f64::INFINITY,
             orbital_elements: None,
             terrain: thalos_world::TerrainConfig::None,
+            ocean: None,
             tectonics: None,
             atmosphere: None,
             terrestrial_atmosphere: None,
