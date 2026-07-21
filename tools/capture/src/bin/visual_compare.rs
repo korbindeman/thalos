@@ -36,6 +36,7 @@ const KNOWN_PRESETS: &[&str] = &[
     "cloud-interior",
     "cloud-limb",
     "cloud-sunset",
+    "plume",
 ];
 const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_SIZE",

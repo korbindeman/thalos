@@ -20,6 +20,7 @@ mod lighting;
 mod map_terrain;
 mod materials;
 mod ocean;
+pub(crate) mod plume;
 pub(crate) mod real_space;
 pub(crate) mod tile_cache;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
@@ -116,6 +117,7 @@ impl Plugin for RenderingPlugin {
             .add_plugins(grass::GrassRenderPlugin)
             .add_plugins(gpu_grass::GpuGrassPlugin)
             .add_plugins(vegetation::VegetationRenderPlugin)
+            .add_plugins(plume::PlumePlugin)
             // Rocks/pebbles disabled — see `mod rocks` above.
             // .add_plugins(rocks::RockScatterPlugin)
             .insert_resource(LastClick::default())

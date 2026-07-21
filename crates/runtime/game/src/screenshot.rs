@@ -551,6 +551,13 @@ pub enum ScreenshotPreset {
     CloudPlanet,
     /// Near-surface view toward a sun placed just above the local horizon.
     CloudSunset,
+    /// Three-quarter hero shot of a firing rocket engine, for iterating on the
+    /// plume look. Boots a plain orbit (space/planet backdrop), forces the engine
+    /// to full throttle, and drives the plume's ambient pressure via
+    /// [`PlumeDebugOverride`](crate::rendering::plume::PlumeDebugOverride) so the
+    /// shock-diamond / sea-level look is reproducible regardless of the craft's
+    /// real altitude. Scrub the pressure with `THALOS_PLUME_PRESSURE` (Pa).
+    Plume,
 }
 
 /// Viewport-relative cloud quality ladder used by both verification captures
@@ -653,6 +660,7 @@ impl ScreenshotPreset {
             Self::CloudLimb => "cloud-limb",
             Self::CloudPlanet => "cloud-planet",
             Self::CloudSunset => "cloud-sunset",
+            Self::Plume => "plume",
         }
     }
 
@@ -687,6 +695,7 @@ impl ScreenshotPreset {
             "cloud-planet" | "cloud_planet" | "cloud-globe" | "cloud_globe" | "cloud-disc"
             | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
             "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
+            "plume" | "engine" | "exhaust" | "rocket" => Self::Plume,
             other => {
                 eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
                 Self::SpaceportAerial
@@ -719,6 +728,8 @@ impl ScreenshotPreset {
             | Self::CloudLimb
             | Self::CloudPlanet
             | Self::CloudSunset => SpawnSituation::ShipOrbit,
+            // Plain orbit: space/planet backdrop, engine forced to fire.
+            Self::Plume => SpawnSituation::ShipOrbit,
         }
     }
 
@@ -1015,6 +1026,30 @@ impl ScreenshotPreset {
                     tangent_limb: false,
                     look_at_body_center: false,
                 },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            // Three-quarter side view of the craft, framed on the engine + plume.
+            // GodView around a craft-centered focus (see `craft_context`): up =
+            // the ship's nose axis, so elevation is height above the "waist" and
+            // azimuth swings around the stack.
+            Self::Plume => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/plume.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 55.0,
+                elevation_deg: 6.0,
+                distance_m: 42.0,
+                // Orbit scenario builds fast; the plume just needs the ship + a
+                // few frames for the ignition transient to settle to full.
+                warmup_frames: 90,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("plume.jsonl"),
+                framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
@@ -1535,6 +1570,7 @@ impl Plugin for HeadlessScreenshotPlugin {
                     retarget_ship_camera,
                     hide_overlays,
                     apply_live_capture_diagnostics,
+                    configure_plume_capture,
                 ),
             )
             // The pose + capture driver runs *after* the flight camera so it wins
@@ -1783,6 +1819,31 @@ fn terrain_inspection_override(raw: Option<&str>) -> f32 {
     }
 }
 
+/// Force the engine to fire and pin the plume's ambient pressure for the plume
+/// preset (headless-only). Full throttle + a chosen back-pressure make the
+/// shock-diamond look reproducible regardless of the craft's real orbit altitude
+/// (which would otherwise give a vacuum plume). `THALOS_PLUME_PRESSURE` (Pa)
+/// scrubs the pressure — 101325 (default) is sea level, lower values thin the
+/// shocks toward the vacuum look.
+fn configure_plume_capture(
+    cfg: Res<ScreenshotConfig>,
+    mut over: ResMut<crate::rendering::plume::PlumeDebugOverride>,
+    mut applied: Local<bool>,
+) {
+    if *applied || cfg.preset != ScreenshotPreset::Plume {
+        return;
+    }
+    let pressure = env_parse::<f32>("THALOS_PLUME_PRESSURE").unwrap_or(101_325.0);
+    over.throttle = Some(1.0);
+    over.ambient_pressure_pa = Some(pressure.max(0.0));
+    over.ignition = Some(1.0);
+    info!(
+        target: "thalos::screenshot",
+        "plume probe: throttle=1.0 ambient_pressure={pressure:.0} Pa"
+    );
+    *applied = true;
+}
+
 /// Diagnostic: for each probe offset across the basin (metres from the pad
 /// centre along `center_dir × heading`), log the resident tile texel size and
 /// the height-mirror sample relative to the basin elevation `E`, plus the tile
@@ -1992,6 +2053,8 @@ fn drive_headless_screenshot(
         ScreenshotPreset::MiraEva => {
             eva_surface_context(&sim, &solar, &height_sources, homeworld.0)
         }
+        // Frame the craft itself, not a surface site.
+        ScreenshotPreset::Plume => craft_context(&sim),
         _ => match cfg.framing {
             ScreenshotFraming::GodView
             | ScreenshotFraming::LocalCloud {
@@ -2330,6 +2393,25 @@ fn eva_surface_context(
         center_world: body_state.position + up_world * surface_r,
         up_world,
         pad_r: surface_r,
+    })
+}
+
+/// Focus context centered on the player craft, for the plume preset. Unlike the
+/// surface presets this frames the vehicle: `center_world` sits a few metres down
+/// the stack (toward the engine + plume) and `up_world` is the ship's nose axis,
+/// so [`pose_god_view_camera`]'s azimuth/elevation orbit the rocket.
+fn craft_context(sim: &SimulationState) -> Option<HubContext> {
+    /// Shift the focus this far along the nose axis (negative = toward the
+    /// engine) so the bell + plume land in frame rather than the pod.
+    const FOCUS_OFFSET_M: f64 = -4.0;
+    let orientation = sim.simulation.attitude().orientation;
+    let nose = (orientation * DVec3::Y).try_normalize().unwrap_or(DVec3::Y);
+    let craft = sim.simulation.ship_state().position;
+    Some(HubContext {
+        body_id: sim.simulation.dominant_body(),
+        center_world: craft + nose * FOCUS_OFFSET_M,
+        up_world: nose,
+        pad_r: 0.0,
     })
 }
 
