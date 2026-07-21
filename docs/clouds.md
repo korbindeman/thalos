@@ -1,7 +1,7 @@
 # Planet-scale volumetric clouds
 
 **Status:** active program, 2026-07-21. CLOUD-0 through CLOUD-3 are complete;
-CLOUD-6 has its first orbital-moments slice in progress on `codex/cloud-0`.
+CLOUD-4 and CLOUD-6 have first slices in progress on `codex/cloud-0`.
 This document is the strategy and technical plan;
 [backlog.md](backlog.md) is the execution queue, while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
@@ -51,20 +51,19 @@ The current result falls short for structural reasons:
    work belongs to CLOUD-6, not temporal reconstruction.
 2. **The density foundation is now genuinely volumetric.** The extruded 2-D
    atlas is gone; a 64³ Perlin/Worley basis, typed vertical profiles, local
-   base/top, boundary-only erosion, a decorrelated macro threshold, mid-scale
-   cauliflower, height remapping, and a 50 km spherical march produce coherent
-   bodies from runway through cruise. A three-level empty-space hierarchy
-   (weather max → local base/top → macro occupancy) and near→horizon shape/detail
-   LOD are in. Continuous weather-attribute sampling prevents the hierarchy's
-   sparse coverage probes from quantizing type/base/top into visible slabs.
+   base/top, boundary-only erosion, a decorrelated macro threshold, and a 50 km
+   spherical march produce coherent bodies from runway through cruise. Fine
+   erosion fades once sub-pixel, while low-frequency macro modulation is reused
+   per ray. Heuristic empty-space leaps were removed after they posterized
+   grazing views (INC-0008).
 3. **Clouds inhabit a private lighting universe.** The compute shader receives
    hand-scaled sun and top/bottom ambient colours. It does not consume the
    atmosphere transmittance, sky-view environment, eclipse, or the shared
    direct-sun visibility path.
 4. **The cost model is now scalable.** Low/Baseline/High/Reference targets are
    viewport-relative, with 1-in-9 sparse scheduling outside Reference. The
-   worst 1440p High probe (sunset, 1712×960 cloud target) is 3.35 ms mean / 3.36
-   ms p95 on the development RTX 4070 Ti, inside the provisional 3.5 ms target;
+   worst 1440p High probe (sunset, 1712×960 cloud target) is 2.471 ms mean /
+   2.476 ms p95 on the development RTX 4070 Ti, inside the provisional 3.5 ms target;
    Baseline at 1080p retains 40.66 MiB of persistent cloud textures.
 5. **Visible clouds do not interact with the world.** The terrain, craft,
    structures, atmosphere, and reflection environment do not receive one
@@ -170,8 +169,9 @@ Density combines:
 
 Use filterable compact formats for generated noise. The former 1920² RGBA32F
 base atlas has been removed; later format work should compact the retained 64³
-RGBA32F basis. Weather and a cheap max-density hierarchy must reject empty rays
-before detail sampling.
+RGBA32F basis. A future empty-space hierarchy is optional and may leap only
+from a conservative density bound over the skipped interval
+([ADR-0008](adr/0008-cloud-skips-require-conservative-bounds.md)).
 
 **Physical-scale invariant:** an authored feature scale names the feature, not
 the full period of a stored tile containing several cells. The current erosion
@@ -186,8 +186,8 @@ Keep the exact spherical shell intersection. Replace the fixed 25 km reach with
 regime-aware sampling:
 
 - fine steps and full detail near/inside cloud;
-- coarser steps and fewer detail octaves through the distant deck;
-- empty-space leaps where weather/max-density data prove a segment clear;
+- the same stable adaptive cadence with fewer detail octaves through the distant deck;
+- empty-space leaps only where max-density data conservatively prove the full segment clear;
 - early exit on optical depth;
 - orbital projection once a volume sample is sub-pixel.
 
@@ -280,7 +280,7 @@ consumer API.
 | CLOUD-0 | Baseline, probes, and budgets | Reproducible current captures, GPU/memory baseline, cloud-specific headless presets, acceptance matrix | — | S–M |
 | CLOUD-1 | Canonical ownership and schema | `CloudClimate` + per-body `CloudWeatherField`; `None` is authoritative; mechanism moves under `body_render`; legacy slab/reference ownership deleted; first weather-derived orbit layer | CLOUD-0 | M–L |
 | CLOUD-2 | Scalable targets and temporal reconstruction | Viewport-relative low-res/interleaved march, robust history rejection/clamp/upscale, screenshot mode, quality ladder | CLOUD-1 | L |
-| CLOUD-3 | Multi-scale density and range | Weather cube with type/base/top, true 3-D base/detail noise, vertical profiles, anti-tiling, empty-space skip, near-to-horizon regime LOD | CLOUD-2 | L |
+| CLOUD-3 | Multi-scale density and range | Weather cube with type/base/top, true 3-D base/detail noise, vertical profiles, anti-tiling, cadence-safe detail LOD and low-frequency reuse | CLOUD-2 | L |
 | CLOUD-4 | Atmosphere-coupled lighting | Shared sun/eclipses/atmosphere/sky inputs, powder + multiple scattering, correct foreground/background media ordering | CLOUD-3 · F3/F4 substrate | L |
 | CLOUD-5 | One-world interactions | Cascaded cloud-sun transmittance, all surface receivers, matched godrays, overcast ambient/IBL response | CLOUD-4 · F6 shadow substrate | L |
 | CLOUD-6 | Full orbital projection and seamless handoff | Density-derived optical-depth/normal moments, reduced-detail limb regime, invisible surface↔orbit↔map transition | CLOUD-3 | M–L |
@@ -376,20 +376,21 @@ in `docs/cloud_baseline.md`.
 
 ### CLOUD-2/3 completion (2026-07-21)
 
-Completed reconstruction and density/range slice on `codex/cloud-0`:
+Completed reconstruction and corrected density/range slice on `codex/cloud-0`:
 
-- **Mid-scale cauliflower** (~1 km lobes from a third volume domain at
-  `shape_scale * 0.38`) fades with `shape_lod` so the far deck keeps only the
-  anti-tiled base.
-- **Height remapping** warps local vertical profiles with low-frequency shape so
-  cumulus/storm tops dome instead of extruding a flat slab; storm columns keep a
-  small density boost through their tower.
-- **Three-level empty-space hierarchy:** dilated weather max (km leaps) → local
-  base/top envelope (radial leap toward the occupied band) → broad-domain
-  occupancy proxy (conservative clear-air leaps only — the first proxy used a
-  macro-only threshold above the real formation curve and wiped the runway view).
-- **Near→horizon LOD:** detail erosion 10–22 km, mid-scale shape 14–36 km, with
-  step length stretching up to ~2.15× as structure is dropped.
+- **Typed 3-D density:** stratus/cumulus/storm vertical profiles modulate a
+  continuous Perlin/Worley mass field; 450 m boundary erosion cuts readable
+  cauliflower detail while preserving solid optical cores.
+- **Safe near→horizon LOD:** only fine boundary erosion fades from 10–22 km,
+  when its authored features become sub-pixel. View-ray cadence remains uniform.
+- **Low-frequency reuse:** the 21.6 km anti-tiling modulation is evaluated once
+  per short view segment and reused by view/shadow density. It remains smooth
+  across pixels without a redundant trilinear fetch at every 200–500 m step.
+- **Conservative-skip invariant:** a marcher may leap only from a true
+  max-density bound over the complete skipped interval. Weather maxima,
+  broad-shape proxies, and estimated base/top crossings are correlated hints,
+  not bounds; using them as resume gates produced stable height strata
+  ([INC-0008](incidents/0008-cloud-hierarchy-resume-strata.md)).
 - Weather producer: slightly stronger cellular gaps (not so strong they shatter
   the limb); taller storm tops / thinner stratus decks so type channels read in
   both near volume and limb silhouettes.
@@ -399,18 +400,16 @@ Completed reconstruction and density/range slice on `codex/cloud-0`:
   hit-aware full-resolution reconstruction. Low/Baseline/High/Reference is a
   real 1/2–1× viewport quality ladder; Reference disables temporal and sparse
   scheduling.
-- The sparse weather maximum remains a cheap empty-space gate, while the RGBA
-  type/base/top tuple is sampled continuously at occupied steps. Refreshing the
-  whole tuple only at each 2.8 km gate interval was rejected because it produced
-  visible distance slabs in cruise/runway views.
-- Matched five-view Baseline re-capture at 1920×1080 / 1280×720: runway **1.59
-  ms**, cruise **0.70 ms**, interior **0.43 ms**, limb **0.61 ms**, sunset **1.92
-  ms** mean GPU. The worst 2560×1440 High probe (sunset, 1712×960 cloud target)
-  is **3.35 ms** mean / **3.36 ms** p95, inside the provisional ≤3.5 ms target.
-- CLOUD-2 and CLOUD-3 are complete. A denser hierarchy texture was not required
-  to meet the measured budget; softer atmosphere-coupled transport and correct
-  foreground/background media ordering are explicitly CLOUD-4. CLOUD-6 retains
-  the offline orbital atlas and reduced-detail limb volume.
+- Weather type/base/top is sampled continuously at ordinary view steps. Holding
+  the tuple piecewise or advancing by proxy-driven leaps was rejected because
+  it quantized grazing rays into visible distance/height slabs.
+- Matched five-view Baseline re-capture at 1920×1080 / 1280×720 is clean of the
+  posterized hierarchy artifact. The worst 2560×1440 High probe (sunset,
+  1712×960 cloud target) is **2.471 ms mean / 2.476 ms p95**, inside the
+  provisional ≤3.5 ms target.
+- CLOUD-2 and CLOUD-3 are complete. CLOUD-4 remains responsible for shared-LUT
+  atmosphere transport; CLOUD-6 retains the offline orbital atlas and
+  reduced-detail limb volume.
 
 ### Program acceptance matrix
 

@@ -33,3 +33,4 @@ and why. Read here before reopening a settled choice.
 | [0005](0005-coastline-as-authored-data.md) | The coastline is authored data — scene depth is occlusion-only for water | Partially superseded by ADR-0006 |
 | [0006](0006-water-projects-one-signed-sea-field.md) | Water is a projection of one signed sea-height field — depth never decides coverage | Accepted |
 | [0007](0007-one-weather-field-many-cloud-projections.md) | Planet clouds use one weather field with regime-specific render projections | Accepted |
+| [0008](0008-cloud-skips-require-conservative-bounds.md) | Cloud ray leaps require conservative density bounds; cadence-preserving reuse is the default | Accepted |

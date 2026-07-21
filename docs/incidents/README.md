@@ -34,3 +34,4 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0004](0004-coarse-lod-mask-step-clamp-grey-shiny.md) | Distant terrain grey/shiny/pixelated — mask stencil step clamped below coarse texel spacing | visual | 2026-07-20 |
 | [0005](0005-smoothstep-epsilon-guard-inverted-forest.md) | Forest painted onto the driest ground — `.max(EPSILON)` guard inverted descending-edge smoothsteps | visual | 2026-07-20 |
 | [0007](0007-cloud-detail-period-eighth-scale.md) | Cloud detail collapsed into stipple — authored cell size was treated as an eight-cell tile period | visual | 2026-07-21 |
+| [0008](0008-cloud-hierarchy-resume-strata.md) | Cloud hierarchy posterized volumes — heuristic leaps resumed on repeated height isosurfaces | visual | 2026-07-21 |

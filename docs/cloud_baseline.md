@@ -169,30 +169,34 @@ reprojected radiance to a 3×3 current neighborhood, and reconstructs with
 bilinear history plus hit-aware full-resolution filtering. Reference mode is
 full-resolution, full-frame, and temporal-off.
 
-Matched final Baseline captures at a 1920×1080 viewport use a 1280×720 cloud
-target and one stable lobe-scale directional shadow probe:
+Matched corrected Baseline captures at a 1920×1080 viewport use a 1280×720
+cloud target and one stable lobe-scale directional shadow probe:
 
 | View | GPU mean | GPU p95 |
 |---|---:|---:|
-| Runway | 1.586 ms | 1.591 ms |
-| Cruise | 0.699 ms | 0.710 ms |
-| Interior | 0.433 ms | 0.449 ms |
-| Limb | 0.605 ms | 0.622 ms |
-| Sunset | 1.917 ms | 1.924 ms |
+| Runway | 2.077 ms | 2.406 ms |
+| Cruise | 1.011 ms | 1.166 ms |
+| Interior | 0.256 ms | 0.259 ms |
+| Limb | 0.877 ms | 1.038 ms |
+| Sunset | 2.184 ms | 2.511 ms |
 
 The budget gate is the densest sunset probe at 2560×1440 High: a 1712×960
-cloud target, 96 view steps, one shadow probe, 3.350 ms mean / 3.362 ms p95,
+cloud target, 96 view steps, one shadow probe, **2.471 ms mean / 2.476 ms p95**,
 and 71,507,968 bytes (68.20 MiB) persistent allocation. This is inside the
 provisional 3.5 ms High target; the old fixed-target High sunset was 11.06 ms.
 
-CLOUD-3 adds typed stratus/cumulus/storm profiles, height remapping, multi-domain
-64³ base/detail noise, mid-scale cauliflower, boundary erosion, conservative
-weather/base-top/broad-occupancy skips, and near-to-horizon shape/detail/step
-LOD. Weather coverage remains a sparse hierarchy gate, while type/base/top are
-sampled continuously at occupied march points; holding the full tuple for each
-2.8 km gate interval produced visible distance slabs. A denser max-density
-volume is not required at the measured budget and is therefore not part of the
-completed phase.
+CLOUD-3 retains typed stratus/cumulus/storm profiles, multi-domain 64³
+base/detail noise, boundary erosion, and continuous weather sampling. The first
+completion attempt added height remapping, a mid-scale formation domain, range
+step stretching, and weather/base-top/broad-occupancy leaps. Matched A/B showed
+that the heuristic leaps posterized shallow rays into stable horizontal strata,
+while the other additions left the hierarchy-free density softer than the last
+organic checkpoint. That path was removed rather than tuned around
+([INC-0008](incidents/0008-cloud-hierarchy-resume-strata.md)). The corrected
+range path fades only sub-pixel fine erosion from 10–22 km and reuses the 21.6
+km macro modulation once per short ray; neither changes sample positions. Any
+future empty-space leap requires a true max-density bound over the skipped
+interval.
 
 ## Interactive regression checklist
 

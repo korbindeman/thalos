@@ -51,20 +51,8 @@ const TARGET_BAND_STEPS = 42.0;   // target samples across one band crossing
 const MAX_RAY_STEPS_CAP = 128u;   // compile-time safety cap; config selects ≤ this
 const MAX_CLOUD_DIST = 50000.0;   // metres; orbital projection owns farther clouds
 const CLOUD_FADE_START = 36000.0; // metres; begin atmospheric horizon fade
-const CLEAR_COVERAGE = 0.12;
-// Occupancy hierarchy (CLOUD-3): weather is the kilometre-scale gate; a cheap
-// macro mass proxy is the second gate inside covered weather; vertical base/top
-// is the third. Each level may leap without sampling the full multi-domain density.
-const WEATHER_PROBE_INTERVAL_M = 2800.0;
-const EMPTY_WEATHER_LEAP_M = 2400.0;
-const EMPTY_OCCUPANCY_LEAP_M = 900.0;
-const OCCUPANCY_PROBE_INTERVAL_M = 700.0;
-// Distance regimes for near → mid-deck → horizon LOD. Detail erosion dies first;
-// mid-scale cauliflower follows; only the anti-tiled base remains at the far deck.
 const DETAIL_NEAR_M = 10000.0;
 const DETAIL_FAR_M = 22000.0;
-const SHAPE_NEAR_M = 14000.0;
-const SHAPE_FAR_M = 36000.0;
 const CAMERA_CUT_DELTA = 0.05;
 
 struct Config {
@@ -156,20 +144,6 @@ fn sample_weather(n: vec3f) -> vec4f {
     return textureSampleLevel(weather_texture, weather_sampler, n, 0.0);
 }
 
-// Conservative local coverage envelope used as the first level of the empty
-// space hierarchy. Weather varies on kilometre-to-synoptic scales; a dilated
-// cross around the current direction bounds the short leap below while being
-// far cheaper than even one full Perlin/Worley density evaluation.
-fn sample_weather_max(n: vec3f) -> f32 {
-    let e = 0.003;
-    var maximum = sample_weather(n).r;
-    maximum = max(maximum, sample_weather(normalize(n + vec3f(e, 0.0, 0.0))).r);
-    maximum = max(maximum, sample_weather(normalize(n - vec3f(e, 0.0, 0.0))).r);
-    maximum = max(maximum, sample_weather(normalize(n + vec3f(0.0, 0.0, e))).r);
-    maximum = max(maximum, sample_weather(normalize(n - vec3f(0.0, 0.0, e))).r);
-    return maximum;
-}
-
 fn volume_corner(c: vec3i) -> vec4f {
     let w = (c + vec3i(WORLEY_RESOLUTION)) % vec3i(WORLEY_RESOLUTION);
     return textureLoad(clouds_worley_texture, vec3u(w));
@@ -214,47 +188,23 @@ fn rotated_domain(p: vec3f) -> vec3f {
     );
 }
 
-// Cheap level-1 occupancy: one broad volume sample + vertical envelope. Used
-// only to reject *clearly empty* segments; never as the lit density. Biased
-// hard toward "occupied" so leaps cannot punch holes through real cloud mass
-// (the first hierarchy pass did, because a macro-only threshold sat above the
-// full multi-domain formation curve).
-fn cloud_occupancy_proxy(pos: vec3f, shell_height: f32, weather: vec4f) -> f32 {
-    let cov = clamp(weather.r * config.clouds_coverage, 0.0, 1.0);
-    let local_base = clamp(weather.b, 0.0, 0.92);
-    let local_top = max(clamp(weather.a, 0.02, 1.0), local_base + 0.02);
-    let h = (shell_height - local_base) / (local_top - local_base);
-    if (h <= -0.06 || h >= 1.06 || cov <= CLEAR_COVERAGE) {
-        return -1.0;
-    }
-
-    let shape_scale = max(config.clouds_base_shape_scale_m, 500.0);
-    // Match the primary mass domain of `get_cloud_map_density`, not the slower
-    // macro threshold domain — leaps must under-reject, not over-reject.
-    let broad = cloud_volume(
-        rotated_domain(pos) + vec3f(1800.0, -4200.0, 900.0),
-        shape_scale,
-    );
-    let shape = broad.r * 0.55 + broad.g * 0.25 + broad.a * 0.20;
-    // Well below the real formation threshold so only obvious clear air leaps.
-    let threshold = mix(0.48, 0.22, cov);
-    return shape - threshold;
-}
-
-// Typed volumetric density. `weather` is constant over a short view segment.
-// `detail_weight` fades boundary erosion with range; `shape_lod` fades the
-// mid-scale cauliflower domain so the far deck keeps only anti-tiled base mass.
+// Typed volumetric density. Weather changes continuously along the view ray;
+// every base/detail sample is full 3-D world-space structure. Empty-space
+// acceleration must use a truly conservative volume in a future optimization:
+// heuristically resuming at base/top or macro thresholds produced stable
+// horizontal isosurfaces at grazing angles (INC-0008).
 fn get_cloud_map_density(
     pos: vec3f,
     shell_height: f32,
     weather: vec4f,
     detail_weight: f32,
-    shape_lod: f32,
+    macro_noise: f32,
 ) -> f32 {
     let cov = clamp(weather.r * config.clouds_coverage, 0.0, 1.0);
     let local_base = clamp(weather.b, 0.0, 0.92);
     let local_top = max(clamp(weather.a, 0.02, 1.0), local_base + 0.02);
-    if (cov <= CLEAR_COVERAGE) {
+    let h = (shell_height - local_base) / (local_top - local_base);
+    if (h <= 0.0 || h >= 1.0 || cov <= 1.0e-3) {
         return 0.0;
     }
 
@@ -267,64 +217,30 @@ fn get_cloud_map_density(
         rotated_domain(pos) + vec3f(1800.0, -4200.0, 900.0),
         shape_scale,
     );
-    let macro_shape = cloud_volume(
-        pos + vec3f(-7300.0, 2100.0, 4900.0),
-        shape_scale * 2.7,
-    );
-
-    // Height remapping: low-frequency shape bends the local vertical profile so
-    // cumulus/storm tops dome instead of reading as a flat slab extrusion.
-    // Stratus keeps a shallow warp so decks stay layered.
-    let h0 = (shell_height - local_base) / (local_top - local_base);
-    let warp_amp = 0.05 * stratus_w + 0.16 * cumulus_w + 0.22 * storm_w;
-    let height_warp = (broad.r * 0.65 + macro_shape.r * 0.35 - 0.5) * warp_amp;
-    let h = h0 + height_warp * h0 * (1.0 - h0) * 2.0;
-    if (h <= 0.0 || h >= 1.0) {
-        return 0.0;
-    }
-
     // Broad Perlin/Worley masses. The erosion channel stays out of the solid
     // body: promoting its small cells into `shape` fragmented the volume into
-    // screen-space stipple instead of adding readable billows (INC-0007).
-    // Anti-tiling comes from the incommensurate macro domain perturbing the
-    // formation threshold, not from blending a second low-pass body into shape.
-    var shape = broad.r * 0.50 + broad.g * 0.22 + broad.a * 0.20 + macro_shape.r * 0.08;
-
-    // Mid-scale cauliflower (~3 km period with cellular frequency 3 → ~1 km
-    // lobes). Near/mid only: sub-pixel at the far deck and expensive to keep.
-    if (shape_lod > 0.02) {
-        let mid = cloud_volume(
-            rotated_domain(pos) + vec3f(-3100.0, 1700.0, -900.0),
-            shape_scale * 0.38,
-        );
-        let mid_mass = mid.g * 0.58 + mid.r * 0.42;
-        let mid_amp = (0.10 * stratus_w + 0.28 * cumulus_w + 0.34 * storm_w) * shape_lod;
-        shape = mix(shape, mid_mass, mid_amp);
-    }
+    // screen-space stipple instead of adding readable billows.
+    let shape = broad.r * 0.52 + broad.g * 0.24 + broad.a * 0.24;
 
     // Coverage is a formation threshold, not an opacity multiplier: lowering
     // it opens clear sky between otherwise equally dense cloud masses.
-    let threshold = mix(0.58, 0.30, cov) + (0.5 - macro_shape.a) * 0.07;
+    let threshold = mix(0.58, 0.30, cov) + (0.5 - macro_noise) * 0.07;
     let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
     var mass = shape - threshold - vertical_narrow;
 
     // Cumulonimbus anvils broaden again near the tropopause, but only where
     // the storm weather channel permits them.
-    let anvil_profile = smoothstep(0.58, 0.74, h) * (1.0 - smoothstep(0.90, 1.0, h));
-    let anvil_shape = broad.r * 0.68 + broad.a * 0.20 + macro_shape.r * 0.12 - (threshold - 0.06);
+    let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
+    let anvil_shape = broad.r * 0.72 + broad.a * 0.28 - (threshold - 0.06);
     mass = max(mass, anvil_shape * anvil_profile * storm_w);
-
-    // Storm towers stay denser through their column so limb silhouettes retain
-    // height instead of collapsing into a single soft pancake.
-    mass += storm_w * 0.04 * smoothstep(0.15, 0.55, h) * (1.0 - smoothstep(0.82, 0.98, h));
 
     let bottom_softness = max(config.clouds_bottom_softness, 0.01);
     let stratus_profile = smoothstep(0.0, bottom_softness * 0.45, h)
         * (1.0 - smoothstep(0.72, 1.0, h));
     let cumulus_profile = smoothstep(0.0, bottom_softness * 0.75, h)
         * (1.0 - smoothstep(0.70, 1.0, h));
-    let storm_profile = smoothstep(0.0, bottom_softness * 0.28, h)
-        * (1.0 - smoothstep(0.90, 1.0, h));
+    let storm_profile = smoothstep(0.0, bottom_softness * 0.35, h)
+        * (1.0 - smoothstep(0.88, 1.0, h));
     let vertical_profile = stratus_profile * stratus_w
         + cumulus_profile * cumulus_w
         + storm_profile * storm_w;
@@ -339,7 +255,7 @@ fn get_cloud_map_density(
             rotated_domain(pos + boil) + vec3f(270.0, -610.0, 130.0),
             // Channel B contains eight primary Worley cells across the stored
             // tile. `clouds_detail_scale_m` describes one authored physical
-            // erosion feature, not the whole tile period (INC-0007).
+            // erosion feature, not the whole tile period.
             max(config.clouds_detail_scale_m, 50.0) * 8.0,
         );
         mass -= (1.0 - detail.b) * edge * detail_weight * config.clouds_detail_strength * 0.55;
@@ -355,11 +271,10 @@ fn get_normalized_height(pos: vec3f) -> f32 {
 }
 
 // Sparse directional shadow through the broad mass plus fine boundary erosion.
-// The mid-scale formation domain is intentionally excluded: three distant taps
-// cannot resolve it and expose nested isosurfaces. Fine erosion, however, is
-// what breaks the typed profile into natural billows rather than horizontal
-// strata (the CLOUD-1 shadow path included this domain).
-fn volumetric_shadow(origin: vec3f, weather: vec4f) -> f32 {
+// Fine erosion breaks the typed profile into natural billows; one stable
+// lobe-scale probe supplies the lee-side cue until CLOUD-4 owns a resolved
+// light-volume representation.
+fn volumetric_shadow(origin: vec3f, weather: vec4f, macro_noise: f32) -> f32 {
     var ray_step_size = config.clouds_shadow_raymarch_step_size;
     var distance_along_ray = ray_step_size * 0.5;
     var transmittance = 1.0;
@@ -369,7 +284,7 @@ fn volumetric_shadow(origin: vec3f, weather: vec4f) -> f32 {
         let normalized_height = get_normalized_height(pos);
         if (normalized_height > 1.0) { return transmittance; };
 
-        let density = get_cloud_map_density(pos, normalized_height, weather, 1.0, 0.0);
+        let density = get_cloud_map_density(pos, normalized_height, weather, 1.0, macro_noise);
         transmittance *= exp(-density * ray_step_size);
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
         distance_along_ray += ray_step_size;
@@ -549,9 +464,16 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     let mid = ray_origin + (0.5 * (ray.start + ray.end)) * ray_dir;
     let n_mid = normalize(mid);
     var weather = sample_weather(n_mid);
-    if (sample_weather_max(n_mid) * config.clouds_coverage <= CLEAR_COVERAGE) {
+    if (weather.r * config.clouds_coverage <= 1.0e-3) {
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
+    // The anti-tiling modulation has a ~21.6 km period. Sampling it once per
+    // ≤50 km view segment preserves a smoothly varying per-pixel system bias
+    // without paying a second trilinear volume fetch at every 200–500 m step.
+    let macro_noise = cloud_volume(
+        mid + vec3f(-7300.0, 2100.0, 4900.0),
+        max(config.clouds_base_shape_scale_m, 500.0) * 2.7,
+    ).a;
 
     // CLOUD-4: multi-scatter dual-lobe phase (shared for the whole ray).
     // cosθ = view·sun_incoming with sun_incoming = -sun_dir (dir toward sun).
@@ -567,9 +489,6 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     var dist = max_dist;
     var scattered_light = vec3f(0.0, 0.0, 0.0);
     var transmittance = 1.0;
-    var next_weather_probe = ray.start;
-    var next_occupancy_probe = ray.start;
-    let shell_thickness = max(config.clouds_top_height - config.clouds_bottom_height, 1.0);
 
     // March-exhaustion fade: a ray travelling far *inside* the deck uses all
     // its configured step cap and stops mid-cloud; the entry-distance haze below never
@@ -584,63 +503,9 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     for (var step: u32 = 0u; step < ray_step_limit; step++) {
         if (dir_length > ray.end) { break; }
         let world_position = ray_origin + dir_length * ray_dir;
-        let weather_n = normalize(world_position);
-
-        // Level 0: dilated weather maximum. Refresh every few kilometres; leap
-        // several ordinary samples when the local footprint is clear. Only the
-        // conservative max gate is sparse: holding type/base/top piecewise
-        // constant across this interval quantizes the typed profile into
-        // visible distance slabs.
-        if (dir_length >= next_weather_probe) {
-            next_weather_probe = dir_length + WEATHER_PROBE_INTERVAL_M;
-            if (sample_weather_max(weather_n) * config.clouds_coverage <= CLEAR_COVERAGE) {
-                dir_length += max(EMPTY_WEATHER_LEAP_M, ray.step_distance);
-                next_occupancy_probe = dir_length;
-                continue;
-            }
-        }
-        weather = sample_weather(weather_n);
-
+        weather = sample_weather(normalize(world_position));
         let normalized_height = get_normalized_height(world_position);
-        let local_base = clamp(weather.b, 0.0, 0.92);
-        let local_top = max(clamp(weather.a, 0.02, 1.0), local_base + 0.02);
-
-        // Level 0.5: local base/top envelope. Leap along the ray toward the
-        // occupied height band when the current sample is clearly outside it.
-        if (normalized_height < local_base - 0.03 || normalized_height > local_top + 0.03) {
-            let r = max(length(world_position), 1.0);
-            let radial = dot(world_position, ray_dir) / r;
-            var leap = max(ray.step_distance * 1.75, EMPTY_OCCUPANCY_LEAP_M * 0.5);
-            if (normalized_height < local_base - 0.03 && radial > 1.0e-4) {
-                let need_m = (local_base - normalized_height) * shell_thickness;
-                leap = clamp(need_m / radial * 0.92, ray.step_distance, EMPTY_WEATHER_LEAP_M);
-            } else if (normalized_height > local_top + 0.03 && radial < -1.0e-4) {
-                let need_m = (normalized_height - local_top) * shell_thickness;
-                leap = clamp(need_m / (-radial) * 0.92, ray.step_distance, EMPTY_WEATHER_LEAP_M);
-            }
-            dir_length += leap;
-            continue;
-        }
-
-        // Distance regimes: full multi-scale near, eroded mid-deck, anti-tiled
-        // base only toward the horizon. Keep the native world-space cadence in
-        // the near field: oversampling it into ~100 m slices exposed coherent
-        // tangent-view integration strata. Conservative occupancy gating and
-        // the per-pixel/per-frame phase preserve shallow cloud crossings.
         let detail_weight = 1.0 - smoothstep(DETAIL_NEAR_M, DETAIL_FAR_M, dir_length);
-        let shape_lod = 1.0 - smoothstep(SHAPE_NEAR_M, SHAPE_FAR_M, dir_length);
-        let range_lod = smoothstep(8000.0, SHAPE_FAR_M, dir_length);
-        let sample_step = ray.step_distance * mix(1.0, 2.15, range_lod);
-
-        // Level 1: broad-domain occupancy proxy inside covered weather. Only
-        // leaps on a strong clear-air signal so real bodies are never skipped.
-        if (dir_length >= next_occupancy_probe) {
-            next_occupancy_probe = dir_length + OCCUPANCY_PROBE_INTERVAL_M;
-            if (cloud_occupancy_proxy(world_position, normalized_height, weather) < -0.18) {
-                dir_length += max(EMPTY_OCCUPANCY_LEAP_M, sample_step);
-                continue;
-            }
-        }
 
         let clouds_density_sampled =
             get_cloud_map_density(
@@ -648,7 +513,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 clamp(normalized_height, 0.0, 1.0),
                 weather,
                 detail_weight,
-                shape_lod,
+                macro_noise,
             )
             * (1.0 - smoothstep(reach_fade_begin, reach_end, dir_length));
 
@@ -668,7 +533,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 1.0,
             );
             // Cloud self-shadow (sun march) + atmosphere sun air-mass + powder.
-            let sun_visibility = volumetric_shadow(world_position, weather);
+            let sun_visibility = volumetric_shadow(world_position, weather, macro_noise);
             let sun_T = atmosphere_sun_transmittance(world_position);
             let powder = powder_term(density_fraction, ray_dot_sun);
             let multiple_scatter_fill = 0.04 + 0.96 * sun_visibility;
@@ -684,7 +549,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
             // Frostbite energy-conserving step, then sample→camera air so
             // in-scatter is pre-attenuated before the BodySky composite.
             let S = clouds_density_sampled * (amb + direct);
-            let delta_transmittance = exp(-clouds_density_sampled * sample_step);
+            let delta_transmittance = exp(-clouds_density_sampled * ray.step_distance);
             var integrated_scattering = S * (1.0 - delta_transmittance) / clouds_density_sampled;
             integrated_scattering *= atmosphere_view_transmittance(
                 world_position,
@@ -697,7 +562,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
 
         if transmittance <= config.clouds_min_transmittance { break; }
 
-        dir_length += sample_step;
+        dir_length += ray.step_distance;
     }
 
     // Distance haze-out: clouds whose entry is past CLOUD_FADE_START dissolve
