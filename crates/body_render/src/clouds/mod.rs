@@ -46,7 +46,7 @@ pub use self::compute::CameraMatrices;
 pub use self::config::CloudsConfig;
 pub use self::images::{
     CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, cloud_target_memory,
-    cloud_weather_image,
+    cloud_target_memory_for, cloud_weather_image,
 };
 
 use self::compute::CloudsComputePlugin;
@@ -96,8 +96,49 @@ impl Plugin for CloudsPlugin {
 
         app.insert_resource(CloudsConfig::default())
             .add_plugins(CloudsComputePlugin)
-            .add_systems(Startup, clouds_setup);
+            .add_systems(Startup, clouds_setup)
+            .add_systems(Update, resize_cloud_targets);
     }
+}
+
+/// Resize all view/history targets together. Handles stay stable, so every
+/// material and extracted bind group follows the new viewport-relative images
+/// without a parallel rebind path.
+fn resize_cloud_targets(
+    mut config: ResMut<CloudsConfig>,
+    cloud_images: Option<Res<CloudsImage>>,
+    mut images: ResMut<Assets<Image>>,
+) {
+    let Some(cloud_images) = cloud_images else {
+        return;
+    };
+    let width = config.render_resolution.x.max(8.0).round() as u32;
+    let height = config.render_resolution.y.max(8.0).round() as u32;
+    let extent = bevy::render::render_resource::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let handles = [
+        &cloud_images.cloud_render_image,
+        &cloud_images.cloud_distance_image,
+        &cloud_images.history_image,
+        &cloud_images.history_distance_image,
+    ];
+    let needs_resize = handles.iter().any(|handle| {
+        images
+            .get(*handle)
+            .is_some_and(|image| image.size() != UVec2::new(width, height))
+    });
+    if !needs_resize {
+        return;
+    }
+    for handle in handles {
+        if let Some(mut image) = images.get_mut(handle) {
+            image.resize(extent);
+        }
+    }
+    config.history_epoch = config.history_epoch.wrapping_add(1).max(1);
 }
 
 fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {

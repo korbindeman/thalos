@@ -74,8 +74,9 @@ pub struct SolidPlanetMaterial {
     #[texture(3)]
     #[sampler(4)]
     pub multi_scatter_lut: Handle<Image>,
-    /// Canonical RGBA8 cloud-weather cubemap. The first orbital projection uses
-    /// its coverage channel; later cloud LODs consume type/base/top as well.
+    /// Canonical RGBA8 cloud-weather cubemap (coverage, type, base, top).
+    /// CLOUD-6's orbital projection derives optical-depth and height moments
+    /// from all four channels (see `thalos::atmosphere` weather-column helpers).
     /// Clear bodies bind a shared zero cube.
     #[texture(5, dimension = "cube")]
     #[sampler(6)]

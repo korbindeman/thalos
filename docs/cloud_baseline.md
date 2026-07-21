@@ -23,6 +23,7 @@ Five named headless presets exercise distinct regimes:
 | `cloud-cruise` | 4,600 m AGL | 35° local sun | deck top, repetition, horizon |
 | `cloud-interior` | 2,650 m AGL | 35° local sun | inside-shell extinction and reconstruction |
 | `cloud-limb` | 200 km AGL, tangent to the surface horizon | 3° local sun | near/orbit handoff and atmospheric composition |
+| `cloud-planet` | ~14,000 km AGL, look at body centre (full disc) | 42° local sun | CLOUD-6 orbital impostor weather across the whole planet |
 | `cloud-sunset` | 700 m AGL, looking toward the sun | 1° local sun | phase response and atmosphere-coupled colour |
 
 The sun-relative presets select a deterministic body-fixed surface point whose
@@ -159,10 +160,44 @@ targets and two R32F distance targets at 1280×720, one RGBA32F 64³ volume, and
 the RGBA8 256²×6 weather cube. This is a 70.4% reduction from CLOUD-1's
 137.35 MiB despite increasing the 3-D basis resolution.
 
+## 2026-07-21 CLOUD-2/3 completion
+
+The completed path sizes all four view/history targets from the physical
+viewport, updates one rotating 3×3 pixel class per valid-history frame, rejects
+history across camera/FOV/body/weather/simulation/target discontinuities, clamps
+reprojected radiance to a 3×3 current neighborhood, and reconstructs with
+bilinear history plus hit-aware full-resolution filtering. Reference mode is
+full-resolution, full-frame, and temporal-off.
+
+Matched final Baseline captures at a 1920×1080 viewport use a 1280×720 cloud
+target and one stable lobe-scale directional shadow probe:
+
+| View | GPU mean | GPU p95 |
+|---|---:|---:|
+| Runway | 1.586 ms | 1.591 ms |
+| Cruise | 0.699 ms | 0.710 ms |
+| Interior | 0.433 ms | 0.449 ms |
+| Limb | 0.605 ms | 0.622 ms |
+| Sunset | 1.917 ms | 1.924 ms |
+
+The budget gate is the densest sunset probe at 2560×1440 High: a 1712×960
+cloud target, 96 view steps, one shadow probe, 3.350 ms mean / 3.362 ms p95,
+and 71,507,968 bytes (68.20 MiB) persistent allocation. This is inside the
+provisional 3.5 ms High target; the old fixed-target High sunset was 11.06 ms.
+
+CLOUD-3 adds typed stratus/cumulus/storm profiles, height remapping, multi-domain
+64³ base/detail noise, mid-scale cauliflower, boundary erosion, conservative
+weather/base-top/broad-occupancy skips, and near-to-horizon shape/detail/step
+LOD. Weather coverage remains a sparse hierarchy gate, while type/base/top are
+sampled continuously at occupied march points; holding the full tuple for each
+2.8 km gate interval produced visible distance slabs. A denser max-density
+volume is not required at the measured budget and is therefore not part of the
+completed phase.
+
 ## Interactive regression checklist
 
-These motion checks remain useful when CLOUD-2/3 replaces the renderer, but no
-longer gate the baseline phase. Run `just game cruise` and `just game orbit`,
+These motion checks remain the interactive acceptance pass for the completed
+CLOUD-2/3 renderer, but do not block the agent-verifiable phase. Run `just game cruise` and `just game orbit`,
 then compare:
 
 - edge screen-door/shimmer during pitch and roll;

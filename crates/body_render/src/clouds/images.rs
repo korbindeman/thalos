@@ -39,8 +39,8 @@ pub struct CloudTargetMemory {
     pub total_bytes: u64,
 }
 
-pub const fn cloud_target_memory() -> CloudTargetMemory {
-    let render_pixels = RENDER_WIDTH as u64 * RENDER_HEIGHT as u64;
+pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemory {
+    let render_pixels = width as u64 * height as u64;
     let render_bytes = render_pixels * 16; // RGBA32F
     let distance_bytes = render_pixels * 4; // R32F
     let history_bytes = render_bytes;
@@ -175,6 +175,10 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
         history_image: images.add(history_image),
         history_distance_image: images.add(history_distance_image),
     }
+}
+
+pub const fn cloud_target_memory() -> CloudTargetMemory {
+    cloud_target_memory_for(RENDER_WIDTH, RENDER_HEIGHT)
 }
 
 /// Build the filterable cubemap image used by both near-volume weather and the

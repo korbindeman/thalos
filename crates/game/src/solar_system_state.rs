@@ -113,12 +113,16 @@ impl CloudWeatherField {
                         climate.seed ^ 0xCE11_C10D,
                         3,
                     );
+                    // Cellular weight is slightly higher than the first CLOUD-3
+                    // checkpoint so open-sky pockets survive into interior and
+                    // runway views, but stays below the level that shattered the
+                    // limb into cubemap-scale confetti.
                     let coverage = (climate.coverage
                         + climate.band_strength * band
                         + climate.variation
-                            * (0.72 * (regional - 0.5)
-                                + 0.45 * (mesoscale - 0.5)
-                                + 0.28 * (cellular - 0.5)))
+                            * (0.70 * (regional - 0.5)
+                                + 0.43 * (mesoscale - 0.5)
+                                + 0.32 * (cellular - 0.5)))
                         .clamp(0.0, 1.0);
 
                     // Kind changes at synoptic/mesoscale rather than one type
@@ -136,15 +140,18 @@ impl CloudWeatherField {
                         climate.seed ^ 0xA11E,
                         3,
                     );
+                    // Local base/top are fractions of the authored shell. Storm
+                    // towers claim most of the thickness so limb silhouettes
+                    // keep height; stratus stays a thin lower deck.
                     let base = match cloud_type {
-                        value if value < 0.25 => 0.04 + 0.06 * vertical_noise,
-                        value if value < 0.75 => 0.02 + 0.08 * vertical_noise,
-                        _ => 0.01 + 0.05 * vertical_noise,
+                        value if value < 0.25 => 0.05 + 0.05 * vertical_noise,
+                        value if value < 0.75 => 0.02 + 0.07 * vertical_noise,
+                        _ => 0.01 + 0.04 * vertical_noise,
                     };
                     let top = match cloud_type {
-                        value if value < 0.25 => 0.18 + 0.14 * vertical_noise,
-                        value if value < 0.75 => 0.38 + 0.36 * vertical_noise,
-                        _ => 0.74 + 0.24 * vertical_noise,
+                        value if value < 0.25 => 0.16 + 0.12 * vertical_noise,
+                        value if value < 0.75 => 0.34 + 0.38 * vertical_noise,
+                        _ => 0.78 + 0.20 * vertical_noise,
                     };
                     let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                     texels.push([

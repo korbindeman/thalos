@@ -28,7 +28,7 @@ use std::borrow::Cow;
 use super::config::CloudsConfig;
 
 use super::{
-    images::{RENDER_HEIGHT, RENDER_WIDTH, VOLUME_SIZE},
+    images::VOLUME_SIZE,
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
@@ -64,7 +64,10 @@ fn prepare_uniforms_bind_group(
     camera: ResMut<CameraMatrices>,
     clouds_config: Res<CloudsConfig>,
     render_device: Res<RenderDevice>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    clouds_image: Res<CloudsImage>,
     time: Res<Time>,
+    mut frame_index: Local<u32>,
 ) {
     let buffer = clouds_uniform_buffer.buffer.get_mut();
 
@@ -94,9 +97,18 @@ fn prepare_uniforms_bind_group(
     buffer.camera_translation = camera.translation;
     buffer.time = time.elapsed_secs_wrapped();
     buffer.reprojection_strength = clouds_config.reprojection_strength;
+    if let Some(target) = gpu_images.get(&clouds_image.cloud_render_image) {
+        let size = target.texture.size();
+        buffer.render_resolution = Vec2::new(size.width as f32, size.height as f32);
+    }
+    buffer.frame_index = *frame_index;
+    buffer.history_epoch = clouds_config.history_epoch;
+    buffer.sparse_march =
+        u32::from(clouds_config.sparse_march && clouds_config.reprojection_strength > 0.0);
     buffer.inverse_camera_view = camera.inverse_camera_view;
     buffer.inverse_camera_projection = camera.inverse_camera_projection;
     buffer.wind_displacement += time.delta_secs() * clouds_config.wind_velocity;
+    *frame_index = frame_index.wrapping_add(1);
 
     clouds_uniform_buffer
         .buffer
@@ -297,9 +309,13 @@ fn run_clouds_compute(
                     .get_compute_pipeline(pipeline.update_pipeline)
                     .unwrap();
                 pass.set_pipeline(update_pipeline);
+                let Some(target) = gpu_images.get(&clouds_image.cloud_render_image) else {
+                    return;
+                };
+                let size = target.texture.size();
                 pass.dispatch_workgroups(
-                    RENDER_WIDTH.div_ceil(WORKGROUP_SIZE),
-                    RENDER_HEIGHT.div_ceil(WORKGROUP_SIZE),
+                    size.width.div_ceil(WORKGROUP_SIZE),
+                    size.height.div_ceil(WORKGROUP_SIZE),
                     1,
                 );
             }

@@ -80,6 +80,15 @@ pub struct CloudsConfig {
     pub ui_visible: bool,
     /// Resolution of the image we're writing to.
     pub render_resolution: Vec2,
+    /// Fraction of the ship camera's physical viewport used by the cloud
+    /// targets. The resulting extent is aligned to the compute workgroup.
+    pub resolution_scale: f32,
+    /// Enables the rotating 3x3 sparse update. Temporal-disabled/reference
+    /// captures turn this off and raymarch every target pixel.
+    pub sparse_march: bool,
+    /// Invalidates all temporal samples when target size, active body,
+    /// weather, or simulation continuity changes.
+    pub history_epoch: u32,
     /// Velocity of the wind, metres/second in the body-fixed frame: `x` is
     /// zonal drift (eastward surface speed at the equator — applied as a slow
     /// rotation of the whole cloud field about the body's spin axis, so the
@@ -119,7 +128,27 @@ impl Default for CloudsConfig {
             reprojection_strength: 0.95,
             ui_visible: true,
             render_resolution: Vec2::new(RENDER_WIDTH as f32, RENDER_HEIGHT as f32),
+            resolution_scale: 2.0 / 3.0,
+            sparse_march: true,
+            history_epoch: 1,
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),
         }
+    }
+}
+
+impl CloudsConfig {
+    /// Project a physical viewport into a stable, workgroup-aligned cloud
+    /// target. Keeping this policy here makes interactive resize and headless
+    /// quality captures use the same path.
+    pub fn set_viewport_resolution(&mut self, viewport: UVec2) {
+        if viewport.x == 0 || viewport.y == 0 {
+            return;
+        }
+        let scale = self.resolution_scale.clamp(0.25, 1.0);
+        let align = |value: u32| ((value.max(8) + 7) / 8) * 8;
+        self.render_resolution = Vec2::new(
+            align((viewport.x as f32 * scale).round() as u32) as f32,
+            align((viewport.y as f32 * scale).round() as u32) as f32,
+        );
     }
 }

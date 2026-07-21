@@ -66,9 +66,11 @@ const DETAIL_STRENGTH: f32 = 0.16;
 const EDGE_SOFTNESS: f32 = 0.055;
 /// `SCENE_FLUX_SCALE` mirror from `thalos_body_render::shading` — the cloud sun
 /// radiance is scaled to the same exposure range as terrain/atmosphere.
-const SUN_FLUX_SCALE: f32 = 0.48;
-const AMBIENT_TOP_SCALE: f32 = 0.030;
-const AMBIENT_BOTTOM_SCALE: f32 = 0.009;
+/// CLOUD-4 keeps this below the pre-coupling 0.48 so stacked volume samples
+/// and the orbital disc no longer clip to pure white before air-mass tinting.
+const SUN_FLUX_SCALE: f32 = 0.36;
+const AMBIENT_TOP_SCALE: f32 = 0.038;
+const AMBIENT_BOTTOM_SCALE: f32 = 0.014;
 
 /// Which body the volumetric cloud raymarch is currently rendered for — the
 /// authored cloudy body the camera is closest to, or `None` when no such body
@@ -104,11 +106,11 @@ fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
     config.clouds_detail_strength = DETAIL_STRENGTH;
     config.clouds_base_edge_softness = EDGE_SOFTNESS;
     config.clouds_bottom_softness = BOTTOM_SOFTNESS;
-    // Three exponentially spaced samples span ~3 km: enough to distinguish
-    // sun-facing cauliflower from a deep core without making every view sample
-    // trace the entire 10.5 km storm layer.
-    config.clouds_shadow_raymarch_steps_count = 3;
-    config.clouds_shadow_raymarch_step_size = 300.0;
+    // One lobe-scale directional probe gives a stable lee-side cue. Three
+    // exponentially spaced taps exposed the typed vertical profile as nested
+    // horizontal bands; a resolved light volume belongs to CLOUD-4.
+    config.clouds_shadow_raymarch_steps_count = 1;
+    config.clouds_shadow_raymarch_step_size = 900.0;
     config.clouds_shadow_raymarch_step_multiply = 2.5;
 }
 
@@ -130,6 +132,7 @@ fn drive_clouds(
     mut config: ResMut<CloudsConfig>,
     time: Res<Time>,
     mut wind_angle: Local<f32>,
+    mut history_continuity: Local<Option<(BodyId, u32, f64)>>,
 ) {
     // Clouds disabled in graphics settings: park the raymarch camera far
     // outside any shell (same as the no-cloud-body case below) so every ray
@@ -144,6 +147,9 @@ fn drive_clouds(
     let Ok((cam_gt, camera)) = ship_cam_q.single() else {
         return;
     };
+    if let Some(viewport) = camera.physical_viewport_size() {
+        config.set_viewport_resolution(viewport);
+    }
     let cam_pos = cam_gt.translation();
 
     // Active cloud body: the terrestrial-atmosphere body the camera is
@@ -181,6 +187,22 @@ fn drive_clouds(
         cam_mat.translation = Vec3::new(0.0, config.planet_radius * 1.0e3 + 1.0e9, 0.0);
         return;
     };
+    let weather_version = cache
+        .environment
+        .get(body_id)
+        .and_then(|environment| environment.cloud_weather.as_ref())
+        .map_or(0, |weather| weather.version);
+    let sim_time = sim.simulation.sim_time();
+    let continuity_changed =
+        history_continuity.is_none_or(|(last_body, last_version, last_time)| {
+            last_body != body_id
+                || last_version != weather_version
+                || (sim_time - last_time).abs() > 0.5
+        });
+    if continuity_changed {
+        config.history_epoch = config.history_epoch.wrapping_add(1).max(1);
+    }
+    *history_continuity = Some((body_id, weather_version, sim_time));
     active.0 = Some(body_id);
     let climate = sim.system.bodies[body_id]
         .terrestrial_atmosphere
@@ -253,28 +275,29 @@ fn drive_clouds(
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
     let cloud_albedo = Vec3::from_array(climate.albedo).max(Vec3::ZERO);
 
-    // First-order atmospheric solar transmittance until CLOUD-4 feeds the
-    // atmosphere LUT directly. Close to the horizon, blue light has crossed a
-    // much longer air path: dim it and shift the surviving direct term toward
-    // amber. This is evaluated from the same body-fixed sun/view geometry as
-    // the raymarch, so sunrise/sunset response is continuous at every site.
+    // CLOUD-4 first slice: camera-local day factor still sets the baseline
+    // sun/ambient chromaticity; the volume shader then multiplies a per-sample
+    // air-mass transmittance so low-sun and low-altitude samples redden further.
+    // Finished CLOUD-4 swaps this CPU guess for shared atmosphere LUT samples.
     let local_up = cam_body.normalize_or_zero();
     let sun_mu = local_up.dot(sun_body);
     let day_t = ((sun_mu + 0.04) / 0.28).clamp(0.0, 1.0);
     let day_blend = day_t * day_t * (3.0 - 2.0 * day_t);
-    let sun_chromaticity = Vec3::new(1.0, 0.30, 0.065).lerp(Vec3::new(1.0, 0.97, 0.92), day_blend);
-    // Exposure adapts the scene around dawn/dusk, so retaining a substantial
-    // direct term gives the visible silver/orange lining expected near the
-    // solar disc while the chromaticity still carries the long-air-path cue.
-    let horizon_transmittance = 0.72 + 0.28 * day_blend;
-    let sun_rgb =
-        sun_chromaticity * cloud_albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
+    // Slightly cooler noon white and a warmer horizon than the pre-CLOUD-4
+    // path — matches the analytic β_R in the volume shader.
+    let sun_chromaticity = Vec3::new(1.0, 0.38, 0.10).lerp(Vec3::new(1.0, 0.96, 0.90), day_blend);
+    let horizon_transmittance = 0.55 + 0.45 * day_blend;
+    // Albedo is applied once here; the volume does not re-multiply climate
+    // albedo, so keep it a touch under 1.0 to leave headroom for phase peaks.
+    let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
+    let sun_rgb = sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
-    let horizon_ambient = 0.22 + 0.78 * day_blend;
+    // Sky-like ambient: more blue at the top, greyer fill under overcast cores.
+    let horizon_ambient = 0.28 + 0.72 * day_blend;
     config.clouds_ambient_color_top =
-        Vec4::new(0.50, 0.62, 0.84, 0.0) * scene_flux * AMBIENT_TOP_SCALE * horizon_ambient;
+        Vec4::new(0.42, 0.58, 0.88, 0.0) * scene_flux * AMBIENT_TOP_SCALE * horizon_ambient;
     config.clouds_ambient_color_bottom =
-        Vec4::new(0.26, 0.32, 0.44, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
+        Vec4::new(0.30, 0.36, 0.48, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
 }
 
 /// Upload the active body's canonical cubemap field. No default is generated

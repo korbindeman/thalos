@@ -41,7 +41,7 @@ use bevy::{
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
-use thalos_body_render::{CloudsConfig, HeightSource, cloud_target_memory};
+use thalos_body_render::{CloudsConfig, HeightSource, cloud_target_memory_for};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -161,13 +161,15 @@ pub enum ScreenshotPreset {
     CloudInterior,
     /// Low-orbit tangent view of the cloud line inside the atmosphere limb.
     CloudLimb,
+    /// Full planetary disc from outside the terrain LOD swap — CLOUD-6 orbital
+    /// impostor / weather-layer regression (SolidPlanet + atmosphere limb).
+    CloudPlanet,
     /// Near-surface view toward a sun placed just above the local horizon.
     CloudSunset,
 }
 
-/// CLOUD-0 capture-only quality ladder. This intentionally controls only
-/// knobs the current renderer already owns; CLOUD-2 replaces it with the real
-/// viewport-relative quality ladder.
+/// Viewport-relative cloud quality ladder used by both verification captures
+/// and the renderer's measured quality contract.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloudCaptureQuality {
     Low,
@@ -200,17 +202,27 @@ impl CloudCaptureQuality {
         match self {
             Self::Low => 48,
             Self::Baseline => 80,
-            Self::High => 104,
+            Self::High => 96,
             Self::Reference => 128,
         }
     }
 
     fn shadow_steps(self) -> u32 {
         match self {
-            Self::Low => 2,
-            Self::Baseline => 3,
-            Self::High => 4,
-            Self::Reference => 6,
+            Self::Low | Self::Baseline | Self::High => 1,
+            Self::Reference => 4,
+        }
+    }
+
+    fn resolution_scale(self) -> f32 {
+        match self {
+            Self::Low => 0.5,
+            Self::Baseline => 2.0 / 3.0,
+            // High spends its budget on range samples, not pixels. A 0.75
+            // target measured 4.21 ms at 1440p on the development GPU; 2/3
+            // keeps the playable tier inside the provisional 3.5 ms budget.
+            Self::High => 2.0 / 3.0,
+            Self::Reference => 1.0,
         }
     }
 }
@@ -227,6 +239,9 @@ enum ScreenshotFraming {
         look_elevation_deg: f32,
         site_sun_elevation_deg: Option<f32>,
         tangent_limb: bool,
+        /// Aim at the body centre for a full planetary disc (impostor range).
+        /// Local-horizon AGL shots leave this false.
+        look_at_body_center: bool,
     },
 }
 
@@ -240,6 +255,7 @@ impl ScreenshotPreset {
             Self::CloudCruise => "cloud-cruise",
             Self::CloudInterior => "cloud-interior",
             Self::CloudLimb => "cloud-limb",
+            Self::CloudPlanet => "cloud-planet",
             Self::CloudSunset => "cloud-sunset",
         }
     }
@@ -257,6 +273,8 @@ impl ScreenshotPreset {
                 Self::CloudInterior
             }
             "cloud-limb" | "cloud_limb" | "cloud-orbit" | "clouds-orbit" => Self::CloudLimb,
+            "cloud-planet" | "cloud_planet" | "cloud-globe" | "cloud_globe" | "cloud-disc"
+            | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
             "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
             other => {
                 eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
@@ -277,9 +295,11 @@ impl ScreenshotPreset {
             // desert site (the craft stays in orbit, irrelevant to the framing).
             Self::DryBelt => SpawnSituation::ShipOrbit,
             Self::CloudRunway => SpawnSituation::Runway,
-            Self::CloudCruise | Self::CloudInterior | Self::CloudLimb | Self::CloudSunset => {
-                SpawnSituation::ShipOrbit
-            }
+            Self::CloudCruise
+            | Self::CloudInterior
+            | Self::CloudLimb
+            | Self::CloudPlanet
+            | Self::CloudSunset => SpawnSituation::ShipOrbit,
         }
     }
 
@@ -371,6 +391,7 @@ impl ScreenshotPreset {
                     look_elevation_deg: 9.0,
                     site_sun_elevation_deg: None,
                     tangent_limb: false,
+                    look_at_body_center: false,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -397,6 +418,7 @@ impl ScreenshotPreset {
                     look_elevation_deg: -5.0,
                     site_sun_elevation_deg: Some(35.0),
                     tangent_limb: false,
+                    look_at_body_center: false,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -419,6 +441,7 @@ impl ScreenshotPreset {
                     look_elevation_deg: 0.0,
                     site_sun_elevation_deg: Some(35.0),
                     tangent_limb: false,
+                    look_at_body_center: false,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -445,6 +468,38 @@ impl ScreenshotPreset {
                     // horizon-grazing ocean glint dominate the cloud probe.
                     site_sun_elevation_deg: Some(12.0),
                     tangent_limb: true,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudPlanet => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_planet.png"),
+                width: 1920,
+                height: 1080,
+                // Small azimuth rotates the view around the sub-camera radial
+                // for compositional variety without losing the full disc.
+                azimuth_deg: 18.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                // Impostor materials + weather cube only — no surface settle.
+                warmup_frames: 240,
+                tail_frames: 24,
+                keep_hud: false,
+                report: PathBuf::from("tools/screenshots/cloud_planet.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    // Outside the terrain LOD swap (4× radius ≈ 12.7 Mm for
+                    // Thalos): SolidPlanet owns the disc so the CLOUD-6 orbital
+                    // weather projection is what we see.
+                    camera_altitude_m: 14_000_000.0,
+                    look_elevation_deg: -90.0,
+                    // Mid-afternoon phase so clouds cast readable shadows and
+                    // the terminator is visible without a razor-thin crescent.
+                    site_sun_elevation_deg: Some(42.0),
+                    tangent_limb: false,
+                    look_at_body_center: true,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -467,6 +522,7 @@ impl ScreenshotPreset {
                     look_elevation_deg: 1.5,
                     site_sun_elevation_deg: Some(1.0),
                     tangent_limb: false,
+                    look_at_body_center: false,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -584,7 +640,7 @@ impl ScreenshotConfig {
                 look_elevation_deg, ..
             } = &mut cfg.framing
         {
-            *look_elevation_deg = v.clamp(-89.0, 89.0);
+            *look_elevation_deg = v.clamp(-90.0, 90.0);
         }
         if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_SUN_ELEVATION")
             && let ScreenshotFraming::LocalCloud {
@@ -698,7 +754,14 @@ fn configure_cloud_capture(
     }
     clouds.clouds_raymarch_steps_count = cfg.cloud_quality.view_steps();
     clouds.clouds_shadow_raymarch_steps_count = cfg.cloud_quality.shadow_steps();
-    clouds.reprojection_strength = if cfg.cloud_temporal { 0.95 } else { 0.0 };
+    let reference = cfg.cloud_quality == CloudCaptureQuality::Reference;
+    clouds.reprojection_strength = if cfg.cloud_temporal && !reference {
+        0.95
+    } else {
+        0.0
+    };
+    clouds.resolution_scale = cfg.cloud_quality.resolution_scale();
+    clouds.sparse_march = cfg.cloud_temporal && !reference;
     if let Some(coverage) = cfg.cloud_coverage_scale {
         clouds.clouds_coverage = coverage;
     }
@@ -1050,13 +1113,19 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
             look_elevation_deg,
             site_sun_elevation_deg,
             tangent_limb,
+            look_at_body_center,
         } => {
             let sun_elevation = site_sun_elevation_deg
                 .map(|value| format!("{value:.4}"))
                 .unwrap_or_else(|| "null".to_string());
             format!(
-                "{{\"kind\":\"local_cloud\",\"azimuth_deg\":{:.4},\"camera_altitude_m\":{:.3},\"look_elevation_deg\":{:.4},\"site_sun_elevation_deg\":{},\"tangent_limb\":{}}}",
-                cfg.azimuth_deg, camera_altitude_m, look_elevation_deg, sun_elevation, tangent_limb,
+                "{{\"kind\":\"local_cloud\",\"azimuth_deg\":{:.4},\"camera_altitude_m\":{:.3},\"look_elevation_deg\":{:.4},\"site_sun_elevation_deg\":{},\"tangent_limb\":{},\"look_at_body_center\":{}}}",
+                cfg.azimuth_deg,
+                camera_altitude_m,
+                look_elevation_deg,
+                sun_elevation,
+                tangent_limb,
+                look_at_body_center,
             )
         }
     }
@@ -1072,7 +1141,10 @@ fn write_cloud_probe_report(
     if let Some(parent) = cfg.report.parent() {
         fs::create_dir_all(parent)?;
     }
-    let memory = cloud_target_memory();
+    let memory = cloud_target_memory_for(
+        clouds.render_resolution.x.round() as u32,
+        clouds.render_resolution.y.round() as u32,
+    );
     let screenshot_target_bytes = cfg.width as u64 * cfg.height as u64 * 4;
     let framing = framing_json(cfg);
     let (gpu_path, gpu_stats) = cloud_probe_stats(diagnostics, "elapsed_gpu");
@@ -1108,8 +1180,8 @@ fn write_cloud_probe_report(
         cfg.height,
         screenshot_target_bytes,
         framing,
-        thalos_body_render::RENDER_WIDTH,
-        thalos_body_render::RENDER_HEIGHT,
+        clouds.render_resolution.x.round() as u32,
+        clouds.render_resolution.y.round() as u32,
         cfg.cloud_quality.name(),
         cfg.cloud_temporal,
         clouds.clouds_raymarch_steps_count,
@@ -1160,6 +1232,7 @@ fn pose_camera(
             camera_altitude_m,
             look_elevation_deg,
             tangent_limb,
+            look_at_body_center,
             ..
         } => pose_local_cloud_camera(
             cfg,
@@ -1171,6 +1244,7 @@ fn pose_camera(
             camera_altitude_m,
             look_elevation_deg,
             tangent_limb,
+            look_at_body_center,
         ),
     }
 }
@@ -1378,6 +1452,8 @@ fn cloud_site_context(
 /// Place a camera at an exact altitude above the probe site and aim relative
 /// to the local horizon. Azimuth zero faces the projected sun; for the limb
 /// preset the look angle is an offset above the geometric surface horizon.
+/// With `look_at_body_center` the camera sits on the site radial and aims at
+/// the body centre (full planetary disc).
 #[allow(clippy::too_many_arguments)]
 fn pose_local_cloud_camera(
     cfg: &ScreenshotConfig,
@@ -1389,6 +1465,7 @@ fn pose_local_cloud_camera(
     camera_altitude_m: f64,
     look_elevation_deg: f32,
     tangent_limb: bool,
+    look_at_body_center: bool,
 ) {
     let up = ctx.up_world;
     let sun_world = solar
@@ -1416,19 +1493,32 @@ fn pose_local_cloud_camera(
     let azimuth = (cfg.azimuth_deg as f64).to_radians();
     let heading = (DQuat::from_axis_angle(up, azimuth) * base_heading).normalize();
 
-    let camera_radius = ctx.pad_r + camera_altitude_m;
-    let elevation_deg = if tangent_limb {
-        let horizon_dip = (ctx.pad_r / camera_radius.max(ctx.pad_r + 1.0))
-            .clamp(-1.0, 1.0)
-            .acos()
-            .to_degrees();
-        -horizon_dip + look_elevation_deg as f64
+    let body_center = ctx.center_world - up * ctx.pad_r;
+    let camera_world = if look_at_body_center {
+        // Slight heading offset so the disc isn't a pure sun-facing billboard
+        // and weather systems read across the phase terminator.
+        let radial = (up * 0.92 + heading * 0.08).normalize();
+        body_center + radial * (ctx.pad_r + camera_altitude_m)
     } else {
-        look_elevation_deg as f64
+        ctx.center_world + up * camera_altitude_m
     };
-    let elevation = elevation_deg.to_radians();
-    let look_direction = (heading * elevation.cos() + up * elevation.sin()).normalize();
-    let camera_world = ctx.center_world + up * camera_altitude_m;
+
+    let look_direction = if look_at_body_center {
+        (body_center - camera_world).normalize()
+    } else {
+        let camera_radius = ctx.pad_r + camera_altitude_m;
+        let elevation_deg = if tangent_limb {
+            let horizon_dip = (ctx.pad_r / camera_radius.max(ctx.pad_r + 1.0))
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            -horizon_dip + look_elevation_deg as f64
+        } else {
+            look_elevation_deg as f64
+        };
+        let elevation = elevation_deg.to_radians();
+        (heading * elevation.cos() + up * elevation.sin()).normalize()
+    };
     let look_up = if look_direction.dot(up).abs() > 0.99 {
         east
     } else {

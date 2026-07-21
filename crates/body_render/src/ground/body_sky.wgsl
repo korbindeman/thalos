@@ -23,7 +23,11 @@
     AtmosphereBlock,
     atmosphere_jitter,
     integrate_atmosphere_multiscatter,
-    weather_cloud_opacity,
+    weather_column_from_texel,
+    orbital_cloud_altitude,
+    orbital_cloud_shade,
+    sample_weather_soft,
+    orbital_cloud_normal_body,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
 #import thalos::water::shade_ocean
@@ -708,12 +712,14 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // clouds deterministically on top of the sky; a separate transparent quad
     // sorted unreliably against this pass under big_space.
     //
-    // Manual bilinear: the layer is RGBA32F (not filterable), and the cloud
-    // texture is deliberately lower-resolution than the viewport —
-    // nearest sampling turns the raymarch's per-texel dither into visible
-    // 2×2-block checkering. Four loads + lerp smooth both the upscale and
-    // most of the dither. Clamped two rows short: the top two texture rows
-    // (screen-bottom) hold the compute pass's camera-save payload.
+    // Depth-aware bilateral upscale: the layer is RGBA32F (not filterable)
+    // and lower-resolution than the viewport. Plain bilinear removes blocks
+    // but washes a cloud hit into adjacent clear texels. Weight the same four
+    // taps by cloud-depth agreement with the nearest source texel so smooth
+    // interiors reconstruct while silhouettes remain localized. First-hit
+    // distance changes rapidly across a translucent volume, so the continuous
+    // depth weight must be broad; a tight weight turns ordinary depth gradients
+    // into false contour lines.
     let cloud_dims = textureDimensions(cloud_layer_tex);
     let cloud_res = vec2<f32>(cloud_dims);
     let cloud_uv = in.clip_position.xy / view.viewport.zw;
@@ -726,13 +732,30 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let cs10 = textureLoad(cloud_layer_tex, cb + vec2<i32>(1, 0), 0);
     let cs01 = textureLoad(cloud_layer_tex, cb + vec2<i32>(0, 1), 0);
     let cs11 = textureLoad(cloud_layer_tex, cb + vec2<i32>(1, 1), 0);
-    let cloud_sample = mix(mix(cs00, cs10, cloud_f.x), mix(cs01, cs11, cloud_f.x), cloud_f.y);
-    let cloud_texel = clamp(
-        vec2<i32>(cloud_uv * cloud_res),
-        vec2<i32>(0, 0),
-        vec2<i32>(cloud_dims) - vec2<i32>(1, 3),
-    );
-
+    let cd00 = textureLoad(cloud_distance_tex, cb, 0).r;
+    let cd10 = textureLoad(cloud_distance_tex, cb + vec2<i32>(1, 0), 0).r;
+    let cd01 = textureLoad(cloud_distance_tex, cb + vec2<i32>(0, 1), 0).r;
+    let cd11 = textureLoad(cloud_distance_tex, cb + vec2<i32>(1, 1), 0).r;
+    let ref_x = select(0, 1, cloud_f.x >= 0.5);
+    let ref_y = select(0, 1, cloud_f.y >= 0.5);
+    let ref_coord = cb + vec2<i32>(ref_x, ref_y);
+    let cloud_near = textureLoad(cloud_distance_tex, ref_coord, 0).r;
+    let depth_scale = max(cloud_near, 2000.0);
+    let hit_ref = cloud_near < 1.0e8;
+    let hit00 = cd00 < 1.0e8;
+    let hit10 = cd10 < 1.0e8;
+    let hit01 = cd01 < 1.0e8;
+    let hit11 = cd11 < 1.0e8;
+    let dw00 = select(0.0, select(1.0, exp(-abs(cd00 - cloud_near) / depth_scale), hit_ref && hit00), hit_ref == hit00);
+    let dw10 = select(0.0, select(1.0, exp(-abs(cd10 - cloud_near) / depth_scale), hit_ref && hit10), hit_ref == hit10);
+    let dw01 = select(0.0, select(1.0, exp(-abs(cd01 - cloud_near) / depth_scale), hit_ref && hit01), hit_ref == hit01);
+    let dw11 = select(0.0, select(1.0, exp(-abs(cd11 - cloud_near) / depth_scale), hit_ref && hit11), hit_ref == hit11);
+    let w00 = (1.0 - cloud_f.x) * (1.0 - cloud_f.y) * dw00;
+    let w10 = cloud_f.x * (1.0 - cloud_f.y) * dw10;
+    let w01 = (1.0 - cloud_f.x) * cloud_f.y * dw01;
+    let w11 = cloud_f.x * cloud_f.y * dw11;
+    let weight_sum = max(w00 + w10 + w01 + w11, 1.0e-5);
+    let cloud_sample = (cs00 * w00 + cs10 * w10 + cs01 * w01 + cs11 * w11) / weight_sum;
     // Suppress the cloud where opaque geometry sits in front of it, so close
     // geometry (the ship hull) isn't painted over by clouds behind it.
     // `cloud_near` is the per-pixel distance at which the raymarch first hit
@@ -774,7 +797,6 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             band_far = max(-b + sqrt_ct, 0.0);
         }
     }
-    let cloud_near = textureLoad(cloud_distance_tex, cloud_texel, 0).r;
     var cloud_vis = 1.0;
     if scene_t < 1.0e29 && r_cloud_top > r_cloud_base {
         let near = min(cloud_near, band_far);
@@ -789,45 +811,92 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // texels up to 1919×1077 — out of bounds for a 1×1 texture, which returns
     // (0,0,0,0) → transmittance 0 → an opaque black sky. Never composite the
     // blank.
-    // Weather-field orbital projection for the resident-terrain/BodySky LOD.
-    // At high altitude the 50 km near-volume march deliberately cannot reach
-    // the limb, but this pass is still active well past the atmosphere shell;
-    // sample the SAME body-fixed weather cube at a representative cloud-shell
-    // hit so the planet retains cloud placement across that handoff.
+    // CLOUD-6 orbital projection for the resident-terrain/BodySky LOD. At high
+    // altitude the near-volume march cannot reach the limb; this path samples
+    // the SAME weather cube with height parallax + optical-depth moments so the
+    // 25–90 km handoff shares structure with SolidPlanetMaterial.
     var cloud = CloudOverlay(vec3<f32>(0.0), 0.0);
     let camera_altitude = cam_r_len - planet_radius;
-    let orbital_blend = smoothstep(25000.0, 90000.0, camera_altitude);
+    let orbital_blend = smoothstep(22000.0, 85000.0, camera_altitude);
     if (orbital_blend > 0.0 && sky_atmos.cloud_albedo_coverage.w > 0.0) {
-        let r_cloud_mid = 0.5 * (r_cloud_base + r_cloud_top);
-        let disc_orbit_cloud = b * b - (oc_len_sq - r_cloud_mid * r_cloud_mid);
-        if (disc_orbit_cloud > 0.0) {
-            let sq_orbit_cloud = sqrt(disc_orbit_cloud);
-            var t_orbit_cloud = -b - sq_orbit_cloud;
-            if (t_orbit_cloud <= 0.0) {
-                t_orbit_cloud = -b + sq_orbit_cloud;
+        // First hit at shell mid to seed a direction, then re-hit at the local
+        // column altitude so tall systems rise on the limb.
+        let r_cloud_seed = 0.5 * (r_cloud_base + r_cloud_top);
+        let disc_orbit_seed = b * b - (oc_len_sq - r_cloud_seed * r_cloud_seed);
+        if (disc_orbit_seed > 0.0) {
+            let sq_orbit_seed = sqrt(disc_orbit_seed);
+            var t_orbit_seed = -b - sq_orbit_seed;
+            if (t_orbit_seed <= 0.0) {
+                t_orbit_seed = -b + sq_orbit_seed;
             }
-            if (t_orbit_cloud > 0.0) {
-                let cloud_hit_w = cam_pos + t_orbit_cloud * ray_dir - planet_center;
-                let cloud_normal_w = normalize(cloud_hit_w);
-                let cloud_normal_l = rotate_quat(
+            if (t_orbit_seed > 0.0) {
+                let seed_hit_w = cam_pos + t_orbit_seed * ray_dir - planet_center;
+                let seed_n_w = normalize(seed_hit_w);
+                let seed_n_l = rotate_quat(
                     sky_atmos_extra.world_to_body_orientation,
-                    cloud_normal_w,
+                    seed_n_w,
                 );
-                let orbital_weather = textureSampleLevel(
+                let seed_col = weather_column_from_texel(
+                    sample_weather_soft(cloud_cover_tex, cloud_cover_sampler, seed_n_l),
+                );
+                var cloud_n_w = seed_n_w;
+                var cloud_n_l = seed_n_l;
+                if (seed_col.opacity > 1.0e-3) {
+                    let r_orbit = planet_radius + orbital_cloud_altitude(seed_col, sky_atmos);
+                    let disc_orbit = b * b - (oc_len_sq - r_orbit * r_orbit);
+                    if (disc_orbit > 0.0) {
+                        let sq_orbit = sqrt(disc_orbit);
+                        var t_orbit = -b - sq_orbit;
+                        if (t_orbit <= 0.0) {
+                            t_orbit = -b + sq_orbit;
+                        }
+                        if (t_orbit > 0.0) {
+                            cloud_n_w = normalize(cam_pos + t_orbit * ray_dir - planet_center);
+                            cloud_n_l = rotate_quat(
+                                sky_atmos_extra.world_to_body_orientation,
+                                cloud_n_w,
+                            );
+                        }
+                    }
+                }
+                let orbital_weather = sample_weather_soft(
                     cloud_cover_tex,
                     cloud_cover_sampler,
-                    cloud_normal_l,
-                    0.0,
+                    cloud_n_l,
                 );
-                let orbital_density = weather_cloud_opacity(orbital_weather.r);
-                let cloud_ndl = max(dot(cloud_normal_w, sky_atmos_extra.sun_dir_flux.xyz), 0.0);
-                let cloud_radiance = sky_atmos.cloud_albedo_coverage.rgb
-                    * sky_atmos_extra.sun_dir_flux.w
-                    * SCENE_FLUX_SCALE
-                    * 0.62
-                    * (0.10 + 0.90 * sqrt(cloud_ndl));
-                let orbital_opacity = orbital_density * 0.88 * orbital_blend;
-                cloud = CloudOverlay(cloud_radiance * orbital_opacity, orbital_opacity);
+                let column = weather_column_from_texel(orbital_weather);
+                if (column.opacity > 1.0e-3) {
+                    let n_body_lit = orbital_cloud_normal_body(
+                        cloud_cover_tex,
+                        cloud_cover_sampler,
+                        cloud_n_l,
+                    );
+                    // Body-local perturbed normal → world for lighting.
+                    let q = sky_atmos_extra.world_to_body_orientation;
+                    let q_conj = vec4(-q.xyz, q.w);
+                    let cloud_n_lit_w = rotate_quat(q_conj, n_body_lit);
+                    let sun_dir = sky_atmos_extra.sun_dir_flux.xyz;
+                    let n_dot_l = dot(cloud_n_lit_w, sun_dir);
+                    let view_mu = max(dot(cloud_n_lit_w, -ray_dir), 0.0);
+                    let shade = orbital_cloud_shade(column, n_dot_l, view_mu);
+                    let night = smoothstep(-0.12, 0.08, n_dot_l);
+                    let sun_elev = clamp(n_dot_l, 0.0, 1.0);
+                    let sun_chroma = mix(
+                        vec3<f32>(1.0, 0.45, 0.18),
+                        vec3<f32>(1.0, 0.97, 0.92),
+                        smoothstep(0.05, 0.45, sun_elev),
+                    );
+                    let cloud_radiance = sky_atmos.cloud_albedo_coverage.rgb
+                        * vec3<f32>(0.90, 0.93, 0.97)
+                        * sun_chroma
+                        * sky_atmos_extra.sun_dir_flux.w
+                        * SCENE_FLUX_SCALE
+                        * 0.55
+                        * shade.x
+                        * night;
+                    let orbital_opacity = shade.y * night * orbital_blend;
+                    cloud = CloudOverlay(cloud_radiance * orbital_opacity, orbital_opacity);
+                }
             }
         }
     }
