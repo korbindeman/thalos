@@ -1,7 +1,8 @@
 # Planet-scale volumetric clouds
 
-**Status:** active program, 2026-07-20. CLOUD-0 and CLOUD-1 are complete;
-CLOUD-2 is next. This document is the strategy and technical plan;
+**Status:** active program, 2026-07-21. CLOUD-0 and CLOUD-1 are complete;
+CLOUD-2 and CLOUD-3 are in progress, with the first density/range fidelity
+checkpoint captured on `codex/cloud-0`. This document is the strategy and technical plan;
 [backlog.md](backlog.md) is the execution queue, while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
 today. Architecture choices are fixed by [ADR-0007](adr/0007-one-weather-field-many-cloud-projections.md).
@@ -43,23 +44,25 @@ This is an upgrade, not a greenfield renderer. Preserve these foundations:
 
 The current result falls short for structural reasons:
 
-1. **CLOUD-1 has unified authority, not fidelity.** Near and orbital clouds now
-   share one field and `clouds: None` is authoritative, but the near density
-   still reduces that richer field to coverage and the orbit layer is only a
-   first surface-following projection.
-2. **The density field is one repeating deck.** One scalar coverage channel,
-   one global base/top, a triplanar 2-D base atlas, and one 3-D erosion texture
-   cannot express fronts, stratus versus convective profiles, or spatially
-   varying cloud tops. The 25 km march cap hides the resulting long-range
-   aliasing by dissolving the horizon.
+1. **The first CLOUD-2/3 checkpoint is not the finished reconstruction.** Near
+   density now consumes coverage/type/base/top and the orbit layer samples the
+   same continuous multi-scale field, but history still lacks neighborhood
+   clamp/moments and the far projection lacks density-derived height/normal
+   moments.
+2. **The density foundation is now genuinely volumetric.** The extruded 2-D
+   atlas is gone; a 64³ Perlin/Worley basis, typed vertical profiles, local
+   base/top, boundary-only erosion, a decorrelated macro threshold, and a
+   50 km spherical march produce coherent bodies from runway through cruise.
+   Empty-space hierarchy and a reduced-detail mid-distance regime remain.
 3. **Clouds inhabit a private lighting universe.** The compute shader receives
    hand-scaled sun and top/bottom ambient colours. It does not consume the
    atmosphere transmittance, sky-view environment, eclipse, or the shared
    direct-sun visibility path.
-4. **The cost model is upside down.** Fixed 1920×1080 RGBA32F output and history
-   buffers are marched every frame, while the renderer does not yet exploit a
-   3×3/1-in-9 topology, neighborhood-clamped history, empty-space hierarchy,
-   or regime-specific detail.
+4. **The cost model is improved but not complete.** The fixed cloud target is
+   now 1280×720 and persistent allocation is 42.63 MB instead of 137.35 MB,
+   but it is not yet viewport-relative and still lacks 3×3/1-in-9 scheduling,
+   neighborhood-clamped history, empty-space hierarchy, and regime-specific
+   detail.
 5. **Visible clouds do not interact with the world.** The terrain, craft,
    structures, atmosphere, and reflection environment do not receive one
    cloud-transmittance field. The impostor's shadow probe is an unrelated
@@ -162,9 +165,17 @@ Density combines:
 - type-specific vertical profiles and anvil shaping;
 - rotated/offset octave domains and a second noise space to suppress tiling.
 
-Use filterable compact formats for generated noise. The current 1920² RGBA32F
-base atlas is not a sensible long-term storage format. Weather and a cheap
-max-density hierarchy must reject empty rays before detail sampling.
+Use filterable compact formats for generated noise. The former 1920² RGBA32F
+base atlas has been removed; later format work should compact the retained 64³
+RGBA32F basis. Weather and a cheap max-density hierarchy must reject empty rays
+before detail sampling.
+
+**Physical-scale invariant:** an authored feature scale names the feature, not
+the full period of a stored tile containing several cells. The current erosion
+channel contains eight cells per volume axis, so its sampled tile period is
+`detail_scale_m * 8`. Treating `detail_scale_m` itself as the period creates
+~56 m cells from the authored 450 m scale, below the 200–500 m horizon step and
+recurs as stipple/micro-cloudlets; see [INC-0007](incidents/0007-cloud-detail-period-eighth-scale.md).
 
 ### 3.3 View march and reconstruction
 
@@ -309,6 +320,36 @@ to 144,023,552 bytes (137.35 MiB). Captures still show the inherited vertical
 sheet/repetition, weak mass hierarchy, over-bright transport, and poor limb
 result; those are deliberately not disguised with tuning here and remain owned
 by CLOUD-2 through CLOUD-6.
+
+### First CLOUD-2/3 fidelity checkpoint
+
+**Status (2026-07-21):** captured and compile-clean on `codex/cloud-0`; both
+phases remain `wip` because their complete exit criteria are larger than this
+vertical slice.
+
+- Cloud colour/distance/history targets moved from 1920×1080 to 1280×720;
+  the 1920² base atlas was deleted, the generated volume moved 32³ → 64³, and
+  persistent cloud allocation fell from 137.35 MiB after CLOUD-1 to 40.66 MiB
+  (42,631,168 bytes).
+- Density now uses a wrap-first trilinear 3-D Perlin/Worley volume, typed
+  stratus/cumulus/storm profiles, spatial base/top, storm anvils, a second
+  macro threshold domain, boundary-only 450 m erosion, and 50 km bounded
+  spherical range. The aliased detail-scale failure and diagnosis are retained
+  in INC-0007.
+- The canonical weather cube now combines synoptic, mesoscale, and cellular
+  coverage. Near volume and first BodySky/SolidPlanet orbital projections use
+  that same field; the 200 km limb probe shows broken systems rather than a
+  missing layer or a uniform white shell.
+- Final baseline probes at 1920×1080 report 8.34 ms mean / 8.38 ms p95 for the
+  densest runway view, 1.20 / 1.21 ms for cruise, and 4.71 / 4.73 ms for the
+  limb on the development RTX 4070 Ti. These are checkpoint measurements, not
+  the CLOUD-2 budget exit: viewport-relative targets, sparse scheduling,
+  history clamp/moments, and empty-space skipping remain.
+- Lighting has darker cores, deterministic sparse self-shadow, and a first
+  solar-elevation tint, but CLOUD-4 still owns atmosphere LUT coupling and
+  correct foreground/background media ordering. CLOUD-5 still owns world
+  cloud shadows; CLOUD-6 still owns density-derived orbital optical-depth,
+  height, and normal moments.
 
 ### Program acceptance matrix
 

@@ -198,19 +198,19 @@ impl CloudCaptureQuality {
 
     fn view_steps(self) -> u32 {
         match self {
-            Self::Low => 36,
-            Self::Baseline => 60,
-            Self::High => 72,
-            Self::Reference => 96,
+            Self::Low => 48,
+            Self::Baseline => 80,
+            Self::High => 104,
+            Self::Reference => 128,
         }
     }
 
     fn shadow_steps(self) -> u32 {
         match self {
             Self::Low => 2,
-            Self::Baseline => 4,
-            Self::High => 6,
-            Self::Reference => 8,
+            Self::Baseline => 3,
+            Self::High => 4,
+            Self::Reference => 6,
         }
     }
 }
@@ -363,8 +363,12 @@ impl ScreenshotPreset {
                 keep_hud: false,
                 report: PathBuf::from("tools/screenshots/cloud_runway.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
-                    camera_altitude_m: 850.0,
-                    look_elevation_deg: -8.0,
+                    // Human-scale weather acceptance view: just above the
+                    // runway, pitched into the cloud-bearing sky. The old
+                    // 850 m / -8° pose was an aerial terrain survey despite
+                    // the preset's name and hid the scene-scale impression.
+                    camera_altitude_m: 35.0,
+                    look_elevation_deg: 9.0,
                     site_sun_elevation_deg: None,
                     tangent_limb: false,
                 },
@@ -385,8 +389,12 @@ impl ScreenshotPreset {
                 keep_hud: false,
                 report: PathBuf::from("tools/screenshots/cloud_cruise.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
-                    camera_altitude_m: 4_600.0,
-                    look_elevation_deg: -3.0,
+                    // Above the ordinary cumulus deck but below the tallest
+                    // authored storm tops: the aviation-scale view across
+                    // cloud tops and developing towers. Interior has its own
+                    // intentionally dense probe below.
+                    camera_altitude_m: 9_000.0,
+                    look_elevation_deg: -5.0,
                     site_sun_elevation_deg: Some(35.0),
                     tangent_limb: false,
                 },
@@ -414,7 +422,9 @@ impl ScreenshotPreset {
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
-                cloud_coverage_scale: None,
+                // Force the local weather threshold into a dense cell so this
+                // diagnostic reliably exercises traversal from inside cloud.
+                cloud_coverage_scale: Some(1.60),
             },
             Self::CloudLimb => ScreenshotConfig {
                 preset: self,
@@ -431,7 +441,9 @@ impl ScreenshotPreset {
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 200_000.0,
                     look_elevation_deg: 0.35,
-                    site_sun_elevation_deg: Some(3.0),
+                    // Keep the low-orbit limb readable without letting a
+                    // horizon-grazing ocean glint dominate the cloud probe.
+                    site_sun_elevation_deg: Some(12.0),
                     tangent_limb: true,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,

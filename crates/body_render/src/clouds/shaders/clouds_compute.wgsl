@@ -14,8 +14,8 @@ const CAM_POS_COLUMN_SCALE = 1.0e4;
 // `reprojection_strength`, since the reprojected sample is approximate.
 const MOVING_REPROJECTION_STRENGTH = 0.9;
 const MAX_DISTANCE = 1.0e9;
-const WORLEY_RESOLUTION = 32;
-const WORLEY_RESOLUTION_F32 = 32.0;
+const WORLEY_RESOLUTION = 64;
+const WORLEY_RESOLUTION_F32 = 64.0;
 
 // ── Thalos fork: body-fixed spherical raymarch ───────────────────────────────
 // Upstream is a Y-up flat-plane demo: the camera sits on the +Y axis and the
@@ -45,24 +45,21 @@ const WORLEY_RESOLUTION_F32 = 32.0;
 // moiré/crosshatch pattern. Long near-tangent segments stay at CLOUD_STEP_M,
 // capped at MAX_RAY_STEPS, with a distance haze-out so the bounded reach reads
 // as natural aerial perspective rather than a hard edge.
-const CLOUD_STEP_M = 280.0;       // coarsest step (long horizon segments)
-const MIN_STEP_M = 64.0;          // finest step (short band crossings)
-const TARGET_BAND_STEPS = 20.0;   // target samples across one band crossing
-const MAX_RAY_STEPS_CAP = 96u;    // compile-time safety cap; config selects ≤ this
-const MAX_CLOUD_DIST = 25000.0;   // metres; clouds whose entry is past this are dropped
-const CLOUD_FADE_START = 13000.0; // metres; begin hazing clouds toward the cap
-// Per-column base-height undulation amount, in fractions of the band thickness
-// (× the centered atlas-alpha field, ~±0.5). Breaks the flat deck base.
-const BASE_UNDULATION = 0.55;
+const CLOUD_STEP_M = 500.0;       // coarsest step (long horizon segments)
+const MIN_STEP_M = 65.0;          // finest step (short band crossings)
+const TARGET_BAND_STEPS = 42.0;   // target samples across one band crossing
+const MAX_RAY_STEPS_CAP = 128u;   // compile-time safety cap; config selects ≤ this
+const MAX_CLOUD_DIST = 50000.0;   // metres; orbital projection owns farther clouds
+const CLOUD_FADE_START = 36000.0; // metres; begin atmospheric horizon fade
 
 struct Config {
-    clouds_base_scale: f32,
+    clouds_base_shape_scale_m: f32,
     clouds_raymarch_steps_count: u32,
     clouds_bottom_height: f32,
     clouds_top_height: f32,
     clouds_coverage: f32,
     clouds_density: f32,
-    clouds_detail_scale: f32,
+    clouds_detail_scale_m: f32,
     clouds_detail_strength: f32,
     clouds_base_edge_softness: f32,
     clouds_bottom_softness: f32,
@@ -90,25 +87,24 @@ struct Config {
 @group(0) @binding(0) var<uniform> config: Config;
 
 @group(1) @binding(0) var clouds_render_texture: texture_storage_2d<rgba32float, read_write>;
-@group(1) @binding(1) var clouds_atlas_texture: texture_storage_2d<rgba32float, read_write>;
-@group(1) @binding(2) var clouds_worley_texture: texture_storage_3d<rgba32float, read_write>;
+@group(1) @binding(1) var clouds_worley_texture: texture_storage_3d<rgba32float, read_write>;
 // Per-pixel nearest cloud-hit distance (metres from the camera; MAX_DISTANCE
 // where the ray hit no cloud). The game's body_sky composite reads it for
 // true depth occlusion against terrain / the ship hull; the raymarch's own
 // history reads use `history_distance_texture` below.
-@group(1) @binding(3) var cloud_distance_texture: texture_storage_2d<r32float, write>;
+@group(1) @binding(2) var cloud_distance_texture: texture_storage_2d<r32float, write>;
 // Planet-fixed cubemap weather field: coverage, cloud type, normalized base,
-// normalized top. CLOUD-1 consumes coverage; CLOUD-3 consumes the remaining
-// channels for type-specific vertical structure.
-@group(1) @binding(4) var weather_texture: texture_cube<f32>;
-@group(1) @binding(5) var weather_sampler: sampler;
+// normalized top. CLOUD-3 consumes all channels for type-specific vertical
+// structure.
+@group(1) @binding(3) var weather_texture: texture_cube<f32>;
+@group(1) @binding(4) var weather_sampler: sampler;
 // Previous frame's render + distance textures, snapshotted by the render node
 // after each update dispatch. ALL temporal-history reads (same-pixel
 // accumulation, motion reprojection, the saved camera rows) come from these —
 // reading the in-flight storage textures instead races across workgroups and
 // paints coherent streak artifacts.
-@group(1) @binding(6) var history_texture: texture_2d<f32>;
-@group(1) @binding(7) var history_distance_texture: texture_2d<f32>;
+@group(1) @binding(5) var history_texture: texture_2d<f32>;
+@group(1) @binding(6) var history_distance_texture: texture_2d<f32>;
 
 struct Ray {
     step_distance: f32,
@@ -136,64 +132,38 @@ struct RaymarchResult {
 // computed ONCE PER RAY in `raymarch` and passed down; a previous version
 // evaluated them per density sample and dropped the frame rate severalfold.
 
-// Local overcast fraction from the canonical planet-fixed weather cubemap.
-fn sample_coverage(n: vec3f) -> f32 {
-    return textureSampleLevel(weather_texture, weather_sampler, n, 0.0).r;
+// Coverage, cloud kind, normalized local base and normalized local top from
+// the canonical planet-fixed weather cubemap.
+fn sample_weather(n: vec3f) -> vec4f {
+    return textureSampleLevel(weather_texture, weather_sampler, n, 0.0);
 }
 
-// World-space tile period of the base atlas, metres (identical on both texel
-// axes: upstream's `u32(p * k * res) % res` is `fract(p * k) * res`, so the
-// period is 1/k regardless of the 1920×1080 texel rectangle).
-fn atlas_period() -> f32 {
-    return 1.0 / (0.00005 * config.clouds_base_scale);
-}
-
-// Wrap-first atlas fetch: reduce the planar coordinate to one tile period in
-// f32-safe small numbers, then scale up to texels.
-fn atlas_load(plane: vec2f) -> vec4f {
-    let w = fract(plane / atlas_period());
-    let res = config.render_resolution;
-    let tx = min(u32(w.x * res.x), u32(res.x) - 1u);
-    let ty = min(u32(w.y * res.y), u32(res.y) - 1u);
-    return textureLoad(clouds_atlas_texture, vec2u(tx, ty));
-}
-
-// Triplanar projection of the tiling 2-D atlas onto the sphere. `tri_w` is
-// the squared body-fixed surface normal (weights summing to 1), computed once
-// per ray in `raymarch` — within one ray's ≤ 25 km reach on a ~3000 km body
-// it is effectively constant. The blend only matters across the planet, where
-// it removes the polar pinch a lat/lon mapping would have.
-fn atlas_triplanar(pos: vec3f, tri_w: vec3f) -> vec4f {
-    return atlas_load(pos.yz) * tri_w.x + atlas_load(pos.xz) * tri_w.y
-        + atlas_load(pos.xy) * tri_w.z;
-}
-
-fn worley_corner(c: vec3i) -> f32 {
+fn volume_corner(c: vec3i) -> vec4f {
     let w = (c + vec3i(WORLEY_RESOLUTION)) % vec3i(WORLEY_RESOLUTION);
-    return textureLoad(clouds_worley_texture, vec3u(w)).r;
+    return textureLoad(clouds_worley_texture, vec3u(w));
 }
 
-// Wrap-first, trilinearly-filtered 3-D Worley detail fetch (period = 32 cells
-// in world space). Nearest-neighbour sampling here reads as a pixel-scale
-// crosshatch on the cloud surfaces once the raymarch dither is time-stable.
-fn cloud_map_detail(position: vec3f) -> f32 {
-    let s = 0.0016 * config.clouds_base_scale * config.clouds_detail_scale;
-    let period = WORLEY_RESOLUTION_F32 / s;
+// Wrap-first, trilinearly-filtered 3-D shape fetch. The same periodic volume
+// is sampled through decorrelated domains/scales below; because every domain
+// is genuinely 3-D, cells grow and erode in altitude instead of extruding a
+// 2-D atlas into the vertical curtains visible before CLOUD-3.
+fn cloud_volume(position: vec3f, period: f32) -> vec4f {
     let p = fract(position / period) * WORLEY_RESOLUTION_F32;
 
     let pf = p - 0.5; // texel centres
     let base = floor(pf);
-    let f = pf - base;
+    var f = pf - base;
+    f = f * f * (3.0 - 2.0 * f);
     let b = vec3i(base);
 
-    let c000 = worley_corner(b + vec3i(0, 0, 0));
-    let c100 = worley_corner(b + vec3i(1, 0, 0));
-    let c010 = worley_corner(b + vec3i(0, 1, 0));
-    let c110 = worley_corner(b + vec3i(1, 1, 0));
-    let c001 = worley_corner(b + vec3i(0, 0, 1));
-    let c101 = worley_corner(b + vec3i(1, 0, 1));
-    let c011 = worley_corner(b + vec3i(0, 1, 1));
-    let c111 = worley_corner(b + vec3i(1, 1, 1));
+    let c000 = volume_corner(b + vec3i(0, 0, 0));
+    let c100 = volume_corner(b + vec3i(1, 0, 0));
+    let c010 = volume_corner(b + vec3i(0, 1, 0));
+    let c110 = volume_corner(b + vec3i(1, 1, 0));
+    let c001 = volume_corner(b + vec3i(0, 0, 1));
+    let c101 = volume_corner(b + vec3i(1, 0, 1));
+    let c011 = volume_corner(b + vec3i(0, 1, 1));
+    let c111 = volume_corner(b + vec3i(1, 1, 1));
 
     let x00 = mix(c000, c100, f.x);
     let x10 = mix(c010, c110, f.x);
@@ -202,45 +172,89 @@ fn cloud_map_detail(position: vec3f) -> f32 {
     return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 
-// Erode a bit from the clouds_bottom_height and clouds_top_height of the cloud layer
-fn cloud_gradient(normalized_height: f32) -> f32 {
-    return (
-        common::linearstep(0.0, 0.1, normalized_height) -
-        common::linearstep(0.8, 1.2, normalized_height)
+fn rotated_domain(p: vec3f) -> vec3f {
+    // Cheap orthonormal-ish axis mixing. It decorrelates repeated volume
+    // samples without trig or a second texture.
+    return vec3f(
+        0.72 * p.x + 0.41 * p.y - 0.56 * p.z,
+        -0.35 * p.x + 0.91 * p.y + 0.22 * p.z,
+        0.60 * p.x + 0.05 * p.y + 0.80 * p.z,
     );
 }
 
-// Per-sample density. `cov` (local overcast fraction × global knob) and
-// `tri_w` (triplanar weights) are the per-ray context from `raymarch` — see
-// the PERF INVARIANT note above.
-fn get_cloud_map_density(pos: vec3f, normalized_height: f32, cov: f32, tri_w: vec3f) -> f32 {
-    // One triplanar fetch serves base shape (r), remap threshold (g), height
-    // gradient (b), and the per-column base-height undulation field (a) that
-    // breaks the flat deck base.
-    let atlas = atlas_triplanar(pos, tri_w);
-    let nh = clamp(normalized_height - (atlas.a - 0.5) * BASE_UNDULATION, 0.0, 1.0);
-
-    // (1 - nh)^16 as a multiply chain — pow() hits the SFU path.
-    let t1 = 1.0 - nh;
-    let t2 = t1 * t1;
-    let t4 = t2 * t2;
-    let t8 = t4 * t4;
-    let height_shape = nh * nh * atlas.b + t8 * t8;
-    var m = common::remap(atlas.r - height_shape, atlas.g, 1.0) * cloud_gradient(nh);
-
-    let clouds_detail_strength = smoothstep(1.0, 0.5, m);
-
-    // Erode with detail; the y/z wind components drift the erosion field for
-    // slow "boiling" independent of the zonal advection.
-    if (clouds_detail_strength > 0.0) {
-        let boil = vec3f(0.0, config.wind_displacement.y, config.wind_displacement.z);
-        m -= cloud_map_detail(pos + boil) * clouds_detail_strength * config.clouds_detail_strength;
+// Typed volumetric density. `weather` is constant over a short view segment,
+// while every base/detail sample is full 3-D world-space structure.
+fn get_cloud_map_density(pos: vec3f, shell_height: f32, weather: vec4f) -> f32 {
+    let cov = clamp(weather.r * config.clouds_coverage, 0.0, 1.0);
+    let local_base = clamp(weather.b, 0.0, 0.92);
+    let local_top = max(clamp(weather.a, 0.02, 1.0), local_base + 0.02);
+    let h = (shell_height - local_base) / (local_top - local_base);
+    if (h <= 0.0 || h >= 1.0 || cov <= 1.0e-3) {
+        return 0.0;
     }
 
-    m = smoothstep(0.0, config.clouds_base_edge_softness, m + cov - 1.0);
-    m *= common::linearstep0(config.clouds_bottom_softness, nh);
+    let stratus_w = 1.0 - smoothstep(0.18, 0.38, weather.g);
+    let storm_w = smoothstep(0.72, 0.88, weather.g);
+    let cumulus_w = max(0.0, 1.0 - stratus_w - storm_w);
 
-    return clamp(m * config.clouds_density, 0.0, 1.0);
+    let shape_scale = max(config.clouds_base_shape_scale_m, 500.0);
+    let broad = cloud_volume(
+        rotated_domain(pos) + vec3f(1800.0, -4200.0, 900.0),
+        shape_scale,
+    );
+    let macro_shape = cloud_volume(
+        pos + vec3f(-7300.0, 2100.0, 4900.0),
+        shape_scale * 2.7,
+    );
+    // Broad Perlin/Worley masses. The erosion channel stays out of the solid
+    // body: promoting its small cells into `shape` fragmented the volume into
+    // screen-space stipple instead of adding readable billows.
+    let shape = broad.r * 0.52 + broad.g * 0.24 + broad.a * 0.24;
+
+    // Coverage is a formation threshold, not an opacity multiplier: lowering
+    // it opens clear sky between otherwise equally dense cloud masses.
+    // The second, much larger period groups otherwise repeating 8 km bodies
+    // into broad systems without contributing its own low-resolution blobs to
+    // the boundary. Keeping it in the threshold preserves solid cloud cores.
+    let threshold = mix(0.58, 0.30, cov) + (0.5 - macro_shape.a) * 0.07;
+    let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
+    var mass = shape - threshold - vertical_narrow;
+
+    // Cumulonimbus anvils broaden again near the tropopause, but only where
+    // the storm weather channel permits them.
+    let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
+    let anvil_shape = broad.r * 0.72 + broad.a * 0.28 - (threshold - 0.06);
+    mass = max(mass, anvil_shape * anvil_profile * storm_w);
+
+    let bottom_softness = max(config.clouds_bottom_softness, 0.01);
+    let stratus_profile = smoothstep(0.0, bottom_softness * 0.45, h)
+        * (1.0 - smoothstep(0.72, 1.0, h));
+    let cumulus_profile = smoothstep(0.0, bottom_softness * 0.75, h)
+        * (1.0 - smoothstep(0.70, 1.0, h));
+    let storm_profile = smoothstep(0.0, bottom_softness * 0.35, h)
+        * (1.0 - smoothstep(0.88, 1.0, h));
+    let vertical_profile = stratus_profile * stratus_w
+        + cumulus_profile * cumulus_w
+        + storm_profile * storm_w;
+
+    // Fine 3-D Worley erosion is strongest only near the boundary, preserving
+    // solid cores for deep self-shadow while cutting cauliflower detail into
+    // silhouettes. Detail moves slowly in a decorrelated domain.
+    let boil = vec3f(0.0, config.wind_displacement.y, config.wind_displacement.z);
+    let edge = 1.0 - smoothstep(0.04, 0.18, mass);
+    if (edge > 1.0e-3) {
+        let detail = cloud_volume(
+            rotated_domain(pos + boil) + vec3f(270.0, -610.0, 130.0),
+            // Channel B contains eight primary Worley cells across the stored
+            // tile. `clouds_detail_scale_m` describes one authored physical
+            // erosion feature, not the whole tile period.
+            max(config.clouds_detail_scale_m, 50.0) * 8.0,
+        );
+        mass -= (1.0 - detail.b) * edge * config.clouds_detail_strength * 0.55;
+    }
+
+    let shaped = smoothstep(0.0, max(config.clouds_base_edge_softness, 0.015), mass);
+    return max(shaped * vertical_profile * config.clouds_density, 0.0);
 }
 
 fn get_normalized_height(pos: vec3f) -> f32 {
@@ -248,13 +262,14 @@ fn get_normalized_height(pos: vec3f) -> f32 {
     return (length(pos) - (config.planet_radius + config.clouds_bottom_height)) / clouds_height;
 }
 
-// `jitter` perturbs the march's start offset: unjittered, the exponential
-// step pattern is a deterministic bias that draws sun-aligned bands across
-// translucent cloud — a settled view never averages it away. Jittered, it is
-// noise the temporal history converges out of.
-fn volumetric_shadow(origin: vec3f, cov: f32, tri_w: vec3f, jitter: f32) -> f32 {
+// The sparse exponential shadow integral is deliberately centred and stable.
+// Per-pixel jitter here used to turn three widely spaced density taps into a
+// high-contrast stipple that remained visible after temporal reconstruction.
+// The smooth 3-D field plus increasing step reach already avoids coherent
+// slab banding without injecting a second stochastic signal per view sample.
+fn volumetric_shadow(origin: vec3f, weather: vec4f) -> f32 {
     var ray_step_size = config.clouds_shadow_raymarch_step_size;
-    var distance_along_ray = ray_step_size * (0.25 + 0.5 * jitter);
+    var distance_along_ray = ray_step_size * 0.5;
     var transmittance = 1.0;
 
     for (var step: u32 = 0; step < config.clouds_shadow_raymarch_steps_count; step++) {
@@ -263,7 +278,7 @@ fn volumetric_shadow(origin: vec3f, cov: f32, tri_w: vec3f, jitter: f32) -> f32 
 
         if (normalized_height > 1.0) { return transmittance; };
 
-        let clouds_density = get_cloud_map_density(pos, normalized_height, cov, tri_w);
+        let clouds_density = get_cloud_map_density(pos, normalized_height, weather);
         transmittance *= exp(-clouds_density * ray_step_size);
 
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
@@ -337,6 +352,10 @@ fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray
     // Adaptive step: ~TARGET_BAND_STEPS samples across this segment, bounded
     // (see the header comment).
     let step = clamp((seg_end - seg_start) / TARGET_BAND_STEPS, MIN_STEP_M, CLOUD_STEP_M);
+    // The full-step temporal phase is safe now that the minimum density
+    // feature is larger than one march step. It prevents near-horizontal rays
+    // from stacking their samples into coherent bands; history averages the
+    // phase instead of trying to hide under-resolved density.
     let dir_length = seg_start - step * jitter;
 
     return Ray(step, dir_length, seg_start, seg_end);
@@ -349,25 +368,27 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
 
-    // Per-ray field context (see the PERF INVARIANT note): coverage and the
-    // triplanar weights vary over tens-of-km scales, so one evaluation at the
-    // segment midpoint serves every sample on this ≤ 25 km ray — and a fully
-    // clear column skips the march outright.
+    // Per-ray weather context varies over tens-of-km scales, so one evaluation
+    // at the segment midpoint serves the short view segment. Base/detail shape
+    // remains full 3-D per sample.
     let mid = ray_origin + (0.5 * (ray.start + ray.end)) * ray_dir;
     let n_mid = normalize(mid);
-    let cov = clamp(sample_coverage(n_mid) * config.clouds_coverage, 0.0, 1.0);
-    if (cov <= 1.0e-3) {
+    let weather = sample_weather(n_mid);
+    if (weather.r * config.clouds_coverage <= 1.0e-3) {
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
-    let tri_w = n_mid * n_mid; // unit normal → weights sum to 1
 
     // Frostbite: dual-lobe phase function
     let ray_dot_sun = dot(ray_dir, -config.sun_dir.xyz);
-    let scattering = mix(
+    let raw_scattering = mix(
         henyey_greenstein(ray_dot_sun, config.forward_scattering_g),
         henyey_greenstein(ray_dot_sun, config.backward_scattering_g),
         config.scattering_lerp
     );
+    // HG above omits 1/(4π). Normalize and retain a broad diffuse multiple-
+    // scattering floor so side-lit clouds stay bright without a white forward
+    // spike consuming the whole frame.
+    let scattering = 0.22 + 0.78 * min(raw_scattering * 0.07957747, 1.8);
 
     var dir_length = ray.dir_length;
     var dist = max_dist;
@@ -390,7 +411,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
 
         let normalized_height = clamp(get_normalized_height(world_position), 0.0, 1.0);
         let clouds_density_sampled =
-            get_cloud_map_density(world_position, normalized_height, cov, tri_w)
+            get_cloud_map_density(world_position, normalized_height, weather)
             * (1.0 - smoothstep(reach_fade_begin, reach_end, dir_length));
 
         if (clouds_density_sampled > 0.0) {
@@ -402,18 +423,16 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 normalized_height
             );
 
-            // Shadow jitter decorrelated PER SAMPLE (golden-ratio sequence
-            // over the step index): one shared value would wobble the whole
-            // pixel's sun term coherently every frame — visible lighting
-            // flicker no history fully hides. Per-sample, the noise averages
-            // across the ~20 samples of the ray before temporal blending.
-            let shadow_jitter = fract(jitter + f32(step) * 0.6180339887);
-
             // Frostbite energy-conversing integration
+            let sun_visibility = volumetric_shadow(world_position, weather);
+            // A small multiple-scattering floor keeps shaded vapor legible;
+            // the old 12% floor plus bright ambient erased nearly all optical
+            // depth and made kilometre-thick clouds read as pale fog.
+            let multiple_scatter_fill = 0.035 + 0.965 * sun_visibility;
             let S = clouds_density_sampled * (
                 ambient_light.rgb +
                 config.sun_color.rgb * scattering
-                    * volumetric_shadow(world_position, cov, tri_w, shadow_jitter)
+                    * multiple_scatter_fill
             );
             let delta_transmittance = exp(-clouds_density_sampled * ray.step_distance);
             let integrated_scattering = S * (1.0 - delta_transmittance) / clouds_density_sampled;
@@ -438,36 +457,23 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     return RaymarchResult(dist, vec4f(scattered_light, transmittance));
 }
 
-fn render_clouds_atlas(frag_coord: vec2f) -> vec4f {
-    let v_uv = frag_coord / config.render_resolution.xy;
-    let coord = vec3f(v_uv, 0.5);
-
-    let mfbm = 0.9;
-    let mvor = 0.7;
-
-    return vec4f(
-        mix(1.0, common::tilable_perlin_fbm(coord, 7, 4), mfbm) *
-            mix(1.0, common::tilable_voronoi(coord, 8, 9.0), mvor),
-        0.625 * common::tilable_voronoi(coord, 3, 15.0) +
-            0.250 * common::tilable_voronoi(coord, 3, 19.0) +
-            0.125 * common::tilable_voronoi(coord, 3, 23.0) -
-            1.0,
-        1.0 - common::tilable_voronoi(coord + 0.5, 6, 9.0),
-        // Thalos fork: alpha carries a low-frequency, seamlessly-tiling
-        // base-height field (large-scale undulation, ~[0,1]) sampled per column
-        // in `get_cloud_map_density` to break the flat deck base.
-        common::tilable_perlin_fbm(coord + 0.27, 3, 2)
-    );
-}
-
-fn render_clouds_worley(coord: vec3f) -> vec4f {
-    let r = common::tilable_voronoi(coord, 16, 3.0);
-    let g = common::tilable_voronoi(coord, 4, 8.0);
-    let b = common::tilable_voronoi(coord, 4, 16.0);
-
-    let c = max(0.0, 1.0 - (r + g * 0.5 + b * 0.25) / 1.75);
-
-    return vec4f(c);
+fn render_clouds_volume(coord: vec3f) -> vec4f {
+    // Four distinct, seamlessly tileable 3-D bases. The runtime samples them
+    // through different physical periods/domains to form broad organization,
+    // cumulus bodies, boundary erosion, and a second macro octave.
+    // Mass formation is deliberately low-bandwidth: at the authored 8 km
+    // period these octaves are 4 km / 2 km / 1 km. Higher frequencies belong
+    // in boundary erosion; putting them through the coverage threshold turns
+    // one cloud into a field of detached micro-cloudlets.
+    let perlin = common::tilable_perlin_fbm(coord, 3, 2.0);
+    let cellular = common::tilable_voronoi(coord + vec3f(0.17, 0.31, 0.07), 2, 3.0);
+    // A single smooth cell scale serves two physical roles: ~1 km lobes when
+    // sampled with the base period and ~55 m boundary cuts with the detail
+    // period. Multi-octave content here polluted solid interiors with a fine
+    // cellular texture before the runtime erosion stage.
+    let erosion = common::tilable_voronoi(coord + vec3f(0.53, 0.11, 0.43), 1, 8.0);
+    let macro_noise = common::tilable_perlin_fbm(coord + vec3f(0.29, 0.47, 0.61), 3, 1.0);
+    return clamp(vec4f(perlin, cellular, erosion, macro_noise), vec4f(0.0), vec4f(1.0));
 }
 
 struct CloudsOutput {
@@ -516,11 +522,8 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
     );
     let cam_static = cam_delta <= CAM_EPSILON;
 
-    // Interleaved-gradient spatial dither for the raymarch start offset, with
-    // a ~golden-ratio phase advance per frame (assuming ~60 fps; any large
-    // irrational-ish step decorrelates frames). Always temporal: both history
-    // paths below average it away, which is what keeps the dither from
-    // reading as a static moiré/halftone pattern on the cloud surfaces.
+    // Interleaved-gradient phase for the view march; temporal history removes
+    // the residual while the offset prevents coherent horizon bands.
     var jitter = fract(52.9829189 * fract(dot(frag_coord, vec2f(0.06711056, 0.00583715))));
     jitter = fract(jitter + config.time * 37.08204);
 
@@ -613,26 +616,17 @@ fn get_ray_direction(frag_coord: vec2f) -> vec3f {
 
 @compute @workgroup_size(8, 8, 1)
 fn init(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
-    let index = vec2f(f32(invocation_id.x), f32(invocation_id.y)) + vec2f(0.5);
-    let inverted_y_coord = config.render_resolution.y - index.y;
-
-    let worley_coord = vec2f(index.x, inverted_y_coord);
-
-    let z = floor(worley_coord.x / WORLEY_RESOLUTION_F32) + 8.0 * floor(worley_coord.y / WORLEY_RESOLUTION_F32);
-    let xy = vec2f(index.x, inverted_y_coord) % WORLEY_RESOLUTION_F32;
-    let xyz = vec3f(xy, z);
-
-    let worley_col = render_clouds_worley(xyz / WORLEY_RESOLUTION_F32);
-    let atlas_col = render_clouds_atlas(vec2f(index.x, inverted_y_coord));
-
-    storageBarrier();
-
-    textureStore(clouds_atlas_texture, invocation_id.xy, atlas_col);
-    textureStore(clouds_worley_texture, vec3u(u32(xyz.x), u32(xyz.y), u32(xyz.z)), worley_col);
+    let xyz = vec3f(invocation_id) + vec3f(0.5);
+    let volume = render_clouds_volume(xyz / WORLEY_RESOLUTION_F32);
+    textureStore(clouds_worley_texture, invocation_id, volume);
 }
 
 @compute @workgroup_size(8, 8, 1)
 fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_workgroups) num_workgroups: vec3<u32>) {
+    if (invocation_id.x >= u32(config.render_resolution.x)
+        || invocation_id.y >= u32(config.render_resolution.y)) {
+        return;
+    }
     let index = vec2f(f32(invocation_id.x), f32(invocation_id.y)) + vec2f(0.5);
 
     // Previous frame's camera, from the history snapshot's save rows.

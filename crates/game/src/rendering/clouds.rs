@@ -51,32 +51,24 @@ use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemSt
 /// Global scale on the planet-fixed weather coverage map (which carries the
 /// local overcast fraction, mean ≈ `CloudWeatherField::coverage_mean`).
 /// 1.0 = trust the weather field; global trim.
-const COVERAGE_SCALE: f32 = 1.0;
+const COVERAGE_SCALE: f32 = 1.25;
 /// Extinction density multiplier. Some core contrast, but not so high that the
 /// flat deck base reads as a hard sliced edge.
-const DENSITY: f32 = 0.09;
-/// Fraction of the band over which density fades in from the base. Wide, so the
-/// (single, flat) deck base reads as a soft underside rather than a hard cutoff.
-const BOTTOM_SOFTNESS: f32 = 0.5;
-/// Overall cloud feature scale (upstream default 1.5). Larger = smaller, more
-/// frequent cells (a shorter atlas repeat period in world space) → a busier,
-/// more varied sky rather than a few big blobs.
-const BASE_SCALE: f32 = 2.4;
-/// Detail-erosion noise scale. Lower than upstream's 42 so the high-frequency
-/// Worley erosion has a coarser period (~hundreds of m, not ~tens) and doesn't
-/// alias into salt-and-pepper noise at the raymarch's constant ~280 m step.
-const DETAIL_SCALE: f32 = 16.0;
-/// Detail-erosion strength (upstream 0.27). Some structure, but eased back from
-/// 0.35 because strong erosion accentuated the vertical-column "elongation" of
-/// the 2-D coverage field.
-const DETAIL_STRENGTH: f32 = 0.26;
+const DENSITY: f32 = 0.0026;
+/// Fraction of the local typed layer over which density fades in from its base.
+/// The weather field varies the base altitude, so this no longer needs to hide
+/// a single sliced deck with an excessively broad fog ramp.
+const BOTTOM_SOFTNESS: f32 = 0.16;
+/// Fine 3-D boundary erosion. Solid cores remain intact in the shader; this
+/// only cuts the cauliflower-scale silhouette where density is already low.
+const DETAIL_STRENGTH: f32 = 0.16;
 /// Base-shape edge softness.
-const EDGE_SOFTNESS: f32 = 0.11;
+const EDGE_SOFTNESS: f32 = 0.055;
 /// `SCENE_FLUX_SCALE` mirror from `thalos_body_render::shading` — the cloud sun
 /// radiance is scaled to the same exposure range as terrain/atmosphere.
-const SUN_FLUX_SCALE: f32 = 0.5;
-const AMBIENT_TOP_SCALE: f32 = 0.10;
-const AMBIENT_BOTTOM_SCALE: f32 = 0.05;
+const SUN_FLUX_SCALE: f32 = 0.48;
+const AMBIENT_TOP_SCALE: f32 = 0.030;
+const AMBIENT_BOTTOM_SCALE: f32 = 0.009;
 
 /// Which body the volumetric cloud raymarch is currently rendered for — the
 /// authored cloudy body the camera is closest to, or `None` when no such body
@@ -109,16 +101,15 @@ impl Plugin for CloudsRenderPlugin {
 fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
     config.clouds_coverage = COVERAGE_SCALE;
     config.clouds_density = DENSITY;
-    config.clouds_base_scale = BASE_SCALE;
-    config.clouds_detail_scale = DETAIL_SCALE;
     config.clouds_detail_strength = DETAIL_STRENGTH;
     config.clouds_base_edge_softness = EDGE_SOFTNESS;
     config.clouds_bottom_softness = BOTTOM_SOFTNESS;
-    // 4 self-shadow steps (upstream 6): each view sample pays this many extra
-    // density evaluations, and the adaptive view step already raised the
-    // sample count through the band — the lighting difference is subtle, the
-    // cost is not. Raise it back up if shadow gradients look flat.
-    config.clouds_shadow_raymarch_steps_count = 4;
+    // Three exponentially spaced samples span ~3 km: enough to distinguish
+    // sun-facing cauliflower from a deep core without making every view sample
+    // trace the entire 10.5 km storm layer.
+    config.clouds_shadow_raymarch_steps_count = 3;
+    config.clouds_shadow_raymarch_step_size = 300.0;
+    config.clouds_shadow_raymarch_step_multiply = 2.5;
 }
 
 /// Per-frame: pick the active cloud body, build its body-fixed frame from the
@@ -256,15 +247,34 @@ fn drive_clouds(
     config.clouds_top_height =
         (climate.base_altitude_m + climate.thickness_m).max(config.clouds_bottom_height + 1.0);
     config.clouds_density = DENSITY * climate.density.max(0.0);
+    config.clouds_base_shape_scale_m = climate.base_shape_scale_m.max(500.0);
+    config.clouds_detail_scale_m = climate.detail_scale_m.max(50.0);
     config.wind_velocity = Vec3::new(climate.wind_m_s[0], climate.wind_m_s[1], 0.0);
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
     let cloud_albedo = Vec3::from_array(climate.albedo).max(Vec3::ZERO);
-    let sun_rgb = Vec3::new(1.0, 0.97, 0.92) * cloud_albedo * scene_flux * SUN_FLUX_SCALE;
+
+    // First-order atmospheric solar transmittance until CLOUD-4 feeds the
+    // atmosphere LUT directly. Close to the horizon, blue light has crossed a
+    // much longer air path: dim it and shift the surviving direct term toward
+    // amber. This is evaluated from the same body-fixed sun/view geometry as
+    // the raymarch, so sunrise/sunset response is continuous at every site.
+    let local_up = cam_body.normalize_or_zero();
+    let sun_mu = local_up.dot(sun_body);
+    let day_t = ((sun_mu + 0.04) / 0.28).clamp(0.0, 1.0);
+    let day_blend = day_t * day_t * (3.0 - 2.0 * day_t);
+    let sun_chromaticity = Vec3::new(1.0, 0.30, 0.065).lerp(Vec3::new(1.0, 0.97, 0.92), day_blend);
+    // Exposure adapts the scene around dawn/dusk, so retaining a substantial
+    // direct term gives the visible silver/orange lining expected near the
+    // solar disc while the chromaticity still carries the long-air-path cue.
+    let horizon_transmittance = 0.72 + 0.28 * day_blend;
+    let sun_rgb =
+        sun_chromaticity * cloud_albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
+    let horizon_ambient = 0.22 + 0.78 * day_blend;
     config.clouds_ambient_color_top =
-        Vec4::new(0.55, 0.66, 0.86, 0.0) * scene_flux * AMBIENT_TOP_SCALE;
+        Vec4::new(0.50, 0.62, 0.84, 0.0) * scene_flux * AMBIENT_TOP_SCALE * horizon_ambient;
     config.clouds_ambient_color_bottom =
-        Vec4::new(0.36, 0.43, 0.55, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE;
+        Vec4::new(0.26, 0.32, 0.44, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
 }
 
 /// Upload the active body's canonical cubemap field. No default is generated

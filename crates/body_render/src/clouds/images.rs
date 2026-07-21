@@ -8,9 +8,17 @@ use bevy::{
     },
 };
 
-pub const IMAGE_SIZE: u32 = 1920;
-pub const RENDER_WIDTH: u32 = 1920;
-pub const RENDER_HEIGHT: u32 = 1080;
+// Two-thirds of the canonical 1080p presentation target. Half-resolution
+// erased the authored 450 m boundary scale during the final upscale; this
+// keeps that structure visible while retaining a 2.25x pixel-cost reduction
+// versus a full-resolution march.
+pub const RENDER_WIDTH: u32 = 1280;
+pub const RENDER_HEIGHT: u32 = 720;
+// 64³ keeps the highest-frequency generated Worley channel above the
+// trilinear interpolation floor. At 32³ its ~11 cells/axis had fewer than
+// three texels per cell and the resulting lattice showed through in shaded
+// cloud boundaries. This costs 4 MiB but does not add runtime texture fetches.
+pub const VOLUME_SIZE: u32 = 64;
 
 /// Per-face resolution of the canonical cubemap weather projection. The game
 /// runtime field must use the same face size.
@@ -37,8 +45,8 @@ pub const fn cloud_target_memory() -> CloudTargetMemory {
     let distance_bytes = render_pixels * 4; // R32F
     let history_bytes = render_bytes;
     let history_distance_bytes = distance_bytes;
-    let base_atlas_bytes = IMAGE_SIZE as u64 * IMAGE_SIZE as u64 * 16; // RGBA32F
-    let worley_bytes = 32 * 32 * 32 * 16; // RGBA32F 3-D
+    let base_atlas_bytes = 0; // CLOUD-3 deleted the extruded 2-D shape atlas.
+    let worley_bytes = VOLUME_SIZE as u64 * VOLUME_SIZE as u64 * VOLUME_SIZE as u64 * 16;
     let coverage_bytes = WEATHER_FACE_SIZE as u64 * WEATHER_FACE_SIZE as u64 * 6 * 4; // RGBA8 cube
     let total_bytes = render_bytes
         + distance_bytes
@@ -61,7 +69,6 @@ pub const fn cloud_target_memory() -> CloudTargetMemory {
 
 pub struct CloudImages {
     pub cloud_render_image: Handle<Image>,
-    pub cloud_atlas_image: Handle<Image>,
     pub cloud_worley_image: Handle<Image>,
     pub cloud_distance_image: Handle<Image>,
     pub weather_image: Handle<Image>,
@@ -86,25 +93,11 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
         | TextureUsages::STORAGE_BINDING
         | TextureUsages::TEXTURE_BINDING;
 
-    let mut cloud_atlas_image = Image::new_fill(
-        Extent3d {
-            width: IMAGE_SIZE,
-            height: IMAGE_SIZE,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &[0; 4 * 4 * 2],
-        TextureFormat::Rgba32Float,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    cloud_atlas_image.texture_descriptor.usage =
-        TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
-
     let mut cloud_worley_image = Image::new_fill(
         Extent3d {
-            width: 32,
-            height: 32,
-            depth_or_array_layers: 32,
+            width: VOLUME_SIZE,
+            height: VOLUME_SIZE,
+            depth_or_array_layers: VOLUME_SIZE,
         },
         TextureDimension::D3,
         &[0; 4 * 4 * 2],
@@ -176,7 +169,6 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
 
     CloudImages {
         cloud_render_image: images.add(cloud_render_image),
-        cloud_atlas_image: images.add(cloud_atlas_image),
         cloud_worley_image: images.add(cloud_worley_image),
         cloud_distance_image: images.add(cloud_distance_image),
         weather_image: images.add(weather_image),

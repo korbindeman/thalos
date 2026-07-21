@@ -505,9 +505,11 @@ pub(super) fn spawn_bodies(
             // Map-scale atmosphere optics for the rim glow + on-disc aerial
             // perspective. Airless procedural bodies have no
             // `terrestrial_atmosphere` → vacuum block → the shader early-outs.
-            // The ship-layer impostor stays vacuum here: the in-context `BodySky`
-            // fullscreen pass owns the ship-view atmosphere once terrain is
-            // resident, and the far-impostor atmosphere is a Slice-6 concern.
+            // The ship-layer impostor carries the same authored atmosphere as
+            // BodySky so the canonical weather projection has non-zero cloud
+            // albedo at orbital range. LOD visibility keeps the two paths
+            // mutually exclusive: BodySky owns the resident near view, this
+            // material owns the distant disc and limb.
             let map_atmosphere = body
                 .terrestrial_atmosphere
                 .as_ref()
@@ -530,6 +532,7 @@ pub(super) fn spawn_bodies(
                     radius: ship_render_radius,
                     albedo,
                     scene: SceneLighting::default(),
+                    atmosphere: ship_atmosphere,
                     ..default()
                 },
                 albedo_cube: impostor_cube.clone(),

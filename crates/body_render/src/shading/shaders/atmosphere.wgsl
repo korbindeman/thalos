@@ -539,6 +539,17 @@ fn atmosphere_jitter(coord: vec2<f32>) -> f32 {
 // haze path are intentionally removed for now; the compositor only receives
 // pre-sampled main and shadow densities.
 
+/// Canonical weather-coverage remap for surface-following orbital cloud LODs.
+/// The runtime weather field is authored around a mean coverage near 0.46.
+/// Turn that continuous meteorological control into resolved clear/cloudy
+/// regions for the far projection. A broad low-opacity shoulder reads as a
+/// grey planetary veil; the narrow transition preserves open water between
+/// weather cells. Shape comes from the continuous coverage field rather than
+/// the categorical type channel, which is reserved for vertical structure.
+fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
+    return smoothstep(0.60, 0.70, raw_coverage * 1.25);
+}
+
 /// Composite the cloud layer on top of an already-lit surface colour.
 ///
 /// Pure Lambertian shading, no phase-function highlights. At orbital

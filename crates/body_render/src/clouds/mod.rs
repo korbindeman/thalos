@@ -5,7 +5,7 @@
 //! composites them onto a Y-up, single-camera skybox. Thalos is spherical, runs
 //! under `big_space` floating origin, and has two cameras (ship + map), so this
 //! fork keeps the valuable, geometry-agnostic half — the noise generation
-//! (Perlin-Worley atlas + 3-D Worley volume, built by the `init` compute pass)
+//! (multi-channel 3-D Perlin-Worley volume, built by the `init` compute pass)
 //! and the HZD density+lighting raymarch (`update` pass) — and reworks the
 //! geometry around a real spherical planet:
 //!
@@ -114,7 +114,6 @@ fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
     });
     commands.insert_resource(CloudsImage {
         cloud_render_image: built.cloud_render_image,
-        cloud_atlas_image: built.cloud_atlas_image,
         cloud_worley_image: built.cloud_worley_image,
         cloud_distance_image: built.cloud_distance_image,
         weather_image: built.weather_image,

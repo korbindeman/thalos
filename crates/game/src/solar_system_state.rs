@@ -96,12 +96,34 @@ impl CloudWeatherField {
                     let dir = face_uv_to_dir(face, u, v).normalize();
                     let band = latitude_band_profile(dir.y.asin());
                     let regional = fbm3(dir * 2.5, climate.seed, 4);
+                    // Coverage needs two meteorological scales. The synoptic
+                    // component establishes planetary bands and fronts while
+                    // the mesoscale component breaks those systems into the
+                    // distinct cells that the same field must expose both to
+                    // the near volume and to an orbital projection. Cloud type
+                    // remains categorical and must not be abused as a shape
+                    // mask: doing so produces conspicuous cubemap-sized blocks.
+                    let mesoscale = fbm3(
+                        dir * 32.0 + Vec3::new(-11.0, 23.0, 7.0),
+                        climate.seed ^ 0x5CA1_E5CA,
+                        3,
+                    );
+                    let cellular = fbm3(
+                        dir * 96.0 + Vec3::new(19.0, -5.0, 37.0),
+                        climate.seed ^ 0xCE11_C10D,
+                        3,
+                    );
                     let coverage = (climate.coverage
                         + climate.band_strength * band
-                        + climate.variation * (regional - 0.5))
+                        + climate.variation
+                            * (0.72 * (regional - 0.5)
+                                + 0.45 * (mesoscale - 0.5)
+                                + 0.28 * (cellular - 0.5)))
                         .clamp(0.0, 1.0);
 
-                    let selector = fbm3(dir * 5.5 + Vec3::splat(17.0), climate.seed ^ 0xC10D, 3);
+                    // Kind changes at synoptic/mesoscale rather than one type
+                    // covering an entire horizon.
+                    let selector = fbm3(dir * 42.0 + Vec3::splat(17.0), climate.seed ^ 0xC10D, 3);
                     let cloud_type = if selector < type_mix[0] {
                         0.08
                     } else if selector < type_mix[0] + type_mix[1] {
@@ -110,19 +132,19 @@ impl CloudWeatherField {
                         0.94
                     };
                     let vertical_noise = fbm3(
-                        dir * 3.2 + Vec3::new(31.0, -7.0, 13.0),
+                        dir * 34.0 + Vec3::new(31.0, -7.0, 13.0),
                         climate.seed ^ 0xA11E,
                         3,
                     );
                     let base = match cloud_type {
-                        value if value < 0.25 => 0.08 + 0.10 * vertical_noise,
-                        value if value < 0.75 => 0.12 + 0.18 * vertical_noise,
-                        _ => 0.05 + 0.10 * vertical_noise,
+                        value if value < 0.25 => 0.04 + 0.06 * vertical_noise,
+                        value if value < 0.75 => 0.02 + 0.08 * vertical_noise,
+                        _ => 0.01 + 0.05 * vertical_noise,
                     };
                     let top = match cloud_type {
-                        value if value < 0.25 => 0.22 + 0.15 * vertical_noise,
-                        value if value < 0.75 => 0.48 + 0.25 * vertical_noise,
-                        _ => 0.78 + 0.20 * vertical_noise,
+                        value if value < 0.25 => 0.18 + 0.14 * vertical_noise,
+                        value if value < 0.75 => 0.38 + 0.36 * vertical_noise,
+                        _ => 0.74 + 0.24 * vertical_noise,
                     };
                     let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                     texels.push([

@@ -24,6 +24,7 @@
     integrate_atmosphere_multiscatter,
     atmosphere_jitter,
     atmosphere_scattering_active,
+    weather_cloud_opacity,
 }
 
 const PI: f32 = 3.14159265358979323846;
@@ -304,7 +305,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
         n_body,
         0.0,
     );
-    let cloud_alpha = smoothstep(0.42, 0.68, weather.r);
+    let cloud_alpha = weather_cloud_opacity(weather.r);
     if cloud_alpha > 0.0 {
         let cloud_albedo = params.atmosphere.cloud_albedo_coverage.rgb;
         let cloud_sun = max(dot(normal, sun_dir), 0.0);

@@ -142,6 +142,23 @@ Generated captures and reports live under `tools/screenshots/cloud0/` and are
 ignored by Git by design. The preset definitions, machine-readable report
 schema, exact memory accounting, and this inventory are the durable baseline.
 
+## 2026-07-21 CLOUD-2/3 checkpoint delta
+
+The first fidelity checkpoint deliberately keeps the CLOUD-0 captures above as
+the immutable before-state. Its matched five-view captures retain the same
+paths under `tools/screenshots/` and report:
+
+| View | Internal target | Quality | GPU mean | GPU p95 |
+|---|---:|---:|---:|---:|
+| Runway | 1280×720 | baseline (80/3) | 8.344 ms | 8.381 ms |
+| Cruise | 1280×720 | baseline (80/3) | 1.198 ms | 1.209 ms |
+| Limb | 1280×720 | baseline (80/3) | 4.714 ms | 4.733 ms |
+
+Persistent allocation is 42,631,168 bytes (40.66 MiB): two RGBA32F colour
+targets and two R32F distance targets at 1280×720, one RGBA32F 64³ volume, and
+the RGBA8 256²×6 weather cube. This is a 70.4% reduction from CLOUD-1's
+137.35 MiB despite increasing the 3-D basis resolution.
+
 ## Interactive regression checklist
 
 These motion checks remain useful when CLOUD-2/3 replaces the renderer, but no

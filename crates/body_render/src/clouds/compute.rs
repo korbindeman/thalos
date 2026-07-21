@@ -28,7 +28,7 @@ use std::borrow::Cow;
 use super::config::CloudsConfig;
 
 use super::{
-    images::{IMAGE_SIZE, RENDER_HEIGHT, RENDER_WIDTH},
+    images::{RENDER_HEIGHT, RENDER_WIDTH, VOLUME_SIZE},
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
@@ -87,8 +87,8 @@ fn prepare_uniforms_bind_group(
     buffer.clouds_ambient_color_top = clouds_config.clouds_ambient_color_top;
     buffer.clouds_ambient_color_bottom = clouds_config.clouds_ambient_color_bottom;
     buffer.clouds_min_transmittance = clouds_config.clouds_min_transmittance;
-    buffer.clouds_base_scale = clouds_config.clouds_base_scale;
-    buffer.clouds_detail_scale = clouds_config.clouds_detail_scale;
+    buffer.clouds_base_shape_scale_m = clouds_config.clouds_base_shape_scale_m;
+    buffer.clouds_detail_scale_m = clouds_config.clouds_detail_scale_m;
     buffer.sun_dir = clouds_config.sun_dir;
     buffer.sun_color = clouds_config.sun_color;
     buffer.camera_translation = camera.translation;
@@ -119,7 +119,6 @@ fn prepare_textures_bind_group(
     render_device: Res<RenderDevice>,
 ) {
     let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
-    let cloud_atlas_view = gpu_images.get(&clouds_image.cloud_atlas_image).unwrap();
     let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
     let cloud_distance_view = gpu_images.get(&clouds_image.cloud_distance_image).unwrap();
     let weather_view = gpu_images.get(&clouds_image.weather_image).unwrap();
@@ -133,7 +132,6 @@ fn prepare_textures_bind_group(
         &pipeline_cache.get_bind_group_layout(&pipeline.texture_bind_group_layout),
         &BindGroupEntries::sequential((
             &cloud_render_view.texture_view,
-            &cloud_atlas_view.texture_view,
             &cloud_worley_view.texture_view,
             &cloud_distance_view.texture_view,
             &weather_view.texture_view,
@@ -289,9 +287,9 @@ fn run_clouds_compute(
                     .unwrap();
                 pass.set_pipeline(init_pipeline);
                 pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    1,
+                    VOLUME_SIZE / WORKGROUP_SIZE,
+                    VOLUME_SIZE / WORKGROUP_SIZE,
+                    VOLUME_SIZE,
                 );
             }
             CloudsState::Update => {
@@ -300,8 +298,8 @@ fn run_clouds_compute(
                     .unwrap();
                 pass.set_pipeline(update_pipeline);
                 pass.dispatch_workgroups(
-                    RENDER_WIDTH / WORKGROUP_SIZE,
-                    RENDER_HEIGHT / WORKGROUP_SIZE,
+                    RENDER_WIDTH.div_ceil(WORKGROUP_SIZE),
+                    RENDER_HEIGHT.div_ceil(WORKGROUP_SIZE),
                     1,
                 );
             }
