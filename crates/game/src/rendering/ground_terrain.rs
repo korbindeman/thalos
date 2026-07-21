@@ -1233,9 +1233,9 @@ pub(super) fn update_body_terrain_atmosphere(
     //      shader can multiply it into the ambient occlusion.
     // .8 = AO config: drives the per-material AO gate/debug flag (inspection.w).
     cloud_io: (
-        Option<Res<thalos_volumetric_clouds::CloudRenderTexture>>,
-        Option<Res<thalos_volumetric_clouds::CloudsConfig>>,
-        Option<Res<thalos_volumetric_clouds::CloudDistanceTexture>>,
+        Option<Res<thalos_body_render::CloudRenderTexture>>,
+        Option<Res<thalos_body_render::CloudsConfig>>,
+        Option<Res<thalos_body_render::CloudDistanceTexture>>,
         Res<super::clouds::ActiveCloudBody>,
         Option<Res<super::spawn::BlankCloudTextures>>,
         Res<AtmosphereTuning>,

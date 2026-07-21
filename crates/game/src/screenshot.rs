@@ -20,6 +20,8 @@
 
 use std::{
     env, fs,
+    fs::OpenOptions,
+    io::Write,
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -27,15 +29,19 @@ use std::{
 use bevy::{
     asset::RenderAssetUsages,
     camera::{ImageRenderTarget, RenderTarget},
-    math::DVec3,
+    diagnostic::{DiagnosticPath, DiagnosticsStore},
+    math::{DQuat, DVec3},
     prelude::*,
     render::{
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
-        view::screenshot::{Capturing, Screenshot, save_to_disk},
+        view::screenshot::{save_to_disk, Capturing, Screenshot},
     },
     window::{CursorIcon, SystemCursorIcon},
 };
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use thalos_body_render::renderer_tile_lod_m_at;
+use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
+use thalos_body_render::{cloud_target_memory_for, CloudsConfig, HeightSource};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -44,13 +50,10 @@ use crate::camera::ShipCamera;
 use crate::loading::AppState;
 use crate::rendering::ground_terrain::BodyTerrain;
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::space_center::{HubContext, hub_context};
+use crate::space_center::{hub_context, HubContext};
 use crate::spawn::{Homeworld, SpawnSituation};
 use crate::structures::StructureRegistry;
 use crate::terrain_registry::BodySurfaceRegistry;
-use thalos_body_render::HeightSource;
-use thalos_body_render::renderer_tile_lod_m_at;
-use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 
 // ---------------------------------------------------------------------------
 // F2 window screenshot
@@ -172,9 +175,120 @@ pub enum ScreenshotPreset {
     /// terrain regressions reproducible without depending on the separate
     /// landmark-crater framing used by [`Self::MiraSurface`].
     MiraEva,
+    /// Low flight over the real runway, aimed through the lower sky so broken
+    /// cumulus and its relationship to the ground are both visible.
+    CloudRunway,
+    /// Camera above the cloud deck at aircraft-cruise altitude, looking across
+    /// the layer toward the sun.
+    CloudCruise,
+    /// Camera placed inside the current 2.0–3.3 km cloud shell.
+    CloudInterior,
+    /// Low-orbit tangent view of the cloud line inside the atmosphere limb.
+    CloudLimb,
+    /// Full planetary disc from outside the terrain LOD swap — CLOUD-6 orbital
+    /// impostor / weather-layer regression (SolidPlanet + atmosphere limb).
+    CloudPlanet,
+    /// Near-surface view toward a sun placed just above the local horizon.
+    CloudSunset,
+}
+
+/// Viewport-relative cloud quality ladder used by both verification captures
+/// and the renderer's measured quality contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CloudCaptureQuality {
+    Low,
+    Baseline,
+    High,
+    Reference,
+}
+
+impl CloudCaptureQuality {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(Self::Low),
+            "" | "baseline" | "current" | "default" => Some(Self::Baseline),
+            "high" => Some(Self::High),
+            "reference" | "ref" | "ultra" => Some(Self::Reference),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Low => "low",
+            Self::Baseline => "baseline",
+            Self::High => "high",
+            Self::Reference => "reference",
+        }
+    }
+
+    fn view_steps(self) -> u32 {
+        match self {
+            Self::Low => 48,
+            Self::Baseline => 80,
+            Self::High => 96,
+            Self::Reference => 128,
+        }
+    }
+
+    fn shadow_steps(self) -> u32 {
+        match self {
+            Self::Low | Self::Baseline | Self::High => 1,
+            Self::Reference => 4,
+        }
+    }
+
+    fn resolution_scale(self) -> f32 {
+        match self {
+            Self::Low => 0.5,
+            Self::Baseline => 2.0 / 3.0,
+            // High spends its budget on range samples, not pixels. A 0.75
+            // target measured 4.21 ms at 1440p on the development GPU; 2/3
+            // keeps the playable tier inside the provisional 3.5 ms budget.
+            Self::High => 2.0 / 3.0,
+            Self::Reference => 1.0,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ScreenshotFraming {
+    /// Original focus-orbit framing used by the base/hub regression shots.
+    GodView,
+    /// Camera at an exact AGL, looking relative to the local horizon. A
+    /// `site_sun_elevation_deg` chooses a reproducible point on the globe whose
+    /// local sun has that elevation; `None` keeps the real spaceport site.
+    LocalCloud {
+        camera_altitude_m: f64,
+        look_elevation_deg: f32,
+        site_sun_elevation_deg: Option<f32>,
+        tangent_limb: bool,
+        /// Aim at the body centre for a full planetary disc (impostor range).
+        /// Local-horizon AGL shots leave this false.
+        look_at_body_center: bool,
+    },
 }
 
 impl ScreenshotPreset {
+    fn name(self) -> &'static str {
+        match self {
+            Self::SpaceportAerial => "spaceport-aerial",
+            Self::RunwayAtmosphere => "runway-atmosphere",
+            Self::Hub => "hub",
+            Self::DryBelt => "dry-belt",
+            Self::EarthReference => "earth-reference",
+            Self::MiraOrbit => "mira-orbit",
+            Self::MiraSurface => "mira-surface",
+            Self::MiraEva => "mira-eva",
+            Self::CloudRunway => "cloud-runway",
+            Self::CloudCruise => "cloud-cruise",
+            Self::CloudInterior => "cloud-interior",
+            Self::CloudLimb => "cloud-limb",
+            Self::CloudPlanet => "cloud-planet",
+            Self::CloudSunset => "cloud-sunset",
+        }
+    }
+
     fn parse(raw: &str) -> Self {
         match raw.trim().to_ascii_lowercase().as_str() {
             // Truthy / unnamed → the default preset.
@@ -191,6 +305,15 @@ impl ScreenshotPreset {
             "mira" | "mira-orbit" | "mira_orbit" => Self::MiraOrbit,
             "mira-surface" | "mira_surface" | "regolith" => Self::MiraSurface,
             "mira-eva" | "mira_eva" | "regolith-eva" => Self::MiraEva,
+            "cloud-runway" | "cloud_runway" | "clouds-runway" => Self::CloudRunway,
+            "cloud-cruise" | "cloud_cruise" | "clouds-cruise" | "cloud-deck" => Self::CloudCruise,
+            "cloud-interior" | "cloud_interior" | "inside-cloud" | "inside-clouds" => {
+                Self::CloudInterior
+            }
+            "cloud-limb" | "cloud_limb" | "cloud-orbit" | "clouds-orbit" => Self::CloudLimb,
+            "cloud-planet" | "cloud_planet" | "cloud-globe" | "cloud_globe" | "cloud-disc"
+            | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
+            "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
             other => {
                 eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
                 Self::SpaceportAerial
@@ -201,7 +324,9 @@ impl ScreenshotPreset {
     /// The scenario the world must be booted into for this preset.
     pub fn spawn_situation(self) -> SpawnSituation {
         match self {
-            Self::SpaceportAerial | Self::RunwayAtmosphere => SpawnSituation::Runway,
+            Self::SpaceportAerial | Self::RunwayAtmosphere | Self::CloudRunway => {
+                SpawnSituation::Runway
+            }
             // The hub is the PLAY path: the placeholder parking orbit plus the
             // spaceport build (armed by `main.rs` via `boots_hub`).
             Self::Hub => SpawnSituation::ShipOrbit,
@@ -212,6 +337,11 @@ impl ScreenshotPreset {
             Self::EarthReference => SpawnSituation::Runway,
             Self::MiraOrbit | Self::MiraSurface => SpawnSituation::ShipOrbit,
             Self::MiraEva => SpawnSituation::Eva,
+            Self::CloudCruise
+            | Self::CloudInterior
+            | Self::CloudLimb
+            | Self::CloudPlanet
+            | Self::CloudSunset => SpawnSituation::ShipOrbit,
         }
     }
 
@@ -245,6 +375,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/spaceport_aerial.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             Self::RunwayAtmosphere => ScreenshotConfig {
                 preset: self,
@@ -261,6 +396,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/runway_atmosphere.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             // Matches the hub's establishing view (`BASE_ESTABLISHING_DISTANCE_M`,
             // the one god-view framing per base) so the capture shows what PLAY shows.
@@ -276,6 +416,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/hub.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             // Low oblique, close in, so individual trees vs bare desert read
             // (like an eye-level survey across the ground). A long warmup: cold
@@ -293,6 +438,175 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/dry_belt.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudRunway => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_runway.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 30.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                warmup_frames: 300,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/cloud_runway.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    // Human-scale weather acceptance view: just above the
+                    // runway, pitched into the cloud-bearing sky. The old
+                    // 850 m / -8° pose was an aerial terrain survey despite
+                    // the preset's name and hid the scene-scale impression.
+                    camera_altitude_m: 35.0,
+                    look_elevation_deg: 9.0,
+                    site_sun_elevation_deg: None,
+                    tangent_limb: false,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudCruise => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_cruise.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 20.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                warmup_frames: 360,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/cloud_cruise.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    // Above the ordinary cumulus deck but below the tallest
+                    // authored storm tops: the aviation-scale view across
+                    // cloud tops and developing towers. Interior has its own
+                    // intentionally dense probe below.
+                    camera_altitude_m: 9_000.0,
+                    look_elevation_deg: -5.0,
+                    site_sun_elevation_deg: Some(35.0),
+                    tangent_limb: false,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudInterior => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_interior.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 70.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                warmup_frames: 360,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/cloud_interior.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    camera_altitude_m: 2_650.0,
+                    look_elevation_deg: 0.0,
+                    site_sun_elevation_deg: Some(35.0),
+                    tangent_limb: false,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                // Force the local weather threshold into a dense cell so this
+                // diagnostic reliably exercises traversal from inside cloud.
+                cloud_coverage_scale: Some(1.60),
+            },
+            Self::CloudLimb => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_limb.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 0.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                warmup_frames: 360,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/cloud_limb.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    camera_altitude_m: 200_000.0,
+                    look_elevation_deg: 0.35,
+                    // Keep the low-orbit limb readable without letting a
+                    // horizon-grazing ocean glint dominate the cloud probe.
+                    site_sun_elevation_deg: Some(12.0),
+                    tangent_limb: true,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudPlanet => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_planet.png"),
+                width: 1920,
+                height: 1080,
+                // Small azimuth rotates the view around the sub-camera radial
+                // for compositional variety without losing the full disc.
+                azimuth_deg: 18.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                // Impostor materials + weather cube only — no surface settle.
+                warmup_frames: 240,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/cloud_planet.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    // Outside the terrain LOD swap (4× radius ≈ 12.7 Mm for
+                    // Thalos): SolidPlanet owns the disc so the CLOUD-6 orbital
+                    // weather projection is what we see.
+                    camera_altitude_m: 14_000_000.0,
+                    look_elevation_deg: -90.0,
+                    // Mid-afternoon phase so clouds cast readable shadows and
+                    // the terminator is visible without a razor-thin crescent.
+                    site_sun_elevation_deg: Some(42.0),
+                    tangent_limb: false,
+                    look_at_body_center: true,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudSunset => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/cloud_sunset.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 0.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                warmup_frames: 360,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/cloud_sunset.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    camera_altitude_m: 700.0,
+                    look_elevation_deg: 1.5,
+                    site_sun_elevation_deg: Some(1.0),
+                    tangent_limb: false,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             Self::EarthReference => ScreenshotConfig {
                 preset: self,
@@ -308,6 +622,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::BevyRaymarched,
+                report: PathBuf::from("tools/screenshots/earth_reference_bevy.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             Self::MiraOrbit => ScreenshotConfig {
                 preset: self,
@@ -324,6 +643,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/mira_orbit.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             Self::MiraSurface => ScreenshotConfig {
                 preset: self,
@@ -340,6 +664,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/mira_surface.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
             Self::MiraEva => ScreenshotConfig {
                 preset: self,
@@ -356,6 +685,11 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 atmosphere: ScreenshotAtmosphere::Configured,
+                report: PathBuf::from("tools/screenshots/mira_eva.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
             },
         }
     }
@@ -392,12 +726,9 @@ impl ScreenshotAtmosphere {
 
 /// A headless screenshot request, resolved from `THALOS_SCREENSHOT*` env vars.
 ///
-/// The pose is a god-view around a preset-resolved focus point (the spaceport
-/// pad centre): [`azimuth_deg`](Self::azimuth_deg) sweeps around the local
-/// vertical, [`elevation_deg`](Self::elevation_deg) tilts up from the horizon
-/// (90° = straight down), and [`distance_m`](Self::distance_m) is the boom
-/// length. Every field is overridable so you can save *specific angles + points*
-/// without recompiling.
+/// The legacy spaceport/hub presets use a god-view around their resolved focus;
+/// cloud presets use an exact AGL and local-horizon look direction. Every pose
+/// is overridable so a diagnostic angle can be reproduced without recompiling.
 #[derive(Resource, Clone, Debug)]
 pub struct ScreenshotConfig {
     pub preset: ScreenshotPreset,
@@ -405,13 +736,14 @@ pub struct ScreenshotConfig {
     pub out: PathBuf,
     pub width: u32,
     pub height: u32,
-    /// Camera azimuth around the focus, degrees (0 = local east, +CCW).
+    /// Camera azimuth, degrees. God-view zero is local east; cloud-view zero
+    /// faces the projected sun.
     pub azimuth_deg: f32,
-    /// Camera elevation above the local horizon, degrees (90 = straight down).
+    /// God-view camera elevation above the local horizon (90 = straight down).
     pub elevation_deg: f32,
-    /// Boom distance from the focus, metres.
+    /// God-view boom distance from the focus, metres.
     pub distance_m: f64,
-    /// Frames to render (posing the aerial camera) after reaching `Running`
+    /// Frames to render (posing the scripted camera) after reaching `Running`
     /// before the capture — lets pipelines compile and shadows / atmosphere /
     /// tiles converge to the new framing.
     pub warmup_frames: u32,
@@ -426,6 +758,16 @@ pub struct ScreenshotConfig {
     /// not written through `GraphicsSettings`, so headless A/B runs never
     /// rewrite the user's persisted preferences.
     pub atmosphere: ScreenshotAtmosphere,
+    /// Machine-readable CLOUD-0 timing/memory report. One JSON object is
+    /// written per capture so reports can be concatenated directly.
+    pub report: PathBuf,
+    framing: ScreenshotFraming,
+    pub cloud_quality: CloudCaptureQuality,
+    /// Whether steady and moving cloud history are allowed. False produces a
+    /// raw temporal-disabled diagnostic frame.
+    pub cloud_temporal: bool,
+    /// Optional global multiplier on the current weather coverage map.
+    pub cloud_coverage_scale: Option<f32>,
 }
 
 impl ScreenshotConfig {
@@ -439,6 +781,14 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_AZIMUTH` / `_ELEVATION` — camera angles, degrees.
     /// - `THALOS_SCREENSHOT_DISTANCE` — boom distance, metres.
     /// - `THALOS_SCREENSHOT_WARMUP` — warmup frames before the capture.
+    /// - `THALOS_SCREENSHOT_CAMERA_ALTITUDE` / `_LOOK_ELEVATION` — local cloud
+    ///   camera AGL and look angle above the horizon.
+    /// - `THALOS_SCREENSHOT_SUN_ELEVATION` — select a globe site with this
+    ///   local sun elevation (cloud presets only; moves away from the runway).
+    /// - `THALOS_SCREENSHOT_CLOUD_QUALITY` — low, baseline, high, reference.
+    /// - `THALOS_SCREENSHOT_CLOUD_TEMPORAL` — 0/off disables all history.
+    /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
+    /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults beside PNG).
     pub fn from_env() -> Option<Self> {
         let raw = env::var("THALOS_SCREENSHOT").ok()?;
         let mut cfg = ScreenshotPreset::parse(&raw).defaults();
@@ -446,6 +796,9 @@ impl ScreenshotConfig {
         if let Some(out) = env::var_os("THALOS_SCREENSHOT_OUT") {
             cfg.out = PathBuf::from(out);
         }
+        cfg.report = env::var_os("THALOS_SCREENSHOT_REPORT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| cfg.out.with_extension("jsonl"));
         if let Some((w, h)) = env::var("THALOS_SCREENSHOT_SIZE")
             .ok()
             .and_then(|s| parse_size(&s))
@@ -479,12 +832,66 @@ impl ScreenshotConfig {
                 ),
             }
         }
+        if let Some(v) = env_parse::<f64>("THALOS_SCREENSHOT_CAMERA_ALTITUDE") {
+            if let ScreenshotFraming::LocalCloud {
+                camera_altitude_m, ..
+            } = &mut cfg.framing
+            {
+                *camera_altitude_m = v.max(0.0);
+            }
+        }
+        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_LOOK_ELEVATION") {
+            if let ScreenshotFraming::LocalCloud {
+                look_elevation_deg, ..
+            } = &mut cfg.framing
+            {
+                *look_elevation_deg = v.clamp(-90.0, 90.0);
+            }
+        }
+        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_SUN_ELEVATION") {
+            if let ScreenshotFraming::LocalCloud {
+                site_sun_elevation_deg,
+                ..
+            } = &mut cfg.framing
+            {
+                *site_sun_elevation_deg = Some(v.clamp(-10.0, 90.0));
+            }
+        }
+        if let Ok(raw) = env::var("THALOS_SCREENSHOT_CLOUD_QUALITY") {
+            if let Some(quality) = CloudCaptureQuality::parse(&raw) {
+                cfg.cloud_quality = quality;
+            } else {
+                eprintln!(
+                    "  Unknown THALOS_SCREENSHOT_CLOUD_QUALITY={raw:?}; using {}.",
+                    cfg.cloud_quality.name()
+                );
+            }
+        }
+        if let Ok(raw) = env::var("THALOS_SCREENSHOT_CLOUD_TEMPORAL") {
+            match parse_bool(&raw) {
+                Some(value) => cfg.cloud_temporal = value,
+                None => eprintln!(
+                    "  Unknown THALOS_SCREENSHOT_CLOUD_TEMPORAL={raw:?}; expected on/off."
+                ),
+            }
+        }
+        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_CLOUD_COVERAGE") {
+            cfg.cloud_coverage_scale = Some(v.clamp(0.0, 4.0));
+        }
         Some(cfg)
     }
 }
 
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     env::var(key).ok().and_then(|s| s.trim().parse::<T>().ok())
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 /// Parse a `WIDTHxHEIGHT` string (`x` or `*` separator).
@@ -524,7 +931,10 @@ impl Plugin for HeadlessScreenshotPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScreenshotDriver>()
             .add_systems(Startup, setup_screenshot_target)
-            .add_systems(Update, (retarget_ship_camera, hide_overlays))
+            .add_systems(
+                Update,
+                (retarget_ship_camera, hide_overlays, configure_cloud_capture),
+            )
             // The pose + capture driver runs *after* the flight camera so it wins
             // (last writer of the `ShipCamera` transform), and only once the world
             // is up so the spaceport it frames is fully built.
@@ -538,6 +948,42 @@ impl Plugin for HeadlessScreenshotPlugin {
             // only): resident tile LOD + rendered height vs the basin plane.
             .add_systems(Update, probe_apron_lod.run_if(in_state(AppState::Running)));
     }
+}
+
+/// Apply capture-only cloud quality controls once, after the cloud plugin's
+/// startup initialization. The normal game never sees these overrides because
+/// this system only exists in [`HeadlessScreenshotPlugin`].
+fn configure_cloud_capture(
+    cfg: Res<ScreenshotConfig>,
+    mut clouds: ResMut<CloudsConfig>,
+    mut applied: Local<bool>,
+) {
+    if *applied {
+        return;
+    }
+    clouds.clouds_raymarch_steps_count = cfg.cloud_quality.view_steps();
+    clouds.clouds_shadow_raymarch_steps_count = cfg.cloud_quality.shadow_steps();
+    let reference = cfg.cloud_quality == CloudCaptureQuality::Reference;
+    clouds.reprojection_strength = if cfg.cloud_temporal && !reference {
+        0.95
+    } else {
+        0.0
+    };
+    clouds.resolution_scale = cfg.cloud_quality.resolution_scale();
+    clouds.sparse_march = cfg.cloud_temporal && !reference;
+    if let Some(coverage) = cfg.cloud_coverage_scale {
+        clouds.clouds_coverage = coverage;
+    }
+    info!(
+        target: "thalos::screenshot",
+        "cloud probe: quality={} view_steps={} shadow_steps={} temporal={} coverage={:.2}",
+        cfg.cloud_quality.name(),
+        clouds.clouds_raymarch_steps_count,
+        clouds.clouds_shadow_raymarch_steps_count,
+        cfg.cloud_temporal,
+        clouds.clouds_coverage,
+    );
+    *applied = true;
 }
 
 /// Diagnostic: for each probe offset across the basin (metres from the pad
@@ -687,7 +1133,7 @@ fn hide_overlays(
     }
 }
 
-/// Pose the aerial camera every `Running` frame, then capture once warmed up and
+/// Pose the scripted camera every `Running` frame, then capture once warmed up and
 /// exit after the readback tail.
 #[allow(clippy::too_many_arguments)]
 fn drive_headless_screenshot(
@@ -701,6 +1147,8 @@ fn drive_headless_screenshot(
     homeworld: Res<Homeworld>,
     root_grid: Query<&Grid, With<BigSpace>>,
     mut camera: Query<(&mut Transform, &mut CellCoord), With<ShipCamera>>,
+    diagnostics: Res<DiagnosticsStore>,
+    clouds: Res<CloudsConfig>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -711,10 +1159,8 @@ fn drive_headless_screenshot(
         return; // wait until the camera renders into our target
     }
 
-    // Resolve the focus and pose the camera. If anything isn't ready yet, hold
-    // the frame counter so warmup only starts once we're actually framing the
-    // scene. Most presets frame the spaceport pad (`hub_context`); the dry-belt
-    // biome probe frames a searched desert site instead.
+    // Resolve the focus and pose the camera. If anything is not ready yet, hold
+    // the frame counter so warmup only starts once the requested site is framed.
     let ctx = match cfg.preset {
         ScreenshotPreset::DryBelt => dry_site_context(
             &sim,
@@ -734,12 +1180,23 @@ fn drive_headless_screenshot(
         ScreenshotPreset::MiraEva => {
             eva_surface_context(&sim, &solar, &height_sources, homeworld.0)
         }
-        ScreenshotPreset::SpaceportAerial
-        | ScreenshotPreset::RunwayAtmosphere
-        | ScreenshotPreset::Hub
-        | ScreenshotPreset::EarthReference => {
-            hub_context(&sim, &solar, &height_sources, &registry, homeworld.0)
-        }
+        _ => match cfg.framing {
+            ScreenshotFraming::GodView
+            | ScreenshotFraming::LocalCloud {
+                site_sun_elevation_deg: None,
+                ..
+            } => hub_context(&sim, &solar, &height_sources, &registry, homeworld.0),
+            ScreenshotFraming::LocalCloud {
+                site_sun_elevation_deg: Some(sun_elevation_deg),
+                ..
+            } => cloud_site_context(
+                &sim,
+                &solar,
+                &height_sources,
+                homeworld.0,
+                sun_elevation_deg,
+            ),
+        },
     };
     let Some(ctx) = ctx else {
         return;
@@ -753,7 +1210,7 @@ fn drive_headless_screenshot(
     if cfg.preset == ScreenshotPreset::MiraEva {
         pose_eva_camera(&cfg, &ctx, root, &mut transform, &mut cell);
     } else {
-        pose_camera(&cfg, &ctx, root, &mut transform, &mut cell);
+        pose_camera(&cfg, &ctx, &solar, root, &mut transform, &mut cell);
     }
 
     if driver.captured {
@@ -775,14 +1232,21 @@ fn drive_headless_screenshot(
     }
     info!(
         target: "thalos::screenshot",
-        "capturing {} ({}x{}) az={}° el={}° dist={:.0}m",
+        "capturing {} ({}x{}) preset={} quality={} temporal={}",
         cfg.out.display(),
         cfg.width,
         cfg.height,
-        cfg.azimuth_deg,
-        cfg.elevation_deg,
-        cfg.distance_m,
+        cfg.preset.name(),
+        cfg.cloud_quality.name(),
+        cfg.cloud_temporal,
     );
+    if let Err(error) = write_cloud_probe_report(&cfg, &clouds, &diagnostics) {
+        warn!(
+            target: "thalos::screenshot",
+            "could not write cloud probe report {}: {error}",
+            cfg.report.display()
+        );
+    }
     commands
         .spawn(Screenshot::image(target))
         .observe(save_to_disk(cfg.out.clone()));
@@ -945,11 +1409,226 @@ fn find_rugged_airless_site(
     best
 }
 
-/// Place the ship camera at the god-view pose defined by `cfg` around `ctx`'s
-/// focus. Mirrors [`crate::god_view::drive_god_view`], minus the input handling
-/// and pitch clamp (so near-top-down elevations are reachable). Detail systems
+#[derive(Debug, Clone, Copy)]
+struct ProbeStats {
+    count: usize,
+    min: f64,
+    mean: f64,
+    p50: f64,
+    p95: f64,
+    max: f64,
+}
+
+/// Render diagnostics inherit any enclosing recorder spans, so the exact path
+/// may gain components as Bevy's render schedule evolves. Select by pass
+/// component + terminal field instead of baking the current hierarchy into
+/// the probe format.
+fn cloud_probe_stats(
+    diagnostics: &DiagnosticsStore,
+    field: &str,
+) -> (Option<String>, Option<ProbeStats>) {
+    let diagnostic = diagnostics.iter().find(|diagnostic| {
+        let path = diagnostic.path();
+        path.components()
+            .any(|component| component == "volumetric_clouds")
+            && path.components().last() == Some(field)
+    });
+    let Some(diagnostic) = diagnostic else {
+        return (None, None);
+    };
+    let path = diagnostic.path().clone();
+    (
+        Some(path.as_str().to_string()),
+        probe_stats(diagnostics, &path),
+    )
+}
+
+fn probe_stats(diagnostics: &DiagnosticsStore, path: &DiagnosticPath) -> Option<ProbeStats> {
+    let mut values: Vec<f64> = diagnostics
+        .get(path)?
+        .values()
+        .copied()
+        .filter(|value| value.is_finite())
+        .collect();
+    if values.is_empty() {
+        return None;
+    }
+    values.sort_by(f64::total_cmp);
+    let count = values.len();
+    let percentile = |p: f64| {
+        let i = ((count as f64 * p).ceil() as usize)
+            .saturating_sub(1)
+            .min(count - 1);
+        values[i]
+    };
+    Some(ProbeStats {
+        count,
+        min: values[0],
+        mean: values.iter().sum::<f64>() / count as f64,
+        p50: percentile(0.50),
+        p95: percentile(0.95),
+        max: values[count - 1],
+    })
+}
+
+fn stats_json(stats: Option<ProbeStats>) -> String {
+    match stats {
+        Some(s) => format!(
+            "{{\"samples\":{},\"min_ms\":{:.6},\"mean_ms\":{:.6},\"p50_ms\":{:.6},\"p95_ms\":{:.6},\"max_ms\":{:.6}}}",
+            s.count, s.min, s.mean, s.p50, s.p95, s.max
+        ),
+        None => "null".to_string(),
+    }
+}
+
+fn framing_json(cfg: &ScreenshotConfig) -> String {
+    match cfg.framing {
+        ScreenshotFraming::GodView => format!(
+            "{{\"kind\":\"god_view\",\"azimuth_deg\":{:.4},\"elevation_deg\":{:.4},\"distance_m\":{:.3}}}",
+            cfg.azimuth_deg, cfg.elevation_deg, cfg.distance_m
+        ),
+        ScreenshotFraming::LocalCloud {
+            camera_altitude_m,
+            look_elevation_deg,
+            site_sun_elevation_deg,
+            tangent_limb,
+            look_at_body_center,
+        } => {
+            let sun_elevation = site_sun_elevation_deg
+                .map(|value| format!("{value:.4}"))
+                .unwrap_or_else(|| "null".to_string());
+            format!(
+                "{{\"kind\":\"local_cloud\",\"azimuth_deg\":{:.4},\"camera_altitude_m\":{:.3},\"look_elevation_deg\":{:.4},\"site_sun_elevation_deg\":{},\"tangent_limb\":{},\"look_at_body_center\":{}}}",
+                cfg.azimuth_deg,
+                camera_altitude_m,
+                look_elevation_deg,
+                sun_elevation,
+                tangent_limb,
+                look_at_body_center,
+            )
+        }
+    }
+}
+
+/// Append one self-contained JSON object. Keeping it JSONL means repeated runs
+/// and the five-preset suite can share a report path without a merge step.
+fn write_cloud_probe_report(
+    cfg: &ScreenshotConfig,
+    clouds: &CloudsConfig,
+    diagnostics: &DiagnosticsStore,
+) -> std::io::Result<()> {
+    if let Some(parent) = cfg.report.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let memory = cloud_target_memory_for(
+        clouds.render_resolution.x.round() as u32,
+        clouds.render_resolution.y.round() as u32,
+    );
+    let screenshot_target_bytes = cfg.width as u64 * cfg.height as u64 * 4;
+    let framing = framing_json(cfg);
+    let (gpu_path, gpu_stats) = cloud_probe_stats(diagnostics, "elapsed_gpu");
+    let (cpu_path, cpu_stats) = cloud_probe_stats(diagnostics, "elapsed_cpu");
+    let gpu = stats_json(gpu_stats);
+    let cpu = stats_json(cpu_stats);
+    let gpu_path = gpu_path
+        .map(|path| format!("\"{path}\""))
+        .unwrap_or_else(|| "null".to_string());
+    let cpu_path = cpu_path
+        .map(|path| format!("\"{path}\""))
+        .unwrap_or_else(|| "null".to_string());
+    let unix_ms = timestamp_millis();
+    let line = format!(
+        concat!(
+            "{{\"schema\":\"thalos.cloud_probe.v1\",",
+            "\"unix_ms\":{},\"preset\":\"{}\",",
+            "\"viewport\":[{},{}],\"screenshot_target_bytes\":{},",
+            "\"framing\":{},",
+            "\"cloud_internal_resolution\":[{},{}],",
+            "\"quality\":\"{}\",\"temporal\":{},",
+            "\"view_steps\":{},\"shadow_steps\":{},\"coverage_scale\":{:.4},",
+            "\"timing\":{{\"gpu\":{},\"cpu\":{}}},",
+            "\"timing_paths\":{{\"gpu\":{},\"cpu\":{}}},",
+            "\"memory\":{{\"render_bytes\":{},\"distance_bytes\":{},",
+            "\"history_bytes\":{},\"history_distance_bytes\":{},",
+            "\"base_atlas_bytes\":{},\"worley_bytes\":{},",
+            "\"coverage_bytes\":{},\"total_bytes\":{}}}}}\n"
+        ),
+        unix_ms,
+        cfg.preset.name(),
+        cfg.width,
+        cfg.height,
+        screenshot_target_bytes,
+        framing,
+        clouds.render_resolution.x.round() as u32,
+        clouds.render_resolution.y.round() as u32,
+        cfg.cloud_quality.name(),
+        cfg.cloud_temporal,
+        clouds.clouds_raymarch_steps_count,
+        clouds.clouds_shadow_raymarch_steps_count,
+        clouds.clouds_coverage,
+        gpu,
+        cpu,
+        gpu_path,
+        cpu_path,
+        memory.render_bytes,
+        memory.distance_bytes,
+        memory.history_bytes,
+        memory.history_distance_bytes,
+        memory.base_atlas_bytes,
+        memory.worley_bytes,
+        memory.coverage_bytes,
+        memory.total_bytes,
+    );
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&cfg.report)?
+        .write_all(line.as_bytes())?;
+    info!(
+        target: "thalos::screenshot",
+        "cloud probe report appended to {} (cloud targets {:.2} MiB)",
+        cfg.report.display(),
+        memory.total_bytes as f64 / (1024.0 * 1024.0),
+    );
+    Ok(())
+}
+
+/// Dispatch to the preset's god-view or local-horizon pose. Detail systems
 /// (scatter, shadows) follow the camera via `rendering::view_anchor`.
 fn pose_camera(
+    cfg: &ScreenshotConfig,
+    ctx: &HubContext,
+    solar: &SolarSystemState,
+    root: &Grid,
+    transform: &mut Transform,
+    cell: &mut CellCoord,
+) {
+    match cfg.framing {
+        ScreenshotFraming::GodView => {
+            pose_god_view_camera(cfg, ctx, root, transform, cell);
+        }
+        ScreenshotFraming::LocalCloud {
+            camera_altitude_m,
+            look_elevation_deg,
+            tangent_limb,
+            look_at_body_center,
+            ..
+        } => pose_local_cloud_camera(
+            cfg,
+            ctx,
+            solar,
+            root,
+            transform,
+            cell,
+            camera_altitude_m,
+            look_elevation_deg,
+            tangent_limb,
+            look_at_body_center,
+        ),
+    }
+}
+
+fn pose_god_view_camera(
     cfg: &ScreenshotConfig,
     ctx: &HubContext,
     root: &Grid,
@@ -1016,8 +1695,7 @@ fn pose_eva_camera(
 
     let (next_cell, local) = root.translation_to_grid(camera_world);
     *cell = next_cell;
-    *transform =
-        Transform::from_translation(local).looking_to(look_dir.as_vec3(), up.as_vec3());
+    *transform = Transform::from_translation(local).looking_to(look_dir.as_vec3(), up.as_vec3());
 }
 
 /// Sample LOD hint (m) for the dry-site search's height / moisture probes — a
@@ -1135,4 +1813,130 @@ fn find_driest_site(hs: &dyn HeightSource, sun_dir_body: DVec3) -> DVec3 {
         }
     }
     best.map(|(_, d)| d).unwrap_or(sun)
+}
+
+/// Select a deterministic body-fixed surface point whose local solar
+/// elevation matches the requested value. This lets the probe suite request a
+/// sunset or broad daylight without changing the simulation epoch (and thus
+/// without perturbing any other system that depends on canonical time).
+fn cloud_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    sun_elevation_deg: f32,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let star_position = states.first()?.position;
+    let sun_world = (star_position - body_state.position).normalize_or_zero();
+    if sun_world == DVec3::ZERO {
+        return None;
+    }
+
+    let sun_body = (body_state.orientation.inverse() * sun_world).normalize();
+    let seed = if sun_body.dot(DVec3::Y).abs() < 0.99 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
+    let across_terminator = (seed - sun_body * seed.dot(sun_body)).normalize();
+    let elevation = (sun_elevation_deg as f64).to_radians();
+    let up_body = (sun_body * elevation.sin() + across_terminator * elevation.cos()).normalize();
+    let up_world = (body_state.orientation * up_body).normalize();
+
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let height_m = height_sources
+        .get(body_id)
+        .and_then(|source| source.sample_height_m(up_body.as_vec3(), 2_000.0))
+        .unwrap_or(0.0) as f64;
+    let pad_r = radius_m + height_m.max(0.0);
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * pad_r,
+        up_world,
+        pad_r,
+    })
+}
+
+/// Place a camera at an exact altitude above the probe site and aim relative
+/// to the local horizon. Azimuth zero faces the projected sun; for the limb
+/// preset the look angle is an offset above the geometric surface horizon.
+/// With `look_at_body_center` the camera sits on the site radial and aims at
+/// the body centre (full planetary disc).
+#[allow(clippy::too_many_arguments)]
+fn pose_local_cloud_camera(
+    cfg: &ScreenshotConfig,
+    ctx: &HubContext,
+    solar: &SolarSystemState,
+    root: &Grid,
+    transform: &mut Transform,
+    cell: &mut CellCoord,
+    camera_altitude_m: f64,
+    look_elevation_deg: f32,
+    tangent_limb: bool,
+    look_at_body_center: bool,
+) {
+    let up = ctx.up_world;
+    let sun_world = solar
+        .states
+        .as_deref()
+        .and_then(|states| {
+            let star = states.first()?;
+            let body = states.get(ctx.body_id)?;
+            Some((star.position - body.position).normalize_or_zero())
+        })
+        .unwrap_or(DVec3::Y);
+    let sun_tangent = sun_world - up * sun_world.dot(up);
+
+    let seed = if up.dot(DVec3::Y).abs() < 0.99 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
+    let east = seed.cross(up).normalize();
+    let base_heading = if sun_tangent.length_squared() > 1.0e-12 {
+        sun_tangent.normalize()
+    } else {
+        east
+    };
+    let azimuth = (cfg.azimuth_deg as f64).to_radians();
+    let heading = (DQuat::from_axis_angle(up, azimuth) * base_heading).normalize();
+
+    let body_center = ctx.center_world - up * ctx.pad_r;
+    let camera_world = if look_at_body_center {
+        // Slight heading offset so the disc isn't a pure sun-facing billboard
+        // and weather systems read across the phase terminator.
+        let radial = (up * 0.92 + heading * 0.08).normalize();
+        body_center + radial * (ctx.pad_r + camera_altitude_m)
+    } else {
+        ctx.center_world + up * camera_altitude_m
+    };
+
+    let look_direction = if look_at_body_center {
+        (body_center - camera_world).normalize()
+    } else {
+        let camera_radius = ctx.pad_r + camera_altitude_m;
+        let elevation_deg = if tangent_limb {
+            let horizon_dip = (ctx.pad_r / camera_radius.max(ctx.pad_r + 1.0))
+                .clamp(-1.0, 1.0)
+                .acos()
+                .to_degrees();
+            -horizon_dip + look_elevation_deg as f64
+        } else {
+            look_elevation_deg as f64
+        };
+        let elevation = elevation_deg.to_radians();
+        (heading * elevation.cos() + up * elevation.sin()).normalize()
+    };
+    let look_up = if look_direction.dot(up).abs() > 0.99 {
+        east
+    } else {
+        up
+    };
+
+    let (next_cell, local) = root.translation_to_grid(camera_world);
+    *cell = next_cell;
+    *transform =
+        Transform::from_translation(local).looking_to(look_direction.as_vec3(), look_up.as_vec3());
 }

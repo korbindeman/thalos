@@ -79,12 +79,9 @@ pub use types::{
     ShipMarker, track_active_craft,
 };
 
-use bevy::prelude::*;
-pub use thalos_body_render::ReferenceClouds;
-use thalos_body_render::{convert_reference_clouds_when_ready, load_reference_cloud_sources};
-
 use crate::SimStage;
 use crate::solar_system_state::sync_solar_system_state;
+use bevy::prelude::*;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.
 pub use crate::coords::{RenderFrame, RenderOrigin};
 
@@ -128,7 +125,6 @@ impl Plugin for RenderingPlugin {
             .register_type::<CameraExposure>()
             .register_type::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ground_terrain::AtmosphereTuning>()
-            .init_resource::<ReferenceClouds>()
             .init_resource::<LastCloudBandUpdate>()
             .init_resource::<ActiveCraft>()
             // The N-craft accessor seam: keep `ActiveCraft` mirroring the active
@@ -142,7 +138,6 @@ impl Plugin for RenderingPlugin {
                     attach_ship_camera_to_big_space
                         .after(setup_big_space)
                         .after(crate::camera::spawn_camera),
-                    load_reference_cloud_sources,
                 ),
             )
             // World spawn is keyed to `WorldState::Live`, not `Startup`: a
@@ -170,7 +165,6 @@ impl Plugin for RenderingPlugin {
                     // swaps) need the same BigSpace attach the boot craft
                     // gets at Startup; no-op once attached (see the fn docs).
                     attach_player_ship_to_big_space,
-                    convert_reference_clouds_when_ready,
                     update_render_origin.after(sync_solar_system_state),
                     update_render_frame.after(sync_solar_system_state),
                     update_body_positions

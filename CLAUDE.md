@@ -706,7 +706,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
 - **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/game/src/local_physics.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/game/src/local_physics.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
-- **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + two backends. Three modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render`. A backend chooses geometry, never its own lighting/atmosphere/cloud math.
+- **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + regime-scaled projections. Four modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities), and `clouds` (the absorbed MIT `bevy-volumetric-clouds` fork: spherical body-fixed volume march + cloud-local history targets). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render` and top-level `thalos_volumetric_clouds` mechanisms. A backend chooses geometry or cost, never its own lighting/atmosphere/weather authority. Terrestrial clouds obey ADR-0009: authored `CloudClimate` → one per-body `CloudWeatherField` → near/orbit/shadow projections.
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The fork is **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess path is gone. (Upstream's own successor is now a *different repo*, [`planetary_terrain_renderer`](https://github.com/kurtkuehnert/planetary_terrain_renderer) — the better diff target for fixes to the Taylor-series precision path.) A 2026-07 optimization pass tailored the fork to Thalos; **see `docs/terrain_lod_optimization.md`**, and note these load-bearing rules:
   - **Providers own mip generation.** `TileProvider::request_tile` must return the **full mip chain** (call `AttachmentData::generate_mipmaps` inside the task). The atlas does *not* regenerate mips — that kept per-tile mip filtering on the main thread and made cached payloads useless.
   - **Attachments may differ in resolution.** The GPU atlas sizes each attachment's texture array independently. Height keeps the full grid (it is the geometry, and the only attachment physics reads); albedo/roughness/material bake at half (`TierConfig::detail_texture_size`) — a >2× cut in the game's largest allocation.
@@ -729,25 +729,6 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   `default-features = false` and pulls no Bevy crate (the no-Bevy CI guard still
   holds); `thalos_body_render` uses the `bevy` feature for the shader-library plugin.
 - **`thalos_shipyard`** — parametric ship **construction model** (ECS attach tree, RON blueprints): part components + catalog, resources, blueprint (de)serialization + spawn, attach nodes / surface mounts / KSP linked symmetry, parametric sizing + mass/capacity recompute, stats / staging, and the geometry mesh builders (cockpit / engine / fuselage / gear / wing) shared with the game's flight-craft rendering. It owns *what a craft is*; it does **not** own the interactive editor or any UI. The **editor application** lives with its sole consumer, the game, at `thalos_game::shipyard_editor` — a UI-agnostic `core` submodule (`ShipEditorCorePlugin`: `EditorState` command/state hub, placement, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron`) plus the native Bevy-UI front-end (scene + panels). There is no standalone editor binary (the old egui `just shipyard` tool was deleted). Every editor-owned entity carries the `EditorPart` marker (defined in `shipyard_editor::core`) and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
-- **`thalos_volumetric_clouds`** — vendored fork of `bevy-volumetric-clouds`
-  (MIT, evroon) at `crates/volumetric_clouds/`. HZD-style raymarched near-cloud
-  layer (Perlin-Worley atlas + 3-D Worley detail, dual-lobe HG; compute →
-  texture), reworked around Thalos's spherical / `big_space` / dual-camera
-  engine: the raymarch runs in the **body-fixed frame** of the active cloud
-  body (true ray-sphere shells from the camera's planet-centred position;
-  wrap-first triplanar noise sampling, f32-safe at planet-radius coordinates),
-  so clouds are planet-fixed — glued to the ground, co-rotating, horizon-
-  correct at any altitude. Large-scale coverage is a planet-fixed equirect
-  weather map (`CloudCoverageMap`) generated from per-body `CloudWeatherState`
-  in `SolarSystemState` (latitude bands + seeded noise; version-gated
-  re-upload) — the future weather system's write target. The game
-  (`rendering/clouds.rs`) drives it via `drive_clouds` (`ActiveCloudBody` =
-  nearest terrestrial-atmosphere body, sole writer); the cloud texture plus a
-  per-pixel nearest-hit distance composite *inside* the `body_sky` atmosphere
-  pass (bound as `BodySkyMaterial::cloud_layer` / `cloud_distance`), not as a
-  separate quad (which sorts unreliably against the fullscreen sky under
-  big_space). See `docs/atmosphere.md` *Cloud rendering*.
-
 Core separation: `world`, `physics_canonical`, `control`, `terrain`,
 `celestial`, and `texgen` are pure Rust libraries; `input`, `game`, `body_render`,
 `physics_local`, and `shipyard` are Bevy consumers. Within
@@ -1455,9 +1436,9 @@ status boundary.
 
 ### Body render crate (`crates/body_render/`)
 
-Unified Bevy rendering for celestial bodies — one appearance model, two
-backends. No generation logic. Added via a single `BodyRenderPlugin`
-(which composes the three module sub-plugins). Three modules:
+Unified Bevy rendering for celestial bodies — one appearance model with
+regime-scaled projections. No world generation logic. Added via a single
+`BodyRenderPlugin` (which composes four module sub-plugins). Four modules:
 
 **`shading`** — the single source of truth every body-surface material
 reads from. No materials of its own.
@@ -1512,6 +1493,17 @@ reads from. No materials of its own.
   `body_terrain.wgsl` for tooling, sharing `TreeMaterial`'s cascade binding
   layout so one shadow rig feeds both.
 
+**`clouds`** — spherical, body-fixed volumetric cloud render mechanism.
+- Owns the absorbed `bevy-volumetric-clouds` compute pipeline, generated
+  Perlin-Worley/Worley textures, cloud colour/distance targets, and cloud-local
+  temporal history; upstream MIT attribution lives beside the module.
+- Consumes a cube `CloudWeatherMap` uploaded from the active body's canonical
+  `CloudWeatherField`. It does not create weather or choose a body.
+- The game-side `rendering::clouds` driver selects the nearest authored cloudy
+  body and projects `CloudClimate`/environment state into view uniforms. Near
+  composition stays in `BodySkyMaterial`; the first orbit projection is in
+  `SolidPlanetMaterial`. See ADR-0009 and `docs/clouds.md`.
+
 `body_render` is the **sole consumer** of the vendored `thalos_udlod`,
 re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
 other crate depends on the fork directly. Replacing the ground backend stays
@@ -1525,7 +1517,8 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   → [PatchedConics] body positions at any epoch t
   → [Simulation::step] per frame → canonical CraftState + authority, consumes ManeuverNodes
   → [solar_system_state::sync_solar_system_state] canonical per-frame BodyStates
-       + per-body environment state (dynamic surface, clouds; later wind/tides)
+       + per-body environment state (`CloudWeatherField`, dynamic surface;
+         later weather evolution/wind/tides)
   → [propagate_flight_plan / propagate_branch_stack] synchronous prediction
        → FlightPlan / TrajectoryBranchStack (Actual + Projected branches)
   → [map_view] MapSnapshot → map rendering, maneuver UI, collision warnings

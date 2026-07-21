@@ -60,23 +60,28 @@
             // pale-blue rather than orange. Tuned live against the runway view.
             multi_scatter_gain: 3.0,
         )),
-        // Volumetric cloud layer (Phase 1) — temporarily disabled. Re-enable
-        // by swapping `None` for the `Some((...))` below. The terrain
-        // `BodySky` pass raymarches a thin slab between `base_altitude_m` and
-        // `base_altitude_m + thickness_m`, using the reference coverage cube
-        // as the large-scale weather map eroded by 3-D detail noise; the
-        // orbital impostor still uses its own fixed reference shell.
-        //
-        // clouds: Some((
-        //     coverage: 0.55,                 // partly cloudy (cube × 2 × coverage, then noise threshold)
-        //     albedo: (0.92, 0.94, 0.97),     // bright near-neutral cloud tops
-        //     scroll_rate: 2.0e-5,
-        //     differential_rotation: 0.40,
-        //     base_altitude_m: 1500.0,
-        //     thickness_m: 5000.0,
-        //     density: 1.0,
-        // )),
-        clouds: None,
+        // Canonical cloud climate. Every near/orbit/shadow projection derives
+        // from the runtime weather field seeded by this block; `None` on other
+        // bodies is authoritative and produces a clear body.
+        clouds: Some((
+            seed: 0x7A105C10D5,
+            coverage: 0.46,
+            band_strength: 0.18,
+            variation: 0.45,
+            type_mix: (0.24, 0.56, 0.20),
+            albedo: (0.94, 0.96, 1.0),
+            scroll_rate: 4.7e-6,
+            differential_rotation: 0.40,
+            wind_m_s: (15.0, 2.0),
+            base_altitude_m: 900.0,
+            thickness_m: 10500.0,
+            density: 1.0,
+            precipitation_threshold: 0.72,
+            storm_threshold: 0.86,
+            weather_scale_km: 900.0,
+            base_shape_scale_m: 8000.0,
+            detail_scale_m: 450.0,
+        )),
         // Physical atmosphere for aerodynamic forces (drag). Surface pressure
         // is reused from the terrain `atmosphere: Breathable(pressure_bar: 1.0)`
         // above; here we author the thermodynamics. Density ρ0 = P0/(R·T0) and

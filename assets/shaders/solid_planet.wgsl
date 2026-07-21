@@ -24,6 +24,11 @@
     integrate_atmosphere_multiscatter,
     atmosphere_jitter,
     atmosphere_scattering_active,
+    weather_column_from_texel,
+    orbital_cloud_altitude,
+    orbital_cloud_shade,
+    sample_weather_soft,
+    orbital_cloud_normal_body,
 }
 
 const PI: f32 = 3.14159265358979323846;
@@ -65,6 +70,11 @@ struct SolidPlanetParams {
 // (single scattering alone leaves it looking airless from space).
 @group(3) @binding(3) var ms_lut_tex: texture_2d<f32>;
 @group(3) @binding(4) var ms_lut_sampler: sampler;
+// Canonical cloud weather: coverage, type, normalized base, normalized top.
+// CLOUD-1's orbital projection consumes coverage; CLOUD-6 replaces this
+// surface-following first vertical with optical-depth/height moments.
+@group(3) @binding(5) var cloud_weather_tex: texture_cube<f32>;
+@group(3) @binding(6) var cloud_weather_sampler: sampler;
 #endif
 
 // Rotate vector `v` by unit quaternion `q` (xyz = axis·sin, w = cos).
@@ -233,8 +243,8 @@ fn fragment(in: VertexOutput) -> FragOutput {
     // alpha is the water mask (baked: 1 = ocean, 0 = land).
     var surface_albedo = params.albedo.xyz;
     var is_water = false;
+    let n_body = rotate_quat(params.orientation, normal);
     if params.albedo.w >= 0.5 {
-        let n_body = rotate_quat(params.orientation, normal);
         let cube = textureSampleLevel(albedo_cube_tex, albedo_cube_sampler, n_body, 0.0);
         surface_albedo = cube.rgb;
         is_water = cube.a >= 0.5;
@@ -287,6 +297,84 @@ fn fragment(in: VertexOutput) -> FragOutput {
             params.scene,
             1.0,
         );
+    }
+
+    // CLOUD-6 orbital projection: same weather authority as the near volume,
+    // but column moments (coverage/type/base/top) drive height parallax,
+    // optical-depth opacity, and a soft height-moment normal. Clear bodies
+    // bind a zero cube so this is a no-op.
+    if params.atmosphere.cloud_albedo_coverage.w > 0.0 {
+        // Surface shadow probe: weather between this terrain point and the sun.
+        let sun_body = rotate_quat(params.orientation, sun_dir);
+        let shadow_n = normalize(n_body + sun_body * 0.07);
+        let shadow_col = weather_column_from_texel(
+            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, shadow_n),
+        );
+        let day_shadow = smoothstep(-0.05, 0.25, dot(normal, sun_dir));
+        let shadow_op = clamp(1.0 - exp(-shadow_col.optical_depth * shadow_col.optical_depth), 0.0, 1.0);
+        lit *= mix(1.0, 0.58, shadow_op * day_shadow * 0.85);
+
+        // Height-parallax sample: re-hit a sphere at the local deck altitude so
+        // the limb silhouette floats above the surface instead of painting on it.
+        var cloud_n_body = n_body;
+        var cloud_normal_ws = normal;
+        let probe = weather_column_from_texel(
+            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, n_body),
+        );
+        if probe.opacity > 1.0e-3 {
+            let cloud_r = params.radius + orbital_cloud_altitude(probe, params.atmosphere);
+            let c_cloud = dot(oc, oc) - cloud_r * cloud_r;
+            let disc_cloud = half_b * half_b - c_cloud;
+            if disc_cloud > 0.0 {
+                let t_cloud = -half_b - sqrt(disc_cloud);
+                if t_cloud > 0.0 {
+                    let cloud_hit = cam_pos + t_cloud * ray_dir;
+                    cloud_normal_ws = normalize(cloud_hit - center);
+                    cloud_n_body = rotate_quat(params.orientation, cloud_normal_ws);
+                }
+            }
+        }
+
+        let weather = sample_weather_soft(
+            cloud_weather_tex,
+            cloud_weather_sampler,
+            cloud_n_body,
+        );
+        let column = weather_column_from_texel(weather);
+        if column.opacity > 1.0e-3 {
+            let cloud_n_body_lit = orbital_cloud_normal_body(
+                cloud_weather_tex,
+                cloud_weather_sampler,
+                cloud_n_body,
+            );
+            // Perturbed body-fixed normal → render-space for lighting.
+            // rotate_quat is body_from_world style for directions into body frame;
+            // invert by conjugating the orientation quaternion.
+            let q = params.orientation;
+            let q_conj = vec4(-q.xyz, q.w);
+            let cloud_n_ws = rotate_quat(q_conj, cloud_n_body_lit);
+            let n_dot_l = dot(cloud_n_ws, sun_dir);
+            let view_mu = max(dot(cloud_n_ws, view_dir), 0.0);
+            let shade = orbital_cloud_shade(column, n_dot_l, view_mu);
+            // Greyer albedo + mild horizon amber from solar elevation at the
+            // sample (CLOUD-4 analytic stand-in until shared LUT coupling).
+            let cloud_albedo = params.atmosphere.cloud_albedo_coverage.rgb
+                * vec3<f32>(0.90, 0.93, 0.97);
+            let sun_elev = clamp(n_dot_l, 0.0, 1.0);
+            let sun_chroma = mix(
+                vec3<f32>(1.0, 0.45, 0.18),
+                vec3<f32>(1.0, 0.97, 0.92),
+                smoothstep(0.05, 0.45, sun_elev),
+            );
+            let cloud_lit = cloud_albedo
+                * sun_chroma
+                * sun_flux
+                * SCENE_FLUX_SCALE
+                * 0.55
+                * shade.x;
+            let night = smoothstep(-0.12, 0.08, n_dot_l);
+            lit = mix(lit, cloud_lit * night, shade.y * night);
+        }
     }
 
     // Aerial perspective + daylight haze across the lit disc: integrate the

@@ -37,3 +37,5 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0007](0007-atmosphere-proxy-omitted-camera-render-offset.md) | Raymarched atmosphere detached from the planet — proxy omitted the camera render offset | visual | 2026-07-20 |
 | [0008](0008-direct-dynamic-game-launch-missed-library-path.md) | Direct dynamic game launch missed Cargo's library search path | crash | 2026-07-21 |
 | [0009](0009-mira-horizon-regolith-normal-aliasing.md) | Mira's opaque horizon looked transparent — unresolved regolith normals aliased through Hapke | visual | 2026-07-21 |
+| [0010](0010-cloud-detail-period-eighth-scale.md) | Cloud detail collapsed into stipple — authored cell size was treated as an eight-cell tile period | visual | 2026-07-21 |
+| [0011](0011-cloud-hierarchy-resume-strata.md) | Cloud hierarchy posterized volumes — heuristic leaps resumed on repeated height isosurfaces | visual | 2026-07-21 |

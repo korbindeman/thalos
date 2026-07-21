@@ -539,6 +539,166 @@ fn atmosphere_jitter(coord: vec2<f32>) -> f32 {
 // haze path are intentionally removed for now; the compositor only receives
 // pre-sampled main and shadow densities.
 
+/// Canonical weather-coverage remap for surface-following orbital cloud LODs.
+/// The runtime weather field is authored around a mean coverage near 0.46.
+/// Turn that continuous meteorological control into resolved clear/cloudy
+/// regions for the far projection. A broad low-opacity shoulder reads as a
+/// grey planetary veil; the narrow transition preserves open water between
+/// weather cells. Shape comes from the continuous coverage field rather than
+/// the categorical type channel, which is reserved for vertical structure.
+fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
+    // Close to the CLOUD-1 formation gate (sparse broken systems, open water)
+    // with a slightly softer upper knee so soft neighborhood filtering does
+    // not erase cell edges into hard cubemap squares.
+    return smoothstep(0.55, 0.73, raw_coverage * 1.22);
+}
+
+/// Column moments derived from the canonical weather cubemap (RGBA =
+/// coverage, type, base, top). CLOUD-6's first orbital projection uses these
+/// instead of coverage-only surface paint so the far LOD shares height and
+/// optical-depth structure with the near volume. A later offline optical-depth
+/// atlas can replace the producer without changing this consumer contract.
+struct WeatherColumn {
+    opacity: f32,
+    optical_depth: f32,
+    /// Local deck mid as a fraction of the authored shell (0 = base altitude).
+    mid_frac: f32,
+    /// Local top fraction — limb silhouette / parallax shell.
+    top_frac: f32,
+    /// 0 = stratus, 1 = storm.
+    stormness: f32,
+}
+
+fn weather_column_from_texel(weather: vec4<f32>) -> WeatherColumn {
+    let cov = clamp(weather.r, 0.0, 1.0);
+    let ty = clamp(weather.g, 0.0, 1.0);
+    let local_base = clamp(weather.b, 0.0, 0.92);
+    let local_top = max(clamp(weather.a, 0.02, 1.0), local_base + 0.02);
+    let thickness = local_top - local_base;
+    // Match the near-volume formation idea: coverage is a threshold, not a
+    // linear opacity multiplier. Slightly softer than the old 0.60–0.70 gate so
+    // mesoscale cells survive filtering without a grey planetary veil.
+    let opacity = weather_cloud_opacity(cov);
+    let stratus_w = 1.0 - smoothstep(0.18, 0.38, ty);
+    let storm_w = smoothstep(0.72, 0.88, ty);
+    let cumulus_w = max(0.0, 1.0 - stratus_w - storm_w);
+    // Column optical depth is used for lighting (self-shadow / core darkening)
+    // more than for occupancy — occupancy is `opacity` above. Thickness and
+    // type make storm towers denser than thin stratus without filling the disc.
+    let type_density = 0.55 * stratus_w + 0.95 * cumulus_w + 1.35 * storm_w;
+    let optical_depth = opacity * type_density * (0.40 + 2.2 * thickness);
+    return WeatherColumn(
+        opacity,
+        optical_depth,
+        mix(local_base, local_top, 0.55),
+        local_top,
+        storm_w,
+    );
+}
+
+/// Altitude of the orbital cloud shell above the solid radius, in the same
+/// render units as `AtmosphereBlock::cloud_shape` (x = base, y = thickness).
+fn orbital_cloud_altitude(column: WeatherColumn, layers: AtmosphereBlock) -> f32 {
+    let base_alt = max(layers.cloud_shape.x, 0.0);
+    let thickness = max(layers.cloud_shape.y, 0.0);
+    // Bias toward local top so the limb silhouette reads taller decks rather
+    // than a single mid-slab extrusion.
+    let frac = mix(column.mid_frac, column.top_frac, 0.35 + 0.45 * column.stormness);
+    return base_alt + frac * thickness;
+}
+
+/// Orbital cloud shade from column moments. Returns premultiplied radiance
+/// scale (multiply by albedo × sun_flux × SCENE_FLUX_SCALE) and opacity.
+/// `n_dot_l` is the lit factor on the *cloud* normal (height-perturbed when
+/// available); `view_mu` is cloud-normal · view for a cheap bright rim.
+fn orbital_cloud_shade(
+    column: WeatherColumn,
+    n_dot_l: f32,
+    view_mu: f32,
+) -> vec2<f32> {
+    if column.opacity <= 1.0e-4 {
+        return vec2<f32>(0.0, 0.0);
+    }
+    // Wrap lighting: orbital clouds still read past the terminator slightly.
+    let wrap = 0.18;
+    let lit = clamp((n_dot_l + wrap) / (1.0 + wrap), 0.0, 1.0);
+    // Dense / tall columns self-shadow and thicken without going charcoal or
+    // filling the whole disc. One optical-depth core term drives both.
+    let core = clamp(1.0 - exp(-column.optical_depth * 0.9), 0.0, 1.0);
+    let self_shadow = mix(1.0, mix(0.62, 0.42, column.stormness), core * (1.0 - 0.55 * lit));
+    // Thin glancing edges pick up a small energy-bounded rim so silhouettes
+    // don't flatten into grey stickers.
+    let rim = pow(1.0 - clamp(view_mu, 0.0, 1.0), 2.2) * (0.08 + 0.10 * column.stormness);
+    // CLOUD-4: cooler radiance scale so the full disc no longer clips white;
+    // sqrt lit keeps soft terminator while the 0.72 prefactor leaves room for
+    // atmosphere-tinted sun on the caller.
+    let radiance_scale = 0.72 * ((0.18 + 0.82 * sqrt(lit)) * self_shadow + rim * lit);
+    // Occupancy stays with the formation gate (`column.opacity`); optical depth
+    // only thickens already-resolved cells so storm cores read denser.
+    let opacity = clamp(column.opacity * mix(0.72, 0.96, core), 0.0, 0.90);
+    return vec2<f32>(radiance_scale, opacity);
+}
+
+/// Soft weather fetch that averages a small body-fixed cross. Linear cube
+/// filtering alone still leaves 256² face seams reading as square patches at
+/// the limb; this cheap neighborhood kills the worst faceting without a second
+/// atlas bake.
+fn sample_weather_soft(
+    weather_tex: texture_cube<f32>,
+    weather_sampler: sampler,
+    n: vec3<f32>,
+) -> vec4<f32> {
+    var t = cross(n, vec3<f32>(0.0, 1.0, 0.0));
+    if (dot(t, t) < 1.0e-8) {
+        t = cross(n, vec3<f32>(1.0, 0.0, 0.0));
+    }
+    t = normalize(t);
+    let b = cross(n, t);
+    // Small cross only — enough to break 256² face squares, not so wide that
+    // mesoscale cells average into a grey veil.
+    let e = 0.0022;
+    let c0 = textureSampleLevel(weather_tex, weather_sampler, n, 0.0);
+    let c1 = textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * t), 0.0);
+    let c2 = textureSampleLevel(weather_tex, weather_sampler, normalize(n - e * t), 0.0);
+    let c3 = textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * b), 0.0);
+    let c4 = textureSampleLevel(weather_tex, weather_sampler, normalize(n - e * b), 0.0);
+    return (c0 * 4.0 + c1 + c2 + c3 + c4) * (1.0 / 8.0);
+}
+
+/// Height-moment normal for orbital cloud lighting: finite difference of the
+/// local top/coverage field in the body-fixed tangent plane. Gives soft relief
+/// on storm cells without a pre-baked normal atlas.
+fn orbital_cloud_normal_body(
+    weather_tex: texture_cube<f32>,
+    weather_sampler: sampler,
+    n: vec3<f32>,
+) -> vec3<f32> {
+    var t = cross(n, vec3<f32>(0.0, 1.0, 0.0));
+    if (dot(t, t) < 1.0e-8) {
+        t = cross(n, vec3<f32>(1.0, 0.0, 0.0));
+    }
+    t = normalize(t);
+    let b = cross(n, t);
+    let e = 0.0045;
+    let h = weather_column_from_texel(
+        textureSampleLevel(weather_tex, weather_sampler, n, 0.0),
+    );
+    let h_t = weather_column_from_texel(
+        textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * t), 0.0),
+    );
+    let h_b = weather_column_from_texel(
+        textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * b), 0.0),
+    );
+    // Relief from both optical mass and local top so tall cells cast self-
+    // shadow even when coverage is uniform.
+    let c0 = h.optical_depth * 0.55 + h.top_frac * 0.45;
+    let c_t = h_t.optical_depth * 0.55 + h_t.top_frac * 0.45;
+    let c_b = h_b.optical_depth * 0.55 + h_b.top_frac * 0.45;
+    let dh_t = (c_t - c0) * 1.8;
+    let dh_b = (c_b - c0) * 1.8;
+    return normalize(n - t * dh_t - b * dh_b);
+}
+
 /// Composite the cloud layer on top of an already-lit surface colour.
 ///
 /// Pure Lambertian shading, no phase-function highlights. At orbital

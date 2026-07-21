@@ -69,7 +69,7 @@ use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::{
-    RenderPlugin,
+    RenderPlugin, diagnostic::RenderDiagnosticsPlugin,
     settings::{Backends, RenderCreation, WgpuSettings},
 };
 use bevy::window::ExitCondition;
@@ -718,6 +718,7 @@ fn main() {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
+        .add_plugins(RenderDiagnosticsPlugin)
         .add_plugins(screenshot::HeadlessScreenshotPlugin)
         .insert_resource(config);
     }

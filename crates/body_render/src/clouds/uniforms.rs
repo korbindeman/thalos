@@ -6,16 +6,18 @@ use bevy::{
     },
 };
 
+use super::images::{RENDER_HEIGHT, RENDER_WIDTH};
+
 #[derive(Clone, Resource, ExtractResource, Reflect, ShaderType)]
 #[reflect(Resource, Default)]
 pub(crate) struct CloudsUniform {
-    pub clouds_base_scale: f32,
+    pub clouds_base_shape_scale_m: f32,
     pub clouds_raymarch_steps_count: u32,
     pub clouds_bottom_height: f32,
     pub clouds_top_height: f32,
     pub clouds_coverage: f32,
     pub clouds_density: f32,
-    pub clouds_detail_scale: f32,
+    pub clouds_detail_scale_m: f32,
     pub clouds_detail_strength: f32,
     pub clouds_base_edge_softness: f32,
     pub clouds_bottom_softness: f32,
@@ -35,6 +37,9 @@ pub(crate) struct CloudsUniform {
     pub time: f32,
     pub reprojection_strength: f32,
     pub render_resolution: Vec2,
+    pub frame_index: u32,
+    pub history_epoch: u32,
+    pub sparse_march: u32,
     pub inverse_camera_view: Mat4,
     pub inverse_camera_projection: Mat4,
     pub wind_displacement: Vec3,
@@ -61,14 +66,17 @@ impl Default for CloudsUniform {
             clouds_ambient_color_top: Vec4::ZERO,
             clouds_ambient_color_bottom: Vec4::ZERO,
             clouds_min_transmittance: 0.0,
-            clouds_base_scale: 0.0,
-            clouds_detail_scale: 0.0,
+            clouds_base_shape_scale_m: 0.0,
+            clouds_detail_scale_m: 0.0,
             sun_dir: Vec4::ZERO,
             sun_color: Vec4::ZERO,
             camera_translation: Vec3::ZERO,
             time: 0.0,
             reprojection_strength: 0.95,
-            render_resolution: Vec2::new(1920.0, 1080.0),
+            render_resolution: Vec2::new(RENDER_WIDTH as f32, RENDER_HEIGHT as f32),
+            frame_index: 0,
+            history_epoch: 1,
+            sparse_march: 1,
             inverse_camera_view: Mat4::IDENTITY,
             inverse_camera_projection: Mat4::IDENTITY,
             wind_displacement: Vec3::new(-11.0, 0.0, 23.0),
@@ -86,36 +94,33 @@ pub(crate) struct CloudsImage {
     #[storage_texture(0, image_format = Rgba32Float, access = ReadWrite)]
     pub cloud_render_image: Handle<Image>,
 
-    #[storage_texture(1, image_format = Rgba32Float, access = ReadWrite)]
-    pub cloud_atlas_image: Handle<Image>,
-
-    #[storage_texture(2, image_format = Rgba32Float, access = ReadWrite, dimension = "3d")]
+    #[storage_texture(1, image_format = Rgba32Float, access = ReadWrite, dimension = "3d")]
     pub cloud_worley_image: Handle<Image>,
 
     /// Nearest cloud-hit distance per pixel (metres from the camera; ≥ 1e8
     /// sentinel = no cloud on this ray). The game samples it as a regular
     /// texture in the `body_sky` composite; the raymarch's own history reads
     /// go through `history_distance_image`.
-    #[storage_texture(3, image_format = R32Float, access = WriteOnly)]
+    #[storage_texture(2, image_format = R32Float, access = WriteOnly)]
     pub cloud_distance_image: Handle<Image>,
 
-    /// Planet-fixed equirect coverage (weather) map, sampled by body-fixed
-    /// direction in the raymarch. Linear-filtered, repeat in U. Visibility
+    /// Planet-fixed cubemap weather field, sampled by body-fixed direction in
+    /// the raymarch. Visibility
     /// must be `compute` explicitly — the AsBindGroup default for sampled
     /// textures is vertex|fragment, which fails pipeline validation against
     /// this compute-only pipeline (storage textures default to compute).
-    #[texture(4, visibility(compute))]
-    #[sampler(5, visibility(compute))]
-    pub coverage_image: Handle<Image>,
+    #[texture(3, visibility(compute), dimension = "cube")]
+    #[sampler(4, visibility(compute))]
+    pub weather_image: Handle<Image>,
 
     /// Previous frame's render texture, snapshotted by the render node after
     /// each `update` dispatch. Sole source for temporal-history reads (and
     /// the saved camera rows) so the raymarch never races its own writes.
-    #[texture(6, visibility(compute), sample_type = "float", filterable = false)]
+    #[texture(5, visibility(compute), sample_type = "float", filterable = false)]
     pub history_image: Handle<Image>,
 
     /// Previous frame's nearest cloud-hit distance — the disocclusion test
     /// for motion reprojection.
-    #[texture(7, visibility(compute), sample_type = "float", filterable = false)]
+    #[texture(6, visibility(compute), sample_type = "float", filterable = false)]
     pub history_distance_image: Handle<Image>,
 }

@@ -37,3 +37,4 @@ and why. Read here before reopening a settled choice.
 | [0009](0009-one-weather-field-many-cloud-projections.md) | Planet clouds use one weather field with regime-specific render projections | Accepted |
 | [0010](0010-bevy-raymarched-rocky-atmosphere.md) | Bevy raymarching is the canonical rocky-body atmosphere | Accepted |
 | [0011](0011-isolated-headless-visual-comparisons.md) | Visual comparisons run as isolated headless captures | Accepted |
+| [0012](0012-cloud-skips-require-conservative-bounds.md) | Cloud ray leaps require conservative density bounds; cadence-preserving reuse is the default | Accepted |

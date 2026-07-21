@@ -502,11 +502,12 @@ this yet — they'd need an `ExtendedMaterial` to reach a fragment hook; deferre
 > [clouds.md](clouds.md); keep future rationale there rather than growing a
 > second plan in this file.
 
-### Today: vendored HZD volumetric clouds (`thalos_volumetric_clouds`)
+### Today: canonical weather plus body-render cloud projections (CLOUD-1)
 
-The shipping near-cloud renderer is a vendored fork of
-`bevy-volumetric-clouds` (MIT, evroon) at `crates/volumetric_clouds/`,
-reworked around Thalos's spherical, `big_space`, dual-camera engine. The
+The shipping near-cloud mechanism is a vendored fork of
+`bevy-volumetric-clouds` (MIT, evroon), absorbed—with its upstream license—at
+`crates/body_render/src/clouds/`. It is reworked around Thalos's spherical,
+`big_space`, dual-camera engine. The
 raymarch runs entirely in the **body-fixed frame** of the active cloud
 body, so clouds are planet-fixed: glued to the ground, co-rotating with
 the surface, horizon-correct at any altitude and at the limb. Three
@@ -538,12 +539,13 @@ stages:
    across the planet, where it avoids polar pinch). Zonal wind advects
    the whole field as a rotation about the body's spin axis.
 2. **Body-fixed drive (game, `rendering/clouds.rs`).** `drive_clouds`
-   picks the **active cloud body** (the nearest terrestrial-atmosphere
-   body; published as the `ActiveCloudBody` resource, sole writer) and
+   picks the **active authored cloud body** (the nearest body whose
+   terrestrial atmosphere has `CloudClimate`; published as the
+   `ActiveCloudBody` resource, sole writer) and
    feeds the crate the camera's planet-centred position and view basis
    rotated by the inverse body orientation (`CameraMatrices`), plus the
    body-fixed sun (scene-matched flux) and planet radius. Static
-   appearance (coverage/density/scale/heights) is set once
+   appearance (coverage/density/scale/heights) is projected from that climate
    (`CloudsConfig` is `Reflect`-registered). A landed/parked
    camera is *static* in this frame, so temporal reprojection converges
    exactly when the view is steady.
@@ -563,30 +565,21 @@ stages:
    binds the live textures on the active cloud body and blank fallbacks
    everywhere else.
 
-**Weather coverage (the weather-system hook).** Large-scale coverage is a
-planet-fixed equirect map (`CloudCoverageMap`, R8 512×256, sampled by
-body-fixed direction; the scalar `clouds_coverage` knob is a global trim
-on it). Its source of truth is per-body environment state:
-`CloudWeatherState` in `SolarSystemState` (seed, mean coverage, latitude
-band strength, variation amplitude, version). `sync_cloud_weather_map`
-projects that state into the texture — ITCZ / subtropical dry belts /
-mid-latitude storm tracks plus seeded low-frequency noise — and
-re-uploads only when `(body, version)` changes. The future weather system
-evolves `CloudWeatherState` (or, later, writes a full coverage grid) and
-bumps `version`; nothing else needs to change.
+**Weather field (the canonical hook).** `thalos_world::CloudClimate` is the
+sole authored terrestrial-cloud configuration; `clouds: None` creates neither
+a runtime field nor visible default clouds. At body spawn, it deterministically
+produces one body-fixed `CloudWeatherField` in `SolarSystemState`: a seam-safe
+RGBA8 cubemap with 256² texels per face (R coverage, G type, B normalized base,
+A normalized top). `sync_cloud_weather_map` uploads only when `(body, version)`
+changes. A future weather system mutates or replaces this field and increments
+`version`; consumers keep the same contract.
 
-The old in-shader slab raymarch (`cloud_volume_overlay`, still in
-`body_sky.wgsl`) is retained for reference but unused; it read the body
-RON `clouds:` block (`CloudCover` → `AtmosphereBlock::cloud_shape`), now
-`None` on Thalos.
-
-The **orbital impostor** (≥ 4× radius) is unchanged — it still composites
-a flat lit reference shell + shadow probe
-(`planet_impostor.wgsl::composite_clouds`); a per-pixel volumetric march
-on a body that small on screen isn't worth it yet. The impostor's
-reference-cloud cubemap is not yet derived from `CloudWeatherState`, so
-from-orbit coverage and in-atmosphere coverage are authored separately
-for now.
+The **first orbital projection** in `SolidPlanetMaterial` samples that same
+weather cubemap by body-fixed normal and composites a surface-following cloud
+layer. It establishes one authority across regimes; CLOUD-6 replaces it with
+density-derived optical depth, normals, height moments, and a reduced-detail
+limb handoff. The former body-name-selected reference cubemaps and dormant
+in-shader `BodySky` slab march are deleted.
 
 **Remaining approximations (deliberate — see Next):**
 
@@ -600,15 +593,18 @@ for now.
   history buffer + neighborhood clamp is the upgrade if that fringe shows.
 - The weather map is static between version bumps — no advection or
   evolution yet.
+- The current volume marcher consumes only coverage from the richer weather
+  texel. CLOUD-3 applies type/base/top to typed vertical profiles and range LOD.
+- The orbital layer is a continuity scaffold, not the final high-fidelity
+  orbit representation.
 
 ### Planned replacement
 
-The former living-weather list is now decomposed in [clouds.md §4](clouds.md):
-canonical per-body state (CLOUD-1), scalable temporal reconstruction (CLOUD-2),
+The cloud program is decomposed in [clouds.md §4](clouds.md): canonical
+per-body state (CLOUD-1, landed), scalable temporal reconstruction (CLOUD-2),
 multi-scale density (CLOUD-3), shared atmosphere lighting (CLOUD-4), one-world
 cloud transmittance/godrays (CLOUD-5), the orbital projection (CLOUD-6), and
-weather/authoring (CLOUD-7). The first pickable slice is CLOUD-0, which captures
-the current renderer and establishes budgets before replacement work begins.
+weather/authoring (CLOUD-7). CLOUD-2 is the next implementation slice.
 
 For gas giants, "clouds" *are* the cloud deck and live inside
 `AtmosphereParams` already.

@@ -1,24 +1,24 @@
-//! Volumetric clouds — integration of the vendored [`thalos_volumetric_clouds`]
-//! crate (HZD-style raymarch, MIT, evroon fork).
+//! Volumetric-cloud orchestration for [`thalos_body_render::clouds`] (an
+//! HZD-style raymarch retaining the upstream MIT/evroon attribution).
 //!
-//! The vendored crate raymarches a planet-relative cloud layer into a texture.
+//! The body-render module raymarches a planet-relative cloud layer into a texture.
 //! [`drive_clouds`] runs it in the **body-fixed frame** of the active cloud
-//! body (the nearest terrestrial-atmosphere body): it feeds the crate the
+//! body (the nearest body with an authored terrestrial cloud climate): it
+//! feeds the mechanism the
 //! camera's true planet-centred position rotated into body-fixed coordinates
 //! plus a `body_from_world`-rotated view basis, so the raymarch is a real
 //! spherical-shell march and every noise field is sampled planet-fixed —
 //! clouds stay glued to the ground, co-rotate with the planet, and the horizon
 //! is correct at any altitude and at the limb.
 //!
-//! **Weather.** Large-scale coverage comes from a planet-fixed equirect
-//! coverage map ([`thalos_volumetric_clouds::CloudCoverageMap`]).
+//! **Weather.** Large-scale structure comes from a planet-fixed RGBA cubemap
+//! ([`thalos_body_render::CloudWeatherMap`]).
 //! [`sync_cloud_weather_map`] projects the per-body
-//! [`CloudWeatherState`](crate::solar_system_state::CloudWeatherState)
+//! [`CloudWeatherField`](crate::solar_system_state::CloudWeatherField)
 //! (owned by `SolarSystemState`, like the other per-body environment state)
-//! into that texture: latitude bands (ITCZ, subtropical dry belts, storm
-//! tracks) plus seeded low-frequency variation. The future weather system
-//! evolves `CloudWeatherState` and bumps its `version`; the map re-uploads on
-//! change.
+//! into that texture. RGBA carries coverage, type, normalized base, and
+//! normalized top. The future weather system evolves the field and bumps its
+//! `version`; every render projection then re-uploads the same authority.
 //!
 //! **Compositing.** The cloud texture is *not* drawn by a separate quad — a
 //! fullscreen transparent quad sorts unreliably against the body's fullscreen
@@ -37,60 +37,44 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
-use thalos_body_render::{AU_M, LIGHT_AT_1AU};
-use thalos_volumetric_clouds::{
-    COVERAGE_HEIGHT, COVERAGE_WIDTH, CameraMatrices, CloudCoverageMap, CloudsConfig, CloudsPlugin,
+use thalos_body_render::{
+    AU_M, CameraMatrices, CloudWeatherMap, CloudsConfig, LIGHT_AT_1AU, WEATHER_FACE_SIZE,
 };
 use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
 use crate::graphics_settings::GraphicsSettings;
-use crate::solar_system_state::CloudWeatherState;
 
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
 
 // ── Tunable appearance ───────────────────────────────────────────────────────
-/// Cloud-base altitude above the body's reference radius, metres.
-const BASE_ALTITUDE_M: f32 = 2000.0;
-/// Cloud-layer thickness, metres (top = base + thickness). A thin deck (vs the
-/// 3 km starting slab) reads as broken cumulus rather than a fuzzy wall.
-const THICKNESS_M: f32 = 1300.0;
 /// Global scale on the planet-fixed weather coverage map (which carries the
-/// local overcast fraction, mean ≈ `CloudWeatherState::coverage_mean`).
+/// local overcast fraction, mean ≈ `CloudWeatherField::coverage_mean`).
 /// 1.0 = trust the weather field; global trim.
-const COVERAGE_SCALE: f32 = 1.0;
+const COVERAGE_SCALE: f32 = 1.25;
 /// Extinction density multiplier. Some core contrast, but not so high that the
 /// flat deck base reads as a hard sliced edge.
-const DENSITY: f32 = 0.09;
-/// Fraction of the band over which density fades in from the base. Wide, so the
-/// (single, flat) deck base reads as a soft underside rather than a hard cutoff.
-const BOTTOM_SOFTNESS: f32 = 0.5;
-/// Overall cloud feature scale (upstream default 1.5). Larger = smaller, more
-/// frequent cells (a shorter atlas repeat period in world space) → a busier,
-/// more varied sky rather than a few big blobs.
-const BASE_SCALE: f32 = 2.4;
-/// Detail-erosion noise scale. Lower than upstream's 42 so the high-frequency
-/// Worley erosion has a coarser period (~hundreds of m, not ~tens) and doesn't
-/// alias into salt-and-pepper noise at the raymarch's constant ~280 m step.
-const DETAIL_SCALE: f32 = 16.0;
-/// Detail-erosion strength (upstream 0.27). Some structure, but eased back from
-/// 0.35 because strong erosion accentuated the vertical-column "elongation" of
-/// the 2-D coverage field.
-const DETAIL_STRENGTH: f32 = 0.26;
+const DENSITY: f32 = 0.0026;
+/// Fraction of the local typed layer over which density fades in from its base.
+/// The weather field varies the base altitude, so this no longer needs to hide
+/// a single sliced deck with an excessively broad fog ramp.
+const BOTTOM_SOFTNESS: f32 = 0.16;
+/// Fine 3-D boundary erosion. Solid cores remain intact in the shader; this
+/// only cuts the cauliflower-scale silhouette where density is already low.
+const DETAIL_STRENGTH: f32 = 0.16;
 /// Base-shape edge softness.
-const EDGE_SOFTNESS: f32 = 0.11;
+const EDGE_SOFTNESS: f32 = 0.055;
 /// `SCENE_FLUX_SCALE` mirror from `thalos_body_render::shading` — the cloud sun
 /// radiance is scaled to the same exposure range as terrain/atmosphere.
-const SUN_FLUX_SCALE: f32 = 0.5;
-const AMBIENT_TOP_SCALE: f32 = 0.10;
-const AMBIENT_BOTTOM_SCALE: f32 = 0.05;
-/// Frequency of the weather map's large-scale variation noise over the unit
-/// sphere (≈ feature size of planet circumference / frequency).
-const WEATHER_NOISE_FREQ: f32 = 2.5;
+/// CLOUD-4 keeps this below the pre-coupling 0.48 so stacked volume samples
+/// and the orbital disc no longer clip to pure white before air-mass tinting.
+const SUN_FLUX_SCALE: f32 = 0.36;
+const AMBIENT_TOP_SCALE: f32 = 0.038;
+const AMBIENT_BOTTOM_SCALE: f32 = 0.014;
 
 /// Which body the volumetric cloud raymarch is currently rendered for — the
-/// terrestrial-atmosphere body the camera is closest to, or `None` when no
-/// such body exists. `ground_terrain::update_body_terrain_atmosphere` binds
+/// authored cloudy body the camera is closest to, or `None` when no such body
+/// exists. `ground_terrain::update_body_terrain_atmosphere` binds
 /// the live cloud textures onto this body's `BodySkyMaterial` (every other
 /// body keeps the blank fallback). **Sole writer:** [`drive_clouds`].
 #[derive(Resource, Default, Clone, Copy)]
@@ -100,8 +84,7 @@ pub struct CloudsRenderPlugin;
 
 impl Plugin for CloudsRenderPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(CloudsPlugin)
-            .register_type::<CloudsConfig>()
+        app.register_type::<CloudsConfig>()
             .register_type::<CameraMatrices>()
             .init_resource::<ActiveCloudBody>()
             .add_systems(bevy::app::PostStartup, init_cloud_appearance)
@@ -113,26 +96,22 @@ impl Plugin for CloudsRenderPlugin {
     }
 }
 
-/// One-time static appearance setup. Kept out of the per-frame [`drive_clouds`]
-/// (which writes only the dynamic fields — sun, planet radius, camera) so
-/// runtime edits to coverage/density/scale/heights persist instead of being
-/// overwritten every frame. Runs in `PostStartup`, after `CloudsPlugin` inserts
+/// One-time projection-quality setup. Authored climate plus camera/light state
+/// are projected per frame; sampling and reconstruction controls remain
+/// independently editable. Runs in `PostStartup`, after `CloudsPlugin` inserts
 /// the default config at `Startup`.
 fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
-    config.clouds_bottom_height = BASE_ALTITUDE_M;
-    config.clouds_top_height = BASE_ALTITUDE_M + THICKNESS_M;
     config.clouds_coverage = COVERAGE_SCALE;
     config.clouds_density = DENSITY;
-    config.clouds_base_scale = BASE_SCALE;
-    config.clouds_detail_scale = DETAIL_SCALE;
     config.clouds_detail_strength = DETAIL_STRENGTH;
     config.clouds_base_edge_softness = EDGE_SOFTNESS;
     config.clouds_bottom_softness = BOTTOM_SOFTNESS;
-    // 4 self-shadow steps (upstream 6): each view sample pays this many extra
-    // density evaluations, and the adaptive view step already raised the
-    // sample count through the band — the lighting difference is subtle, the
-    // cost is not. Raise it back up if shadow gradients look flat.
-    config.clouds_shadow_raymarch_steps_count = 4;
+    // One lobe-scale directional probe gives a stable lee-side cue. Three
+    // exponentially spaced taps exposed the typed vertical profile as nested
+    // horizontal bands; a resolved light volume belongs to CLOUD-4.
+    config.clouds_shadow_raymarch_steps_count = 1;
+    config.clouds_shadow_raymarch_step_size = 900.0;
+    config.clouds_shadow_raymarch_step_multiply = 2.5;
 }
 
 /// Per-frame: pick the active cloud body, build its body-fixed frame from the
@@ -153,6 +132,7 @@ fn drive_clouds(
     mut config: ResMut<CloudsConfig>,
     time: Res<Time>,
     mut wind_angle: Local<f32>,
+    mut history_continuity: Local<Option<(BodyId, u32, f64)>>,
 ) {
     // Clouds disabled in graphics settings: park the raymarch camera far
     // outside any shell (same as the no-cloud-body case below) so every ray
@@ -167,6 +147,9 @@ fn drive_clouds(
     let Ok((cam_gt, camera)) = ship_cam_q.single() else {
         return;
     };
+    if let Some(viewport) = camera.physical_viewport_size() {
+        config.set_viewport_resolution(viewport);
+    }
     let cam_pos = cam_gt.translation();
 
     // Active cloud body: the terrestrial-atmosphere body the camera is
@@ -176,7 +159,12 @@ fn drive_clouds(
         let Some(body) = sim.system.bodies.get(rsb.body_id) else {
             continue;
         };
-        if body.terrestrial_atmosphere.is_none() {
+        if body
+            .terrestrial_atmosphere
+            .as_ref()
+            .and_then(|atmosphere| atmosphere.clouds.as_ref())
+            .is_none()
+        {
             continue;
         }
         let center = gt.translation();
@@ -199,7 +187,28 @@ fn drive_clouds(
         cam_mat.translation = Vec3::new(0.0, config.planet_radius * 1.0e3 + 1.0e9, 0.0);
         return;
     };
+    let weather_version = cache
+        .environment
+        .get(body_id)
+        .and_then(|environment| environment.cloud_weather.as_ref())
+        .map_or(0, |weather| weather.version);
+    let sim_time = sim.simulation.sim_time();
+    let continuity_changed =
+        history_continuity.is_none_or(|(last_body, last_version, last_time)| {
+            last_body != body_id
+                || last_version != weather_version
+                || (sim_time - last_time).abs() > 0.5
+        });
+    if continuity_changed {
+        config.history_epoch = config.history_epoch.wrapping_add(1).max(1);
+    }
+    *history_continuity = Some((body_id, weather_version, sim_time));
     active.0 = Some(body_id);
+    let climate = sim.system.bodies[body_id]
+        .terrestrial_atmosphere
+        .as_ref()
+        .and_then(|atmosphere| atmosphere.clouds.as_ref())
+        .expect("active cloud body was filtered by authored climate");
 
     let to_cam = cam_pos - planet_center;
     if to_cam.length() < 1.0 {
@@ -213,7 +222,7 @@ fn drive_clouds(
     // a slow extra rotation about the spin axis — the shader then samples an
     // already-advected field with zero per-sample wind math (~1e-8 rad/frame,
     // far below the reprojection change threshold).
-    *wind_angle = (*wind_angle + config.wind_velocity.x * time.delta_secs() / radius.max(1.0))
+    *wind_angle = (*wind_angle + climate.wind_m_s[0] * time.delta_secs() / radius.max(1.0))
         .rem_euclid(std::f32::consts::TAU);
     let q_bw = (Quat::from_rotation_y(*wind_angle) * body_rot.inverse()).normalize();
     let cam_body = q_bw * to_cam;
@@ -253,132 +262,81 @@ fn drive_clouds(
     let au_over_d = (AU_M / d_star.max(1.0)) as f32;
     let scene_flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
 
-    // Drive only the dynamic config (static appearance is set once in
-    // `init_cloud_appearance`, leaving it editable at runtime).
+    // Project authored, quality-neutral climate plus dynamic view/light state.
+    // Sampling/reconstruction quality remains independently editable.
     config.planet_radius = radius;
+    config.clouds_bottom_height = climate.base_altitude_m.max(0.0);
+    config.clouds_top_height =
+        (climate.base_altitude_m + climate.thickness_m).max(config.clouds_bottom_height + 1.0);
+    config.clouds_density = DENSITY * climate.density.max(0.0);
+    config.clouds_base_shape_scale_m = climate.base_shape_scale_m.max(500.0);
+    config.clouds_detail_scale_m = climate.detail_scale_m.max(50.0);
+    config.wind_velocity = Vec3::new(climate.wind_m_s[0], climate.wind_m_s[1], 0.0);
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
-    let sun_rgb = Vec3::new(1.0, 0.97, 0.92) * scene_flux * SUN_FLUX_SCALE;
+    let cloud_albedo = Vec3::from_array(climate.albedo).max(Vec3::ZERO);
+
+    // CLOUD-4 first slice: camera-local day factor still sets the baseline
+    // sun/ambient chromaticity; the volume shader then multiplies a per-sample
+    // air-mass transmittance so low-sun and low-altitude samples redden further.
+    // Finished CLOUD-4 swaps this CPU guess for shared atmosphere LUT samples.
+    let local_up = cam_body.normalize_or_zero();
+    let sun_mu = local_up.dot(sun_body);
+    let day_t = ((sun_mu + 0.04) / 0.28).clamp(0.0, 1.0);
+    let day_blend = day_t * day_t * (3.0 - 2.0 * day_t);
+    // Slightly cooler noon white and a warmer horizon than the pre-CLOUD-4
+    // path — matches the analytic β_R in the volume shader.
+    let sun_chromaticity = Vec3::new(1.0, 0.38, 0.10).lerp(Vec3::new(1.0, 0.96, 0.90), day_blend);
+    let horizon_transmittance = 0.55 + 0.45 * day_blend;
+    // Albedo is applied once here; the volume does not re-multiply climate
+    // albedo, so keep it a touch under 1.0 to leave headroom for phase peaks.
+    let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
+    let sun_rgb = sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
+    // Sky-like ambient: more blue at the top, greyer fill under overcast cores.
+    let horizon_ambient = 0.28 + 0.72 * day_blend;
     config.clouds_ambient_color_top =
-        Vec4::new(0.55, 0.66, 0.86, 0.0) * scene_flux * AMBIENT_TOP_SCALE;
+        Vec4::new(0.42, 0.58, 0.88, 0.0) * scene_flux * AMBIENT_TOP_SCALE * horizon_ambient;
     config.clouds_ambient_color_bottom =
-        Vec4::new(0.36, 0.43, 0.55, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE;
+        Vec4::new(0.30, 0.36, 0.48, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
 }
 
-/// Project the active body's [`CloudWeatherState`] into the planet-fixed
-/// equirect coverage map. Installs a default weather state for a body on
-/// first contact (seeded per body), and regenerates the texture only when the
-/// `(body, version)` pair changes — the weather system's re-upload hook.
+/// Upload the active body's canonical cubemap field. No default is generated
+/// here: authored `CloudClimate::None` is authoritative.
 fn sync_cloud_weather_map(
     active: Res<ActiveCloudBody>,
-    mut cache: ResMut<SolarSystemState>,
-    coverage: Option<Res<CloudCoverageMap>>,
+    cache: Res<SolarSystemState>,
+    weather: Option<Res<CloudWeatherMap>>,
     mut images: ResMut<Assets<Image>>,
     mut last: Local<Option<(BodyId, u32)>>,
 ) {
     let Some(body_id) = active.0 else {
         return;
     };
-    let Some(coverage) = coverage else {
+    let Some(weather) = weather else {
         return;
     };
-    let state = match cache
+    let Some(field) = cache
         .environment
         .get(body_id)
-        .and_then(|env| env.cloud_weather)
-    {
-        Some(state) => state,
-        None => {
-            let state = CloudWeatherState {
-                seed: CloudWeatherState::default().seed ^ (body_id as u64).wrapping_mul(0x9E37),
-                ..CloudWeatherState::default()
-            };
-            cache.install_cloud_weather(body_id, state);
-            state
-        }
-    };
-    if *last == Some((body_id, state.version)) {
-        return;
-    }
-    let Some(mut image) = images.get_mut(&coverage.handle) else {
+        .and_then(|env| env.cloud_weather.as_ref())
+    else {
         return;
     };
-    image.data = Some(generate_coverage_map(&state));
-    *last = Some((body_id, state.version));
-}
-
-/// Bake the weather state into the R8 equirect coverage grid (u = longitude,
-/// v = colatitude — must match `clouds_compute.wgsl::sample_coverage`).
-fn generate_coverage_map(state: &CloudWeatherState) -> Vec<u8> {
-    let w = COVERAGE_WIDTH as usize;
-    let h = COVERAGE_HEIGHT as usize;
-    let mut data = vec![0u8; w * h];
-    for row in 0..h {
-        let colat = std::f32::consts::PI * (row as f32 + 0.5) / h as f32;
-        let lat = std::f32::consts::FRAC_PI_2 - colat;
-        let band = latitude_band_profile(lat);
-        let (sin_c, cos_c) = colat.sin_cos();
-        for col in 0..w {
-            let lon = std::f32::consts::TAU * ((col as f32 + 0.5) / w as f32 - 0.5);
-            let dir = Vec3::new(sin_c * lon.cos(), cos_c, sin_c * lon.sin());
-            let n = fbm3(dir * WEATHER_NOISE_FREQ, state.seed, 4);
-            let c = state.coverage_mean + state.band_strength * band + state.variation * (n - 0.5);
-            data[row * w + col] = (c.clamp(0.0, 1.0) * 255.0) as u8;
-        }
+    if field.face_size != WEATHER_FACE_SIZE {
+        error!(
+            target: "thalos::clouds",
+            "weather field face size {} does not match renderer {}",
+            field.face_size,
+            WEATHER_FACE_SIZE,
+        );
+        return;
     }
-    data
-}
-
-/// Centered (≈ [-1, 1]) latitude modulation of coverage: wetter at the ITCZ
-/// and the mid-latitude storm tracks, drier in the subtropical belts and at
-/// the poles. Latitudes in radians.
-fn latitude_band_profile(lat: f32) -> f32 {
-    let gauss = |x: f32, c: f32, wd: f32| (-((x - c) / wd) * ((x - c) / wd)).exp();
-    let a = lat.abs();
-    gauss(a, 0.0, 0.10) + 0.7 * gauss(a, 0.96, 0.24)
-        - 0.8 * gauss(a, 0.44, 0.15)
-        - 0.4 * gauss(a, std::f32::consts::FRAC_PI_2, 0.25)
-}
-
-/// Integer-mix hash → [0, 1) (no trig — stable at any coordinate).
-fn hash3(p: IVec3, seed: u64) -> f32 {
-    let mut h = (p.x as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
-        ^ (p.y as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F)
-        ^ (p.z as i64 as u64).wrapping_mul(0x1656_67B1_9E37_79F9)
-        ^ seed;
-    h ^= h >> 31;
-    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
-    h ^= h >> 32;
-    (h & 0x00FF_FFFF) as f32 / 16_777_216.0
-}
-
-/// Trilinearly-interpolated value noise in [0, 1].
-fn value_noise3(p: Vec3, seed: u64) -> f32 {
-    let i = p.floor();
-    let f = p - i;
-    let u = f * f * (Vec3::splat(3.0) - 2.0 * f);
-    let i = i.as_ivec3();
-    let corner = |dx: i32, dy: i32, dz: i32| hash3(i + IVec3::new(dx, dy, dz), seed);
-    let x00 = corner(0, 0, 0) + (corner(1, 0, 0) - corner(0, 0, 0)) * u.x;
-    let x10 = corner(0, 1, 0) + (corner(1, 1, 0) - corner(0, 1, 0)) * u.x;
-    let x01 = corner(0, 0, 1) + (corner(1, 0, 1) - corner(0, 0, 1)) * u.x;
-    let x11 = corner(0, 1, 1) + (corner(1, 1, 1) - corner(0, 1, 1)) * u.x;
-    let y0 = x00 + (x10 - x00) * u.y;
-    let y1 = x01 + (x11 - x01) * u.y;
-    y0 + (y1 - y0) * u.z
-}
-
-/// Normalized fractal value noise in [0, 1].
-fn fbm3(p: Vec3, seed: u64, octaves: u32) -> f32 {
-    let mut sum = 0.0;
-    let mut amp = 0.5;
-    let mut norm = 0.0;
-    let mut q = p;
-    for _ in 0..octaves {
-        sum += amp * value_noise3(q, seed);
-        norm += amp;
-        amp *= 0.5;
-        q *= 2.17;
+    if *last == Some((body_id, field.version)) {
+        return;
     }
-    sum / norm
+    let Some(mut image) = images.get_mut(&weather.handle) else {
+        return;
+    };
+    image.data = Some(field.rgba8_bytes());
+    *last = Some((body_id, field.version));
 }

@@ -23,8 +23,8 @@
 //! terrain despawn/respawn.
 
 use bevy::asset::embedded_asset;
-use bevy::ecs::system::lifetimeless::SRes;
 use bevy::ecs::system::SystemParamItem;
+use bevy::ecs::system::lifetimeless::SRes;
 use bevy::image::Image;
 use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
@@ -36,11 +36,11 @@ use bevy::render::render_resource::binding_types::{
     texture_depth_2d, uniform_buffer,
 };
 use bevy::render::render_resource::{
-    encase, AsBindGroup, AsBindGroupError, BindGroupLayout, BindGroupLayoutEntries,
-    BindGroupLayoutEntry, BindingResources, BufferInitDescriptor, BufferUsages,
-    CompareFunction, FilterMode, MipmapFilterMode, OwnedBindingResource, RenderPipelineDescriptor,
-    SamplerBindingType, SamplerDescriptor, ShaderStages, SpecializedMeshPipelineError,
-    TextureSampleType, TextureViewDimension, UnpreparedBindGroup,
+    AsBindGroup, AsBindGroupError, BindGroupLayout, BindGroupLayoutEntries, BindGroupLayoutEntry,
+    BindingResources, BufferInitDescriptor, BufferUsages, CompareFunction, FilterMode,
+    MipmapFilterMode, OwnedBindingResource, RenderPipelineDescriptor, SamplerBindingType,
+    SamplerDescriptor, ShaderStages, SpecializedMeshPipelineError, TextureSampleType,
+    TextureViewDimension, UnpreparedBindGroup, encase,
 };
 use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::{FallbackImage, GpuImage};
@@ -78,7 +78,7 @@ pub struct BodySkyMaterial {
     /// without it the midday sky is physically dim and the celestial backdrop
     /// bleeds through. Indexed by `(u = (sun·zenith + 1) / 2, v = h / atmos_top)`.
     pub multi_scatter_lut: Handle<Image>,
-    /// High-fidelity volumetric cloud layer rendered by `thalos_volumetric_clouds`
+    /// High-fidelity volumetric cloud layer rendered by `body_render::clouds`
     /// (RGBA32F: rgb = premultiplied in-scatter, a = transmittance), composited
     /// over the atmosphere in-scatter as the final step of the fullscreen pass.
     /// Sampled with `textureLoad` (unfilterable float, no sampler). The game
@@ -204,11 +204,7 @@ impl AsBindGroup for BodySkyMaterial {
                     usage: BufferUsages::STORAGE,
                     contents: &[0u8; 16],
                 });
-                (
-                    fallback.d2_array.texture_view.clone(),
-                    dummy.clone(),
-                    dummy,
-                )
+                (fallback.d2_array.texture_view.clone(), dummy.clone(), dummy)
             }
         };
 
@@ -318,7 +314,10 @@ impl AsBindGroup for BodySkyMaterial {
                 (0, uniform_buffer::<AtmosphereBlock>(false)),
                 (1, uniform_buffer::<BodySkyExtra>(false)),
                 (2, texture_depth_2d()),
-                (3, texture_cube(TextureSampleType::Float { filterable: true })),
+                (
+                    3,
+                    texture_cube(TextureSampleType::Float { filterable: true }),
+                ),
                 (4, sampler(SamplerBindingType::Filtering)),
                 (5, texture_2d(TextureSampleType::Float { filterable: true })),
                 (6, sampler(SamplerBindingType::Filtering)),
@@ -330,7 +329,10 @@ impl AsBindGroup for BodySkyMaterial {
                     8,
                     texture_2d(TextureSampleType::Float { filterable: false }),
                 ),
-                (9, texture_cube(TextureSampleType::Float { filterable: true })),
+                (
+                    9,
+                    texture_cube(TextureSampleType::Float { filterable: true }),
+                ),
                 (10, sampler(SamplerBindingType::Filtering)),
                 (
                     11,

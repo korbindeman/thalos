@@ -3,7 +3,11 @@ use bevy::{
     ecs::system::ResMut,
     prelude::*,
     render::{
-        Extract, Render, RenderApp, RenderSystems,
+        Extract,
+        Render,
+        RenderApp,
+        RenderSystems,
+        diagnostic::{RecordDiagnostics, begin_diagnostics_frame},
         extract_resource::ExtractResourcePlugin,
         render_asset::RenderAssets,
         render_resource::{
@@ -21,20 +25,14 @@ use bevy::{
 /// Controls the compute shader which renders the volumetric clouds.
 use std::borrow::Cow;
 
-use crate::config::CloudsConfig;
+use super::config::CloudsConfig;
 
 use super::{
-    images::IMAGE_SIZE,
+    images::VOLUME_SIZE,
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
 const WORKGROUP_SIZE: u32 = 8;
-/// Height of the cloud render + sky textures (see `images::build_images`). The
-/// `update` pass only writes those (1920×1080); only `init` needs the full
-/// `IMAGE_SIZE²` atlas grid. Dispatching the square grid for `update` wasted
-/// ~44% of the raymarch threads off the bottom of the render target.
-const RENDER_HEIGHT: u32 = 1080;
-
 /// Camera basis fed to the cloud raymarch, in the **body-fixed frame** of the
 /// active cloud body: `translation` is the camera position relative to the
 /// planet centre, rotated into body-fixed coordinates (so it co-rotates with
@@ -66,7 +64,10 @@ fn prepare_uniforms_bind_group(
     camera: ResMut<CameraMatrices>,
     clouds_config: Res<CloudsConfig>,
     render_device: Res<RenderDevice>,
+    gpu_images: Res<RenderAssets<GpuImage>>,
+    clouds_image: Res<CloudsImage>,
     time: Res<Time>,
+    mut frame_index: Local<u32>,
 ) {
     let buffer = clouds_uniform_buffer.buffer.get_mut();
 
@@ -89,16 +90,25 @@ fn prepare_uniforms_bind_group(
     buffer.clouds_ambient_color_top = clouds_config.clouds_ambient_color_top;
     buffer.clouds_ambient_color_bottom = clouds_config.clouds_ambient_color_bottom;
     buffer.clouds_min_transmittance = clouds_config.clouds_min_transmittance;
-    buffer.clouds_base_scale = clouds_config.clouds_base_scale;
-    buffer.clouds_detail_scale = clouds_config.clouds_detail_scale;
+    buffer.clouds_base_shape_scale_m = clouds_config.clouds_base_shape_scale_m;
+    buffer.clouds_detail_scale_m = clouds_config.clouds_detail_scale_m;
     buffer.sun_dir = clouds_config.sun_dir;
     buffer.sun_color = clouds_config.sun_color;
     buffer.camera_translation = camera.translation;
     buffer.time = time.elapsed_secs_wrapped();
     buffer.reprojection_strength = clouds_config.reprojection_strength;
+    if let Some(target) = gpu_images.get(&clouds_image.cloud_render_image) {
+        let size = target.texture.size();
+        buffer.render_resolution = Vec2::new(size.width as f32, size.height as f32);
+    }
+    buffer.frame_index = *frame_index;
+    buffer.history_epoch = clouds_config.history_epoch;
+    buffer.sparse_march =
+        u32::from(clouds_config.sparse_march && clouds_config.reprojection_strength > 0.0);
     buffer.inverse_camera_view = camera.inverse_camera_view;
     buffer.inverse_camera_projection = camera.inverse_camera_projection;
     buffer.wind_displacement += time.delta_secs() * clouds_config.wind_velocity;
+    *frame_index = frame_index.wrapping_add(1);
 
     clouds_uniform_buffer
         .buffer
@@ -121,23 +131,23 @@ fn prepare_textures_bind_group(
     render_device: Res<RenderDevice>,
 ) {
     let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
-    let cloud_atlas_view = gpu_images.get(&clouds_image.cloud_atlas_image).unwrap();
     let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
     let cloud_distance_view = gpu_images.get(&clouds_image.cloud_distance_image).unwrap();
-    let coverage_view = gpu_images.get(&clouds_image.coverage_image).unwrap();
+    let weather_view = gpu_images.get(&clouds_image.weather_image).unwrap();
     let history_view = gpu_images.get(&clouds_image.history_image).unwrap();
-    let history_distance_view = gpu_images.get(&clouds_image.history_distance_image).unwrap();
+    let history_distance_view = gpu_images
+        .get(&clouds_image.history_distance_image)
+        .unwrap();
 
     let bind_group = render_device.create_bind_group(
         None,
         &pipeline_cache.get_bind_group_layout(&pipeline.texture_bind_group_layout),
         &BindGroupEntries::sequential((
             &cloud_render_view.texture_view,
-            &cloud_atlas_view.texture_view,
             &cloud_worley_view.texture_view,
             &cloud_distance_view.texture_view,
-            &coverage_view.texture_view,
-            &coverage_view.sampler,
+            &weather_view.texture_view,
+            &weather_view.sampler,
             &history_view.texture_view,
             &history_distance_view.texture_view,
         )),
@@ -266,9 +276,17 @@ fn run_clouds_compute(
     };
 
     {
+        let diagnostics = ctx.diagnostic_recorder();
+        let diagnostics = diagnostics.as_deref();
         let mut pass = ctx
             .command_encoder()
             .begin_compute_pass(&ComputePassDescriptor::default());
+        let pass_name = match *state {
+            CloudsState::Init => "volumetric_clouds_init",
+            CloudsState::Update => "volumetric_clouds",
+            CloudsState::Loading => "volumetric_clouds_loading",
+        };
+        let pass_span = diagnostics.pass_span(&mut pass, pass_name);
 
         pass.set_bind_group(0, &uniform_bind_group.0, &[]);
         pass.set_bind_group(1, &texture_bind_group.0, &[]);
@@ -280,20 +298,29 @@ fn run_clouds_compute(
                     .get_compute_pipeline(pipeline.init_pipeline)
                     .unwrap();
                 pass.set_pipeline(init_pipeline);
-                pass.dispatch_workgroups(IMAGE_SIZE / WORKGROUP_SIZE, IMAGE_SIZE / WORKGROUP_SIZE, 1);
+                pass.dispatch_workgroups(
+                    VOLUME_SIZE / WORKGROUP_SIZE,
+                    VOLUME_SIZE / WORKGROUP_SIZE,
+                    VOLUME_SIZE,
+                );
             }
             CloudsState::Update => {
                 let update_pipeline = pipeline_cache
                     .get_compute_pipeline(pipeline.update_pipeline)
                     .unwrap();
                 pass.set_pipeline(update_pipeline);
+                let Some(target) = gpu_images.get(&clouds_image.cloud_render_image) else {
+                    return;
+                };
+                let size = target.texture.size();
                 pass.dispatch_workgroups(
-                    IMAGE_SIZE / WORKGROUP_SIZE,
-                    RENDER_HEIGHT / WORKGROUP_SIZE,
+                    size.width.div_ceil(WORKGROUP_SIZE),
+                    size.height.div_ceil(WORKGROUP_SIZE),
                     1,
                 );
             }
         }
+        pass_span.end(&mut pass);
     }
 
     // Snapshot this frame's output into the history textures the next
@@ -348,7 +375,12 @@ impl Plugin for CloudsComputePlugin {
         // `camera_driver` runs), so the dispatch records before the per-view
         // sky pass that samples the cloud textures — matching the old
         // `add_node_edge(CloudsLabel, CameraDriverLabel)`.
-        render_app.add_systems(RenderGraph, run_clouds_compute.in_set(RenderGraphSystems::Begin));
+        render_app.add_systems(
+            RenderGraph,
+            run_clouds_compute
+                .in_set(RenderGraphSystems::Begin)
+                .after(begin_diagnostics_frame),
+        );
 
         render_app.add_systems(
             ExtractSchedule,

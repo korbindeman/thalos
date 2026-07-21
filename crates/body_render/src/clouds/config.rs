@@ -1,5 +1,7 @@
 use bevy::prelude::*;
 
+use super::images::{RENDER_HEIGHT, RENDER_WIDTH};
+
 #[derive(Resource, Clone, Copy, Reflect)]
 #[reflect(Resource)]
 /// The configuration that gets passed to the compute shader that renders the clouds.
@@ -16,7 +18,9 @@ use bevy::prelude::*;
 ///     .run();
 /// ```
 pub struct CloudsConfig {
-    /// Number of raymarching steps. More steps reduces noise but requires more computational power
+    /// Hard cap on view-ray steps. The marcher still exits at the shell edge or
+    /// once transmittance is exhausted; raising this mainly extends grazing
+    /// horizon rays. CLOUD-0 exposes it as a capture-quality control.
     pub clouds_raymarch_steps_count: u32,
     /// Number of raymarching steps for shadowing.
     /// More steps reduces noise but requires more computational power
@@ -59,10 +63,10 @@ pub struct CloudsConfig {
     pub clouds_ambient_color_bottom: Vec4,
     /// Minimal transmittance in a ray, if transmittance is too low the ray is discarded.
     pub clouds_min_transmittance: f32,
-    /// Determines the overall scale of the clouds
-    pub clouds_base_scale: f32,
-    ///Determines the scale of the details inside the clouds
-    pub clouds_detail_scale: f32,
+    /// Characteristic world-space period of the base cloud shape, metres.
+    pub clouds_base_shape_scale_m: f32,
+    /// Characteristic world-space period of edge erosion detail, metres.
+    pub clouds_detail_scale_m: f32,
     /// Direction towards the sun.
     pub sun_dir: Vec4,
     /// Color of the sun (HDR, RGBA).
@@ -76,6 +80,15 @@ pub struct CloudsConfig {
     pub ui_visible: bool,
     /// Resolution of the image we're writing to.
     pub render_resolution: Vec2,
+    /// Fraction of the ship camera's physical viewport used by the cloud
+    /// targets. The resulting extent is aligned to the compute workgroup.
+    pub resolution_scale: f32,
+    /// Enables the rotating 3x3 sparse update. Temporal-disabled/reference
+    /// captures turn this off and raymarch every target pixel.
+    pub sparse_march: bool,
+    /// Invalidates all temporal samples when target size, active body,
+    /// weather, or simulation continuity changes.
+    pub history_epoch: u32,
     /// Velocity of the wind, metres/second in the body-fixed frame: `x` is
     /// zonal drift (eastward surface speed at the equator — applied as a slow
     /// rotation of the whole cloud field about the body's spin axis, so the
@@ -88,7 +101,9 @@ impl Default for CloudsConfig {
     fn default() -> Self {
         let sun_dir = Vec3::new(-0.7, 0.5, 0.75).normalize();
         Self {
-            clouds_raymarch_steps_count: 12,
+            // 80 samples let an inside-layer tangent ray integrate 40 km at
+            // the 500 m coarse step before the near-volume distance fade.
+            clouds_raymarch_steps_count: 80,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
             clouds_bottom_height: 1250.0,
@@ -106,14 +121,34 @@ impl Default for CloudsConfig {
             clouds_ambient_color_top: Vec4::new(149.0, 167.0, 200.0, 0.0) * (1.5 / 225.0),
             clouds_ambient_color_bottom: Vec4::new(39.0, 67.0, 87.0, 0.0) * (1.5 / 225.0),
             clouds_min_transmittance: 0.1,
-            clouds_base_scale: 1.5,
-            clouds_detail_scale: 42.0,
+            clouds_base_shape_scale_m: 8_000.0,
+            clouds_detail_scale_m: 450.0,
             sun_dir: Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0),
             sun_color: Vec4::new(1.0, 0.9, 0.85, 1.0) * 1.4,
             reprojection_strength: 0.95,
             ui_visible: true,
-            render_resolution: Vec2::new(1920.0, 1080.0),
+            render_resolution: Vec2::new(RENDER_WIDTH as f32, RENDER_HEIGHT as f32),
+            resolution_scale: 2.0 / 3.0,
+            sparse_march: true,
+            history_epoch: 1,
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),
         }
+    }
+}
+
+impl CloudsConfig {
+    /// Project a physical viewport into a stable, workgroup-aligned cloud
+    /// target. Keeping this policy here makes interactive resize and headless
+    /// quality captures use the same path.
+    pub fn set_viewport_resolution(&mut self, viewport: UVec2) {
+        if viewport.x == 0 || viewport.y == 0 {
+            return;
+        }
+        let scale = self.resolution_scale.clamp(0.25, 1.0);
+        let align = |value: u32| ((value.max(8) + 7) / 8) * 8;
+        self.render_resolution = Vec2::new(
+            align((viewport.x as f32 * scale).round() as u32) as f32,
+            align((viewport.y as f32 * scale).round() as u32) as f32,
+        );
     }
 }

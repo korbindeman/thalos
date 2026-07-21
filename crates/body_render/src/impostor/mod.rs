@@ -5,33 +5,27 @@ mod map_ocean;
 mod material;
 pub mod post_stack;
 mod proc_impostor;
-mod reference_clouds;
 mod rings;
 pub mod shader_types;
 mod solid_planet;
 mod texture;
 
 pub use bake::{
-    PreparedPlanetBake, bake_from_planet_surface, blank_cloud_cover_image,
-    equirect_to_cloud_cover_image, prepare_planet_bake, upload_prepared_bake,
+    PreparedPlanetBake, bake_from_planet_surface, prepare_planet_bake, upload_prepared_bake,
 };
 pub use film_grain::FilmGrain;
 pub use gas_giant::{
     GasGiantLayers, GasGiantMaterial, GasGiantMaterialHandle, GasGiantParams, MAX_PALETTE_STOPS,
 };
 pub use map_ocean::{MapOceanMaterial, MapOceanParams};
-pub use proc_impostor::{
-    COAST_ATLAS_HEIGHT_RANGE_M, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
-    blank_coast_cube, blank_impostor_cube,
-};
 pub use material::{
     PlanetCoastlineParams, PlanetDetailParams, PlanetHaloMaterial, PlanetHaloMaterialHandle,
     PlanetMaterial, PlanetMaterialHandle, PlanetParams, PlanetWaterParams,
 };
 pub use post_stack::space_camera_post_stack;
-pub use reference_clouds::{
-    ReferenceClouds, cloud_cover_image_for_body, convert_reference_clouds_when_ready,
-    load_reference_cloud_sources, reference_cloud_path,
+pub use proc_impostor::{
+    COAST_ATLAS_HEIGHT_RANGE_M, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
+    blank_coast_cube, blank_impostor_cube,
 };
 pub use rings::{
     MAX_RING_STOPS, RingLayers, RingMaterial, RingMaterialHandle, RingParams, build_ring_mesh,

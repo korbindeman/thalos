@@ -13,7 +13,7 @@ The one-line policy: **you can't sell the game; you can sell content for it.**
 | **Source code** | [PolyForm Noncommercial 1.0.0](LICENSE) | Use, modify, fork, and redistribute for any **noncommercial** purpose. Selling the game (or other commercial use of the code) is reserved to the copyright holder. |
 | **Assets** (art, audio, authored content incl. RON under `assets/` and `ships/`) | [CC BY 4.0](LICENSE-ASSETS) | Share and adapt for **any** purpose, **including commercially**, with attribution. Paid planet packs / part packs built on Thalos content are explicitly fine. |
 | **`crates/udlod`** (vendored) | MIT OR Apache-2.0 | Upstream license, kept intact. |
-| **`crates/volumetric_clouds`** (vendored) | MIT | Upstream license, kept intact. |
+| **`crates/body_render/src/clouds`** (absorbed vendored module) | MIT | Upstream license and provenance, kept intact. |
 | **The name "Thalos" and the logo** | Not licensed | Reserved. See "Trademark & brand" below. |
 
 ## Why this split
@@ -54,7 +54,9 @@ directories:
 
 - **`crates/udlod`** — MIT OR Apache-2.0, forked from
   [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain).
-- **`crates/volumetric_clouds`** — MIT, forked from `evroon/bevy-volumetric-clouds`.
+- **`crates/body_render/src/clouds`** — MIT, absorbed fork of
+  `evroon/bevy-volumetric-clouds` (see `UPSTREAM_LICENSE` and the provenance
+  `README.md` in that directory).
 
 Their `LICENSE`/attribution files travel with the source and must stay intact.
 

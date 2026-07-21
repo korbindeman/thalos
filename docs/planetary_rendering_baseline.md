@@ -322,15 +322,15 @@ polarisation.
 
 ## 8. Clouds
 
-Vendored, heavily reworked **HZD-style volumetric raymarch**
-(`crates/volumetric_clouds/`), run in the **body-fixed frame** of the nearest
+Absorbed, heavily reworked **HZD-style volumetric raymarch**
+(`crates/body_render/src/clouds/`), run in the **body-fixed frame** of the nearest
 terrestrial-atmosphere body: true ray-sphere shell intersection from the
 camera's planet-centred position, wrap-first noise sampling that stays
 f32-safe at planet-radius coordinates — so clouds are planet-fixed,
 co-rotating, and horizon-correct at any altitude.
 
-- **Density**: planet-fixed equirect coverage map (512×256, generated from
-  per-body `CloudWeatherState` — ITCZ/subtropical/storm-track latitude bands +
+- **Density**: planet-fixed RGBA weather cubemap (256²×6, generated from
+  per-body `CloudWeatherField` — coverage/type/base/top with latitude bands +
   seeded noise, version-gated re-upload; the future weather system's write
   target) × vertical profile (rounded base, eroded top) × 3-octave value-noise
   FBM detail. Thalos deck: base 2 km, thickness 1.3 km.
@@ -545,7 +545,7 @@ full-scale planetary renderer" realism:
 | SSAO | `crates/game/src/rendering/ssao.rs` + `ssao.wgsl` |
 | Exposure/light projection | `crates/game/src/rendering/lighting.rs`, `impostor/post_stack.rs` |
 | IBL probe | `crates/game/src/reflection_probe.rs` |
-| Clouds | `crates/volumetric_clouds/`, `crates/game/src/rendering/clouds.rs` |
+| Clouds | `crates/body_render/src/clouds/`, `crates/game/src/rendering/clouds.rs` |
 | Water | `shading/shaders/water.wgsl` (inside body_sky), `ground/water_material.rs` (dormant) |
 | Vegetation | `crates/body_render/src/ground/{vegetation,scatter,gpu_grass,tree_impostor,landcover}.rs`, drivers in `crates/game/src/rendering/{grass,gpu_grass,vegetation}.rs` |
 | Celestial | `crates/celestial/`, `crates/game/src/sky_render.rs` |
