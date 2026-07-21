@@ -1,11 +1,11 @@
-# ADR-0006: Water is a projection of one signed sea-height field — depth never decides coverage
+# ADR-20260720T185958Z-water-projects-one-signed-sea-field: Water is a projection of one signed sea-height field — depth never decides coverage
 
-- **Status:** Accepted (supersedes the near-authority/crossfade half of ADR-0005)
+- **Status:** Accepted (supersedes the near-authority/crossfade half of ADR-20260720T185957Z-coastline-as-authored-data)
 - **Date:** 2026-07-20
 
 ## Context
 
-ADR-0005 split water authority by range: near, coverage/colour from the exact
+ADR-20260720T185957Z-coastline-as-authored-data split water authority by range: near, coverage/colour from the exact
 scene-depth compare (`t_ocean` vs `scene_t`); far, from the baked coast atlas;
 a crossfade band (~300 km–1.5 Mm) between them. It landed with a stack of
 error-hiding devices — a range-scaled mesh-error feather (`2e-5·t`), the
@@ -37,7 +37,7 @@ geometry.**
   1. the resident **udlod height-tile atlas** (tile-tree walk capped at the
      pixel's footprint LOD, mip-sampled within the tile) — exact, the same
      data the visible mesh displaced from;
-  2. the **coast/bathymetry cube** (ADR-0005's atlas, mip-sampled at footprint)
+  2. the **coast/bathymetry cube** (ADR-20260720T185957Z-coastline-as-authored-data's atlas, mip-sampled at footprint)
      as the coarse tail — tiles not resident, terrain despawned, beyond the
      impostor swap.
   Near and far are the same quantity at different resolutions — a mip chain,
@@ -97,7 +97,7 @@ geometry.**
   udlod's functions to udlod's bind groups, so they can't be reused directly.
   Kept byte-faithful to `thalos_udlod::math::Coordinate::from_world_position`
   / `functions.wgsl`; a comment on each side ties them.
-- ADR-0002 stands: the water *surface* stays the analytic sphere. ADR-0005's
+- ADR-20260720T185954Z-analytic-planet-water-never-meshed stands: the water *surface* stays the analytic sphere. ADR-20260720T185957Z-coastline-as-authored-data's
   coast atlas survives as the cascade's coarse tail; its zero-crossing
   invariant (**relief never crosses sea level**) is now load-bearing for the
   whole cascade.

@@ -38,7 +38,7 @@ The project's design and planning docs. Start here to find the right one.
 | [atmosphere.md](atmosphere.md) | Atmosphere/cloud/ocean *rendering*; IBL/reflection probe |
 | [clouds.md](clouds.md) | Planet-scale volumetric cloud program: canonical weather, density, temporal reconstruction, lighting, shadows, and orbital LOD |
 | [celestial.md](celestial.md) | Procedural sky model: sources, spectra, cubemap bake |
-| [physics.md](physics.md) | The owned-solver revamp (`thalos_physics`, TGS-Soft) — see ADR-0004 |
+| [physics.md](physics.md) | The owned-solver revamp (`thalos_physics`, TGS-Soft) — see ADR-20260720T185956Z-replace-avian-owned-tgs-soft-solver |
 | [shadow_unification_prompt.md](shadow_unification_prompt.md) | F6 one-shadow-world status block + tuning knobs |
 | [planetary_rendering_baseline.md](planetary_rendering_baseline.md) | Rendering baseline reference |
 | [tooling.md](tooling.md) | Toolchain policy; local-only compiler tuning recipes |
@@ -59,6 +59,6 @@ Docs cite each other with a short prefix so a ref is unambiguous from any doc:
 | `clean §N` | [architecture_cleanup.md](architecture_cleanup.md) |
 | `gfx §N` | [graphics_fidelity.md](graphics_fidelity.md) |
 | `cloud §N` | [clouds.md](clouds.md) |
-| `ADR-NNNN` | [adr/](adr/) |
+| `ADR-YYYYMMDDTHHMMSSZ-slug` | [adr/](adr/) |
 | `INC-NNNN` | [incidents/](incidents/) |
 | anything else | by filename (`ui_flow.md §3`) |

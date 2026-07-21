@@ -6,7 +6,7 @@ This document is the strategy and technical plan;
 [backlog.md](backlog.md) is the execution queue, while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
 today. Architecture choices are fixed by
-[ADR-0009](adr/0009-one-weather-field-many-cloud-projections.md).
+[ADR-20260720T212214Z-one-weather-field-many-cloud-projections](adr/0009-one-weather-field-many-cloud-projections.md).
 
 The target is a Blackrack-class cloud system for a surface-to-orbit flight
 camera: shaped volumes that can be entered, stable planetary weather seen from
@@ -192,7 +192,7 @@ Use filterable compact formats for generated noise. The former 1920² RGBA32F
 base atlas has been removed; later format work should compact the retained 64³
 RGBA32F basis. A future empty-space hierarchy is optional and may leap only
 from a conservative density bound over the skipped interval
-([ADR-0012](adr/0012-cloud-skips-require-conservative-bounds.md)).
+([ADR-20260721T033055Z-cloud-skips-require-conservative-bounds](adr/0012-cloud-skips-require-conservative-bounds.md)).
 
 **Physical-scale invariant:** an authored feature scale names the feature, not
 the full period of a stored tile containing several cells. The current erosion
@@ -449,7 +449,7 @@ Completed reconstruction and corrected density/range slice on `codex/cloud-0`:
 ## 5. Risks and decision gates
 
 These choices were accepted on 2026-07-20 and are recorded in
-[ADR-0009](adr/0009-one-weather-field-many-cloud-projections.md) and form the
+[ADR-20260720T212214Z-one-weather-field-many-cloud-projections](adr/0009-one-weather-field-many-cloud-projections.md) and form the
 constraints for every later phase:
 
 1. **Weather topology — recommended: cube/2-D array.** It costs more authoring

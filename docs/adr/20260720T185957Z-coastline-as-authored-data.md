@@ -1,6 +1,6 @@
-# ADR-0005: The coastline is authored data — scene depth is occlusion-only for water
+# ADR-20260720T185957Z-coastline-as-authored-data: The coastline is authored data — scene depth is occlusion-only for water
 
-- **Status:** Partially superseded by ADR-0006 (2026-07-20): the coast atlas
+- **Status:** Partially superseded by ADR-20260720T185958Z-water-projects-one-signed-sea-field (2026-07-20): the coast atlas
   survives as the coarse tail of the field cascade, but the depth-compare
   near authority and the range crossfade are replaced by direct sampling of
   the resident udlod height tiles — depth no longer decides coverage/colour
@@ -9,7 +9,7 @@
 
 ## Context
 
-The analytic ocean (ADR-0002) decided per pixel whether a fragment is water by
+The analytic ocean (ADR-20260720T185954Z-analytic-planet-water-never-meshed) decided per pixel whether a fragment is water by
 comparing the ray-traced sea-sphere hit against the **scene-depth buffer** —
 i.e. against whatever terrain mesh UDLOD happened to render this frame — and
 derived the water's colour from the same signal (`column = scene_t − t_ocean`).
@@ -77,11 +77,11 @@ scene depth is demoted to what it can actually answer.**
   wanted. Rejected.
 - **Water folded into the terrain pipeline now** (F9: `WATER` branch in
   `shade_surface`, mask/SDF as a tile attachment): the long-term home, but it
-  reintroduces the meshed-water facet-sag problem ADR-0002 exists to prevent
+  reintroduces the meshed-water facet-sag problem ADR-20260720T185954Z-analytic-planet-water-never-meshed exists to prevent
   unless the analytic sphere is kept anyway, and coarse tiles quantize the
   boundary unless an SDF channel is added — i.e. it *also* wants the authored
   coast data. Deferred, not rejected: the coast atlas built here becomes F9's
-  attachment source. ADR-0002's analytic-sphere rule stands.
+  attachment source. ADR-20260720T185954Z-analytic-planet-water-never-meshed's analytic-sphere rule stands.
 - **Evaluating the macro field analytically in WGSL** (no bake): crisp at
   infinite resolution, but it duplicates the continent field in a second
   language — the CPU/GPU dual-authority drift risk the tile pipeline already

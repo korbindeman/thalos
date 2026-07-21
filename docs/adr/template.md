@@ -1,6 +1,6 @@
-# ADR-NNNN: <short title of the decision>
+# ADR-YYYYMMDDTHHMMSSZ-short-title: <short title of the decision>
 
-- **Status:** Proposed | Accepted | Superseded by ADR-XXXX
+- **Status:** Proposed | Accepted | Superseded by ADR-YYYYMMDDTHHMMSSZ-short-title
 - **Date:** YYYY-MM-DD
 
 ## Context

@@ -3,7 +3,7 @@
 `thalos_udlod` began as `kurtkuehnert/bevy_terrain`, whose design target is
 **preprocessed real-world raster data** (GeoTIFF → on-disk tile pyramids). Thalos
 replaced that fixed format with an owned `SurfaceQuery` contract between producer
-and renderer. The current producer synthesizes at runtime; ADR-0008 plans a new
+and renderer. The current producer synthesizes at runtime; ADR-20260720T211046Z-offline-terrain-packages plans a new
 adaptive offline terrain package as another producer. In both cases Thalos knows
 the full content identity, so reconstructed tiles are safely memoizable. This
 document records the optimization pass that spends that leverage, and what it

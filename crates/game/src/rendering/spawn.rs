@@ -304,7 +304,7 @@ pub(super) fn spawn_bodies(
         };
         if ship_atmosphere.atmos_geom.z > 0.0 {
             // Coast/bathymetry cube for the analytic ocean's far-field
-            // coverage + colour (ADR-0005). Baked from the same runtime
+            // coverage + colour (ADR-20260720T185957Z-coastline-as-authored-data). Baked from the same runtime
             // surface the tiles bake from; no-ocean bodies bind the blank
             // (never sampled — `ocean.y` gates the branch). 1024²/face ≈
             // 4.9 km texels on Thalos: macro islands (≥ ~10 km, the smallest
@@ -332,7 +332,7 @@ pub(super) fn spawn_bodies(
                 cloud_distance: blank_cloud_dist.clone(),
                 coast_atlas,
                 // Filled by `update_body_terrain_atmosphere` once the body's
-                // udlod terrain spawns (ADR-0006 height-tile lookup).
+                // udlod terrain spawns (ADR-20260720T185958Z-water-projects-one-signed-sea-field height-tile lookup).
                 terrain_entity: None,
             };
             commands.spawn((

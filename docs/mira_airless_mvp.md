@@ -1,6 +1,6 @@
 # Mira airless terrain MVP
 
-**Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-0008](adr/0008-offline-terrain-packages.md) ·
+**Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](adr/0008-offline-terrain-packages.md) ·
 **Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](backlog.md)
 
 ### Landed compatibility vertical slice
@@ -239,7 +239,7 @@ RAM reconstructed-tile cache
 
 ## 6. Offline bakery
 
-The bakery is a separately runnable Rust toolchain. Per ADR-0013, Burn owns one
+The bakery is a separately runnable Rust toolchain. Per ADR-20260721T033713Z-rust-native-learned-terrain, Burn owns one
 backend-generic model, diffusion, and sampling definition across offline
 training and inference. Campaigns may select WGPU, CUDA, ROCm, CPU, or Burn's
 Candle backend without forking model code. Learned crates remain independent of

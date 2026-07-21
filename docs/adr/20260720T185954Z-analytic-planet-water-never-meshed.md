@@ -1,4 +1,4 @@
-# ADR-0002: Planet water is an analytic ray-traced sphere — never a mesh, at any scale
+# ADR-20260720T185954Z-analytic-planet-water-never-meshed: Planet water is an analytic ray-traced sphere — never a mesh, at any scale
 
 - **Status:** Accepted
 - **Date:** 2026-07-01 (recorded 2026-07-18 from the session notes)

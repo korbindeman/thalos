@@ -1,4 +1,4 @@
-# ADR-0012: Cloud ray leaps require conservative density bounds
+# ADR-20260721T033055Z-cloud-skips-require-conservative-bounds: Cloud ray leaps require conservative density bounds
 
 **Status:** Accepted
 **Date:** 2026-07-21

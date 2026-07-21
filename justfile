@@ -92,7 +92,7 @@ compare preset="earth-reference" axis="atmosphere":
     {{ if os() == "windows" { "target/debug/examples/visual_compare.exe" } else { "./target/debug/examples/visual_compare" } }} "{{preset}}" "{{axis}}"
 
 # Offline authored terrain package. The MVP producer is the deterministic
-# airless compiler; ADR-0008's diffusion producer will emit the same package
+# airless compiler; ADR-20260720T211046Z-offline-terrain-packages's diffusion producer will emit the same package
 # boundary. Output: assets/terrain_packages/<body>.bin.
 bake body="Mira":
     cargo run --release -p thalos_terrain_baker -- {{body}}

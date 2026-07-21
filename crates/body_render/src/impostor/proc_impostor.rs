@@ -101,7 +101,7 @@ pub fn blank_impostor_cube() -> Image {
 /// Mirrored by `coast_atlas_height_m` in `body_sky.wgsl`; change both together.
 pub const COAST_ATLAS_HEIGHT_RANGE_M: f32 = 8_000.0;
 
-/// Bake the per-body **coast/bathymetry cube** (ADR-0005): signed terrain
+/// Bake the per-body **coast/bathymetry cube** (ADR-20260720T185957Z-coastline-as-authored-data): signed terrain
 /// height (m about sea level, `R16Unorm`-encoded) sampled at one fixed coarse
 /// LOD, indexed by body-fixed direction. The `BodySky` analytic ocean reads it
 /// at range for water **coverage** (its zero crossing — which equals the

@@ -1,7 +1,7 @@
 # Visual testing
 
 Thalos diagnoses and iterates on graphics with deterministic, full-resolution
-headless captures. ADR-0011 rejects a live multi-camera split screen: it would
+headless captures. ADR-20260721T032344Z-isolated-headless-visual-comparisons rejects a live multi-camera split screen: it would
 duplicate the one-view renderer and change LOD, SSAO, shadow, antialiasing, and
 other viewport-dependent inputs while supposedly holding them constant.
 

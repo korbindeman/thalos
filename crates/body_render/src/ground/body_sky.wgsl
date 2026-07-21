@@ -84,7 +84,7 @@ struct SkyAtmosExtra {
 // an active cloud layer.
 @group(3) @binding(8) var cloud_distance_tex: texture_2d<f32>;
 
-// Coast/bathymetry cube (ADR-0005): signed terrain height about sea level,
+// Coast/bathymetry cube (ADR-20260720T185957Z-coastline-as-authored-data): signed terrain height about sea level,
 // R16Unorm-encoded over ±COAST_ATLAS_HEIGHT_RANGE_M, indexed by body-fixed
 // direction. Baked once at spawn from the same generator the tiles bake from.
 // The analytic-ocean branch samples it at range for water coverage + colour so
@@ -93,7 +93,7 @@ struct SkyAtmosExtra {
 @group(3) @binding(9) var coast_atlas_tex: texture_cube<f32>;
 @group(3) @binding(10) var coast_atlas_sampler: sampler;
 
-// ── Resident-height-tile lookup (ADR-0006) ─────────────────────────────────
+// ── Resident-height-tile lookup (ADR-20260720T185958Z-water-projects-one-signed-sea-field) ─────────────────────────────────
 // The analytic-ocean branch samples signed sea height straight from the udlod
 // height atlas — the exact texels the visible terrain mesh is displaced from —
 // so water coverage/colour are a projection of the one terrain field, never a
@@ -280,7 +280,7 @@ fn sample_tile_sea_height(dir_local: vec3<f32>, footprint_rad: f32) -> vec2<f32>
 }
 
 // Signed sea height (m about sea level) of the terrain field at a body-local
-// direction — THE water authority (ADR-0006). One field, two resolutions:
+// direction — THE water authority (ADR-20260720T185958Z-water-projects-one-signed-sea-field). One field, two resolutions:
 // the resident height tile when one covers this direction, else the baked
 // coast atlas mip chain (cold streaming, beyond terrain despawn, no-terrain
 // bodies). Both are projections of the same `SurfaceQuery` surface, so the
@@ -450,9 +450,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     // ── Analytic ocean ────────────────────────────────────────────────────
-    // Ray-trace a math sphere at sea level (ADR-0002: never a mesh). WHERE it
+    // Ray-trace a math sphere at sea level (ADR-20260720T185954Z-analytic-planet-water-never-meshed: never a mesh). WHERE it
     // is water and HOW DEEP it looks are both direct samples of the one
-    // signed sea-height field (ADR-0006): the resident udlod height tiles —
+    // signed sea-height field (ADR-20260720T185958Z-water-projects-one-signed-sea-field): the resident udlod height tiles —
     // the exact texels the visible terrain mesh is displaced from — with the
     // baked coast atlas as the coarse tail. The depth buffer NEVER decides
     // coverage or colour; its one remaining job is occluding water behind
@@ -470,7 +470,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     var water_here = false;
     var t_ocean = 0.0;
     // Water coverage [0, 1] and the colour-driving column (m along the ray),
-    // both resolved from the sea field below (ADR-0006).
+    // both resolved from the sea field below (ADR-20260720T185958Z-water-projects-one-signed-sea-field).
     var ocean_cov = 0.0;
     var ocean_color_column_m = 0.0;
     // Shore-interaction inputs for `shade_ocean` (BL-10): vertical depth at
@@ -986,7 +986,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         );
         let surf_trans = (1.0 - opacity) * (1.0 - cloud.opacity);
         // `ocean_cov` was resolved in the ocean block from the signed sea
-        // field (ADR-0006: resident height tiles → coast-atlas tail). Partial
+        // field (ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident height tiles → coast-atlas tail). Partial
         // coverage lets the framebuffer seabed show through for the wet
         // shoreline sliver / clear shallows.
         let out_rgb = sky_rgb + water * surf_trans * ocean_cov;

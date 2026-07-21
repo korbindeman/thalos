@@ -1244,7 +1244,7 @@ pub(super) fn update_body_terrain_atmosphere(
         Res<super::ssao::SsaoConfig>,
     ),
     flatten_registry: Res<TerrainFlattenRegistry>,
-    // ADR-0006: resident-height-tile lookup inputs for the sky material's
+    // ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident-height-tile lookup inputs for the sky material's
     // analytic-ocean branch. .0 finds each body's udlod terrain entity + its
     // `TileAtlas` (lod count, height decode range, attachment-0 UV layout);
     // .1 supplies the per-(terrain, view) tile tree's window size.
@@ -1315,7 +1315,7 @@ pub(super) fn update_body_terrain_atmosphere(
         })
         .unwrap_or_else(|_| sim.simulation.ship_state().position);
 
-    // ADR-0006: per-body height-tile lookup parameters for the sky material's
+    // ADR-20260720T185958Z-water-projects-one-signed-sea-field: per-body height-tile lookup parameters for the sky material's
     // ocean branch, which samples signed sea height from the same udlod atlas
     // the terrain mesh displaces from. Bodies without a terrain (or whose
     // tile tree hasn't spawned yet) keep `tile_lookup.x = 0` — the shader
@@ -1618,7 +1618,7 @@ pub(super) fn update_body_terrain_atmosphere(
             continue;
         };
         mat.atmosphere_extra = *extra;
-        // ADR-0006: point the material at this body's live terrain entity so
+        // ADR-20260720T185958Z-water-projects-one-signed-sea-field: point the material at this body's live terrain entity so
         // its bind-group prepare can resolve the height atlas + tile tree in
         // the render world. Refreshed every frame, so terrain despawn/respawn
         // (residency tiers, flatten invalidation) can never leave it stale.

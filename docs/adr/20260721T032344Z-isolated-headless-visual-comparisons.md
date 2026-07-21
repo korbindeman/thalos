@@ -1,4 +1,4 @@
-# ADR-0011: Visual comparisons run as isolated headless captures
+# ADR-20260721T032344Z-isolated-headless-visual-comparisons: Visual comparisons run as isolated headless captures
 
 - **Status:** Accepted
 - **Date:** 2026-07-21

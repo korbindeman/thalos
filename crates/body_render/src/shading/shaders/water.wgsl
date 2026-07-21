@@ -169,7 +169,7 @@ fn water_brdf(
 
 // Depth-graded subsurface colour. `column_m` is the camera-ray thickness
 // between the sea surface and the seabed (scene depth near, baked bathymetry
-// far — ADR-0005); near zero at the waterline, large in open ocean. Shallows
+// far — ADR-20260720T185957Z-coastline-as-authored-data); near zero at the waterline, large in open ocean. Shallows
 // lighten toward cyan, deep water saturates to the per-body deep tint.
 //
 // The 8 m e-folding keeps the pale-shallow band a *fringe*: only the first
@@ -187,7 +187,7 @@ fn water_subsurface(color_depth: vec4<f32>, column_m: f32) -> vec3<f32> {
 }
 
 // Shore-interaction ranges (BL-10, tier 1 — MSFS-class: normals + albedo only,
-// no displaced geometry, ADR-0002 intact). All shore effects are keyed on the
+// no displaced geometry, ADR-20260720T185954Z-analytic-planet-water-never-meshed intact). All shore effects are keyed on the
 // signed sea field's depth / shore distance the sky pass supplies, so they are
 // as LOD-stable as the coastline itself.
 const SHORE_FX_VIEW_LO_M: f32 = 3500.0;  // shore effects full inside this…

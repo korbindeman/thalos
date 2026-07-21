@@ -16,7 +16,7 @@ while its non-atmosphere composites are migrated independently.
 | Area | Today | Future |
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
-| Rocky-body sky | **Bevy `AtmosphereMode::Raymarched` is canonical** (ADR-0010). One camera-local atmosphere proxy follows the body selected by `ViewAnchor`; authored Rayleigh scale heights/optical depth feed Bevy's medium, with an Earth aerosol split and ozone absorption. The deterministic `earth-reference` screenshot is the orbital regression probe. The legacy `BodySky` atmosphere is debug-only. | Remove the temporary 0.1 density adapter when terrain and the photometric atmosphere share one radiometric exposure contract; migrate cloud/star composites without restoring a second atmosphere. |
+| Rocky-body sky | **Bevy `AtmosphereMode::Raymarched` is canonical** (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere). One camera-local atmosphere proxy follows the body selected by `ViewAnchor`; authored Rayleigh scale heights/optical depth feed Bevy's medium, with an Earth aerosol split and ozone absorption. The deterministic `earth-reference` screenshot is the orbital regression probe. The legacy `BodySky` atmosphere is debug-only. | Remove the temporary 0.1 density adapter when terrain and the photometric atmosphere share one radiometric exposure contract; migrate cloud/star composites without restoring a second atmosphere. |
 | Cloud rendering | **Near/mid `BodySky` path:** the vendored compute raymarch described in *Cloud rendering (M4)* below; body-fixed spherical shells, procedural density, a planet-fixed weather map, cloud-depth export, and temporal reprojection. The far impostor still composites a separately authored flat shell. Gas-giant cloud decks remain a distinct system. | The canonical surface-to-orbit replacement is planned in [clouds.md](clouds.md): one per-body weather field, atmosphere-coupled lighting, scalable reconstruction, shared cloud shadows, and a weather-derived orbital projection. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
@@ -255,8 +255,8 @@ prepass-depth texture is terrain-blind. The workaround lives in
   continents pure black beyond ~13,000 km while the analytic ocean stayed
   lit.
 - **The analytic ocean's coverage/colour are direct samples of the one signed
-  sea-height field — never a depth comparison, at any range** (ADR-0006,
-  superseding ADR-0005's range-blend). The ocean branch samples signed sea
+  sea-height field — never a depth comparison, at any range** (ADR-20260720T185958Z-water-projects-one-signed-sea-field,
+  superseding ADR-20260720T185957Z-coastline-as-authored-data's range-blend). The ocean branch samples signed sea
   height at the sphere-hit direction from a resolution cascade of the same
   field: the resident **udlod height-tile atlas** first (a WGSL port of the
   tile-tree walk, capped at the pixel's footprint LOD and mip-sampled within
@@ -278,7 +278,7 @@ prepass-depth texture is terrain-blind. The workaround lives in
   of the water surface by more than a footprint-scaled margin. Never derive
   water coverage or colour from scene depth again — the depth-compare
   architecture regenerated coast speckle / translucent-wash artifacts three
-  times (INC-0003, BL-5, BL-8) before ADR-0006 removed it.
+  times (INC-0003, BL-5, BL-8) before ADR-20260720T185958Z-water-projects-one-signed-sea-field removed it.
 - **Shore interaction is keyed on the same field** (BL-10, tier 1 —
   MSFS-class, normals + albedo only, no displaced geometry): near shore the
   sky pass takes two extra field taps for the tangent gradient, giving

@@ -108,7 +108,7 @@ When a palette or BRDF constant moves, it moves in one place.
 ## Steering, decisions & incidents
 
 The project self-steers through an execution/strategy split plus durable
-git-committed institutional memory (ADR-0001; full doc map + cross-ref
+git-committed institutional memory (ADR-20260720T185953Z-steering-harness; full doc map + cross-ref
 convention in `docs/README.md`):
 
 - **`docs/backlog.md`** — the operational queue: status-tracked, stably-ID'd
@@ -125,7 +125,7 @@ convention in `docs/README.md`):
   talk** → capture to the plan docs (ADR if a fork resolves), then decompose
   into backlog rows. Invoke it (or follow its procedure) for any of those three.
 - **`docs/adr/`** — the decision log: *why* things are the way they are,
-  including rejected alternatives. **Read the index before making or reopening
+  including rejected alternatives. **Read the timestamp-ordered records before making or reopening
   a non-trivial design choice; write one at decision time** (choosing among
   alternatives, cutting/deferring scope, reversing an approach) — the reasoning
   is otherwise lost to context compaction. Immutable once accepted; supersede,
@@ -286,7 +286,7 @@ artifact identity, validator, and `PackageSurface`; player devices
 never run the producer. The production
 direction is an offline hierarchical-diffusion bakery that emits adaptive,
 versioned cube-sphere terrain packages; see `docs/mira_airless_mvp.md` and
-ADR-0008. Player devices stream packages through a `PackageSurface` backing and
+ADR-20260720T211046Z-offline-terrain-packages. Player devices stream packages through a `PackageSurface` backing and
 reconstruct only bounded close-range detail. The authored package and the
 disposable runtime tile cache are separate layers. Package-backed and procedural
 bodies must still converge on the one `SurfaceQuery` consumer path and one height
@@ -300,9 +300,9 @@ The old runtime baked pipeline
 temporary offline Mira producer/global package payload. Do not reconnect them
 to a runtime startup bake or revive the dump/editor flow. MIRA-0's adaptive
 package tracer is complete; MIRA-1/2 replace the producer with diffusion. New bakery
-work follows ADR-0008 and the package spec behind the same `SurfaceQuery` seam.
+work follows ADR-20260720T211046Z-offline-terrain-packages and the package spec behind the same `SurfaceQuery` seam.
 MIRA learned models are Rust-native and authored once with pinned Burn 0.21 per
-ADR-0010. `thalos_terrain_learned` is Bevy-independent shared model/sampler code;
+ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere. `thalos_terrain_learned` is Bevy-independent shared model/sampler code;
 training checkpoints carry raw/EMA weights plus path-remapped Adam state so
 cross-process resume remains deterministic. `thalos_terrain_train` is the
 offline producer tool. Candle may be selected as a
@@ -388,7 +388,7 @@ the smallest canonical tool that answers the question:
   a specific play moment a scripted fresh-spawn capture cannot represent.
 
 Do **not** build a live multi-camera/split-screen comparison renderer. Do not
-take two ad-hoc manual screenshots and call them an A/B. ADR-0011 makes isolated,
+take two ad-hoc manual screenshots and call them an A/B. ADR-20260721T032344Z-isolated-headless-visual-comparisons makes isolated,
 sequential, full-resolution headless captures the one comparison path; a split
 viewport changes LOD, SSAO, shadows, antialiasing, and other inputs under test.
 
@@ -624,7 +624,7 @@ wgpu 29: pipeline `push_constant_ranges`→`immediate_size: u32`,
 **0.19 features we deliberately do NOT use** (we have custom replacements):
 Bevy's Skybox, the new BSN / Next-Gen Scenes, rectangular area lights,
 `EditableText`. Bevy's built-in atmosphere is now the exception:
-`AtmosphereMode::Raymarched` is the canonical rocky-body sky (ADR-0010),
+`AtmosphereMode::Raymarched` is the canonical rocky-body sky (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere),
 projected through the active `ViewAnchor`; do not add a second production
 atmosphere path. **Worth evaluating for the graphics sprint** (new in
 0.19, not yet adopted): **contact shadows** (screen-space, kills close-geometry
@@ -714,7 +714,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
 - **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/game/src/local_physics.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/game/src/local_physics.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
-- **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + regime-scaled projections. Four modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities), and `clouds` (the absorbed MIT `bevy-volumetric-clouds` fork: spherical body-fixed volume march + cloud-local history targets). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render` and top-level `thalos_volumetric_clouds` mechanisms. A backend chooses geometry or cost, never its own lighting/atmosphere/weather authority. Terrestrial clouds obey ADR-0009: authored `CloudClimate` → one per-body `CloudWeatherField` → near/orbit/shadow projections.
+- **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + regime-scaled projections. Four modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyWaterMaterial`, rendered-height patch utilities), and `clouds` (the absorbed MIT `bevy-volumetric-clouds` fork: spherical body-fixed volume march + cloud-local history targets). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render` and top-level `thalos_volumetric_clouds` mechanisms. A backend chooses geometry or cost, never its own lighting/atmosphere/weather authority. Terrestrial clouds obey ADR-20260720T212214Z-one-weather-field-many-cloud-projections: authored `CloudClimate` → one per-body `CloudWeatherField` → near/orbit/shadow projections.
 - **`thalos_udlod`** — vendored UDLOD terrain renderer (lives at `crates/udlod/`). Forked from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. Edit in-tree like any other workspace crate. The fork is **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess path is gone. (Upstream's own successor is now a *different repo*, [`planetary_terrain_renderer`](https://github.com/kurtkuehnert/planetary_terrain_renderer) — the better diff target for fixes to the Taylor-series precision path.) A 2026-07 optimization pass tailored the fork to Thalos; **see `docs/terrain_lod_optimization.md`**, and note these load-bearing rules:
   - **Providers own mip generation.** `TileProvider::request_tile` must return the **full mip chain** (call `AttachmentData::generate_mipmaps` inside the task). The atlas does *not* regenerate mips — that kept per-tile mip filtering on the main thread and made cached payloads useless.
   - **Attachments may differ in resolution.** The GPU atlas sizes each attachment's texture array independently. Height keeps the full grid (it is the geometry, and the only attachment physics reads); albedo/roughness/material bake at half (`TierConfig::detail_texture_size`) — a >2× cut in the game's largest allocation.
@@ -1510,7 +1510,7 @@ reads from. No materials of its own.
 - The game-side `rendering::clouds` driver selects the nearest authored cloudy
   body and projects `CloudClimate`/environment state into view uniforms. Near
   composition stays in `BodySkyMaterial`; the first orbit projection is in
-  `SolidPlanetMaterial`. See ADR-0009 and `docs/clouds.md`.
+  `SolidPlanetMaterial`. See ADR-20260720T212214Z-one-weather-field-many-cloud-projections and `docs/clouds.md`.
 
 `body_render` is the **sole consumer** of the vendored `thalos_udlod`,
 re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
@@ -1611,7 +1611,7 @@ assets/solar_system.ron + assets/bodies/<body>.ron
 
 Each major system has a unified spec doc. **The map + cross-ref convention
 (`clean §N` = architecture_cleanup.md, `gfx §N` = graphics_fidelity.md,
-`ADR-NNNN`, `INC-NNNN`) live in `docs/README.md`.** Steering docs —
+`ADR-YYYYMMDDTHHMMSSZ-slug`, `INC-NNNN`) live in `docs/README.md`.** Steering docs —
 `backlog.md` (the queue), `adr/` (decision log), `incidents/` (post-mortems) —
 are covered in "Steering, decisions & incidents" above.
 

@@ -36,7 +36,7 @@ specific gaps + tuning + one structural split, not missing machinery.
 - **Scene lighting** — `SceneLighting` is one clean CPU mirror feeding every
   body material; eclipse occluders + planetshine come free to anything binding it.
 - **Atmosphere** — Bevy `AtmosphereMode::Raymarched` is the canonical
-  rocky-body sky (ADR-0010), projected onto one camera-local proxy selected by
+  rocky-body sky (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere), projected onto one camera-local proxy selected by
   `ViewAnchor`. Authored Rayleigh terms feed an Earth aerosol + ozone medium.
   The former `BodySky` atmosphere is retained only for debug A/B captures while
   its cloud/depth composites are migrated independently.
@@ -292,7 +292,7 @@ phase dependencies, and acceptance criteria live there.
 
 | ID | Item | Status | Effort | Sprint | Notes / source |
 |---|---|---|---|---|---|
-| BL-13 | Earth-reference Bevy raymarched atmosphere convergence | ☑ | Med | THIS | ADR-0010; deterministic land-only `earth-reference` capture inspected 2026-07-20; normal-path live verification pending |
+| BL-13 | Earth-reference Bevy raymarched atmosphere convergence | ☑ | Med | THIS | ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere; deterministic land-only `earth-reference` capture inspected 2026-07-20; normal-path live verification pending |
 | — | Object aerial recession (foliage/rocks → sky haze) | ◐ | — | THIS | `object_aerial_recession`; fold inside `shade_surface` so it can't be forgotten (one-world invariant #5) |
 | W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
 | W15 | Atmosphere-coupled Nubis cloud lighting (powder + multi-scatter octaves + shared sun/sky transmittance) (= CLOUD-4) | ☐ | High | later | cloud §3.4 · Schneider 2023 |
@@ -344,12 +344,12 @@ materials** instead of constant colours.
 
 Visual conclusions must come from controlled evidence, not from two manually
 framed screenshots or a split-screen renderer that changes viewport-dependent
-inputs. ADR-0011 makes isolated headless capture matrices the canonical path;
+inputs. ADR-20260721T032344Z-isolated-headless-visual-comparisons makes isolated headless capture matrices the canonical path;
 the operational contract and artifact layout live in `visual_testing.md`.
 
 | ID | Item | Status | Effort | Sprint | Notes / source |
 |---|---|---|---|---|---|
-| BL-18 | Typed `just compare <preset> <axis>` runner: isolated variants, full captures, labelled contact sheet, baseline diffs/wipes, JSON provenance + metrics | ✅ | Med | THIS | runtime-verified 2026-07-21: `earth-reference/atmosphere` A/B + `spaceport-aerial/ssao` off/on/raw artifacts inspected · ADR-0011 · INC-0008 |
+| BL-18 | Typed `just compare <preset> <axis>` runner: isolated variants, full captures, labelled contact sheet, baseline diffs/wipes, JSON provenance + metrics | ✅ | Med | THIS | runtime-verified 2026-07-21: `earth-reference/atmosphere` A/B + `spaceport-aerial/ssao` off/on/raw artifacts inspected · ADR-20260721T032344Z-isolated-headless-visual-comparisons · INC-0008 |
 | BL-19 | Expand shared diagnostic channels (normals/depth/LOD/shadow/material/atmosphere/lighting lobes); optional interactive image wipe only if needed | ☐ | Med | later | extend the capture matrix, never a second `ShipCamera`/`ViewAnchor` path |
 
 ---

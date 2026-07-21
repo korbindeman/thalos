@@ -1,6 +1,6 @@
 #![enable(implicit_some)]
 (
-    // Mira is the first offline package-backed terrain body (ADR-0008). The
+    // Mira is the first offline package-backed terrain body (ADR-20260720T211046Z-offline-terrain-packages). The
     // package freezes this intent at `assets/terrain_packages/Mira.bin`; the
     // game validates its content key before constructing `BakedSurface`.
     terrain: Feature((

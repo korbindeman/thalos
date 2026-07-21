@@ -7,35 +7,31 @@ and why. Read here before reopening a settled choice.
 
 ## How to use
 
-- **Read first.** Before making or revisiting a non-trivial design choice, skim the index below
-  (and the relevant ADRs) so you don't re-litigate a settled question or re-explore a rejected
-  path.
+- **Read first.** Before making or revisiting a non-trivial design choice, scan the
+  timestamp-ordered ADR files and search their headings/content so you don't re-litigate a
+  settled question or re-explore a rejected path.
 - **Add one when a decision is made** — whenever you choose among alternatives, defer or cut
   scope, or reverse an earlier approach (architectural or not). Do it at decision time; the
-  reasoning is otherwise lost to context compaction. Copy `0000-template.md` to
-  `NNNN-kebab-title.md` (next number in sequence), fill it in, and add a row to the index.
-  Resolving a fork from the backlog's "Decisions pending" table always gets one.
+  reasoning is otherwise lost to context compaction. Copy `template.md` to
+  `YYYYMMDDTHHMMSSZ-kebab-title.md`, using the current UTC time (`date -u
+  '+%Y%m%dT%H%M%SZ'`), and fill it in. Resolving a fork from the backlog's "Decisions pending"
+  table always gets one.
 - **One decision per record.** Keep each ADR short and focused.
 - **Immutable once Accepted.** Don't rewrite an accepted decision — write a new ADR that
-  supersedes it, and flip the old ADR's `Status` to `Superseded by ADR-NNNN`. Update the index.
+  supersedes it, and flip the old ADR's `Status` to `Superseded by
+  ADR-YYYYMMDDTHHMMSSZ-short-title`.
 - **Commit ADRs alongside the code** that realizes the decision (same change/slice).
 - Historical decisions being migrated out of auto-memory get their original decision date plus
   a "recorded YYYY-MM-DD" note.
 
-## Index
+## Identity and ordering
 
-| ADR | Title | Status |
-|-----|-------|--------|
-| [0001](0001-steering-harness.md) | Roadmap steering harness — backlog + steer skill + ADR / incident logs | Accepted |
-| [0002](0002-analytic-planet-water-never-meshed.md) | Planet water is an analytic ray-traced sphere — never a mesh, at any scale | Accepted |
-| [0003](0003-eva-outside-the-slf.md) | EVA stays a kinematic body-fixed controller, outside the SLF | Accepted |
-| [0004](0004-replace-avian-owned-tgs-soft-solver.md) | Replace Avian with an owned TGS-Soft solver crate (`thalos_physics`) | Accepted |
-| [0005](0005-coastline-as-authored-data.md) | The coastline is authored data — scene depth is occlusion-only for water | Partially superseded by ADR-0006 |
-| [0006](0006-water-projects-one-signed-sea-field.md) | Water is a projection of one signed sea-height field — depth never decides coverage | Accepted |
-| [0007](0007-mira-mvp-runtime-surface.md) | Mira's airless MVP is a runtime `SurfaceQuery` | Superseded by ADR-0008 |
-| [0008](0008-offline-terrain-packages.md) | Offline terrain packages are an authored `SurfaceQuery` backing | Accepted |
-| [0009](0009-one-weather-field-many-cloud-projections.md) | Planet clouds use one weather field with regime-specific render projections | Accepted |
-| [0010](0010-bevy-raymarched-rocky-atmosphere.md) | Bevy raymarching is the canonical rocky-body atmosphere | Accepted |
-| [0011](0011-isolated-headless-visual-comparisons.md) | Visual comparisons run as isolated headless captures | Accepted |
-| [0012](0012-cloud-skips-require-conservative-bounds.md) | Cloud ray leaps require conservative density bounds; cadence-preserving reuse is the default | Accepted |
-| [0013](0013-rust-native-learned-terrain.md) | Mira learned terrain is authored once in Rust with Burn | Accepted |
+ADR identifiers have the form `ADR-YYYYMMDDTHHMMSSZ-short-title`. The UTC timestamp is the
+record's creation time; lexical filename order is therefore chronological recording order. The
+semantic slug avoids unrelated branches competing for the same path. Causal order is explicit in
+`supersedes` references rather than inferred from adjacent timestamps.
+
+There is deliberately no hand-maintained index: it would make this README a merge hotspot. The
+timestamp-sorted files are the canonical index. Use `rg --sort path '^# ADR-' docs/adr` to list
+titles in order or `rg '<term>' docs/adr` to search decisions. See
+`ADR-20260721T034338Z-distributed-chronological-identifiers` for the rationale and migration rule.

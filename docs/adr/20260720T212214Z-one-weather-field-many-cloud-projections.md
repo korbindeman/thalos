@@ -1,4 +1,4 @@
-# ADR-0009: Planet clouds use one weather field with regime-specific render projections
+# ADR-20260720T212214Z-one-weather-field-many-cloud-projections: Planet clouds use one weather field with regime-specific render projections
 
 - **Status:** Accepted
 - **Date:** 2026-07-20

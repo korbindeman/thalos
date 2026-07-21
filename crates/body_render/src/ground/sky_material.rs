@@ -8,7 +8,7 @@
 //! Reuses the same atmosphere uniforms as [`crate::BodyTerrainMaterial`] so a
 //! single per-frame update system writes both.
 //!
-//! ## Manual `AsBindGroup` (ADR-0006)
+//! ## Manual `AsBindGroup` (ADR-20260720T185958Z-water-projects-one-signed-sea-field)
 //!
 //! The analytic-ocean branch samples **signed sea height straight from the
 //! udlod height-tile atlas** — the exact texels the visible terrain mesh is
@@ -92,10 +92,10 @@ pub struct BodySkyMaterial {
     /// than by the geometric shell-band approximation. Bodies without an
     /// active cloud layer bind a 1×1 far-sentinel fallback.
     pub cloud_distance: Handle<Image>,
-    /// Per-body coast/bathymetry cube (ADR-0005): signed terrain height about
+    /// Per-body coast/bathymetry cube (ADR-20260720T185957Z-coastline-as-authored-data): signed terrain height about
     /// sea level, `R16Unorm`-encoded over `±COAST_ATLAS_HEIGHT_RANGE_M`, baked
     /// once at spawn by [`crate::bake_coast_bathymetry_cube`] from the same
-    /// `SurfaceQuery` the tiles bake from. Since ADR-0006 it is the **coarse
+    /// `SurfaceQuery` the tiles bake from. Since ADR-20260720T185958Z-water-projects-one-signed-sea-field it is the **coarse
     /// tail** of the sea-field cascade: the ocean branch samples the resident
     /// height tiles first and falls back to this cube where no tile is
     /// resident (cold streaming, terrain despawned, beyond the impostor swap).
@@ -307,7 +307,7 @@ impl AsBindGroup for BodySkyMaterial {
     ) -> Vec<BindGroupLayoutEntry> {
         // Bindings 0–10 mirror what the `AsBindGroup` derive generated before
         // the manual impl (same order, types, and all-stages visibility);
-        // 11–14 are the ADR-0006 height-tile lookup.
+        // 11–14 are the ADR-20260720T185958Z-water-projects-one-signed-sea-field height-tile lookup.
         BindGroupLayoutEntries::with_indices(
             ShaderStages::all(),
             (

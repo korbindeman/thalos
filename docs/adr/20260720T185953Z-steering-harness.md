@@ -1,4 +1,4 @@
-# ADR-0001: Roadmap steering harness — backlog + steer skill + ADR / incident logs
+# ADR-20260720T185953Z-steering-harness: Roadmap steering harness — backlog + steer skill + ADR / incident logs
 
 - **Status:** Accepted
 - **Date:** 2026-07-18
@@ -52,4 +52,6 @@ only, and both flip in the same change.
 - Small standing overhead: backlog row + plan-doc checkbox + spec doc move together in every
   landing change.
 - Auto-memory narrows to genuinely session-personal facts; durable decisions and forensics
-  migrate to ADRs / incidents over time (seeded with ADR-0002..0004, INC-0001).
+  migrate to ADRs / incidents over time (seeded with
+  ADR-20260720T185954Z-analytic-planet-water-never-meshed through
+  ADR-20260720T185956Z-replace-avian-owned-tgs-soft-solver, plus INC-0001).

@@ -176,7 +176,7 @@ const SLOPE_WIDTH_C: f64 = 0.16;
 /// threshold for hundreds of km and the shelf shoulder alone stays in the
 /// −5…−25 m band — drop below the shallow-colour band promptly: real
 /// island seas read as water with pale fringes, not one vast translucent
-/// bank. The wide gentle shelf beyond is unchanged. ADR-0005.
+/// bank. The wide gentle shelf beyond is unchanged. ADR-20260720T185957Z-coastline-as-authored-data.
 const FORESHORE_DEPTH_M: f64 = 15.0;
 const FORESHORE_WIDTH_C: f64 = 2.5e-4;
 
@@ -1300,7 +1300,7 @@ fn hypsometric_height(c: f64) -> f64 {
         let shelf = SHELF_DEPTH_M * x * (2.0 - x);
         // Immediate foreshore drop off the waterline (beach shelf lip): a few
         // metres of depth within the first ~km of shore, so the water there
-        // reads as water instead of an ankle-deep translucent apron. ADR-0005.
+        // reads as water instead of an ankle-deep translucent apron. ADR-20260720T185957Z-coastline-as-authored-data.
         let foreshore = FORESHORE_DEPTH_M * (1.0 - (-s / FORESHORE_WIDTH_C).exp());
         let abyss = (ABYSS_DEPTH_M - SHELF_DEPTH_M)
             * smoothstep(SHELF_WIDTH_C, SHELF_WIDTH_C + SLOPE_WIDTH_C, s);

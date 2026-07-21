@@ -1,6 +1,6 @@
 //! Offline terrain-package baker.
 //!
-//! This is the first producer for ADR-0008's package contract. The current MVP
+//! This is the first producer for ADR-20260720T211046Z-offline-terrain-packages's package contract. The current MVP
 //! producer is the deterministic airless feature compiler; the expensive
 //! hierarchical diffusion producer will replace this producer without changing
 //! the package reader or the game's `SurfaceQuery` consumers.

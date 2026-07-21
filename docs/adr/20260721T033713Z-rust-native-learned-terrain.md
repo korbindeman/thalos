@@ -1,11 +1,11 @@
-# ADR-0013: Mira learned terrain is authored once in Rust with Burn
+# ADR-20260721T033713Z-rust-native-learned-terrain: Mira learned terrain is authored once in Rust with Burn
 
 - **Status:** Accepted
 - **Date:** 2026-07-20
 
 ## Context
 
-ADR-0008 deliberately kept the offline model implementation behind the terrain
+ADR-20260720T211046Z-offline-terrain-packages deliberately kept the offline model implementation behind the terrain
 package boundary and allowed Python/PyTorch. MIRA-1 now needs a concrete model
 toolchain. The same small models may later be useful in an optional bundled
 authoring tool or close-detail reconstruction, while normal play must remain
@@ -39,7 +39,7 @@ capability; MIRA-3's bounded client detail path remains separately budgeted.
   stack. Burn can still execute through Candle where advantageous.
 - **Embed planetary diffusion in normal gameplay now** — rejected because it
   would make latency, model availability, and device support gameplay
-  requirements, contrary to ADR-0008.
+  requirements, contrary to ADR-20260720T211046Z-offline-terrain-packages.
 
 ## Consequences
 

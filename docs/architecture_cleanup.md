@@ -154,7 +154,7 @@ file-deletable dead code" does not exist as separable files:
 - `impostor/bake.rs` previously mixed the dead bake path with reference-cloud
   helpers. CLOUD-1 removed those helpers and the body-name-selected
   `reference_clouds.rs` authority; terrestrial clouds now project the canonical
-  per-body `CloudWeatherField` (ADR-0009).
+  per-body `CloudWeatherField` (ADR-20260720T212214Z-one-weather-field-many-cloud-projections).
 
 The genuinely-dead code is the `compile_terrain_config` /
 `compile_initial_static_surface` / `compile_manifest_to_static_surface` /

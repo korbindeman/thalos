@@ -3,7 +3,7 @@
 //! The game itself still renders exactly one canonical `ShipCamera`. This tool
 //! starts one clean headless game process per typed variant, then assembles the
 //! full-resolution captures into evidence an agent or human can inspect. See
-//! `docs/visual_testing.md` and ADR-0011.
+//! `docs/visual_testing.md` and ADR-20260721T032344Z-isolated-headless-visual-comparisons.
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{

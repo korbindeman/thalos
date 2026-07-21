@@ -1,4 +1,4 @@
-//! Versioned authored terrain-package container (ADR-0008).
+//! Versioned authored terrain-package container (ADR-20260720T211046Z-offline-terrain-packages).
 //!
 //! The package is deliberately producer-agnostic. Revision 1 can carry the
 //! compatibility `StaticSurfaceData` substrate, while its manifest already

@@ -60,7 +60,7 @@ pub struct BodySkyExtra {
     /// matching the impostor water BRDF fallback so the ground↔impostor handoff
     /// stays consistent. Only read when `ocean.y >= 0.5`.
     pub ocean_color_depth: Vec4,
-    /// Resident-height-tile lookup parameters (ADR-0006). The ocean branch
+    /// Resident-height-tile lookup parameters (ADR-20260720T185958Z-water-projects-one-signed-sea-field). The ocean branch
     /// samples signed sea height straight from the udlod height atlas bound at
     /// bindings 11–14 — the exact texels the visible terrain mesh is displaced
     /// from — with the coast atlas as the coarse tail.

@@ -9,7 +9,7 @@ produces tiles; nothing in this doc depends on *how*.
 > compiler, field-DAG pipeline spec, migration plan, research surveys) was moved
 > under [`archive/`](archive/) and reframed as a black box. The current runtime
 > generator and the planned offline package bakery both target the tile contract
-> below; see [mira_airless_mvp.md](mira_airless_mvp.md) and ADR-0008. This doc is the *consumer* side:
+> below; see [mira_airless_mvp.md](mira_airless_mvp.md) and ADR-20260720T211046Z-offline-terrain-packages. This doc is the *consumer* side:
 > tile contract → rendering → shadows → colliders → dynamic features.
 > Atmospheric optics, ocean, clouds, reflections, and lighting/GI live in
 > [atmosphere.md](atmosphere.md).
@@ -110,7 +110,7 @@ changing atlas residency or rendering.
 The fork is therefore **provider-first**. `TileAtlas` and
 `TileTree` own residency, fallback, LOD balancing, and shader-visible
 atlas state; `TileProvider` owns the source of tile contents. The
-offline GeoTIFF/preprocess/`DiskTileProvider` path has been removed. ADR-0008's
+offline GeoTIFF/preprocess/`DiskTileProvider` path has been removed. ADR-20260720T211046Z-offline-terrain-packages's
 new terrain package is an authored `SurfaceQuery` source, not that legacy data
 tree. Persistent reconstructed-tile reuse remains a cache provider/wrapper,
 keyed by package/generator identity + reconstruction version + tile coordinate

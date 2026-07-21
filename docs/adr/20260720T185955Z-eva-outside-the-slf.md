@@ -1,4 +1,4 @@
-# ADR-0003: EVA stays a kinematic body-fixed controller, outside the SLF
+# ADR-20260720T185955Z-eva-outside-the-slf: EVA stays a kinematic body-fixed controller, outside the SLF
 
 - **Status:** Accepted
 - **Date:** 2026-06 (recorded 2026-07-18; design detail in `surface_local.md` §10)

@@ -1,12 +1,12 @@
-# ADR-0008: Offline terrain packages are an authored `SurfaceQuery` backing
+# ADR-20260720T211046Z-offline-terrain-packages: Offline terrain packages are an authored `SurfaceQuery` backing
 
 - **Status:** Accepted
 - **Date:** 2026-07-20
-- **Supersedes:** ADR-0007
+- **Supersedes:** ADR-20260720T211045Z-mira-mvp-runtime-surface
 
 ## Context
 
-ADR-0007 interpreted the deletion of Thalos's old feature compiler and startup
+ADR-20260720T211045Z-mira-mvp-runtime-surface interpreted the deletion of Thalos's old feature compiler and startup
 bake checks as a product decision against baking. The intended product direction
 is different: terrain baking is a first-class offline authoring feature. A
 hierarchical diffusion pipeline, inspired by InfiniteDiffusion / Terrain
@@ -43,7 +43,7 @@ dynamic flatten state.
 
 ## Consequences
 
-- ADR-0013 selects one Rust/Burn model definition for training and inference;
+- ADR-20260721T033713Z-rust-native-learned-terrain selects one Rust/Burn model definition for training and inference;
   Rust also owns the package reader, validator, tile contract, and gameplay
   sampling.
 - The package format, not the model implementation, is the durable boundary.
@@ -89,7 +89,7 @@ decision.
 
 ## Alternatives rejected
 
-1. **Runtime-only analytic generation (ADR-0007).** Rejected because the product
+1. **Runtime-only analytic generation (ADR-20260720T211045Z-mira-mvp-runtime-surface).** Rejected because the product
    explicitly needs learned, offline-authored terrain fidelity and variable
    storage density.
 2. **Run Terrain Diffusion on player GPUs.** Rejected because model/runtime

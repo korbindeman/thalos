@@ -1,4 +1,4 @@
-# ADR-0010: Bevy raymarching is the canonical rocky-body atmosphere
+# ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere: Bevy raymarching is the canonical rocky-body atmosphere
 
 - **Status:** Accepted
 - **Date:** 2026-07-20

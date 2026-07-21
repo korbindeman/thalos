@@ -1,10 +1,10 @@
-# ADR-0007: Mira's airless MVP is a runtime `SurfaceQuery`
+# ADR-20260720T211045Z-mira-mvp-runtime-surface: Mira's airless MVP is a runtime `SurfaceQuery`
 
-- **Status:** Superseded by ADR-0008
+- **Status:** Superseded by ADR-20260720T211046Z-offline-terrain-packages
 - **Date:** 2026-07-20
 
 > **Superseded 2026-07-20:** the product direction explicitly requires offline
-> diffusion baking and adaptive terrain packages. ADR-0008 retains the one
+> diffusion baking and adaptive terrain packages. ADR-20260720T211046Z-offline-terrain-packages retains the one
 > `SurfaceQuery` consumer path but replaces this ADR's runtime-only producer
 > decision.
 
