@@ -195,7 +195,7 @@ autopilot's lead-time sizing can't drift from the controller's gains.
   - `flight` — `FlightState` (body-frame α/β/pitch/bank), the AoA
     envelope (`pitch_command_envelope`), `AssistStatus`.
   - `allocator` — `allocate` + `Allocation`.
-- **`thalos_game::control_bus`** — the Bevy glue: `ControlBusPlugin`, the
+- **`thalos_runtime::control_bus`** — the Bevy glue: `ControlBusPlugin`, the
   `SasState` / `AttitudeControllerState` / `RealizedControl` resources, and
   the `realize_control` system, scheduled in `SimStage::Physics` after the
   demand producers (pilot throttle, warp, autopilot) and before

@@ -32,7 +32,7 @@ added without reworking existing code.
 
 ## Crate layout
 
-New workspace crate: `crates/celestial/` → `thalos_celestial`.
+New workspace crate: `crates/domain/celestial/` → `thalos_celestial`.
 
 ```
 celestial/

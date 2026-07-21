@@ -12,7 +12,7 @@ schematic up during atmospheric flight — useless in an airplane. The MFD makes
 gives a home to future cockpit displays (navigation display, docking, transfer
 plotting, …) without another bespoke panel each time.
 
-Code: `crates/game/src/hud/mfd/` (`mod.rs` + `widgets/`). Added by `MfdPlugin`
+Code: `crates/runtime/game/src/hud/mfd/` (`mod.rs` + `widgets/`). Added by `MfdPlugin`
 from `HudPlugin`.
 
 ## Shape

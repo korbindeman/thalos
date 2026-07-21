@@ -3,12 +3,12 @@
 **Status: design agreed 2026-06-11; Phase A2 (shadow mode)
 implemented and acceptance met 2026-06-12.** The pure classifier
 lives in `thalos_physics_canonical::regime` (unit-tested), the
-game-side resolver + drift checker in `crates/game/src/regime.rs`
+game-side resolver + drift checker in `crates/runtime/game/src/regime.rs`
 (`RegimePlugin`); the legacy machinery still drives everything and no
 consumer reads the record yet.
 
 A2 acceptance results (~51 k drift-checked frames, reading
-`thalos_game::regime::RegimeDriftDiagnostics`): **zero steady-state
+`thalos_runtime::regime::RegimeDriftDiagnostics`): **zero steady-state
 mismatches in every check** (role, authority, warp cap, prediction);
 three single-frame blips total, all on the documented §3.2 edges
 (pause→1× snap; the landed throttle release). Scenario coverage:
@@ -49,7 +49,7 @@ what:
   `AuthorityMode` (5 variants, 2 never constructed) and game-side
   `AvianRole` (`Paused`/`AttitudeOnly`/`Full`) are parallel
   classifications kept aligned by `manage_authority`
-  (`crates/game/src/local_physics.rs`), which carries two
+  (`crates/runtime/game/src/local_physics.rs`), which carries two
   special-case pins jumped ahead of its generic match (grounded EVA
   pinned to `LocalRigidBody`; landed ship + warp request collapsed to
   `BodyFixed`). `docs/surface_local.md` §5 predicted this machinery
@@ -59,7 +59,7 @@ what:
   `max_stable` + throttle ≤ 1e-3) is computed independently three
   times — `manage_authority`'s landed-warp collapse,
   `enforce_warp_altitude_limits`' `ship_grounded_stationary`
-  (`crates/game/src/bridge.rs`), and `collapse_or_constrain_warp`'s
+  (`crates/runtime/game/src/bridge.rs`), and `collapse_or_constrain_warp`'s
   `stable_contact_reached` — with drift between them (one reads
   `warp.target_speed()`, another `warp.speed()`). "Is the craft
   ballistic" is re-derived again in `bridge::ship_is_ballistic` to
@@ -81,7 +81,7 @@ what:
   `enforce_warp_altitude_limits`, `detect_terrain_impact`).
 - **Dead spec vocabulary**: `AuthorityMode::WarpIntegrated` and
   `::Docked` are never constructed outside tests; canonical
-  `SimClock`/`TimeMode` (`crates/physics_canonical/src/canonical.rs`)
+  `SimClock`/`TimeMode` (`crates/simulation/physics_canonical/src/canonical.rs`)
   are entirely unused and the former name-clashes with the real
   game-side `sim_clock::SimClock`.
 
@@ -331,7 +331,7 @@ and compare stability and effort directly.
 ## 5. Vocabulary cleanup (Phase B) — **done (2026-06-12)**
 
 - **Deleted** canonical `SimClock` + `TimeMode` — unused, and the name
-  collided with the real `crates/game/src/sim_clock.rs` clock.
+  collided with the real `crates/runtime/game/src/sim_clock.rs` clock.
 - **Deleted** `AuthorityMode::WarpIntegrated` and
   `AuthorityMode::Docked` (and their `WarpIntegratorId` /
   `AssemblyId` / `DockingPortId` payload aliases, and the matching
@@ -340,7 +340,7 @@ and compare stability and effort directly.
   docking) on their own merits. `AuthorityMode` is now exactly the
   three implemented variants: `OnRails` / `LocalRigidBody` /
   `BodyFixed`.
-- **Split `crates/game/src/local_physics.rs`** (~3 k lines after the
+- **Split `crates/runtime/game/src/local_physics.rs`** (~3 k lines after the
   A3 deletions) into `local_physics/` with eight focused modules —
   `spawn` (bubble lifecycle, SOI rebase, debug drops, EVA placement),
   `terrain_patch`, `snap` (snap/readback/re-anchor), `forces`, `gear`,

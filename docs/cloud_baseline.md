@@ -139,7 +139,7 @@ The off-screen screenshot target adds 7.91 MiB at 1080p or 14.06 MiB at
    gap with clear-sky background and nearby opaque curtains; there is no
    convincing continuous extinction/fog response around the camera.
 
-Generated captures and reports live under `tools/screenshots/cloud0/` and are
+Generated captures and reports live under `artifacts/visual/latest/cloud0/` and are
 ignored by Git by design. The preset definitions, machine-readable report
 schema, exact memory accounting, and this inventory are the durable baseline.
 
@@ -147,7 +147,7 @@ schema, exact memory accounting, and this inventory are the durable baseline.
 
 The first fidelity checkpoint deliberately keeps the CLOUD-0 captures above as
 the immutable before-state. Its matched five-view captures retain the same
-paths under `tools/screenshots/` and report:
+paths under `artifacts/visual/latest/` and report:
 
 | View | Internal target | Quality | GPU mean | GPU p95 |
 |---|---:|---:|---:|---:|

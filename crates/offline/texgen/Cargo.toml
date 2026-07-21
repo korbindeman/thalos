@@ -1,0 +1,10 @@
+[package]
+name = "thalos_texgen"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Procedural texture compiler source. The production executable lives under
+# `tools/texgen`; runtime rendering consumes only its generated assets.
+
+[dependencies]

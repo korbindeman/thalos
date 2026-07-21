@@ -64,12 +64,12 @@ jobs:
           # record / the Avian-free `LocalCraftKinematics` readout. Keeping this
           # surface small is what makes the eventual swap to the owned
           # `thalos_physics` solver surgical (Phase 0). Allowlist:
-          #   crates/physics_local/**           the boundary crate itself
-          #   crates/game/src/local_physics/**  snap/readback/forces/colliders/clock
-          #   crates/game/src/aero.rs           force layer (runs inside the substep)
-          #   crates/game/src/regime.rs         authority executor + classifier
-          #   crates/game/src/player_controller.rs + debug.rs   the EVA exception
-          allow='crates/physics_local/|crates/game/src/local_physics/|crates/game/src/aero\.rs|crates/game/src/regime\.rs|crates/game/src/player_controller\.rs|crates/game/src/debug\.rs'
+          #   crates/simulation/physics_local/**           the boundary crate itself
+          #   crates/runtime/game/src/local_physics/**  snap/readback/forces/colliders/clock
+          #   crates/runtime/game/src/aero.rs           force layer (runs inside the substep)
+          #   crates/runtime/game/src/regime.rs         authority executor + classifier
+          #   crates/runtime/game/src/player_controller.rs + debug.rs   the EVA exception
+          allow='crates/simulation/physics_local/|crates/runtime/game/src/local_physics/|crates/runtime/game/src/aero\.rs|crates/runtime/game/src/regime\.rs|crates/runtime/game/src/player_controller\.rs|crates/runtime/game/src/debug\.rs'
           offenders="$(grep -rnE 'avian3d|avian::' crates --include='*.rs' | grep -vE "$allow" || true)"
           if [ -n "$offenders" ]; then
             echo "::error::Avian named outside the backend-seam allowlist (docs/physics.md):"

@@ -7,7 +7,8 @@ set dotenv-filename := ".env.just"
 # once into `bevy_dylib`; subsequent game/screenshot/preview iterations relink
 # only Thalos crates. Release/build/trace paths stay static. Override the whole
 # game command in `.env.just` to opt out locally.
-game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features bevy/dynamic_linking")
+game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features dev-renderer")
+capture_command := env_var_or_default("THALOS_CAPTURE_COMMAND", "cargo run -p thalos_capture_host --features dev-renderer")
 
 # Run the game. Bare `just game` boots to the start screen (scenario
 # picker / shipyard / settings); naming a mode skips it and launches
@@ -31,16 +32,16 @@ game mode=env_var_or_default("THALOS_SPAWN", "menu"):
 # (or the pause menu's SHIPYARD button). There is no standalone editor binary.
 
 # Headless procedural-object gallery: renders each object (trees, conifer,
-# shrub; rocks etc. later) to a PNG under tools/preview/out/, then exits. No
+# shrub; rocks etc. later) to a PNG under artifacts/visual/latest/object_preview/, then exits. No
 # window — both a human and an agent can run it and inspect the images. Lit with
 # the real TreeMaterial + sky model so it matches the in-game look. Add objects
-# in crates/body_render/examples/object_preview.rs.
+# in crates/rendering/render/examples/object_preview.rs.
 preview:
     cargo run -p thalos_body_render --features bevy/dynamic_linking --example object_preview
 
 # UI kitchen sink: renders every thalos_ui token/widget over a test scene to
-# tools/ui_preview/kitchen_sink.png headlessly, then exits — agents iterate on
-# the UI kit by reading the PNG. See crates/ui/examples/kitchen_sink.rs.
+# artifacts/visual/latest/ui_preview.png headlessly, then exits — agents iterate on
+# the UI kit by reading the PNG. See crates/interface/ui/examples/kitchen_sink.rs.
 ui-preview:
     cargo run -p thalos_ui --features bevy/dynamic_linking,bevy/wayland,bevy/jpeg --example kitchen_sink
 
@@ -51,7 +52,7 @@ ui-preview-window:
 
 # Interactive window variant of `just preview`: opens a window with an orbit
 # camera — drag to orbit, scroll to zoom, ←/→ cycle objects, S saves a
-# screenshot to tools/preview/out/<object>_view.png.
+# screenshot to artifacts/visual/latest/object_preview/<object>_view.png.
 preview-window:
     cargo run -p thalos_body_render --features bevy/dynamic_linking --example object_preview -- --window
 
@@ -72,7 +73,7 @@ preview-window:
 # reproduces the canonical eye-level EVA spawn and its horizon/LOD coverage.
 # `earth-reference` is the 3:2 ISS-like custom-atmosphere calibration view.
 # `just screenshot latest` replays the active 3-D perspective most recently
-# saved by the player with F8 and writes tools/screenshots/latest_perspective.png.
+# saved by the player with F8 and writes artifacts/visual/latest/latest_perspective.png.
 # Override the framing
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
@@ -82,34 +83,35 @@ preview-window:
 # _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL). Ocean probes
 # additionally accept THALOS_SCREENSHOT_OCEAN_TIME for deterministic phase.
 screenshot preset="spaceport-aerial":
-    python tools/visual_capture.py capture "{{preset}}"
+    cargo run -p thalos_capture --bin thalos_capture -- shot "{{preset}}"
 
 # Authoritative one-shot capture: clean process, full preset warmup, then exit.
 screenshot-cold preset="spaceport-aerial":
-    {{ if os() == "windows" { "$env:THALOS_SCREENSHOT='" + preset + "'; " } else { "THALOS_SCREENSHOT='" + preset + "' " } }}{{game_command}}
+    {{ if os() == "windows" { "$env:THALOS_SCREENSHOT='" + preset + "'; " } else { "THALOS_SCREENSHOT='" + preset + "' " } }}{{capture_command}}
 
 capture-status:
-    python tools/visual_capture.py status
+    cargo run -p thalos_capture --bin thalos_capture -- status
 
 capture-stop:
-    python tools/visual_capture.py stop
+    cargo run -p thalos_capture --bin thalos_capture -- stop
 
 # Deterministic visual A/B or N-way comparison. The lightweight orchestrator
 # sends every variant to the same persistent renderer used by `just screenshot`,
 # resetting temporal histories between captures. Outputs full captures + contact sheet +
 # diffs/wipes + manifest under the disposable agent scratch tree at
-# tools/agent_scratch/screenshots/comparisons/<preset>/<axis>/.
+# artifacts/visual/runs/comparisons/<preset>/<axis>/.
 # Axes include ssao (off/on/raw), terrain-lighting, terrain-culling,
 # terrain-regolith-filter, and cloud-reconstruction. See docs/visual_testing.md.
 compare preset="spaceport-aerial" axis="ssao":
-    cargo build -p thalos_game --example visual_compare
-    {{ if os() == "windows" { "target/debug/examples/visual_compare.exe" } else { "./target/debug/examples/visual_compare" } }} "{{preset}}" "{{axis}}"
+    cargo build -p thalos_capture --bins
+    {{ if os() == "windows" { "target/debug/visual_compare.exe" } else { "./target/debug/visual_compare" } }} "{{preset}}" "{{axis}}"
 
 # Clean-process evidence lane. Use after exploratory iteration and for structural
 # pipeline axes (terrain-culling automatically falls back here).
 compare-cold preset="spaceport-aerial" axis="ssao":
-    cargo build -p thalos_game --features bevy/dynamic_linking --bin thalos_game --example visual_compare
-    {{ if os() == "windows" { "target/debug/examples/visual_compare.exe" } else { "./target/debug/examples/visual_compare" } }} "{{preset}}" "{{axis}}" --cold
+    cargo build -p thalos_capture_host --features dev-renderer
+    cargo build -p thalos_capture --bins
+    {{ if os() == "windows" { "target/debug/visual_compare.exe" } else { "./target/debug/visual_compare" } }} "{{preset}}" "{{axis}}" --cold
 
 # Offline authored terrain package. The MVP producer is the deterministic
 # airless compiler; ADR-20260720T211046Z-offline-terrain-packages's diffusion producer will emit the same package
@@ -121,21 +123,30 @@ bake body="Mira":
 validate-bake body="Mira":
     cargo run --release -p thalos_terrain_baker -- validate {{body}}
 
+# Rebuild the versioned vegetation atlases consumed by the runtime renderer.
+texgen:
+    cargo run --release -p thalos_texgen_tool
+
 # Whole-planet biome map export (headless, agent-readable): renders the true
 # in-game macro palette + a flat biome-class map with per-biome area stats to
 # target/world_map.png + target/world_biomes.png, then exits. Defaults to
 # web-mercator; knobs (set as env vars): WORLD_PROJ=equirect, WORLD_MODE=hypso
 # (legacy ramp), WORLD_W, WORLD_SEED, WORLD_RADIUS_KM, and the WORLD_ZOOM /
-# WORLD_TRANSECT probe modes. See crates/terrain/examples/world_map.rs.
+# WORLD_TRANSECT probe modes. See tools/world_map/src/main.rs.
 map:
-    cargo run --release -p thalos_terrain --example world_map
+    cargo run --release -p thalos_world_map
 
 # CLOUD-0's repeatable five-view baseline. Each preset writes a PNG under
-# tools/screenshots/ and a same-named JSONL report under tools/diagnostics/.
+# artifacts/visual/latest/ and a same-named JSONL report under artifacts/diagnostics/.
 # Use the single-preset `screenshot` recipe with overrides for 1440p,
 # temporal-off, or quality sweeps.
 cloud-baseline:
-    $presets = @('cloud-runway', 'cloud-cruise', 'cloud-interior', 'cloud-limb', 'cloud-sunset'); foreach ($preset in $presets) { $env:THALOS_SCREENSHOT = $preset; cargo run -p thalos_game; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+    $presets = @('cloud-runway', 'cloud-cruise', 'cloud-interior', 'cloud-limb', 'cloud-sunset'); foreach ($preset in $presets) { cargo run -p thalos_capture --bin thalos_capture -- shot $preset; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
+
+# Fast edit-loop type check. Pass another package when working below the game
+# composition boundary: `just check thalos_body_render`.
+check package="thalos_game":
+    cargo check -p "{{package}}"
 
 # Build everything
 build:

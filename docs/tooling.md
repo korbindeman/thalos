@@ -13,11 +13,12 @@ home directory or the workspace-local `.cargo/config.toml`; the workspace file
 is ignored by Git for this purpose. The `just game` command can also be
 customized locally with `.env.just`, which is ignored by Git.
 
-This includes:
+Portable incremental and debug-info policy lives in the root `Cargo.toml`.
+Local config contains only:
 
-- `CARGO_INCREMENTAL` overrides for platform-specific incremental behavior.
-- Debug-info reductions for local iteration.
-- Local linker experiments.
+- the supported platform linker;
+- the sccache wrapper and cache location;
+- a per-Cargo-process job budget sized for expected concurrent agents.
 
 Do not add a compiler-backend override. The pinned stable toolchain uses LLVM;
 any future deviation is a cross-platform architecture decision, not local tuning.
@@ -26,7 +27,7 @@ any future deviation is a cross-platform architecture decision, not local tuning
 
 `just game` and the explicit cold screenshot lane use the `justfile`'s shared
 `game_command`, which defaults to
-`cargo run -p thalos_game --features bevy/dynamic_linking`. `just preview` and
+`cargo run -p thalos_game --features dev-renderer`. `just preview` and
 `just ui-preview` enable the same Bevy feature for their own packages; the UI
 preview also requests the game's `wayland`/`jpeg` Bevy feature set so Cargo can
 reuse the same `bevy_dylib` artifact instead of compiling a second variant.
@@ -55,7 +56,7 @@ THALOS_GAME_COMMAND="cargo run -p thalos_game"
 ```
 
 The high-frequency graphics loop is separate: `just screenshot` starts (or
-reuses) one static `thalos_game` renderer through Dioxus/Subsecond, with the
+reuses) one static `thalos_capture_host` renderer through Dioxus/Subsecond, with the
 `dev-iteration` feature. Rust ECS-system bodies hot-patch without relinking or
 restarting the world. Bevy watches normal asset shaders and WGSL registered via
 `embedded_asset!`, so both shader forms reload in the same process. `just compare`
@@ -84,7 +85,7 @@ steady-state relink.
 
 `just game` normally starts borderless fullscreen. The renderer backend
 defaults to **Vulkan on Windows** (set in `wgpu_settings_from_env`,
-`crates/game/src/main.rs`) — wgpu's own default prefers DX12 there, and DX12
+`crates/runtime/game/src/lib.rs`) — wgpu's own default prefers DX12 there, and DX12
 is this dev machine's documented unstable path (swapchain-acquire panics,
 silent device death, and a 2026-07-19 full DeviceLost wedge requiring a
 reboot). Other platforms keep the wgpu default (Metal on macOS). If a
@@ -112,7 +113,7 @@ the upstream Bevy fractional-scale text bug is fixed.
 
 `THALOS_WGPU_BACKEND` is a Thalos-facing alias for the same class of wgpu
 backend selection that `WGPU_BACKEND` provides, but it is scoped to our game
-startup helper in `crates/game/src/main.rs` and is easy to keep in `.env.just`.
+startup helper in `crates/runtime/game/src/lib.rs` and is easy to keep in `.env.just`.
 It overrides the Vulkan-on-Windows default above: `auto` restores wgpu's own
 selection (DX12 on Windows), `dx12` forces DX12 for A/B comparison.
 
@@ -124,7 +125,7 @@ that floor shows no movement. Set `THALOS_VSYNC=off` (also accepts
 `0`/`false`/`no`) to launch with `PresentMode::AutoNoVsync` and read the true,
 uncapped frame time while still allowing wgpu to fall back to a supported
 non-vsync present mode; anything else keeps the vsync default. Read by
-`overrides_from_env` in `crates/game/src/window_settings.rs` as a session
+`overrides_from_env` in `crates/runtime/game/src/window_settings.rs` as a session
 override: it wins over the persisted `user/settings.ron` vsync preference and
 greys out the VSync control in the settings menu, without being written into
 the file. (Vsync can also be toggled live from the settings menu's Window
@@ -145,23 +146,38 @@ user runs the game.
 
 Generated evidence has three deliberately separate homes:
 
-- `tools/screenshots/` contains only the latest canonical whole-scene views.
+- `artifacts/visual/latest/` contains only the latest canonical whole-scene views.
   Each `just screenshot <preset>` overwrites its stable preset filename; do not
   keep numbered experiments or crops beside it.
-- `tools/agent_scratch/` is disposable visual working space. Put ad-hoc
+- `artifacts/visual/runs/` is disposable visual working space. Put ad-hoc
   `THALOS_SCREENSHOT_OUT` captures there; `just compare` writes its complete
-  matrices under `tools/agent_scratch/screenshots/comparisons/` automatically.
-- `tools/diagnostics/` contains machine-readable runtime output. F8 writes the
+  matrices under `artifacts/visual/runs/comparisons/` automatically.
+- `artifacts/diagnostics/` contains machine-readable runtime output. F8 writes the
   latest player-to-agent camera handoff to `latest_perspective.json`; memory and
   grass diagnostics also default there, and a bare filename supplied through
   `THALOS_GRASS_LOG`, `THALOS_SHADOW_LOG`, or
   `THALOS_SHIPYARD_SELECT_LOG` is resolved there. An explicit relative path
   with a parent, or an absolute path, is still honored.
 
-All three output trees are ignored by Git (apart from the scratchpad README).
-The procedural-object and UI preview galleries keep their existing dedicated
-locations because they are stable multi-view galleries, not whole-scene
-iteration history.
+All three output trees are ignored by Git. The temporary procedural-object and
+UI preview examples also write beneath `artifacts/visual/latest/`; future
+in-context runtime presets will replace those examples without creating another
+output root.
+
+### Local storage hygiene
+
+`target/` and `user/tilecache/` are disposable caches. Preserve the small
+`user/*.ron` settings files, but clear the tile cache whenever its multi-gigabyte
+footprint is no longer buying useful terrain-iteration latency. A full
+`cargo clean` is the canonical reset for compiler output; do not park screenshots,
+logs, or bakes directly under `target/`, because they disappear with that reset.
+
+Remove obsolete worktrees with `git worktree remove`, followed by
+`git worktree prune`, rather than deleting their directories manually. Prefer
+worktrees outside the main checkout so their private `target/` trees are visible
+as separate storage costs. Before removing a worktree, verify both its dirty
+state and commits absent from `main`; unique research branches and their authored
+data are not caches.
 
 ### Fast build setup — see docs/build_speed.md
 
@@ -177,7 +193,7 @@ Invariants that still bind here (detailed in build_speed.md):
 
 - **One Cargo command at a time** against the workspace `target/` — concurrent
   `game`/`screenshot`/`check` invocations serialize on the target lock and
-  contend for CPU + several GiB of compiler memory. Use `cargo check-game` while
+  contend for CPU + several GiB of compiler memory. Use `just check` while
   editing, then one linked `just game`/`just screenshot`. (Genuinely parallel
   agents get their own worktree + target dir + shared sccache instead — see
   build_speed.md §7.2.)

@@ -152,11 +152,11 @@ time-of-day changes and warp.
 
 Two shadow systems exist — the central F6 debt:
 
-1. **Custom cascade rig** — `crates/game/src/rendering/sun_shadow.rs`:
+1. **Custom cascade rig** — `crates/runtime/game/src/rendering/sun_shadow.rs`:
    self-managed 3-cascade ortho depth maps (4096², `SHADOW_CASTER_LAYER = 8`,
    copy-node → `Depth32Float`), **craft-centred** framing (deliberate — dodges a
    frame-lagged crawl; keep it). Sampled via the `thalos::shadow` WGSL library
-   (`crates/body_render/src/shading/shaders/shadow.wgsl`: `ShadowCascadeBlock`,
+   (`crates/rendering/render/src/shading/shaders/shadow.wgsl`: `ShadowCascadeBlock`,
    `sun_shadow_factor`).
    - **Receive:** terrain (`body_terrain.wgsl`), trees, grass (per-vertex single
      tap), rocks, ground_patch (preview diorama), and the hull (F6b:
@@ -246,8 +246,8 @@ through warp and settle instantly after.
 
 ## Pointers
 
-`crates/game/src/rendering/sun_shadow.rs` · `crates/body_render/src/shading/shaders/shadow.wgsl`
-· hull material `crates/body_render/src/craft/` · `crates/game/src/runway.rs`,
+`crates/runtime/game/src/rendering/sun_shadow.rs` · `crates/rendering/render/src/shading/shaders/shadow.wgsl`
+· hull material `crates/rendering/render/src/craft/` · `crates/runtime/game/src/runway.rs`,
 `structures.rs` · doc rows W5/W6/W12/W18/W2 in `docs/graphics_fidelity.md` §4.2
 · memories: `craft-shadow-caster-layer`, `directional-light-cascade-count-invariant`,
 `grass-receives-sun-shadows`, `f5-screen-space-ao` (the AO field is the ambient

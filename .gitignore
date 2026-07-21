@@ -1,35 +1,34 @@
-/target
-/stage-bakes
-# Rendered output of the procedural-object previewer (`just preview`).
-/tools/preview/out/
-# Headless whole-scene captures (`just screenshot` / THALOS_SCREENSHOT).
-/tools/screenshots/
-# Disposable A/B matrices and ad-hoc agent capture iterations.
-/tools/agent_scratch/*
-!/tools/agent_scratch/README.md
-# Machine-readable runtime diagnostics (JSONL and related probe output).
-/tools/diagnostics/
-/tools/ui_preview/
-# Baked procedural textures (`cargo run -p thalos_texgen --example bake`).
-/tools/texgen/out/
+# Rust build output.
+/target/
+
+# Generated visual evidence, video frames, and machine-readable diagnostics.
+/artifacts/
+
 # Per-user runtime settings written by the game (window mode, UI scale, …).
 /user/
-Cargo.lock
+
+# Local build and launcher configuration.
+/.cargo/config.toml
+/.cargo/config.toml.bak*
+/.env.just
+
+# OS, compiler, and language caches.
 .DS_Store
-.cargo/config
-.cargo/config.toml
-.env.just
-.thalos_dumps/
+rustc-ice-*.txt
+**/__pycache__/
+
 # Session-local Claude state stays ignored, but project skills (steer,
 # wgsl-bevy) are shared infrastructure and are tracked.
-.claude/*
-!.claude/skills/
-.codex/
-crates/ui/tools/ui_preview/kitchen_sink.png
-rustc-ice-2026-07-20T17_25_42-22912.txt
+/.claude/*
+!/.claude/skills/
+
+# Codex session state is local; the checked-in environment definition is not.
+/.codex/*
+!/.codex/environments/
+!/.codex/environments/environment.toml
+
 # MIRA-1 training data and run artifacts. Manifests/configs stay tracked.
-terrain_data/raw/
-terrain_data/processed/
-terrain_data/synthetic/
-terrain_runs/
-**/__pycache__/
+/terrain_data/raw/
+/terrain_data/processed/
+/terrain_data/synthetic/
+/terrain_runs/

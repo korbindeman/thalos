@@ -113,7 +113,7 @@ End state replaces `{physics_canonical, physics_local}` with
   resolver). Bridges to `thalos_physics` in the SLF.
 - **`physics_local`** — **dissolves.** Once Avian is gone, its
   quarantine job is done; the remaining thin Bevy ECS glue (components,
-  plugin wiring, collider construction) moves into `crates/game`.
+  plugin wiring, collider construction) moves into `crates/runtime/game`.
 
 This delivers the original "merge the physics crates" instinct: the
 Avian-quarantine crate disappears. The split that remains —
@@ -183,11 +183,11 @@ The **only** code permitted to name `thalos_physics_local::avian` types
 
 | Module | Role |
 |---|---|
-| `crates/physics_local/**` | the boundary crate (Avian re-export + collider/body/readout construction, clock/plugin setup) |
-| `crates/game/src/local_physics/**` | the per-frame executor systems: snap/readback, forces, gear, ground, terrain/structure collider lifecycle, clock |
-| `crates/game/src/aero.rs` | aero force layer — runs *inside* the Avian substep (`PhysicsSchedule`), reads live kinematics, writes force/torque |
-| `crates/game/src/regime.rs` | the authority executor + ground-contact classifier (reads `ContactGraph` + the settle SLF pose) |
-| `crates/game/src/player_controller.rs`, `crates/game/src/debug.rs` | the **EVA exception** (body-centered kinematic seam; `surface_local.md` §10) + debug hitbox/teleport |
+| `crates/simulation/physics_local/**` | the boundary crate (Avian re-export + collider/body/readout construction, clock/plugin setup) |
+| `crates/runtime/game/src/local_physics/**` | the per-frame executor systems: snap/readback, forces, gear, ground, terrain/structure collider lifecycle, clock |
+| `crates/runtime/game/src/aero.rs` | aero force layer — runs *inside* the Avian substep (`PhysicsSchedule`), reads live kinematics, writes force/torque |
+| `crates/runtime/game/src/regime.rs` | the authority executor + ground-contact classifier (reads `ContactGraph` + the settle SLF pose) |
+| `crates/runtime/game/src/player_controller.rs`, `crates/runtime/game/src/debug.rs` | the **EVA exception** (body-centered kinematic seam; `surface_local.md` §10) + debug hitbox/teleport |
 
 Everything else reads `LocalCraftKinematics` (SLF kinematics), `CraftStateMirror`
 (inertial canonical), or the `CraftRegime` record. When `thalos_physics` lands,

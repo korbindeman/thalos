@@ -201,7 +201,7 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 >
 > **Shared foliage material model (2026-06-29).** A tree's leaf/bark colour now
 > has **one definition** — the `thalos::foliage` WGSL library
-> (`crates/body_render/src/shading/shaders/foliage.wgsl`, `foliage_base_albedo` +
+> (`crates/rendering/render/src/shading/shaders/foliage.wgsl`, `foliage_base_albedo` +
 > `foliage_hue_tint`), the *albedo* analogue of `thalos::lighting::shade_foliage`.
 > Both the near mesh trees (`tree.wgsl`) and the **impostor bake**
 > (`tree_bake.wgsl`) derive their colour from it, on the same atlas sample + baked
@@ -316,26 +316,26 @@ older `TerrainFlatten` `nearest_flatten` exclusion.
 
 ### 3.1 Code layout
 
-- **`crates/body_render/src/ground/tile_lattice.rs`** *(new, refactor)* — the
+- **`crates/rendering/render/src/ground/tile_lattice.rs`** *(new, refactor)* — the
   cube-sphere lattice math (`cube_face_uv` / `cube_dir` / `tile_frame` /
   `tiles_per_side` / `tile_uv_span`), lifted out of `vegetation.rs` into a
   `TileLattice { tiles_per_side }`. Grass switches to it with no behavior
   change. One lattice definition shared by grass, shrubs, trees — they cannot
   drift.
-- **`crates/body_render/src/ground/scatter.rs`** *(new, pure)* —
+- **`crates/rendering/render/src/ground/scatter.rs`** *(new, pure)* —
   `VegLayer`, `VegSpeciesPlacement`, `VegInstance`, `VegScatterTile`,
   `build_scatter_tile`, `clump_field`, the shared `placement_gate` helper, the
   instanced material (`VegInstancedMaterial`), and the foliage impostor material
   (`FoliageImpostorMaterial`). No Bevy beyond mesh/material types, like
   `vegetation.rs`.
-- **`crates/body_render/src/ground/vegetation.rs`** *(existing)* — keeps the
+- **`crates/rendering/render/src/ground/vegetation.rs`** *(existing)* — keeps the
   grass blade/clump megamesh builder + `GrassMaterial`. Gains blade-LOD
   variants (7-vert → 3-vert → crossed-quad clump).
-- **`crates/game/src/rendering/vegetation.rs`** *(new, driver)* — the unified
+- **`crates/runtime/game/src/rendering/vegetation.rs`** *(new, driver)* — the unified
   driver: `SpeciesLibrary` resource + drive / finalize / anchor / rebuild / LOD
   systems, a generalization of today's `grass.rs`. Hosts trees and shrubs
   first; grass folds in at Phase 4.
-- **`crates/game/src/rendering/grass.rs`** *(existing)* — stays as the grass
+- **`crates/runtime/game/src/rendering/grass.rs`** *(existing)* — stays as the grass
   driver until Phase 4 folds it into the unified driver.
 - **Impostor bake** lives near `scatter.rs` (foliage octahedral atlas), distinct
   from the top-level `body_render::impostor` module (distant *planet*
@@ -936,16 +936,16 @@ sends screenshots (agents do not launch it).
 
 ## 17. Code pointers
 
-- Lattice/scatter (engine): `crates/body_render/src/ground/tile_lattice.rs`,
+- Lattice/scatter (engine): `crates/rendering/render/src/ground/tile_lattice.rs`,
   `scatter.rs`, `vegetation.rs`, `grass.wgsl`.
-- Driver (game): `crates/game/src/rendering/vegetation.rs` (new),
+- Driver (game): `crates/runtime/game/src/rendering/vegetation.rs` (new),
   `grass.rs` (until Phase 4).
-- Seams: `crates/body_render/src/ground/height_source.rs` (`HeightSource`),
+- Seams: `crates/rendering/render/src/ground/height_source.rs` (`HeightSource`),
   `pipeline.rs` (`material_masks_from_heights`),
   `rendered_height.rs` (`TerrainPatchBasis`).
-- Terrain shader handoff: `crates/body_render/src/ground/body_terrain.wgsl`.
-- Anchoring reference: `crates/game/src/runway.rs`
-  (`update_runway_transform`), `crates/game/src/rendering/grass.rs`
+- Terrain shader handoff: `crates/rendering/render/src/ground/body_terrain.wgsl`.
+- Anchoring reference: `crates/runtime/game/src/runway.rs`
+  (`update_runway_transform`), `crates/runtime/game/src/rendering/grass.rs`
   (`update_grass_transforms`).
 - Related specs: `docs/terrain.md` (tile contract + shipped grass layer),
   `docs/atmosphere.md` (wind/weather neighbor systems),

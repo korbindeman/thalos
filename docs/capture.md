@@ -1,7 +1,9 @@
 # Capture architecture
 
-**Status:** target accepted 2026-07-21; the current persistent screenshot lane
-is the working foundation, and CAP-1–CAP-4 migrate it to the target below.
+**Status:** migration active 2026-07-21. CAP-1 has landed compile-clean; the
+interactive and headless apps are thin shells over `thalos_runtime`. The typed
+protocol, dedicated capture host, and lightweight Rust controller have landed;
+the coupled capture systems still move out of the runtime incrementally.
 
 ## 1. Goal
 
@@ -35,7 +37,7 @@ it selects a platform shell with no primary window and adds the capture runtime.
 
 ### 2.1 Runtime modules
 
-The current `crates/game/src` moves first into a library and is organized by
+The current `crates/runtime/game/src` moves first into a library and is organized by
 responsibility, not one crate per feature:
 
 ```text
@@ -153,7 +155,7 @@ prove it renders every canonical preset through the shared runtime.
 
 ### CAP-3 — Rust CLI, comparisons, and artifacts
 
-Replace `visual_capture.py` and `visual_compare.rs`, retain `just` aliases,
+Replace the Python controller and runtime-owned comparison example, retain `just` aliases,
 introduce typed request/result manifests, move generated evidence to
 `artifacts/`, and make pipeline/render errors fatal to a request.
 

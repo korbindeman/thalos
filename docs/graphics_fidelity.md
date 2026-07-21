@@ -403,7 +403,7 @@ Rendering splits into two concerns on a **state-in / pixels-out** boundary
   once. *(The craft **hull material** already moved here — `body_render::craft`,
   Phase 4a in `docs/architecture.md` — which is what unblocks F6b: the hull can now
   sample `thalos::shadow`. The editor itself has since moved out of
-  `thalos_shipyard` into `thalos_game::shipyard_editor`; the remaining Phase-4a
+  `thalos_shipyard` into `thalos_runtime::shipyard_editor`; the remaining Phase-4a
   follow-up is the material-application split + dependency flip.)*
 - **Drivers — "what to shade this frame":** systems that read `SolarSystemState` /
   `CraftState` / `Simulation` → fill uniforms, decide LOD swaps, spawn bodies,
@@ -481,13 +481,13 @@ made (per CLAUDE.md) and reflected into the relevant system spec as they land.
 
 ---
 
-*Key file anchors:* spine `crates/body_render/src/shading/shaders/lighting.wgsl`
+*Key file anchors:* spine `crates/rendering/render/src/shading/shaders/lighting.wgsl`
 (metallic stub @564, F0 @455); craft divergence `assets/shaders/ship_part.wgsl` +
-`crates/game/src/rendering/lighting.rs` (magic constants @267/272/273/388,
+`crates/runtime/game/src/rendering/lighting.rs` (magic constants @267/272/273/388,
 physical flux @126, flat hull lux @373); terrain material
-`crates/body_render/src/ground/body_terrain.wgsl` + `landcover.wgsl` ↔
-`crates/body_render/src/ground/landcover.rs`; shadow rig
-`crates/game/src/rendering/sun_shadow.rs` + `shading/shaders/shadow.wgsl`;
-atmosphere `crates/body_render/src/shading/{atmosphere.rs,multi_scatter.rs,sky_view.rs}` +
-`ground/body_sky.wgsl`; reflection probe `crates/game/src/reflection_probe.rs`;
-post `crates/body_render/src/impostor/post_stack.rs` (AgX @37).
+`crates/rendering/render/src/ground/body_terrain.wgsl` + `landcover.wgsl` ↔
+`crates/rendering/render/src/ground/landcover.rs`; shadow rig
+`crates/runtime/game/src/rendering/sun_shadow.rs` + `shading/shaders/shadow.wgsl`;
+atmosphere `crates/rendering/render/src/shading/{atmosphere.rs,multi_scatter.rs,sky_view.rs}` +
+`ground/body_sky.wgsl`; reflection probe `crates/runtime/game/src/reflection_probe.rs`;
+post `crates/rendering/render/src/impostor/post_stack.rs` (AgX @37).

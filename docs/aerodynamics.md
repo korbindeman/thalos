@@ -2,7 +2,7 @@
 
 Atmospheric flight forces (drag, lift, control surfaces) for spacecraft **and
 aircraft**. The force physics is a small **native** model,
-[`thalos_physics_canonical::aero`] (`crates/physics_canonical/src/aero.rs`); this
+[`thalos_physics_canonical::aero`] (`crates/simulation/physics_canonical/src/aero.rs`); this
 doc is that model plus the consumer-side integration story.
 
 Status: **native bubble-side flight model.** A wingless craft (rocket/capsule)
@@ -92,7 +92,7 @@ non-dimensional first cuts tuned in-game.
 
 ## Force-only coupling (Thalos owns mass, inertia, gravity)
 
-`crates/game/src/aero.rs` is the adapter. Each physics step
+`crates/runtime/game/src/aero.rs` is the adapter. Each physics step
 [`apply_aero_forces`] reads the craft's Avian `LinearVelocity`/`AngularVelocity`,
 rotates them into the body frame, samples the body's atmosphere for density, calls
 `evaluate_aero`, and writes the result into the craft's `ConstantForce` /
@@ -109,7 +109,7 @@ Two integration invariants, plus a safety clamp:
 
 1. **The rigid body rotates about the real CoM.** `spawn_player_avian_body` pins
    `CenterOfMass(params.center_of_mass)` + `NoAutoCenterOfMass` for *every* ship
-   (`crates/game/src/local_physics.rs`); otherwise Avian uses the collider
+   (`crates/runtime/game/src/local_physics.rs`); otherwise Avian uses the collider
    centroid. The net aero force is applied at the CoM (`ConstantForce`) and the
    moment as a pure couple (`ConstantTorque`), so this keeps both correct (and the
    gear pivot right).
@@ -134,7 +134,7 @@ The *physics* atmosphere is distinct from the *render* atmosphere
 a **physical exponential** model — nothing Earth-hardcoded; everything derived from
 authored surface conditions + the body's own gravity.
 
-`TerrestrialAtmosphere` (`crates/world/src/atmosphere.rs`) carries an optional
+`TerrestrialAtmosphere` (`crates/domain/world/src/atmosphere.rs`) carries an optional
 `profile: Option<AtmosphereProfile>` with the surface **thermodynamics** —
 `surface_temperature_k`, `specific_gas_constant` (default 287 = Earth air),
 `gamma` (1.4). The vertical density structure is derived by:
@@ -192,7 +192,7 @@ should not see a quartic surprise.
 ## Flight configuration — flaps & speedbrake
 
 Deliberately shallow (KSP-style): two controls, no trim/mixture/cowl-flap
-management. `crates/game/src/flight_config.rs` owns the state
+management. `crates/runtime/game/src/flight_config.rs` owns the state
 (`FlightConfig`); `assets/input.ron` binds the keys.
 
 - **Flap lever** — `F` extends a detent, `R` retracts: UP → T/O → LDG.
@@ -245,11 +245,11 @@ Aerodynamic flight is a **bubble** concern: it runs only while Avian owns
 translation, at 1× warp.
 
 - **In-atmosphere is a `Full`-role trigger.** `avian_role_from_inputs`
-  (`crates/game/src/local_physics.rs`) returns `Full` when the craft is below the
+  (`crates/runtime/game/src/local_physics.rs`) returns `Full` when the craft is below the
   Kármán line, so Avian owns translation across the *whole* atmospheric column
   (Kármán line → ground), not just the ~20 km terrain-collider band.
 - **Warp clamps to 1× in atmosphere.** `enforce_warp_altitude_limits`
-  (`crates/game/src/bridge.rs`) caps warp to 1× below the Kármán line. Aero only
+  (`crates/runtime/game/src/bridge.rs`) caps warp to 1× below the Kármán line. Aero only
   runs in the live bubble, so warping would silently skip it. `apply_aero_forces`
   lives in `PhysicsSchedule`, so it only executes while physics is stepping —
   never under warp/pause or the `BodyFixed` regime.
@@ -258,7 +258,7 @@ EVA is excluded throughout (no aero surfaces attached).
 
 ## Handling feel — coefficients from transport derivatives
 
-The **stability and damping** coefficients (`crates/game/src/aero.rs`,
+The **stability and damping** coefficients (`crates/runtime/game/src/aero.rs`,
 held in the `AeroTuning` resource) are mapped from standard
 transport-category stability derivatives (Cm_α ≈ −1.2, Cm_q ≈ −25 including
 the α̇ lag this model lacks, Cl_p ≈ −0.45, Cn_r ≈ −0.3). The **control**
@@ -280,7 +280,7 @@ inertia and span land it at a few tenths of a second and triple-digit roll
 rates. Heavy planes feel heavy and small planes nimble through their actual
 mass and geometry. Full deflection commands the craft's real physical capability
 (an airliner *can* roll at ~35°/s and pull to stall AoA — its pilots just
-don't), so gentle inputs fly gently. `crates/game/src/aero.rs` has unit tests
+don't), so gentle inputs fly gently. `crates/runtime/game/src/aero.rs` has unit tests
 pinning the Meridian's aspect ratio, steady roll rate, roll-onset τ, and pitch
 trim authority to these bands so a retune can't silently regress the feel.
 
@@ -307,7 +307,7 @@ over-damped coefficients, which were strong enough at taxi speed to fight the
 suspension.)
 
 Nosewheel steering fades with ground speed
-(`GearTuning::steer_fade_speed_m_s`, `crates/game/src/local_physics.rs`): full
+(`GearTuning::steer_fade_speed_m_s`, `crates/runtime/game/src/local_physics.rs`): full
 tiller throw at taxi speed, a couple of degrees at takeoff speed — the
 real-world tiller→pedals split — so a hard yaw input at speed cannot command
 the lateral grip that would trip the craft over its main gear. Tire grip
@@ -440,40 +440,40 @@ for directions). Both groups start disabled.
 
 ## File map
 
-- `crates/physics_canonical/src/aero.rs` — the native model: `AeroConfig`,
+- `crates/simulation/physics_canonical/src/aero.rs` — the native model: `AeroConfig`,
   `ControlInputs` (incl. flap/spoiler deployment), `evaluate_aero` (incl.
   wave drag; + unit tests).
-- `crates/game/src/aero.rs` — `GameAeroPlugin`, `build_ship_aero_config`
+- `crates/runtime/game/src/aero.rs` — `GameAeroPlugin`, `build_ship_aero_config`
   (panels → config, incl. Korn `M_dd` + flap/spoiler coefficient derivation +
   `derive_control_coefficients` for per-surface control authority),
   `attach_ship_aero`, `apply_aero_forces` (atmosphere sample + body-frame
   velocity + inertia-relative clamp + force write), the F3 overlay.
-- `crates/game/src/flight_config.rs` — the flap lever / spoiler actuator
+- `crates/runtime/game/src/flight_config.rs` — the flap lever / spoiler actuator
   state (`FlightConfig`) and its input handling.
-- `crates/game/src/hud/flight_config_panel.rs` — the capability-gated
+- `crates/runtime/game/src/hud/flight_config_panel.rs` — the capability-gated
   flaps/brakes HUD pills.
-- `crates/game/src/fuel.rs` — `air_breathing_thrust_factor` (jet density
+- `crates/runtime/game/src/fuel.rs` — `air_breathing_thrust_factor` (jet density
   lapse) inside `refresh_active_propulsion`; `active_thrust_fraction` (the
   throttle gate the gimbal authority scales by).
-- `crates/game/src/staging.rs` — `recompute_ship_inertia` aggregates every
+- `crates/runtime/game/src/staging.rs` — `recompute_ship_inertia` aggregates every
   gimballed engine into `ShipParameters::gimbal_torque_full`.
-- `crates/game/src/local_physics/forces.rs` — `compute_angular_acceleration`
+- `crates/runtime/game/src/local_physics/forces.rs` — `compute_angular_acceleration`
   realizes `command · (max_torque + gimbal_effective)`; `apply_local_forces`
   computes the throttle-scaled `gimbal_effective`.
-- `crates/control/src/attitude.rs` — the controller normalizes by
+- `crates/simulation/control/src/attitude.rs` — the controller normalizes by
   `max_torque + effector_authority`, where `effector_authority` = aero
   surfaces + engine gimbal (fed from `control_bus::realize_control`).
-- `crates/shipyard/src/stats.rs` — `ShipBlueprint::wing_aero_panels` +
+- `crates/domain/construction/src/stats.rs` — `ShipBlueprint::wing_aero_panels` +
   `WingAeroPanel` (per-wing aerodynamic geometry incl. sweep/thickness and
   the `AeroSurfaceWindow` control-surface windows with body-frame centroids
   for the moment arms).
-- `crates/world/src/atmosphere.rs` — `AtmosphereProfile` + `AtmosphereSample` +
+- `crates/domain/world/src/atmosphere.rs` — `AtmosphereProfile` + `AtmosphereSample` +
   `TerrestrialAtmosphere::sample_at_altitude_m`.
-- `crates/world/src/body.rs` — `surface_pressure_pa` / `surface_gravity_m_s2`.
-- `crates/game/src/local_physics.rs` — `CenterOfMass` pin, `craft_in_atmosphere`
+- `crates/domain/world/src/body.rs` — `surface_pressure_pa` / `surface_gravity_m_s2`.
+- `crates/runtime/game/src/local_physics.rs` — `CenterOfMass` pin, `craft_in_atmosphere`
   + the in-atmosphere `Full`-role trigger, `WeightOnWheels`.
-- `crates/game/src/bridge.rs` — atmosphere warp clamp.
-- `crates/game/src/hud/atmo_panel.rs` — TAS / dynamic-pressure / Mach readout
+- `crates/runtime/game/src/bridge.rs` — atmosphere warp clamp.
+- `crates/runtime/game/src/hud/atmo_panel.rs` — TAS / dynamic-pressure / Mach readout
   (from `AeroReadout`).
 
 ## Verification

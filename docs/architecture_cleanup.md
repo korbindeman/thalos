@@ -25,7 +25,7 @@ result is a steady stream of bugs whose root cause is structural, not local:
   `GearState`, `EvaMode`, `CameraFocus`, `PlayerShip` `.single()` queries…),
   and the runway grew from "the one strip" into a god module.
 - **Dead mass.** ~11 kLOC of the superseded bake pipeline still sits in
-  `crates/terrain` + `body_render`, confusing every search and every new
+  `crates/domain/terrain` + `body_render`, confusing every search and every new
   agent.
 
 The sprint goal: one canonical path per operation, N-by-default, and the
@@ -106,7 +106,7 @@ claim of a `build_parallel_taxiway` blocker is stale). Debt Phase 3 removes:
 
 ### 2.4 Duplication / dead code / god modules
 
-- **Dead bake pipeline, ~11 kLOC**: `crates/terrain/src/{feature_compiler,
+- **Dead bake pipeline, ~11 kLOC**: `crates/domain/terrain/src/{feature_compiler,
   cache, cold_desert_field, aging_oceanic_field, generic_terrestrial_field,
   surface_color}.rs`, `body_render/src/impostor/bake.rs`, plus the vestigial
   bridge in `rendering/generation.rs`. Audit found no live callers
@@ -167,7 +167,7 @@ B/C. Revisit only if the terrain generator is reworked (a natural time to drop
 the compile chain wholesale).
 
 **Landed anyway (compiler-verified-safe small cleanups):** deleted
-`crates/terrain/examples/oceanic_bake_timing.rs` (dead bake-timing harness);
+`crates/domain/terrain/examples/oceanic_bake_timing.rs` (dead bake-timing harness);
 removed uncalled `install_dynamic_surface_state` + `dynamic_surface_for` from
 `solar_system_state.rs` (dropped the now-unused `PlanetSurface` import, kept the
 `DynamicSurfaceState` seam); removed uncalled `from_static_surface` builders +

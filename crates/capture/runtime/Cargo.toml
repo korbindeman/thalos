@@ -1,0 +1,15 @@
+[package]
+name = "thalos_capture_runtime"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+thalos_runtime = { path = "../../runtime/game" }
+thalos_capture_protocol = { path = "../protocol" }
+
+[features]
+dev-renderer = ["thalos_runtime/dev-renderer"]
+dev-iteration = ["thalos_runtime/dev-iteration"]
+gpu-counters = ["thalos_runtime/gpu-counters"]

@@ -1,24 +1,31 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/world",
-    "crates/physics_canonical",
-    "crates/control",
-    "crates/terrain",
-    "crates/celestial",
-    "crates/texgen",
-    "crates/input",
-    "crates/ui",
-    "crates/body_render",
-    "crates/game",
-    "crates/shipyard",
-    "crates/udlod",
-    "crates/physics_local",
-    "crates/big_space",
-    "crates/bevy_erosion_filter",
-    "crates/terrain_baker",
-    "crates/terrain_learned",
+    "apps/game",
+    "crates/capture/protocol",
+    "crates/capture/runtime",
+    "crates/domain/celestial",
+    "crates/domain/construction",
+    "crates/domain/terrain",
+    "crates/domain/terrain/erosion_filter",
+    "crates/domain/world",
+    "crates/interface/input",
+    "crates/interface/ui",
+    "crates/offline/terrain_learned",
+    "crates/offline/texgen",
+    "crates/rendering/render",
+    "crates/rendering/udlod",
+    "crates/runtime/game",
+    "crates/simulation/control",
+    "crates/simulation/physics_canonical",
+    "crates/simulation/physics_local",
+    "crates/vendor/big_space",
+    "tools/terrain_baker",
     "tools/terrain_train",
+    "tools/texgen",
+    "tools/capture",
+    "tools/capture_host",
+    "tools/world_map",
 ]
 
 [workspace.package]
@@ -26,19 +33,23 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
-thalos_udlod = { path = "crates/udlod" }
-# Vendored fork (crates/big_space). i64 cell precision is the workspace-wide
+thalos_udlod = { path = "crates/rendering/udlod" }
+# Vendored fork (crates/vendor/big_space). i64 cell precision is the workspace-wide
 # choice; consumers inherit it via `big_space = { workspace = true }`.
-big_space = { path = "crates/big_space", features = ["i64"] }
+big_space = { path = "crates/vendor/big_space", features = ["i64"] }
 burn = { version = "=0.21.0", default-features = false }
 
-# Shared dev defaults stay portable. Platform-specific compiler/linker
-# tuning belongs in local, ignored Cargo config; see `docs/tooling.md`.
+# Shared dev defaults stay portable and apply in every worktree. Platform-
+# specific linkers, compiler-cache paths, and per-machine job limits belong in
+# local, ignored Cargo config; see `docs/build_speed.md`.
 [profile.dev]
 opt-level = 1
+incremental = true
+debug = "line-tables-only"
 
 [profile.dev.package."*"]
 opt-level = 3
+debug = "line-tables-only"
 
 # Release: single codegen unit for cross-crate inlining + thin LTO.
 [profile.release]

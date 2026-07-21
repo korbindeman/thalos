@@ -51,8 +51,8 @@ way.
 
 ## Target workspace
 
-The hierarchy separates runnable products, reusable libraries, production
-tools, visual laboratories, authored/runtime assets, and generated evidence.
+The hierarchy separates the player-facing application, reusable libraries,
+developer/offline executables, authored/runtime assets, and generated evidence.
 Within `crates/`, folders express responsibility and intended dependency
 direction; ordinary feature size is handled with Rust modules rather than a
 crate per feature.
@@ -60,7 +60,6 @@ crate per feature.
 ```text
 apps/
   game/                         # bin: thalos_game
-  capture_host/                 # bin: thalos_capture_host
 
 crates/
   vendor/
@@ -92,15 +91,11 @@ crates/
 
 tools/
   capture/                      # CLI: shot/compare/record/verify/status/stop
+  capture_host/                 # headless shell over the real game runtime
   terrain_baker/
   terrain_train/
   texgen/
   world_map/
-
-labs/
-  object_preview/
-  ui_preview/
-  terrain/
 
 assets/
   generated/
@@ -113,21 +108,34 @@ artifacts/
   diagnostics/
 ```
 
+Visual verification scenes belong to `thalos_runtime` and render through the
+canonical capture host. The former object/UI previews remain temporary crate
+examples until equivalent in-context runtime presets land; there is no parallel
+`labs/` application layer. Exploratory browser tooling such as Terrain Lab stays
+under `tools/` and is not an acceptance renderer.
+
+`apps/` is intentionally narrow: it contains software shipped to and launched
+directly by the player. Headless capture is a first-class product capability,
+but its host process is developer/automation infrastructure and therefore lives
+under `tools/` alongside its controller.
+
 The target dependency direction is:
 
 ```text
-apps → thalos_runtime → domain + simulation + rendering + interface
-capture_host → thalos_runtime + capture_runtime → capture_protocol
+apps/game → thalos_runtime → domain + simulation + rendering + interface
+tools/capture_host → thalos_runtime + capture_runtime → capture_protocol
 capture CLI → capture_protocol
 rendering → construction
 physics_local + rendering → terrain height/query contract
+runtime → renderer-specific GPU height-mirror registry
 ```
 
-Two current backwards edges must disappear: construction must not depend on
-rendering, and local physics must not depend on the renderer for terrain-height
-types. `thalos_render` consumes the construction model; `thalos_terrain` owns
-the shared height/query contract, with renderer-backed implementations supplied
-above it. `thalos_texgen` becomes offline and rendering loads its baked assets.
+The construction/rendering edge now points correctly: rendering consumes the
+construction model and owns the material projection. The terrain seam is also
+repaired: `thalos_terrain` owns `HeightSource` plus the shared patch contract;
+local physics consumes that contract without a rendering dependency; runtime
+composition separately tracks the renderer's GPU-atlas mirrors. `thalos_texgen`
+is offline and rendering loads its baked assets.
 
 See ADR-20260721T194628Z-role-based-agent-first-workspace and
 ADR-20260721T194629Z-first-class-headless-capture-runtime.
@@ -161,8 +169,9 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
 - **Phase 2** — render consolidation. *(done)*
   - `planet_lighting` + `planet_rendering` + `terrain_render` merged into
     `thalos_body_render` (`shading`/`impostor`/`ground` modules behind one
-    `BodyRenderPlugin`). The three old crates are deleted; consumers
-    (`game`, `body_editor`, `physics_local`) depend on `thalos_body_render`.
+    `BodyRenderPlugin`). The three old crates are deleted. Runtime composition
+    depends on `thalos_body_render`; local physics consumes only the shared
+    `thalos_terrain::HeightSource`/patch contract and has no rendering dependency.
   - The `atmosphere` data crate folded into `thalos_world::atmosphere`
     (deleted; authored body data has one home). `world`'s pure-crate Bevy-guard
     entry covers it.
@@ -208,21 +217,13 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
   - **Done (2026-07-01):** the editor was slimmed *out* of `thalos_shipyard`
     entirely. The `editor/` module (`ShipEditorCorePlugin` + placement / visuals /
     commands / shrouds / state) moved into its sole consumer, the game, at
-    `thalos_game::shipyard_editor::core`; the standalone egui `ship_editor` binary
+    `thalos_runtime::shipyard_editor::core`; the standalone egui `ship_editor` binary
     was **deleted** (superseded by the native-UI in-game editor). This retired
     follow-up items (3) relocate the binary and (4) drop `bevy_egui` +
     `thalos_celestial` from `thalos_shipyard`. `thalos_shipyard` is now the
     construction *model* only (parts / blueprints / geometry / sizing / stats /
     staging), with deps `bevy`, `glam`, `serde`, `ron`, `thalos_body_render`.
-  - **Interim debt (still open):** `thalos_shipyard` *temporarily* depends on
-    `thalos_body_render` — `appearance.rs` (and the game's ship-view / editor)
-    still *uses* the material, re-exported through the `shipyard::material` shim.
-    This is a backwards edge (construction shouldn't pull in the render stack),
-    removed by the remaining follow-up.
-  - **Deferred follow-up (remaining):** (1) move material *application* out of the
-    editor core (`shipyard_editor::core::visuals` / `::shrouds` attach
-    `ShipPartMaterial` + sync uniforms today) into a render-side appearance plugin
-    the front-end drives; (2) **flip the dependency** to the clean
-    `body_render → shipyard` direction — render reads the construction model to shade
-    it, exactly as it already reads `thalos_world` to shade bodies — and drop the
-    interim edge.
+  - **Completed 2026-07-21:** the dependency is now
+    `thalos_body_render → thalos_shipyard`. Material types, registration, and the
+    construction-dimensions→material projection live in rendering; the
+    construction crate contains no renderer dependency or material re-export.

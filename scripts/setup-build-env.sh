@@ -8,13 +8,28 @@
 # Usage:
 #   scripts/setup-build-env.sh            # install tools + write config if absent
 #   scripts/setup-build-env.sh --force    # overwrite an existing .cargo/config.toml (backs it up)
+#   scripts/setup-build-env.sh --agents 4 # size each Cargo process for four concurrent agents
 set -euo pipefail
 
 FORCE=0
-[[ "${1:-}" == "--force" ]] && FORCE=1
+AGENT_SLOTS=2
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --force) FORCE=1; shift ;;
+    --agents)
+      [[ "${2:-}" =~ ^[1-9][0-9]*$ ]] || { echo "--agents requires a positive integer" >&2; exit 2; }
+      AGENT_SLOTS="$2"; shift 2 ;;
+    *) echo "Unknown option '$1'" >&2; exit 2 ;;
+  esac
+done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cfg="$repo_root/.cargo/config.toml"
+worktree_roots=()
+while IFS= read -r root; do worktree_roots+=("$root"); done \
+  < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p')
+(( ${#worktree_roots[@]} == 0 )) && worktree_roots=("$repo_root")
+scc_basedirs="$(IFS=:; echo "${worktree_roots[*]}")"
 
 # --- platform detection ------------------------------------------------------
 os="$(uname -s)"
@@ -28,6 +43,10 @@ case "$os" in
   *) echo "Unsupported OS '$os' — use scripts/setup-build-env.ps1 on Windows." >&2; exit 1 ;;
 esac
 echo "==> Platform: $platform"
+
+logical_cpus="$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+cargo_jobs=$((logical_cpus / AGENT_SLOTS))
+(( cargo_jobs < 1 )) && cargo_jobs=1
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -90,14 +109,13 @@ else
     echo "# Local, gitignored, per-machine. See docs/build_speed.md."
     echo ""
     echo "[env]"
-    echo "CARGO_INCREMENTAL = \"1\"   # Iterate regime; set 0 in-shell for sccache (scripts/sccache-on.sh)"
+    echo "SCCACHE_DIR = \"${SCCACHE_DIR:-$HOME/.cache/sccache}\""
+    echo "SCCACHE_CACHE_SIZE = \"${SCCACHE_CACHE_SIZE:-50G}\""
+    echo "SCCACHE_BASEDIRS = \"$scc_basedirs\""
     echo ""
-    echo "[profile.dev]"
-    echo "incremental = true"
-    echo "debug = \"line-tables-only\""
-    echo ""
-    echo "[profile.dev.package.\"*\"]"
-    echo "debug = \"line-tables-only\""
+    echo "[build]"
+    echo "jobs = $cargo_jobs # $logical_cpus logical CPUs / $AGENT_SLOTS expected concurrent agents"
+    echo "rustc-wrapper = \"sccache\""
     echo ""
     if [[ "$platform" == "linux" || "$platform" == "wsl" ]]; then
       echo "[target.x86_64-unknown-linux-gnu]"
@@ -105,8 +123,6 @@ else
       echo "rustflags = [\"-C\", \"link-arg=-fuse-ld=mold\"]"
       echo ""
     fi
-    echo "[alias]"
-    echo "check-game = \"check -p thalos_game\""
   } > "$cfg"
   echo "==> Wrote $cfg"
 fi
@@ -118,7 +134,7 @@ echo "==> Done. Quick checks:"
 have sccache && echo "   sccache: $(sccache --version)"
 echo ""
 echo "Next:"
-echo "  * Iterate loop (one machine):   cargo check-game ; just screenshot hub"
-echo "  * Parallel/cloud (sccache on):  source scripts/sccache-on.sh   # then cargo/just"
+echo "  * Iterate loop:                 just check ; just screenshot hub"
+echo "  * Parallel/cold worktree:       source scripts/sccache-on.sh   # disables incremental"
 echo "  * Verify sccache pays off:      sccache --show-stats"
 echo "  * See docs/build_speed.md for the full per-environment agent workflow."

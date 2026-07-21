@@ -556,9 +556,9 @@ into Thalos and wiring it to the revamped feature compiler.
 - In-memory tile reuse is provided by `thalos_udlod`'s `TileAtlas`;
   an explicit Thalos-side persistent cache is deferred unless tile
   latency proves to be a problem.
-- **Implementation:** [crates/body_render/src/ground/pipeline.rs](../crates/body_render/src/ground/pipeline.rs).
+- **Implementation:** [crates/rendering/render/src/ground/pipeline.rs](../crates/rendering/render/src/ground/pipeline.rs).
 - **Exit criterion (met):** body terrain entities are spawned by
-  `crates/game/src/rendering/ground_terrain.rs` from
+  `crates/runtime/game/src/rendering/ground_terrain.rs` from
   `finalize_planet_generation` once the body's `PlanetSurface` task
   resolves; the synthesized cubemap drives both impostor + ground LOD
   from the same source data.
@@ -603,9 +603,9 @@ into Thalos and wiring it to the revamped feature compiler.
   deferred, but orbital/mid-altitude haze and cloud coverage match the
   impostor handoff.
 - **Implementation:**
-  [crates/body_render/src/shading/shaders/lighting.wgsl](../crates/body_render/src/shading/shaders/lighting.wgsl),
-  [crates/body_render/src/ground/body_terrain.wgsl](../crates/body_render/src/ground/body_terrain.wgsl),
-  [crates/game/src/rendering/ground_terrain.rs](../crates/game/src/rendering/ground_terrain.rs).
+  [crates/rendering/render/src/shading/shaders/lighting.wgsl](../crates/rendering/render/src/shading/shaders/lighting.wgsl),
+  [crates/rendering/render/src/ground/body_terrain.wgsl](../crates/rendering/render/src/ground/body_terrain.wgsl),
+  [crates/runtime/game/src/rendering/ground_terrain.rs](../crates/runtime/game/src/rendering/ground_terrain.rs).
 - **Exit criterion (met):** terrain ground-LOD pixels go through
   Hapke + eclipse + planetshine + ambient via the shared helper, with
   per-fragment roughness sampled from the third tile attachment.
@@ -653,12 +653,12 @@ normal so residual bands read as smooth terrain rather than terraced
 contour steps.
 
 The cascade — since migration P0, it lives in the Query API seam
-[crates/terrain/src/query.rs](../crates/terrain/src/query.rs) (moved out
+[crates/domain/terrain/src/query.rs](../crates/domain/terrain/src/query.rs) (moved out
 of `body_render::ground::pipeline`, which now delegates to it) — adds
 high-frequency detail on top of the macro:
 
 - **Musgrave ridged hybrid multifractal** (`hmf_ridged_3d` in
-  [crates/terrain/src/noise.rs](../crates/terrain/src/noise.rs))
+  [crates/domain/terrain/src/noise.rs](../crates/domain/terrain/src/noise.rs))
   evaluated in body-local 3D so the field is sphere-continuous —
   the same physical point returns the same value regardless of which
   cube face is generating it. The HMF's self-modulating weight
@@ -908,9 +908,9 @@ scan re-samples stale tiles' centre height and rebuilds only the ones whose
 ground actually moved (> 5 cm) — this re-seats grass after tile streaming and
 removes it when a flatten pad is installed late.
 
-**Code.** Engine side: `crates/body_render/src/ground/vegetation.rs` +
+**Code.** Engine side: `crates/rendering/render/src/ground/vegetation.rs` +
 `grass.wgsl` (lattice, builder, material). Driver:
-`crates/game/src/rendering/grass.rs` (`GrassRenderPlugin`: active-body pick,
+`crates/runtime/game/src/rendering/grass.rs` (`GrassRenderPlugin`: active-body pick,
 tile lifecycle, f64 anchoring, wind/sun updates, rebuild scan).
 
 **Deferred.** GPU instancing / compute placement; density falloff rings;

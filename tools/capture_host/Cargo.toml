@@ -1,0 +1,13 @@
+[package]
+name = "thalos_capture_host"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_capture_runtime = { path = "../../crates/capture/runtime" }
+
+[features]
+dev-renderer = ["thalos_capture_runtime/dev-renderer"]
+dev-iteration = ["thalos_capture_runtime/dev-iteration"]
+gpu-counters = ["thalos_capture_runtime/gpu-counters"]

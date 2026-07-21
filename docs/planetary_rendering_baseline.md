@@ -41,7 +41,7 @@ divergence is purely in shading inputs — BRDF, sun/sky/shadow/IBL evaluation.
 
 Crate layout: rendering *mechanism* (materials, shaders, spine, LUTs) lives in
 `thalos_body_render`; per-frame *drivers* (fill uniforms, LOD swaps, f64
-anchoring) live in `thalos_game::rendering`. The terrain LOD engine is the
+anchoring) live in `thalos_runtime::rendering`. The terrain LOD engine is the
 vendored `thalos_udlod` (fork of kurtkuehnert/bevy_terrain), consumed only by
 `body_render`.
 
@@ -53,12 +53,12 @@ The ground is streamed by the vendored **UDLOD** renderer: a cube-sphere,
 sparse-tile-atlas, runtime-provider-first terrain system.
 
 **Tile address space.** 6 cube faces × quadtree LODs; LOD 0 is one tile per
-face, LOD N is 4^N tiles per face (`crates/udlod/src/math/coordinate.rs`).
+face, LOD N is 4^N tiles per face (`crates/rendering/udlod/src/math/coordinate.rs`).
 Cube-face UVs carry a C_SQR distortion correction. Tile borders overlap by
 2 px carrying neighbour data, and the pixel→direction mapping is *stitched*
 (bit-exact across neighbours) so bilinear filtering never seams.
 
-**Per-body tile configuration** (`crates/game/src/rendering/ground_terrain.rs:73`):
+**Per-body tile configuration** (`crates/runtime/game/src/rendering/ground_terrain.rs:73`):
 
 | Tier | LOD count | Atlas slots | Tile res | Use |
 |---|---|---|---|---|
@@ -88,7 +88,7 @@ cell size, camera owns `FloatingOrigin`). Within a body, UDLOD's key novelty
 is a **second-order Taylor-series relative-position path**: per-frame CPU f64
 coefficients let the vertex shader reconstruct camera-relative positions with
 sub-centimetre precision at planet radius, where naive f32 quantises to
-~0.25 m (`crates/udlod/src/shaders/functions.wgsl`, `compute_relative_position`).
+~0.25 m (`crates/rendering/udlod/src/shaders/functions.wgsl`, `compute_relative_position`).
 This path is unconditional (the upstream `high_precision` feature was removed).
 Everything that must be rock-steady on a rotating planet (runway, grass tiles,
 structures, shadow-cascade anchors) follows the same pattern: a root-grid
@@ -123,7 +123,7 @@ height 0 at the reference radius — "sea level" is the constant 0 m, no ocean
 layer) plus a ridged-multifractal detail cascade: base wavelength 1000 m,
 amplitude 250 m, lacunarity 2, up to 11 octaves (bottoming out ~0.5 m
 wavelength / ~12 cm amplitude), with 2-octave domain warp (4 km wavelength,
-800 m displacement) to break the lattice (`crates/terrain/src/query.rs:57`).
+800 m displacement) to break the lattice (`crates/domain/terrain/src/query.rs:57`).
 Relief fades to zero in a ~60 m band at the waterline so the coastline is
 LOD-invariant (the shore is a macro-field crossing, not a detail-noise
 accident). Ground height is deliberately LOD-invariant in this slice to avoid
@@ -152,7 +152,7 @@ deliberately (it currently rules out simulation-style erosion at bake time).
 ## 4. Surface shading
 
 **The spine.** `thalos::lighting::shade_surface(ThalosSurface, …)` is the
-canonical per-fragment entry (`crates/body_render/src/shading/shaders/lighting.wgsl`).
+canonical per-fragment entry (`crates/rendering/render/src/shading/shaders/lighting.wgsl`).
 The caller fills `ThalosSurface { albedo, roughness, normal_ws, geo_normal_ws,
 emissive, occlusion, metallic, translucency, style }` and dispatch routes on
 style:
@@ -323,7 +323,7 @@ polarisation.
 ## 8. Clouds
 
 Absorbed, heavily reworked **HZD-style volumetric raymarch**
-(`crates/body_render/src/clouds/`), run in the **body-fixed frame** of the nearest
+(`crates/rendering/render/src/clouds/`), run in the **body-fixed frame** of the nearest
 terrestrial-atmosphere body: true ray-sphere shell intersection from the
 camera's planet-centred position, wrap-first noise sampling that stays
 f32-safe at planet-radius coordinates — so clouds are planet-fixed,
@@ -534,18 +534,18 @@ full-scale planetary renderer" realism:
 
 | System | Where |
 |---|---|
-| LOD engine | `crates/udlod/` (tile tree/atlas: `src/terrain_data/`, precision: `src/shaders/functions.wgsl`) |
-| Terrain generator | `crates/terrain/src/` (`query.rs` seam, `procedural.rs`) |
-| Tile bake → GPU | `crates/body_render/src/ground/pipeline.rs`, `body_terrain.wgsl`, `body_material.rs` |
-| Lighting spine | `crates/body_render/src/shading/shaders/lighting.wgsl`, `shading/mod.rs` |
+| LOD engine | `crates/rendering/udlod/` (tile tree/atlas: `src/terrain_data/`, precision: `src/shaders/functions.wgsl`) |
+| Terrain generator | `crates/domain/terrain/src/` (`query.rs` seam, `procedural.rs`) |
+| Tile bake → GPU | `crates/rendering/render/src/ground/pipeline.rs`, `body_terrain.wgsl`, `body_material.rs` |
+| Lighting spine | `crates/rendering/render/src/shading/shaders/lighting.wgsl`, `shading/mod.rs` |
 | Atmosphere | `shading/shaders/atmosphere.wgsl`, `shading/{multi_scatter,sky_view}.rs`, `ground/body_sky.wgsl` |
-| Scene depth | `crates/game/src/rendering/scene_depth.rs` |
-| Shadows | `crates/game/src/rendering/sun_shadow.rs`, `shading/shaders/shadow.wgsl` |
-| SSAO | `crates/game/src/rendering/ssao.rs` + `ssao.wgsl` |
-| Exposure/light projection | `crates/game/src/rendering/lighting.rs`, `impostor/post_stack.rs` |
-| IBL probe | `crates/game/src/reflection_probe.rs` |
-| Clouds | `crates/body_render/src/clouds/`, `crates/game/src/rendering/clouds.rs` |
+| Scene depth | `crates/runtime/game/src/rendering/scene_depth.rs` |
+| Shadows | `crates/runtime/game/src/rendering/sun_shadow.rs`, `shading/shaders/shadow.wgsl` |
+| SSAO | `crates/runtime/game/src/rendering/ssao.rs` + `ssao.wgsl` |
+| Exposure/light projection | `crates/runtime/game/src/rendering/lighting.rs`, `impostor/post_stack.rs` |
+| IBL probe | `crates/runtime/game/src/reflection_probe.rs` |
+| Clouds | `crates/rendering/render/src/clouds/`, `crates/runtime/game/src/rendering/clouds.rs` |
 | Water | `shading/shaders/water.wgsl`, `ground/body_sky.wgsl` compiled by `BodyOceanMaterial` |
-| Vegetation | `crates/body_render/src/ground/{vegetation,scatter,gpu_grass,tree_impostor,landcover}.rs`, drivers in `crates/game/src/rendering/{grass,gpu_grass,vegetation}.rs` |
-| Celestial | `crates/celestial/`, `crates/game/src/sky_render.rs` |
+| Vegetation | `crates/rendering/render/src/ground/{vegetation,scatter,gpu_grass,tree_impostor,landcover}.rs`, drivers in `crates/runtime/game/src/rendering/{grass,gpu_grass,vegetation}.rs` |
+| Celestial | `crates/domain/celestial/`, `crates/runtime/game/src/sky_render.rs` |
 | Plan / specs | `docs/graphics_fidelity.md`, `docs/terrain.md`, `docs/atmosphere.md`, `docs/vegetation.md` |

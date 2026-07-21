@@ -1,0 +1,15 @@
+[package]
+name = "thalos_game"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_runtime = { path = "../../crates/runtime/game" }
+
+[features]
+dev-renderer = ["thalos_runtime/dev-renderer"]
+dev-iteration = ["thalos_runtime/dev-iteration"]
+profile-chrome = ["thalos_runtime/profile-chrome"]
+profile-tracy = ["thalos_runtime/profile-tracy"]
+gpu-counters = ["thalos_runtime/gpu-counters"]

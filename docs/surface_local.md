@@ -36,7 +36,7 @@ that choice:
 - **The ground is a moving object.** The terrain collider is a
   kinematic trimesh whose pose is recomputed *every frame* as the body
   rotates (`attach_terrain_patch_when_close` /
-  `sync_terrain_collider_pose` in `crates/game/src/local_physics.rs`).
+  `sync_terrain_collider_pose` in `crates/runtime/game/src/local_physics.rs`).
   The contact solver never sees a static floor; contacts are re-derived
   against moving geometry each frame, and any error in the
   multi-Mm-magnitude pose chain shows up as jitter — the visible
@@ -261,7 +261,7 @@ jitter fix — since render placement is independent of physics.)
 
 ### 6.4 Player placement / editing (built — see `base_building.md`)
 
-> **Landed 2026-06-29** as the in-world base editor (`crates/game/src/base_editor/`).
+> **Landed 2026-06-29** as the in-world base editor (`crates/runtime/game/src/base_editor/`).
 > The region invalidation below took the **coarse-hammer** path (despawn +
 > respawn the whole body terrain, reusing the persistent flatten handle) rather
 > than scoped per-AABB invalidation; the scoped version (item 1) is the
@@ -349,9 +349,9 @@ Unit-tested incl. a free-fall dynamics-equivalence test (SLF vs
 body-centered inertial agree to <1e-6) that pins the Coriolis sign.
 
 **Ships in the SLF** — `LocalBubble.frame: SurfaceLocalFrame`
-(`crates/physics_local`); the ship conversion seam
+(`crates/simulation/physics_local`); the ship conversion seam
 (`inertial_to_ship_frame`/`ship_frame_to_inertial` in
-`crates/game/src/local_physics.rs`) routes through the SLF;
+`crates/runtime/game/src/local_physics.rs`) routes through the SLF;
 `apply_local_forces` uses `surface_local_acceleration`;
 `reanchor_surface_frame` re-anchors at 1.5 km horizontal drift (exact f64,
 canonical untouched). Consumers migrated: aero/control_bus altitude →
@@ -363,7 +363,7 @@ scenario.
 **heightfield** collider (`spawn_terrain_collider_patch`, authored in the
 patch-tangent frame, posed via `patch_basis_rotation` + the SLF rotation),
 and the runway's one-sided trimesh became a solid **cuboid slab**
-(`crates/game/src/runway.rs`). The one-sided trimesh was the cause of the
+(`crates/runtime/game/src/runway.rs`). The one-sided trimesh was the cause of the
 landing craft being violently ejected off its gear (one-step
 penetration-recovery on a surface with no interior).
 
@@ -388,7 +388,7 @@ a one-frame-stale `GlobalTransform` under big_space — fixed by moving it to
 `PostUpdate` after `TransformSystems::Propagate` (same fix `draw_aero_debug`
 already had).
 
-**Structures registry** — `crates/game/src/structures.rs`:
+**Structures registry** — `crates/runtime/game/src/structures.rs`:
 `StructureSite`/`StructureRegistry`/`StructurePlacement` +
 `apply_structure_flatten` (the single "stick to terrain" flatten path). The
 runway registers a `StructureSite { kind: Runway, placement: FlattenTo }`

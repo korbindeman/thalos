@@ -1,0 +1,11 @@
+[package]
+name = "thalos_world_map"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = "0.32"
+image = { version = "0.25", default-features = false, features = ["png"] }
+rayon = "1.12"
+thalos_terrain = { path = "../../crates/domain/terrain" }

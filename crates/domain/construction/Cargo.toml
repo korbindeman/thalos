@@ -1,0 +1,11 @@
+[package]
+name = "thalos_shipyard"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = "0.19"
+glam = { version = "0.32", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+ron = "0.12"

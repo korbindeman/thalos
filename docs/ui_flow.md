@@ -8,7 +8,7 @@ mirrors. This doc is the design of record for the game's screen/mode flow.
 ## The problem this fixes
 
 The game's outer shell is a clean state machine —
-[`AppState`](../crates/game/src/loading.rs) = `Loading | MainMenu | Running`.
+[`AppState`](../crates/runtime/game/src/loading.rs) = `Loading | MainMenu | Running`.
 But **everything inside `Running`** — the space-center hub, the VAB (shipyard
 editor), the base editor, and the ship/map views — was modelled as a loose bag
 of boolean `.open` resources (`SpaceCenter::open`, `ShipyardEditor::open`,

@@ -4,7 +4,7 @@ The in-world **base editor** is a Cities:Skylines-style tool for laying out a
 surface base on a planet: pick a building site on the real terrain, flatten the
 land into a level pad, then click-and-place / edit buildings on it. It is the
 first realization of the player-placement gameplay that `surface_local.md` §6.4
-designed for and deferred. Code lives in `crates/game/src/base_editor/`.
+designed for and deferred. Code lives in `crates/runtime/game/src/base_editor/`.
 
 > **Status (2026-07-04).** Compiles clean; **not yet runtime-verified** by a
 > `just game` launch. Implemented: site pick + live flatten, building + launchpad

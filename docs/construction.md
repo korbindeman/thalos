@@ -7,7 +7,7 @@ ships today.
 
 This is mostly a **design document**. It captures the shape agreed during
 design so the next agent inherits the model rather than re-deriving it. The
-current `thalos_shipyard` crate (see `crates/shipyard/`, summarised in §2)
+current `thalos_shipyard` crate (see `crates/domain/construction/`, summarised in §2)
 is the foundation this **generalises** — we extend the existing attach-node
 system, we do not fork it.
 
@@ -23,7 +23,7 @@ and what is still on paper.
 ### Landed — the in-game shipyard editor (core/front-end split)
 
 The interactive editor lives with its sole consumer, the game, at
-**`thalos_game::shipyard_editor`**. The editing machinery is a
+**`thalos_runtime::shipyard_editor`**. The editing machinery is a
 UI-framework-agnostic `core` submodule (`ShipEditorCorePlugin`) — the
 `EditorState` command/state hub the front-end reads/writes, attach-node +
 surface-mount placement with the KSP linked-symmetry stamping, live mesh
@@ -33,7 +33,7 @@ blueprint save/load against `ships/*.ron`. It reads the `thalos_shipyard`
 construction model (parts, blueprints, geometry, sizing/stats/staging) — which
 carries no editor or UI. The front-end:
 
-- **In-game editor** — `thalos_game::shipyard_editor`, native Bevy UI in
+- **In-game editor** — `thalos_runtime::shipyard_editor`, native Bevy UI in
   the game's `HudTheme` style. A **separate scene** (not an `AppState`): a
   `SimClock` pause source whose `editor_closed` run condition also gates the
   three `SimStage` sets + the HUD update systems, so **no game logic runs
@@ -47,7 +47,7 @@ carries no editor or UI. The front-end:
   button, or `just game shipyard`. Escape closes (pause-menu priority
   chain). The build persists across open/close — entities are hidden, not
   despawned — so a design in progress survives flying around in between.
-- **Launch** (`thalos_game::relaunch`) — fly the current design without a
+- **Launch** (`thalos_runtime::relaunch`) — fly the current design without a
   process restart. It carries the live build's collected `ShipBlueprint`
   (no file round-trip / save-timing race) to a two-phase relaunch that
   despawns the old `PlayerShip` part tree + map billboard, tears down the
@@ -69,7 +69,7 @@ is native Bevy UI, not egui.)
 **The world-partition rule that makes this safe:** the editor's build and
 the player's flight craft are assembled from the *same* part components in
 the *same* ECS `World`. Every editor-owned entity carries
-`thalos_game::shipyard_editor::core::EditorPart`; every iterating core query filters
+`thalos_runtime::shipyard_editor::core::EditorPart`; every iterating core query filters
 `With<EditorPart>`, and every game system that aggregates part components
 for the flight craft (fuel/propulsion, staging topology, inertia, gear
 wheels, part colliders, ship visuals) filters `Without<EditorPart>`. Any
@@ -136,7 +136,7 @@ footprint placement** capability (§4.3) without forking the rocket path:
 - **Geometry feedback** (§8 "free now"): `ShipStats` reports total
   **wing area** and area-weighted **mean aerodynamic chord**; wing mass
   feeds dry mass, CoM, and a crude rod-model MOI.
-- **In-game**: `crates/game/src/ship_view.rs` renders and positions wings
+- **In-game**: `crates/runtime/game/src/ship_view.rs` renders and positions wings
   with the same `wing_mesh` builder, so a saved aircraft looks right when
   spawned (as static mass — there is no flight model).
 
@@ -176,13 +176,13 @@ catalog entry plus the **wing-host + auto-pylon** connector path from §4.1 /
   engine part; a single wing/fin yields one nacelle. The generated connector is
   a rectangular pylon from the wing underside to the nacelle.
 - **Geometry**: `engine_mesh.rs` owns the shared nacelle/pylon mesh builder,
-  and both the shipyard editor and `crates/game/src/ship_view.rs` render from
+  and both the shipyard editor and `crates/runtime/game/src/ship_view.rs` render from
   it. Rocket engines keep the old bell/frustum body.
 - **Runtime graph**: live fuel crossfeed and staging now union
   `Attachment` + `SurfaceMount`, so wing-mounted engines can receive fuel and
   drop with their host subtree. Mirrored nacelles count double for dry mass,
   thrust, mass flow, and stage summaries.
-- **Atmosphere gate**: `crates/game/src/fuel.rs` ignores
+- **Atmosphere gate**: `crates/runtime/game/src/fuel.rs` ignores
   `requires_atmosphere` engines unless the craft is inside the dominant
   body's `terrestrial_atmosphere.karman_line_m`. There is still no aerodynamic
   lift/drag model; the jet is construction-ready and scalar-thrust-ready, not
@@ -258,7 +258,7 @@ continuous, upswept superellipse loft:
   smooth ogive while its centerline sweeps **up** (the airliner tail), instead
   of a straight pencil-point. `fuselage_mesh.rs` owns the station generator, the
   skin mesh, and the host-skin query; the editor and
-  `crates/game/src/ship_view.rs` render from the same builder. Straight-axis
+  `crates/runtime/game/src/ship_view.rs` render from the same builder. Straight-axis
   only (full 3-D spline still deferred, §8); roundness handles circle →
   rounded-rectangle, but a true double-bubble (control-loop sections) is future
   work.
@@ -415,7 +415,7 @@ system).
 
 ## 2. Where we start (current shipyard)
 
-`crates/shipyard/` — relevant pieces this design builds on:
+`crates/domain/construction/` — relevant pieces this design builds on:
 
 - `attach.rs` — `AttachNode { diameter, offset }`, `Attachment {
   parent, parent_node, my_node }`, `Ship { root }`. Node-mating is the

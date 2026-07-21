@@ -1,0 +1,15 @@
+[package]
+name = "thalos_physics_local"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+avian3d = { version = "0.7", default-features = false, features = ["3d", "f64", "parry-f64", "parallel", "debug-plugin"] }
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+thalos_physics_canonical = { path = "../physics_canonical" }
+thalos_world = { path = "../../domain/world" }
+thalos_terrain = { path = "../../domain/terrain" }
+
+[dev-dependencies]
+approx = "0.5"

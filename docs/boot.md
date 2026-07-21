@@ -14,7 +14,7 @@ contract).
 
 ## 1. App states
 
-`crate::loading::AppState` (game crate; `crates/game/src/loading.rs`):
+`crate::loading::AppState` (game crate; `crates/runtime/game/src/loading.rs`):
 
 ```
 Loading ──(all tracker steps complete)──▶ LoadDestination
@@ -72,7 +72,7 @@ warning rather than hanging (a stalled bake task or placement).
 `steps_for` (or whatever calls `begin`), then `tracker.complete(id)` /
 `advance` / `set_detail` from the producer. Nothing else to wire.
 
-## 3. The start screen (`crates/game/src/main_menu.rs`)
+## 3. The start screen (`crates/runtime/game/src/main_menu.rs`)
 
 Shown when no scenario is named: bare `just game` (the justfile default
 mode is now `menu`), `THALOS_SPAWN=menu`, or a bare `cargo run`. Skipped

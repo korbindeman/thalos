@@ -10,11 +10,10 @@ live in [tooling.md](tooling.md); tooling.md now points here. The invariants it
 still owns (dynamic-linking launch contract, one-Cargo-at-a-time, feature
 fingerprint, env-var launch toggles) are referenced below, not duplicated.
 
-The rule from `CLAUDE.md` stands: **platform-specific compiler/linker tuning
-lives in the gitignored `.cargo/config.toml` and `.env.just`, never in committed
-workspace config.** Everything this doc configures is local, per-machine, and
-ignored by Git. The committed `Cargo.toml` keeps only portable profile choices
-(`dev` opt-level 1, deps opt-level 3, release thin-LTO).
+The rule from `CLAUDE.md` stands: portable profile policy belongs in committed
+`Cargo.toml`; machine-specific linkers, cache paths, and CPU budgets belong in
+the gitignored `.cargo/config.toml`; launcher overrides belong in `.env.just`.
+See ADR-20260721T212438Z-portable-build-policy-local-acceleration.
 
 ---
 
@@ -22,16 +21,19 @@ ignored by Git. The committed `Cargo.toml` keeps only portable profile choices
 
 If you do nothing else:
 
-- **Every platform:** keep Bevy `dynamic_linking` on (already the committed
-  default for `just game`/`screenshot`/`preview`/`ui-preview`), use a **fast
+- **Every platform:** keep Bevy `dynamic_linking` on for the normal game, cold
+  capture, and temporary preview examples. The persistent `just screenshot`
+  host is the one intentional static/hotpatch fingerprint. Use a **fast
   linker** (rust-lld on Windows, **mold** on Linux/WSL, the default new ld on
   macOS), keep **incremental on** for the edit→rebuild→screenshot loop, and on
   Windows **exclude `target/` from Defender**.
 - **Run `scripts/setup-build-env.sh`** (Linux/macOS/WSL) or
   `scripts/setup-build-env.ps1` (Windows). They install the linker + sccache and
-  drop the right local config in place.
-- **For parallel agents / a cloud box / fresh worktrees:** turn on **sccache**
-  and set `CARGO_INCREMENTAL=0`. sccache turns a cold Bevy dep-graph build from
+  write a local config with the fast linker, sccache wrapper, and a per-process
+  Cargo job budget. Pass `--agents N` / `-AgentSlots N` for expected concurrency.
+- **For parallel agents / a cloud box / fresh worktrees:** give every agent a
+  separate worktree/`target/`, share one sccache, and set
+  `CARGO_INCREMENTAL=0`. sccache turns a cold Bevy dep-graph build from
   minutes into a cache hit; it is the single biggest lever for many-worktree and
   clean-build throughput.
 
@@ -66,8 +68,10 @@ So there are two regimes, and the ideal config differs between them:
 | **Iterate** | Editing one crate, rebuilding + screenshotting on one machine | Link + one-crate codegen (single-threaded) | Fast linker, dynamic linking, **incremental on** |
 | **Cold / parallel** | Fresh worktree, cloud box, N agents in parallel, CI | The whole dep graph | **sccache**, cores, RAM; **incremental off** |
 
-The awkward part: **incremental and sccache pull against each other** (§5). Pick
-per regime rather than trying to run both hot at once.
+Incremental and sccache pull against each other only for the same crate (§5).
+The normal configuration uses both usefully: incremental Thalos/path crates and
+sccache-backed registry dependencies. Parallel mode disables incremental so
+workspace crates become shareable across worktrees too.
 
 ---
 
@@ -75,15 +79,20 @@ per regime rather than trying to run both hot at once.
 
 Stack these; they are orthogonal except where noted.
 
-### 3.1 Bevy dynamic linking — already the committed default
-`just game`/`screenshot`/`preview`/`ui-preview` build with
-`--features bevy/dynamic_linking`. Bevy links once into a shared `bevy_dylib`;
+### 3.1 Two renderer fingerprints — committed policy
+`just game`, `just screenshot-cold`, and the temporary preview examples use the
+normal dynamic renderer fingerprint. Bevy links once into a shared `bevy_dylib`;
 subsequent edits relink only Thalos crates. Do **not** add it to release paths
 (`just build`, `just trace`, tests, bakes) — a shipped binary with a missing
 `bevy_dylib` crashes. Any tool that launches a dev renderer directly must
 reproduce Cargo's dylib search-path contract (profile dir + `deps` +
 `rustc --print target-libdir` onto `PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/
 `LD_LIBRARY_PATH`) — see INC-0008 and tooling.md.
+
+Persistent `just screenshot` / `just compare` use
+`thalos_capture_host/dev-iteration`: Bevy hotpatching and embedded shader
+watching, deliberately without dynamic linking. No third Bevy/wgpu feature
+mixture is supported.
 
 ### 3.2 A fast linker (per platform)
 The default MSVC `link.exe` (Windows) and the historical `ld` are slow. Use:
@@ -97,10 +106,10 @@ The default MSVC `link.exe` (Windows) and the historical `ld` are slow. Use:
   you measure a reason.
 
 ### 3.3 Incremental + trimmed debug info
-`CARGO_INCREMENTAL=1` and `[profile.dev] incremental = true` make one-crate edits
-cheap. `debug = "line-tables-only"` (both `dev` and `dev.package."*"`) keeps
+Committed `[profile.dev] incremental = true` makes one-crate edits cheap.
+`debug = "line-tables-only"` (both `dev` and `dev.package."*"`) keeps
 backtraces while cutting debuginfo generation and link size — a real chunk of
-link time. This is the **Iterate** regime default in `.cargo/config.toml`.
+link time. These portable defaults live in `Cargo.toml`, not local config.
 
 ### 3.4 opt-level split — already committed
 `Cargo.toml` sets `[profile.dev] opt-level = 1` (your code stays cheap to
@@ -108,12 +117,12 @@ compile) and `[profile.dev.package."*"] opt-level = 3` (deps run fast). Tradeoff
 the *first* cold dep build is slower because deps compile optimized — which is
 exactly why sccache (§5) pays for itself on the cold/parallel regime.
 
-### 3.5 sccache — the new piece
+### 3.5 sccache
 A compiler cache that turns a repeated rustc invocation into a cache hit. See
 §5 for the full setup and the incremental interaction. Headline: it does **not**
 speed up your own frequently-edited crates in the iterate loop, but it makes
-**cold dep-graph builds and fresh worktrees near-instant**, which is the whole
-game for parallel agents and cloud boxes.
+registry dependencies, cold dep-graph builds, and fresh worktrees much cheaper.
+The generated local Cargo config keeps the wrapper enabled by default.
 
 ### 3.6 One Cargo at a time; one feature fingerprint
 From `CLAUDE.md`/tooling.md, still load-bearing:
@@ -121,7 +130,7 @@ From `CLAUDE.md`/tooling.md, still load-bearing:
 - Run **one Cargo command at a time** against the workspace `target/`.
   Concurrent `game`/`check`/`screenshot` invocations serialize on the target
   lock while competing for CPU and several GiB of compiler memory. Use
-  `cargo check-game` while editing, then **one** linked `just game`/`just
+  `just check` while editing, then **one** linked `just game`/`just
   screenshot` when an artifact is actually needed. (For *genuinely* parallel
   agents, give each its own worktree + target dir + shared sccache — §7.2 —
   which sidesteps the single-target-lock contention.)
@@ -191,22 +200,20 @@ compile (same crate, same flags, same sources) is a cache read instead of a
 rebuild.
 
 ### 5.1 The incremental interaction — read this first
-**sccache cannot cache incrementally-compiled crates.** With
-`CARGO_INCREMENTAL=1`, your workspace crates are compiled incrementally and
-sccache skips them; only the non-incremental dependency crates get cached. Two
-consequences:
+**sccache cannot cache incrementally compiled crates.** Cargo's dev incremental
+setting applies to workspace members and path dependencies, not registry
+dependencies. The generated local config therefore keeps sccache as the normal
+`rustc-wrapper` without forcing `CARGO_INCREMENTAL` either way:
 
 - In the **Iterate** regime (editing your crates on one machine), incremental is
-  the win and sccache adds little for *your* crates — keep incremental on, leave
-  sccache off (or accept it only caches deps).
+  the win for Thalos crates while sccache still caches registry dependencies.
 - In the **Cold / parallel** regime (fresh worktree, cloud box, CI, N agents),
-  set **`CARGO_INCREMENTAL=0`** and turn sccache **on**. Now the entire graph —
+  set **`CARGO_INCREMENTAL=0`**. Now the entire graph —
   Bevy included — is cacheable, and a fresh worktree reuses the cache instead of
   recompiling from scratch.
 
-That is why sccache is **opt-in per shell/box**, not baked into
-`.cargo/config.toml`. Flipping it globally would silently disable the
-incremental loop.
+The wrapper being always present does not disable incremental compilation;
+sccache passes those invocations through uncached.
 
 ### 5.2 Install
 - **Linux/WSL/macOS:** `cargo binstall sccache` (prebuilt, fast) — or
@@ -216,17 +223,20 @@ incremental loop.
 
 The setup scripts do this for you.
 
-### 5.3 Turn it on for a shell (Cold/parallel regime)
+### 5.3 Enter the cold/parallel regime
 ```bash
-export RUSTC_WRAPPER=sccache
 export CARGO_INCREMENTAL=0
 export SCCACHE_DIR="$HOME/.cache/sccache"     # Windows: %LOCALAPPDATA%\Mozilla\sccache
 export SCCACHE_CACHE_SIZE="50G"               # Bevy artifacts are large; give it room
 ```
 
 Helper toggles are provided: `source scripts/sccache-on.sh` (bash) /
-`scripts/sccache-on.ps1` (PowerShell) set exactly these for the current shell so
-you don't pollute the iterate loop.
+dot-source `scripts/sccache-on.ps1` (PowerShell). They also set
+`SCCACHE_BASEDIRS` to the complete set reported by `git worktree list`, so each
+checkout root is stripped and identical relative source/target paths hash
+consistently. Unset only `CARGO_INCREMENTAL` to return to the normal iterate
+regime. Because base directories are server configuration, provision worktrees
+before starting parallel builds and restart sccache after the set changes.
 
 ### 5.4 Verify it's working
 ```bash
@@ -250,39 +260,30 @@ the same cache.
 ## 6. Per-platform setup
 
 Run the setup script for your platform; the manual config it writes is below for
-reference. All of it lands in the **gitignored** `.cargo/config.toml` /
-`.env.just`.
+reference. Machine-local settings land in the **gitignored**
+`.cargo/config.toml`; portable profile settings remain in `Cargo.toml`.
 
-The portable `.cargo/config.toml` this repo ships (local, gitignored) carries a
-`[target.<triple>]` table per platform. Cargo only applies the table matching the
-**active** target, so one file works on all machines; the Windows absolute
-linker path is inert on macOS/Linux and vice-versa.
+Setup defaults to two concurrent agent slots. It divides the machine's logical
+CPU count between them; override the expected slot count when provisioning a
+single-agent laptop or a larger agent box.
 
 ### 6.1 Windows (native)
-`rust-lld` + incremental + trimmed debug. This is your current known-good setup;
-keep it:
+`rust-lld` + sccache + a bounded job count. For a 16-thread machine configured
+for two simultaneous agents:
 
 ```toml
-[env]
-CARGO_INCREMENTAL = "1"
-
-[profile.dev]
-incremental = true
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-debug = "line-tables-only"
+[build]
+jobs = 8
+rustc-wrapper = "sccache"
 
 [target.x86_64-pc-windows-msvc]
 # rust-lld.exe on PATH also works; absolute path is the toolchain copy.
 linker = "C:/Users/korbi/.rustup/toolchains/1.97.0-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
 
-[alias]
-check-game = "check -p thalos_game"
 ```
 
-Then: Defender exclusions (§3.8). Optionally sccache for clean builds (§5).
-`cargo check-game` while editing; one `just game`/`just screenshot` when you need
+Then: Defender exclusions (§3.8). `just check` while editing; one
+`just game`/`just screenshot` when you need
 a frame.
 
 ### 6.2 Windows + WSL2 (recommended for agent iteration)
@@ -304,28 +305,18 @@ work entirely in WSL and push/pull. Do not build the same directory from both
 Windows and WSL — the `target/` artifacts are not cross-compatible.
 
 ### 6.3 macOS
-The default new linker is fast; usually just incremental + trimmed debug:
+The default new linker is fast; local config only needs cache and job policy:
 
 ```toml
-[env]
-CARGO_INCREMENTAL = "1"
-
-[profile.dev]
-incremental = true
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-debug = "line-tables-only"
-
-[alias]
-check-game = "check -p thalos_game"
+[build]
+jobs = 4
+rustc-wrapper = "sccache"
 ```
 
 If a macOS toolchain hits stale `.llvm.<hash>` anonymous-symbol references
-between incremental objects, disable incremental locally (`[profile.dev]
-incremental = false`) rather than touching the workspace profile. Cranelift for
-local iteration is an opt-in local experiment (§8). Metal is the default wgpu
-backend; the screenshot tool renders headless through it.
+between incremental objects, set `CARGO_INCREMENTAL=0` for that shell rather
+than touching the workspace profile. Metal is the default wgpu backend; the
+screenshot tool renders headlessly through it.
 
 ### 6.4 Linux cloud box (recommended for parallel agents)
 The throughput setup. mold + sccache + `CARGO_INCREMENTAL=0`, real-GPU Vulkan if
@@ -333,23 +324,18 @@ the box has a GPU, lavapipe otherwise.
 
 ```toml
 # .cargo/config.toml
-[profile.dev]
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-debug = "line-tables-only"
+[build]
+jobs = 8
+rustc-wrapper = "sccache"
 
 [target.x86_64-unknown-linux-gnu]
 linker = "clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
-[alias]
-check-game = "check -p thalos_game"
 ```
 
 ```bash
 # box profile (~/.bashrc or the agent launcher) — Cold/parallel regime
-export RUSTC_WRAPPER=sccache
 export CARGO_INCREMENTAL=0
 export SCCACHE_DIR=/var/cache/sccache        # shared across all agents/worktrees on this box
 export SCCACHE_CACHE_SIZE=100G
@@ -368,7 +354,7 @@ many agents to run).
 Principles first, then the two concrete shapes.
 
 **Principles (both shapes):**
-- **Check before you link.** `cargo check-game` (or `cargo check -p <crate>`)
+- **Check before you link.** `just check` (or `cargo check -p <crate>`)
   catches type/borrow errors in a fraction of a link. Only build a linked
   artifact (`just game`/`just screenshot`) when you actually need to run or see
   something.
@@ -381,18 +367,19 @@ Principles first, then the two concrete shapes.
   user's job (`CLAUDE.md`). The headless tools are the agent's eyes.
 
 ### 7.1 Shape A — single machine, one agent (local dev, WSL, your laptop)
-**Iterate regime.** Incremental on, dynamic linking on, fast linker, **sccache
-off** (or deps-only). One Cargo command at a time against the single `target/`.
+**Iterate regime.** Incremental on, dynamic linking on, fast linker, sccache
+wrapping registry dependencies. One Cargo command at a time against the single
+`target/`.
 
 Loop:
 ```
-edit → cargo check-game            # fast, no link
+edit → just check                  # fast, no link
      → (repeat until it type-checks)
      → just screenshot <preset>    # one linked artifact when a frame is needed
      → read the PNG → iterate
 ```
-This is the everyday Windows/WSL/macOS developer loop. It leans entirely on
-incremental + dynamic linking + the fast linker.
+This is the everyday Windows/WSL/macOS developer loop. It combines incremental
+Thalos crates, cached dependencies, dynamic linking, and the fast linker.
 
 ### 7.2 Shape B — parallel agents on a cloud box
 **Cold/parallel regime.** This is the throughput setup and the one your
@@ -401,11 +388,18 @@ description points at (headless agents, screenshot-driven).
 - **Each agent gets its own git worktree** (`git worktree add`) with its **own
   `target/`** — so they don't serialize on the single target lock (§3.6). The
   Agent tool's `isolation: "worktree"` fits this directly.
+- Each worktree runs the setup script once if it does not inherit a generated
+  `.cargo/config.toml`. This is cheap after the linker/cache are installed and
+  ensures that the same job budget and cache store apply everywhere.
+- Create the full worktree set before launching agents, regenerate local config,
+  then restart the sccache server once. The setup scripts discover every current
+  worktree root; adding one after the server starts requires the same refresh.
 - **All worktrees share one sccache** (`SCCACHE_DIR` on the box). The first
   worktree populates the cache building Bevy; every subsequent worktree links
   the dep graph from cache in seconds. This is what makes N parallel agents
   affordable — without it, each worktree recompiles Bevy from cold.
-- **`CARGO_INCREMENTAL=0`** box-wide so sccache caches everything (§5.1).
+- **`CARGO_INCREMENTAL=0`** in each parallel-agent shell so sccache caches
+  workspace crates across worktrees (§5.1).
 - **Concurrency budget:** cap parallel builds at roughly `min(cores/2,
   RAM_GiB / 4)` — a Bevy link peaks at several GiB, so memory, not cores, is
   usually the ceiling. Oversubscribing thrashes and is slower than a lower cap.
@@ -414,6 +408,9 @@ description points at (headless agents, screenshot-driven).
 Loop, per agent:
 ```
 git worktree add ../wt-<task>      # isolated checkout + target dir
+cd ../wt-<task>
+scripts/setup-build-env.sh --agents <N> # once per worktree; PowerShell equivalent on Windows
+source scripts/sccache-on.sh       # or dot-source the PowerShell helper
 cargo check -p <crate>             # sccache-backed; deps are cache hits
 just screenshot <preset>           # linked artifact; Bevy from cache
 read PNG → iterate → hand back diff
@@ -445,7 +442,7 @@ Don't guess — measure the loop you care about.
 - **Timing a build:** `cargo build --workspace --timings` writes an HTML report
   (`target/cargo-timings/`) showing per-crate wall time and parallelism — finds
   the long pole.
-- **Incremental touch-rebuild:** `touch crates/game/src/main.rs && time just
+- **Incremental touch-rebuild:** `touch crates/runtime/game/src/lib.rs && time just
   screenshot hub` measures the real iterate-loop cost (edit one file → linked
   artifact).
 - **sccache payoff:** `sccache --show-stats` before/after; the hit rate on a

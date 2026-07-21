@@ -146,8 +146,8 @@ orbit to ground.
 ### Architecture: shared optics, one render path
 
 The atmosphere is a fullscreen quad per body (`BodySkyMaterial` in
-`crates/terrain_render/src/sky_material.rs`, shader at
-`crates/terrain_render/src/body_sky.wgsl`) while the real terrain LOD is
+`crates/domain/terrain_render/src/sky_material.rs`, shader at
+`crates/domain/terrain_render/src/body_sky.wgsl`) while the real terrain LOD is
 visible. It renders in `Transparent3d` with `depth_compare = Always`
 so it rasterizes on every pixel, then clips the raymarch with two
 intersections:
@@ -200,7 +200,7 @@ WebGPU forbids sampling the live depth attachment from a fragment
 shader, and our forked `thalos_udlod` does not queue into
 `Opaque3dPrepass` (the standard prepass-depth path), so the built-in
 prepass-depth texture is terrain-blind. The workaround lives in
-`crates/game/src/rendering/scene_depth.rs`:
+`crates/runtime/game/src/rendering/scene_depth.rs`:
 
 - A `SceneDepthImage` resource owns a `Handle<Image>` whose GPU
   texture (`Depth32Float`, `COPY_DST | TEXTURE_BINDING`) is sized to
@@ -353,7 +353,7 @@ altitude-dependent multi-scatter fill, strong where air is densest near the
 ground) simply over-contributes relative to surface albedo in the engine's
 flux units.
 
-The fix decouples the two. `crates/game/src/rendering/ground_terrain.rs`
+The fix decouples the two. `crates/runtime/game/src/rendering/ground_terrain.rs`
 holds an `AtmosphereTuning` resource (`#[reflect(Resource)]`)
 with an **absolute** `aerial_perspective_strength` (default `0.15` =
 clear weather). Each frame the per-body shader multiplier is computed as
@@ -491,7 +491,7 @@ this yet — they'd need an `ExtendedMaterial` to reach a fragment hook; deferre
 
 The shipping near-cloud mechanism is a vendored fork of
 `bevy-volumetric-clouds` (MIT, evroon), absorbed—with its upstream license—at
-`crates/body_render/src/clouds/`. It is reworked around Thalos's spherical,
+`crates/rendering/render/src/clouds/`. It is reworked around Thalos's spherical,
 `big_space`, dual-camera engine. The
 raymarch runs entirely in the **body-fixed frame** of the active cloud
 body, so clouds are planet-fixed: glued to the ground, co-rotating with
@@ -702,8 +702,8 @@ F4 will project this same LUT to SH ambient for the terrain and
 `StandardMaterial` paths (the probe already consumes it for the hull),
 retiring the hand-tuned `GlobalAmbientLight`.
 
-Lives in `crates/game/src/reflection_probe.rs`; the sky-view LUT
-mechanism in `crates/body_render/src/shading/sky_view.rs`.
+Lives in `crates/runtime/game/src/reflection_probe.rs`; the sky-view LUT
+mechanism in `crates/rendering/render/src/shading/sky_view.rs`.
 
 ### Why not render the actual scene into the cubemap
 

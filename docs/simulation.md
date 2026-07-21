@@ -17,7 +17,7 @@ implementation is the patched-conics + `KeplerianPropagator` core.
 > / `BodyFixed`): the never-implemented `WarpIntegrated` and `Docked`
 > placeholders were removed in regimes Phase B, along with this doc's
 > canonical `SimClock`/`TimeMode` sketch (the real clock boundary is
-> `crates/game/src/sim_clock.rs`). Sections describing **world
+> `crates/runtime/game/src/sim_clock.rs`). Sections describing **world
 > presets, provider policies, `ForceProvider`/`TorqueProvider`,
 > `WarpIntegrator`, navigation contexts/encounters, `ManeuverFrame`,
 > the hydrate/collapse bridge trait, and the `sim_core`/`ephemeris`/
@@ -96,7 +96,7 @@ the simulation.
 ### Clock and pause boundary
 
 Simulation pause is not implemented by pausing Bevy's global
-`Time<Virtual>`. `crates/game/src/sim_clock.rs` owns the explicit
+`Time<Virtual>`. `crates/runtime/game/src/sim_clock.rs` owns the explicit
 `SimClock` resource, whose sole writer folds the Escape pause menu, the
 destruction scenario picker, freecam when the craft was not time-warp
 eligible on enter (`FreeCam::active && !allow_sim_time` — when freecam is
@@ -123,7 +123,7 @@ The body is selected once per activation—never chased frame by frame—and a
 view with no resolved terrain body keeps the inertial fallback.
 
 Between orbital truth and every Bevy-side projection is one evaluated
-runtime resource: `SolarSystemState` in `crates/game/src/solar_system_state.rs`.
+runtime resource: `SolarSystemState` in `crates/runtime/game/src/solar_system_state.rs`.
 `SimulationState` owns the long-lived simulation, system definition, and
 `BodyTrajectoryProvider`; `sync_solar_system_state` evaluates it once per
 frame into `SolarSystemState`. Map snapshots, real-space body grids, planet
@@ -609,7 +609,7 @@ keeps working without re-running thrust on the canonical side.
 
 The Avian rigid body persists for the lifetime of the player ship, but
 *what role it plays* each frame is a three-way decision driven by
-`AvianAuthority` / `AvianRole` (`crates/game/src/local_physics.rs`).
+`AvianAuthority` / `AvianRole` (`crates/runtime/game/src/local_physics.rs`).
 The split is necessary because two questions need independent answers:
 
 1. *Should Avian's `PhysicsSchedule` step at all?* Needed for rotation
@@ -853,7 +853,7 @@ regime* exists for spacecraft drag + aircraft lift/control via the native
 `thalos_physics_canonical::aero` whole-body model, applied **bubble-side**
 (force-only into Avian) rather than as a canonical `ForceProvider`. The
 entry rule is the body's `karman_line_m`: below it,
-`crates/game/src/local_physics.rs` returns `AvianRole::Full` (Avian owns
+`crates/runtime/game/src/local_physics.rs` returns `AvianRole::Full` (Avian owns
 translation so drag acts across the whole column) and
 `enforce_warp_altitude_limits` clamps warp to 1× — matching the "high warp
 disallowed in aerodynamic flight" rule above. The *orbital drag regime*
@@ -1688,18 +1688,18 @@ each using the body-centered inertial frame (`rel_vel = craft.vel −
 body.vel`):
 
 - **SAS holds** — `compute_target_direction`
-  ([navigation.rs:179](crates/game/src/navigation.rs:179)); Prograde arm
-  at [:191](crates/game/src/navigation.rs:191), Normal via
-  `orbital_frame` at [:205](crates/game/src/navigation.rs:205), Radial at
-  [:223](crates/game/src/navigation.rs:223).
+  ([navigation.rs:179](crates/runtime/game/src/navigation.rs:179)); Prograde arm
+  at [:191](crates/runtime/game/src/navigation.rs:191), Normal via
+  `orbital_frame` at [:205](crates/runtime/game/src/navigation.rs:205), Radial at
+  [:223](crates/runtime/game/src/navigation.rs:223).
 - **Navball markers** — `compute_marker_directions`
-  ([markers.rs:274](crates/game/src/navball/markers.rs:274)); the
+  ([markers.rs:274](crates/runtime/game/src/navball/markers.rs:274)); the
   `rel_pos`/`rel_vel` basis at
-  [:302](crates/game/src/navball/markers.rs:302).
+  [:302](crates/runtime/game/src/navball/markers.rs:302).
 - **Speed readout** — `update`
-  ([flight_panel.rs:153](crates/game/src/hud/flight_panel.rs:153)); label
+  ([flight_panel.rs:153](crates/runtime/game/src/hud/flight_panel.rs:153)); label
   hardcoded `"ORBITAL VELOCITY"` at
-  [:105](crates/game/src/hud/flight_panel.rs:105).
+  [:105](crates/runtime/game/src/hud/flight_panel.rs:105).
 
 Adding Surface/Target by branching each of the three is exactly the
 divergence the "one source of truth" invariant exists to prevent. §4
@@ -1708,9 +1708,9 @@ collapses them into one.
 #### 2.2 The frame math already exists (pure, in physics_canonical)
 
 - Orbital reference velocity = `body.velocity` (body-centered inertial;
-  see [body_centered.rs](crates/physics_canonical/src/body_centered.rs)).
+  see [body_centered.rs](crates/simulation/physics_canonical/src/body_centered.rs)).
 - Surface reference velocity = `body.velocity + ω × r` —
-  [`body_fixed_surface_velocity`](crates/physics_canonical/src/body_fixed.rs:18).
+  [`body_fixed_surface_velocity`](crates/simulation/physics_canonical/src/body_fixed.rs:18).
   `BodyState` carries `orientation` + `angular_velocity`.
 - `orbital_frame(ship_pos, ship_vel, body_pos, body_vel)` returns the
   orbital prograde/normal/radial triad and already lives in
@@ -1719,10 +1719,10 @@ collapses them into one.
 #### 2.3 SAS holds and markers already enumerate the directions
 
 - `NavigationMode`
-  ([navigation.rs:24](crates/game/src/navigation.rs:24)) — Stability,
+  ([navigation.rs:24](crates/runtime/game/src/navigation.rs:24)) — Stability,
   Prograde, Retrograde, Normal, AntiNormal, Radial{In,Out}, Target,
   AntiTarget, ManeuverNode.
-- `MarkerKind` ([markers.rs:41](crates/game/src/navball/markers.rs:41)) —
+- `MarkerKind` ([markers.rs:41](crates/runtime/game/src/navball/markers.rs:41)) —
   the same nine markers.
 - **"Target" already exists, but as a *pointing* direction** ("aim nose
   at target"), not a *velocity frame*. KSP's Target speed mode reframes
@@ -1733,24 +1733,24 @@ collapses them into one.
 #### 2.4 The navball sphere is frame-independent
 
 `NavballFrame`
-([navball/attitude.rs](crates/game/src/navball/attitude.rs)) paints the
+([navball/attitude.rs](crates/runtime/game/src/navball/attitude.rs)) paints the
 sphere in local East/North/Up. The speed mode does **not** rotate the
 sphere — only the velocity markers + readout change. Contained change.
 
 #### 2.5 UI toggle pattern + situation signals
 
 - The Ship/Map `ViewMode` toggle
-  ([hud/view_mode_panel.rs](crates/game/src/hud/view_mode_panel.rs)) is
+  ([hud/view_mode_panel.rs](crates/runtime/game/src/hud/view_mode_panel.rs)) is
   the resource+button pattern to mirror.
 - Landed signal: `AuthorityMode::BodyFixed`
-  ([canonical.rs:144](crates/physics_canonical/src/canonical.rs:144)).
+  ([canonical.rs:144](crates/simulation/physics_canonical/src/canonical.rs:144)).
 - Altitude: the HUD GND readout already computes AGL via the
   `HeightSource` registry (orbital_panel.rs); altitude above the
   reference sphere is `|r| − body.radius`.
 
 ### 3. Target abstraction today
 
-`TargetBody { target: Option<usize> }` ([target.rs](crates/game/src/target.rs))
+`TargetBody { target: Option<usize> }` ([target.rs](crates/runtime/game/src/target.rs))
 is a celestial-body world-id, forwarded into the `Simulation`. Good
 enough for the Target frame's reference velocity (`= target_body.velocity`)
 now; vessel-vs-vessel uses the same path later.
@@ -1851,7 +1851,7 @@ auto-select Surface. Deliberate, small divergence.
 ### 7. Switching UI
 
 - Make the speed readout
-  ([flight_panel.rs:105](crates/game/src/hud/flight_panel.rs:105))
+  ([flight_panel.rs:105](crates/runtime/game/src/hud/flight_panel.rs:105))
   interactive; a click cycles **Orbit → Surface → Target → Orbit**,
   **skipping Target when `TargetBody` is unset** (degrades to a 2-way
   toggle). Sets `manual_override`. Mirror the `view_mode_panel.rs` button
@@ -1909,7 +1909,7 @@ Shipped close to §4–§8. File map:
 - **`BodyDefinition.surface_frame_ceiling_m: Option<f64>`** + parsing
   plumbing (`BodyFile`/`BodyDetailsFile`, merge + build). Authored in the
   per-body file (`assets/bodies/<name>.ron`); Mira carries an example value.
-- **`thalos_game::velocity_frame`** (new) — `VelocityFrameState` resource +
+- **`thalos_runtime::velocity_frame`** (new) — `VelocityFrameState` resource +
   `update_velocity_frame` writer + `VelocityFramePlugin`, plus `next_frame`
   for the click cycle. Registered in `main.rs`; the writer runs in
   `SimStage::Physics` `.before(control_bus::realize_control)`.

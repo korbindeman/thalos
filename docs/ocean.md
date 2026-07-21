@@ -107,7 +107,7 @@ just screenshot ocean
 The preset searches Thalos for water deeper than 250 m under a 10–32° sun,
 then places the real `ShipCamera` 600 m from the sea focus at 1.5° elevation and
 22° off the specular axis. It renders 1920×1080 to
-`tools/screenshots/ocean.png` through the real atmosphere, cloud, depth, ocean,
+`artifacts/visual/latest/ocean.png` through the real atmosphere, cloud, depth, ocean,
 and post stack.
 
 The acceptance read is:
@@ -121,8 +121,8 @@ The acceptance read is:
 
 BL-12 was recaptured and inspected on 2026-07-21 after the INC-0012 correction;
 OCEAN-1's deterministic phase-0 production capture is
-`tools/screenshots/ocean.png` and its evolved phase-45 capture is
-`tools/screenshots/ocean_t45.png`. Both retain foreground and horizon detail.
+`artifacts/visual/latest/ocean.png` and its evolved phase-45 capture is
+`artifacts/visual/latest/ocean_t45.png`. Both retain foreground and horizon detail.
 
 To inspect the field without the sun road or BRDF hiding topology, run:
 

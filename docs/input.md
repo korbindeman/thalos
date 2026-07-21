@@ -4,7 +4,7 @@ Thalos routes semantic player input through `bevy_enhanced_input`
 contexts owned by `thalos_input`. Raw Bevy input should remain only for
 spatial data and UI internals: cursor position, ray projection, Bevy
 picking hover/click/drag events, native-UI text-field input
-(`thalos_game::ui_widgets`), and shipyard pinch gestures. (The game UI is
+(`thalos_runtime::ui_widgets`), and shipyard pinch gestures. (The game UI is
 native Bevy UI; `bevy_egui` is no longer a dependency anywhere in the
 workspace.)
 
@@ -123,7 +123,7 @@ Shipyard:
 - `ShipyardContext` for orbit camera, wheel pan/zoom, primary pointer,
   and precision modifier. The **game adds this context too** (alongside
   its own contexts) for the in-game shipyard editor: the gate in
-  `crates/game/src/input.rs` keeps it inactive unless the editor is open,
+  `crates/runtime/game/src/input.rs` keeps it inactive unless the editor is open,
   and deactivates every gameplay context (flight, warp, view, eva,
   maneuver) while it is. While the editor's ship-name field has focus, the
   keyboard action source is disabled entirely and the field consumes raw

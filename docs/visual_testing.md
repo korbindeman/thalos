@@ -24,24 +24,24 @@ other viewport-dependent inputs while supposedly holding them constant.
 - `just preview` remains the supplemental isolated-asset path. It does not replace
   the in-context game capture.
 
-`tools/screenshots/` is the curated latest-view surface: every named preset
+`artifacts/visual/latest/` is the curated latest-view surface: every named preset
 owns one stable filename there and overwrites it on the next canonical capture.
 Ad-hoc framings set `THALOS_SCREENSHOT_OUT` to a path under
-`tools/agent_scratch/screenshots/`; they do not mint new names beside the
-canonical views. Comparison matrices always use the scratch tree automatically.
+`artifacts/visual/runs/`; they do not mint new names beside the canonical
+views. Comparison matrices always use the run tree automatically.
 
 ## Player-saved perspective handoff
 
 Press F8 while the ship/free camera, space-center hub, or another 3-D god-view
 is active. Thalos writes a versioned handoff to
-`tools/diagnostics/latest_perspective.json` and confirms it with an in-game
+`artifacts/diagnostics/latest_perspective.json` and confirms it with an in-game
 toast. An agent responding to “check my latest perspective” runs:
 
 ```text
 just screenshot latest
 ```
 
-The result overwrites `tools/screenshots/latest_perspective.png`. The handoff
+The result overwrites `artifacts/visual/latest/latest_perspective.png`. The handoff
 stores the camera in the nearest terrain body's fixed frame, plus vertical FOV,
 viewport, target body, and canonical spawn scene. Headless replay projects that
 pose through the fresh body's current transform and uses the real `ShipCamera`,
@@ -90,7 +90,7 @@ search path (INC-0008) and starts one clean process per variant.
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
 | `terrain-regolith-filter` | `legacy-unfiltered`, `footprint-filtered` | Matched before/after for airless procedural-detail Nyquist filtering |
 
-Axes are intentionally typed in `crates/game/examples/visual_compare.rs`. Add a
+Axes are intentionally typed in `tools/capture/src/bin/visual_compare.rs`. Add a
 new one only when every variant can be selected by a capture-only override that
 does not persist user settings. A multi-test may have N variants, but they must
 all remain values of the same factor.
@@ -105,7 +105,7 @@ than pretending an existing pipeline changed.
 Each run writes to:
 
 ```text
-tools/agent_scratch/screenshots/comparisons/<preset>/<axis>/
+artifacts/visual/runs/comparisons/<preset>/<axis>/
   01_<variant>.png
   02_<variant>.png
   ...

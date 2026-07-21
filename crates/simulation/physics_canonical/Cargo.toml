@@ -1,0 +1,14 @@
+[package]
+name = "thalos_physics_canonical"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { version = "0.32", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+thalos_world = { path = "../../domain/world" }
+
+[dev-dependencies]
+approx = "0.5"

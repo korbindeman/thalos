@@ -9,6 +9,7 @@ The project's design and planning docs. Start here to find the right one.
 | [backlog.md](backlog.md) | **Execution** — the rolling, status-tracked queue of concrete scoped items across the active sprints. The *what's next*. Driven by the `steer` skill. | Work queue |
 | [architecture_cleanup.md](architecture_cleanup.md) | **Primary sprint plan** — the consolidation pass: packages A–G, the audit baseline, rules of engagement. | Strategy |
 | [graphics_fidelity.md](graphics_fidelity.md) | **Secondary sprint plan** — one-world principle, the F1–F9 unification foundation, per-substrate workstreams (§4), open questions (§7). | Strategy |
+| [gameplay.md](gameplay.md) | **Horizon vision** — the core loop, the setback-not-failure consequence economy, the diegetic control-authority ladder, the uncrewed-first opening arc, vehicle families and heritage, probes, contracts. Design capture; **no active sprint, no backlog rows** — kept at doc granularity until a track opens. | Vision (horizon) |
 | [adr/](adr/) | **Decision log** — numbered Architecture Decision Records: *why* a choice was made and what was rejected. | Rationale |
 | [incidents/](incidents/) | **Incident post-mortems** — numbered forensics for *fixed* non-obvious bugs: evidence, root cause, prevention, recurrence signals. | Incidents |
 

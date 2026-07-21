@@ -16,11 +16,11 @@ menus, and hand-rolled panel frames everywhere).
 ## Iterating on the look
 
 ```bash
-just ui-preview          # headless kitchen sink → tools/ui_preview/kitchen_sink.png
+just ui-preview          # headless kitchen sink → artifacts/visual/latest/ui_preview.png
 just ui-preview-window   # interactive variant (hover/press/typing; S = screenshot)
 ```
 
-The kitchen sink (`crates/ui/examples/kitchen_sink.rs`) lays out every token
+The kitchen sink (`crates/interface/ui/examples/kitchen_sink.rs`) lays out every token
 and widget over a colourful 3D scene so the frost has something to blur.
 Agents iterate by editing the kit and **reading the PNG** — same
 self-inspection loop as `just preview` / `just screenshot`. Add any new
@@ -54,7 +54,7 @@ runs all widget interaction/visual systems globally.
 
 - **Tokens are the single styling authority.** A colour/spacing/radius used
   by more than one screen lives in `tokens`, not at the call site. The flight
-  HUD's `HudTheme` (`crates/game/src/hud/theme.rs`) is a *projection* of the
+  HUD's `HudTheme` (`crates/runtime/game/src/hud/theme.rs`) is a *projection* of the
   same tokens (it re-points its palette at them and keeps only the Fira Code
   face + HUD-specific datum colours) — change tokens, both worlds move.
 - **One interaction-styling system.** Anything clickable carries
@@ -66,7 +66,7 @@ runs all widget interaction/visual systems globally.
   Attach glass via `theme.glass()` (regular) / `theme.glass_heavy()`
   (dominant modal dialogs); both share one material asset per style.
 - **Text fields share one focus.** `TextFieldFocus` is the keyboard owner;
-  the game input gate (`crates/game/src/input.rs`) reads it to suppress
+  the game input gate (`crates/runtime/game/src/input.rs`) reads it to suppress
   keyboard bindings while typing. New editable fields must be
   `UiTextField`s, not bespoke key readers.
 - **The loading screen depends on token consts only** (no `UiTheme`
