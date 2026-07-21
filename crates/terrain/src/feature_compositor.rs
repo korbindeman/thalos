@@ -7,6 +7,8 @@
 //! here to avoid double-counting; unbaked craters become part of the single
 //! mesh/collider surface.
 
+use glam::DVec3;
+#[cfg(test)]
 use glam::Vec3;
 
 use crate::crater_profile::{SubPeaks, crater_profile, degradation_factor, morphology_for_radius};
@@ -34,17 +36,21 @@ pub(crate) fn runtime_feature_height_margin_m(static_surface: &StaticSurfaceData
 /// terrain consistently regardless of bucket/neighbour iteration order.
 pub(crate) fn compose_runtime_features_m(
     static_surface: &StaticSurfaceData,
-    dir: Vec3,
+    dir: DVec3,
     base_height_m: f32,
 ) -> f32 {
     let dir = dir.normalize_or_zero();
-    if dir == Vec3::ZERO || static_surface.craters.is_empty() {
+    if dir == DVec3::ZERO || static_surface.craters.is_empty() {
         return base_height_m;
     }
 
+    // The feature index is a coarse candidate accelerator, so f32 is precise
+    // enough for its ~15 km cells. The actual crater distance below must stay
+    // f64: near dot=1, f32 `acos` quantises angular distance by hundreds of
+    // metres on Mira and turns smooth crater walls into vertical steps.
     let mut crater_indices: Vec<u32> = static_surface
         .feature_index
-        .lookup_with_neighbors(dir)
+        .lookup_with_neighbors(dir.as_vec3())
         .filter_map(|feature| match feature {
             FeatureRef::Crater(index) => Some(index),
             FeatureRef::Volcano(_) | FeatureRef::Channel(_) => None,
@@ -79,7 +85,7 @@ fn compose_unbaked_crater_m(
     crater: &Crater,
     body_radius_m: f32,
     cubemap_bake_threshold_m: f32,
-    dir: Vec3,
+    dir: DVec3,
 ) -> f32 {
     // Craters at/above the bake threshold are already in the static height
     // cubemap. Leave them alone here so the runtime compositor only fills the
@@ -88,20 +94,20 @@ fn compose_unbaked_crater_m(
         return height_m;
     }
 
-    let center = crater.center.normalize_or_zero();
-    if center == Vec3::ZERO {
+    let center = crater.center.as_dvec3().normalize_or_zero();
+    if center == DVec3::ZERO {
         return height_m;
     }
 
     let angular_dist = center.dot(dir).clamp(-1.0, 1.0).acos();
-    let surface_dist_m = angular_dist * body_radius_m.max(1.0);
-    if surface_dist_m > crater.influence_radius_m() {
+    let surface_dist_m = angular_dist * f64::from(body_radius_m.max(1.0));
+    if surface_dist_m > f64::from(crater.influence_radius_m()) {
         return height_m;
     }
 
     let degrad = degradation_factor(crater.radius_m, crater.age_gyr);
     let delta_m = crater_profile(
-        surface_dist_m / crater.radius_m,
+        (surface_dist_m / f64::from(crater.radius_m)) as f32,
         crater.depth_m * degrad,
         crater.rim_height_m * degrad,
         crater.radius_m,
@@ -177,14 +183,14 @@ mod tests {
     #[test]
     fn baked_craters_are_not_composed_again() {
         let c = crater(Vec3::X, 2_000.0, 0.1);
-        let h = compose_unbaked_crater_m(123.0, &c, 100_000.0, 1_500.0, Vec3::X);
+        let h = compose_unbaked_crater_m(123.0, &c, 100_000.0, 1_500.0, DVec3::X);
         assert_eq!(h, 123.0);
     }
 
     #[test]
     fn unbaked_crater_carves_center() {
         let c = crater(Vec3::X, 1_000.0, 0.0);
-        let h = compose_unbaked_crater_m(0.0, &c, 100_000.0, 1_500.0, Vec3::X);
+        let h = compose_unbaked_crater_m(0.0, &c, 100_000.0, 1_500.0, DVec3::X);
         assert!(
             h < -50.0,
             "expected crater center to carve below base, got {h}"
@@ -194,7 +200,7 @@ mod tests {
     #[test]
     fn unbaked_crater_does_not_affect_distant_samples() {
         let c = crater(Vec3::X, 1_000.0, 0.0);
-        let h = compose_unbaked_crater_m(42.0, &c, 100_000.0, 1_500.0, Vec3::Y);
+        let h = compose_unbaked_crater_m(42.0, &c, 100_000.0, 1_500.0, DVec3::Y);
         assert_eq!(h, 42.0);
     }
 }

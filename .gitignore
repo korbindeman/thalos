@@ -4,13 +4,16 @@
 /tools/preview/out/
 # Headless whole-scene captures (`just screenshot` / THALOS_SCREENSHOT).
 /tools/screenshots/
+# Disposable A/B matrices and ad-hoc agent capture iterations.
+/tools/agent_scratch/*
+!/tools/agent_scratch/README.md
+# Machine-readable runtime diagnostics (JSONL and related probe output).
+/tools/diagnostics/
 /tools/ui_preview/
 # Baked procedural textures (`cargo run -p thalos_texgen --example bake`).
 /tools/texgen/out/
 # Per-user runtime settings written by the game (window mode, UI scale, …).
 /user/
-# Runtime grass-churn diagnostic log (THALOS_GRASS_LOG, default grass_churn.jsonl).
-/grass_churn.jsonl
 Cargo.lock
 .DS_Store
 .cargo/config

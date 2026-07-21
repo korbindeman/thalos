@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod aero;
+mod artifact_paths;
 mod autopilot;
 mod base_editor;
 mod body_tree_panel;

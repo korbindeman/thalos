@@ -77,7 +77,9 @@ impl SsaoConfig {
     /// pass entirely (terrain skips sampling, node skips rendering), `show`
     /// paints raw AO on the terrain (diagnostic), anything else / unset = on.
     fn from_env() -> Self {
-        let mode = std::env::var("THALOS_SSAO").unwrap_or_default().to_ascii_lowercase();
+        let mode = std::env::var("THALOS_SSAO")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
         match mode.as_str() {
             "off" | "0" | "false" => Self {
                 enabled: false,
@@ -153,17 +155,19 @@ impl Plugin for SsaoPlugin {
             .add_systems(Update, resize_ao_image);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.add_systems(RenderStartup, init_ssao_pipeline).add_systems(
-                Core3d,
-                // After the transparent pass → strictly after `copy_scene_depth`
-                // (which runs before it), so `SceneDepthImage` is populated. The
-                // blur resolves the raw pass's dither noise before the terrain
-                // samples the result next frame.
-                (compute_ssao, blur_ssao)
-                    .chain()
-                    .in_set(Core3dSystems::MainPass)
-                    .after(main_transparent_pass_3d),
-            );
+            render_app
+                .add_systems(RenderStartup, init_ssao_pipeline)
+                .add_systems(
+                    Core3d,
+                    // After the transparent pass → strictly after `copy_scene_depth`
+                    // (which runs before it), so `SceneDepthImage` is populated. The
+                    // blur resolves the raw pass's dither noise before the terrain
+                    // samples the result next frame.
+                    (compute_ssao, blur_ssao)
+                        .chain()
+                        .in_set(Core3dSystems::MainPass)
+                        .after(main_transparent_pass_3d),
+                );
         }
     }
 }
@@ -328,8 +332,7 @@ fn compute_ssao(
         return;
     }
     let (extracted, _ship) = view.into_inner();
-    let (Some(ao_raw), Some(scene_depth), Some(pipeline)) = (ao_raw, scene_depth, pipeline)
-    else {
+    let (Some(ao_raw), Some(scene_depth), Some(pipeline)) = (ao_raw, scene_depth, pipeline) else {
         return;
     };
     let (Some(dest), Some(depth)) = (

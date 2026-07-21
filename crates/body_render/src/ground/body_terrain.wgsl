@@ -1186,7 +1186,12 @@ fn grass_field_detail(
 // it stays glued to the surface under time warp / floating-origin shifts, and
 // it fades with distance to avoid sub-pixel shimmer (the macro albedo carries
 // the far field).
-fn regolith_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> SurfaceDetail {
+fn regolith_detail(
+    p_body: vec3<f32>,
+    geo_normal: vec3<f32>,
+    cam_dist: f32,
+    footprint_m: f32,
+) -> SurfaceDetail {
     var out: SurfaceDetail;
     out.tint = vec3<f32>(REGOLITH_VALUE_TRIM);
     out.normal_offset = vec3<f32>(0.0);
@@ -1199,23 +1204,34 @@ fn regolith_detail(p_body: vec3<f32>, geo_normal: vec3<f32>, cam_dist: f32) -> S
     // Broad mare/highland mottle + fine dust/ejecta speckle. Both centred on 0
     // so the mean stays at the trimmed baked albedo; the spread is what reads as
     // dusty texture and dark small-crater hollows.
-    let mottle = (fbm3_periodic(
+    let mottle = fbm3_value_faded(
         p_body * REGOLITH_MOTTLE_SCALE,
         4,
         DETAIL_COORD_PERIOD_M * REGOLITH_MOTTLE_SCALE,
-    ) - 0.5) * 2.0;
-    let speckle = (fbm3_periodic(
+        1.0 / REGOLITH_MOTTLE_SCALE,
+        footprint_m,
+    );
+    let speckle = fbm3_value_faded(
         p_body * REGOLITH_SPECKLE_SCALE,
         3,
         DETAIL_COORD_PERIOD_M * REGOLITH_SPECKLE_SCALE,
-    ) - 0.5) * 2.0;
+        1.0 / REGOLITH_SPECKLE_SCALE,
+        footprint_m,
+    );
     let value_mul = 1.0 + (mottle * REGOLITH_MOTTLE_AMT + speckle * REGOLITH_SPECKLE_AMT) * fade;
     out.tint = vec3<f32>(REGOLITH_VALUE_TRIM * clamp(value_mul, 0.45, 1.8));
 
     // Micro-relief normal from the fine detail height gradient (~1.25 m), tangent
     // to the sphere so it tilts facets toward/away from the low sun — the pocked
     // light/dark micro-contrast that makes regolith read as solid cratered ground.
-    let grad = detail_height_grad(p_body).yzw;
+    let detail_grad = fbm3_perlin_grad_faded(
+        p_body * DETAIL_SCALE,
+        DETAIL_OCTAVES,
+        DETAIL_COORD_PERIOD_M * DETAIL_SCALE,
+        1.0 / DETAIL_SCALE,
+        footprint_m,
+    );
+    let grad = detail_grad.yzw * DETAIL_SCALE;
     let grad_t = grad - geo_normal * dot(grad, geo_normal);
     var off = -grad_t * (REGOLITH_NORMAL_STRENGTH * fade);
     let off_len = length(off);
@@ -1328,7 +1344,17 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         if (debug_on) {
             surface_rgb = albedo.rgb * REGOLITH_VALUE_TRIM;
         } else {
-            let rd = regolith_detail(detail_p_body, geo_normal, cam_dist);
+            let regolith_footprint = select(
+                footprint_m,
+                0.0,
+                terrain_extras.inspection.x >= 2.5,
+            );
+            let rd = regolith_detail(
+                detail_p_body,
+                geo_normal,
+                cam_dist,
+                regolith_footprint,
+            );
             surface_rgb = albedo.rgb * rd.tint;
             regolith_normal_offset = rd.normal_offset;
         }
@@ -1423,7 +1449,10 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         albedo = vec4<f32>(mix(dark, light, debug_checker), 1.0);
     }
 
-    if (terrain_extras.inspection.x >= 0.5) {
+    if (
+        terrain_extras.inspection.x >= 0.5
+        && terrain_extras.inspection.x < 1.5
+    ) {
         var output_fullbright: FragmentOutput;
         output_fullbright.color = vec4<f32>(albedo.rgb, albedo.a);
         return output_fullbright;
@@ -1489,7 +1518,10 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     let stable_normal = select(
         normalize(mix(geo_normal, normal, 0.85)),
         geo_normal,
-        distant_schematic,
+        distant_schematic || (
+            terrain_extras.inspection.x >= 1.5
+            && terrain_extras.inspection.x < 2.5
+        ),
     );
 
     // Geometric specular AA: measure the shading normal's screen-space variance

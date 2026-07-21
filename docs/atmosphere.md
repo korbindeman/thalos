@@ -5,19 +5,18 @@ solid surface: gas-giant materials, rocky-body atmospheric scattering,
 clouds, ocean rendering, and image-based lighting (IBL / reflection
 probe).
 
-What runs today: gas-giant materials, a single-scattering Rayleigh +
-Mie atmosphere on terrestrial impostors and terrain LOD, reference
-cloud-cover overlays with shader-side differential rotation, an
-in-impostor water BRDF, and a CPU-painted reflection probe. The
-terrestrial atmosphere is production-ready for orbital views;
-in-atmosphere flight is the remaining frontier.
+What runs today: gas-giant materials, Bevy's raymarched rocky-body
+atmosphere on the active render camera, reference cloud-cover overlays,
+an in-impostor water BRDF, and a CPU-painted reflection probe. The old
+`BodySky` single-scatter atmosphere remains only as a debug A/B fallback
+while its non-atmosphere composites are migrated independently.
 
 ## Status
 
 | Area | Today | Future |
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Storm and aurora layers; volumetric for cinematic close-ups. |
-| Rocky-body sky | **Single-scattering Rayleigh + Mie raymarch** (`atmosphere.wgsl::integrate_atmosphere`). Per-body β + scale heights + Henyey-Greenstein g; one integral produces in-scatter, transmittance, rim halo, terminator orange, and aerial perspective. 8 view × 6 sun samples per fragment with per-pixel jitter. The terrain `BodySky` pass and the impostor path both use this orbital model so the surface stays readable and haze concentrates toward the limb instead of washing the whole disk blue. Sky pixels still boost alpha from local in-scatter luminance so bright sky crushes stars where an observer's eye would adapt away from them. Per-body params at `assets/bodies/<name>.ron::scattering`. | Ozone absorption (Earth's blue-purple twilight, two extra params); Bruneton 2008 / Hillaire-style multi-scatter LUTs once in-atmosphere flight justifies the precompute step. |
+| Rocky-body sky | **Bevy `AtmosphereMode::Raymarched` is canonical** (ADR-0010). One camera-local atmosphere proxy follows the body selected by `ViewAnchor`; authored Rayleigh scale heights/optical depth feed Bevy's medium, with an Earth aerosol split and ozone absorption. The deterministic `earth-reference` screenshot is the orbital regression probe. The legacy `BodySky` atmosphere is debug-only. | Remove the temporary 0.1 density adapter when terrain and the photometric atmosphere share one radiometric exposure contract; migrate cloud/star composites without restoring a second atmosphere. |
 | Cloud rendering | **Near/mid `BodySky` path:** the vendored compute raymarch described in *Cloud rendering (M4)* below; body-fixed spherical shells, procedural density, a planet-fixed weather map, cloud-depth export, and temporal reprojection. The far impostor still composites a separately authored flat shell. Gas-giant cloud decks remain a distinct system. | The canonical surface-to-orbit replacement is planned in [clouds.md](clouds.md): one per-body weather field, atmosphere-coupled lighting, scalable reconstruction, shared cloud shadows, and a weather-derived orbital projection. |
 | Oceans | In-impostor water BRDF: triggered where `sample_height_m(dir) < sea_level`. Authored deep-water color + minimum column depth. Sky-tint reflection now derives from the new β·H Rayleigh fields (was hand-authored). Flat surface. | Microfacet ocean with sun-glint streak, depth-darkened color, fresnel reflectivity, foam at coastlines. Probably a dedicated material rather than the impostor. |
 | Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
@@ -29,6 +28,45 @@ in-atmosphere flight is the remaining frontier.
 > `karman_line_m` on `TerrestrialAtmosphere`, but the physical profile
 > (`TerrestrialAtmosphere::sample_at_altitude_m` → density / pressure /
 > temperature / speed-of-sound) feeds forces, not shading.
+
+### Canonical rocky-body render path (2026-07-20)
+
+`rendering::stock_atmosphere::sync_stock_atmosphere` projects exactly one
+authored rocky atmosphere into Bevy for the active ship view. It attaches
+`AtmosphereSettings { rendering_method: AtmosphereMode::Raymarched, .. }` to
+the `ShipCamera` and places an `Atmosphere` proxy at the active body's center
+in the camera's floating-origin render frame. The body is resolved through
+`ViewAnchor`; orbit, surface, freecam, hub, and screenshot views therefore use
+the same camera-relative placement rule.
+
+**Placement invariant (INC-0007):** a relative f64 camera-to-body vector is not
+itself a render-space position. The extracted proxy center is
+`camera_global.translation() + camera_to_body`; BigSpace does not guarantee the
+camera sits at render-space zero.
+
+Thalos's authored Rayleigh column remains the source of spectral scattering.
+The adapter uses Bevy's Earth aerosol scattering/absorption split and ozone
+profile. A single `0.1` density multiplier currently reconciles Bevy's
+photometric atmosphere with terrain that still shades in the spine's arbitrary
+scene-flux units. It scales scattering and extinction together, so the
+raymarch remains internally energy-consistent. F7's radiometric unification
+must remove this adapter rather than accumulating more look-specific knobs.
+
+`just screenshot earth-reference` supplies the fixed 3:2, low-orbit camera for
+visual regression. `THALOS_SCREENSHOT_ATMOSPHERE=custom|bevy|configured` makes
+matched legacy/canonical captures without mutating saved graphics settings.
+This reference framing is land-only; ocean and cloud appearance are explicitly
+outside its acceptance criteria.
+
+`just screenshot runway-atmosphere` is the complementary surface probe: a low,
+near-horizontal camera above the flattened spaceport basin that makes the sky
+and long atmospheric slant path fill the frame. Use
+`just compare runway-atmosphere atmosphere` for the controlled legacy-vs-Bevy
+surface comparison.
+
+The older `BodySkyMaterial` sections below document the retained debug path and
+the cloud/depth composites that still need re-homing. They are not the
+canonical rocky-body atmosphere.
 
 ## Goals
 

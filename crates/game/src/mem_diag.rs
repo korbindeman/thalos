@@ -1,9 +1,13 @@
 //! GPU-memory leak diagnostic (temporary — remove once the leak is pinned).
 //!
 //! Enabled by setting the `THALOS_MEM_DIAG` env var (any value). Every ~2 s it
-//! appends one JSONL line per world to `mem_diag.jsonl` in the game's cwd (repo
-//! root). A leak shows up as a monotonically climbing count; the number that
+//! appends one JSONL line per world to `tools/diagnostics/mem_diag.jsonl`. A
+//! leak shows up as a monotonically climbing count; the number that
 //! *stays flat* localizes the category:
+//!
+//! The asset/entity counts need no build feature. For real wgpu driver-object
+//! counters, also launch with `--features gpu-counters`; the feature is opt-in
+//! so normal game/screenshot/preview builds share one Bevy/wgpu dylib.
 //!
 //!   - `render_meshes` climbs while `main_meshes` stays flat
 //!         → the churned `RenderAssetUsages::RENDER_WORLD` scatter meshes
@@ -29,8 +33,8 @@ use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderSystems};
 
-/// Output file (cwd = repo root when launched via `just game`).
-const LOG_PATH: &str = "mem_diag.jsonl";
+/// Output filename under the canonical diagnostics directory.
+const LOG_FILENAME: &str = "mem_diag.jsonl";
 /// Log cadence in frames (~2 s at 60 fps). Both worlds keep their own counter.
 const LOG_EVERY_FRAMES: u64 = 120;
 
@@ -45,11 +49,8 @@ pub fn scatter_killed() -> bool {
 }
 
 fn append_line(line: &str) {
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(LOG_PATH)
-    {
+    let path = crate::artifact_paths::default_jsonl_path(LOG_FILENAME);
+    if let Ok(mut f) = crate::artifact_paths::open_jsonl_append(&path) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -63,7 +64,8 @@ impl Plugin for MemDiagPlugin {
         if std::env::var("THALOS_MEM_DIAG").is_err() {
             return;
         }
-        info!(target: "thalos::mem", "GPU-memory diagnostic ON → {LOG_PATH}");
+        let path = crate::artifact_paths::default_jsonl_path(LOG_FILENAME);
+        info!(target: "thalos::mem", "GPU-memory diagnostic ON → {}", path.display());
         app.add_systems(Update, log_main_assets);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(Render, log_render_assets.in_set(RenderSystems::Cleanup));
@@ -102,8 +104,8 @@ fn log_main_assets(
 /// `wgpu_mem_allocs` climb while `render_meshes` stays bounded, the leak is the
 /// `MeshAllocator` growing GPU buffer slabs from continuous variable-size scatter
 /// mesh churn (slabs free only when fully empty). The wgpu counters read 0 unless
-/// wgpu's `counters` feature is active — a 0 line just means "use the external
-/// VRAM meter instead".
+/// wgpu's `counters` feature is active (`thalos_game/gpu-counters`) — a 0 line
+/// just means "use the external VRAM meter instead".
 fn log_render_assets(
     mut frame: Local<u64>,
     meshes: Res<RenderAssets<RenderMesh>>,

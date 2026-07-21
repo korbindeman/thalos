@@ -3,9 +3,10 @@ set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 set dotenv-load := true
 set dotenv-filename := ".env.just"
 
-# Dev run defaults to Bevy dynamic linking (cross-platform iteration speedup;
-# dev-only, never reaches `just build`/`just trace`/release). Override the whole
-# command in `.env.just` to opt out locally.
+# Every dev entry point that boots Bevy defaults to dynamic linking. Bevy links
+# once into `bevy_dylib`; subsequent game/screenshot/preview iterations relink
+# only Thalos crates. Release/build/trace paths stay static. Override the whole
+# game command in `.env.just` to opt out locally.
 game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features bevy/dynamic_linking")
 
 # Run the game. Bare `just game` boots to the start screen (scenario
@@ -35,41 +36,57 @@ game mode=env_var_or_default("THALOS_SPAWN", "menu"):
 # the real TreeMaterial + sky model so it matches the in-game look. Add objects
 # in crates/body_render/examples/object_preview.rs.
 preview:
-    cargo run -p thalos_body_render --example object_preview
+    cargo run -p thalos_body_render --features bevy/dynamic_linking --example object_preview
 
 # UI kitchen sink: renders every thalos_ui token/widget over a test scene to
 # tools/ui_preview/kitchen_sink.png headlessly, then exits — agents iterate on
 # the UI kit by reading the PNG. See crates/ui/examples/kitchen_sink.rs.
 ui-preview:
-    cargo run -p thalos_ui --example kitchen_sink
+    cargo run -p thalos_ui --features bevy/dynamic_linking,bevy/wayland,bevy/jpeg --example kitchen_sink
 
 # Interactive window variant of `just ui-preview` (hover/press/typing feel;
 # S saves the same screenshot). User-run (opens a window).
 ui-preview-window:
-    cargo run -p thalos_ui --example kitchen_sink -- --window
+    cargo run -p thalos_ui --features bevy/dynamic_linking,bevy/wayland,bevy/jpeg --example kitchen_sink -- --window
 
 # Interactive window variant of `just preview`: opens a window with an orbit
 # camera — drag to orbit, scroll to zoom, ←/→ cycle objects, S saves a
 # screenshot to tools/preview/out/<object>_view.png.
 preview-window:
-    cargo run -p thalos_body_render --example object_preview -- --window
+    cargo run -p thalos_body_render --features bevy/dynamic_linking --example object_preview -- --window
 
 # Headless screenshot: boots the game off-screen (no window), builds the world
 # for the preset, poses the camera, and writes a PNG to tools/screenshots/, then
 # exits — agent-runnable like `just preview`, but of a whole composed scene.
-# `just screenshot` does the spaceport aerial; `just screenshot hub` captures
+# `just screenshot` does the spaceport aerial; `just screenshot runway-atmosphere`
+# captures a low near-horizontal view inside the atmosphere; `just screenshot hub` captures
 # the space-center hub exactly as PLAY presents it (spaceport built, no craft
 # placed — the regression probe for view-anchored surface detail);
 # `just screenshot dry-belt` (aliases: dry / desert / biome) surveys the driest
 # sunlit desert site it can find — the verification probe for terrain-per-biome
 # work (landcover palette + the tree/scatter biome gate). `mira-orbit` and
-# `mira-surface` verify the offline terrain package, LOD, and Hapke regolith.
+# `mira-surface` verifies the landmark crater/package/Hapke view; `mira-eva`
+# reproduces the canonical eye-level EVA spawn and its horizon/LOD coverage.
+# `earth-reference` is the 3:2 ISS-like atmosphere calibration view; it defaults
+# to Bevy raymarching, while THALOS_SCREENSHOT_ATMOSPHERE=custom captures the
+# matched legacy BodySky A/B.
 # Override the framing
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
-# Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP.
+# Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP,
+# _ATMOSPHERE (configured/custom/bevy).
 screenshot preset="spaceport-aerial":
-    THALOS_SCREENSHOT='{{preset}}' cargo run -p thalos_game
+    {{ if os() == "windows" { "$env:THALOS_SCREENSHOT='" + preset + "'; " } else { "THALOS_SCREENSHOT='" + preset + "' " } }}{{game_command}}
+
+# Deterministic visual A/B or N-way comparison. Builds the normal dynamic-link
+# game once, then the lightweight orchestrator launches that exact binary in a
+# clean process per typed variant. Outputs full captures + contact sheet +
+# diffs/wipes + manifest under the disposable agent scratch tree at
+# tools/agent_scratch/screenshots/comparisons/<preset>/<axis>/.
+# Axes: atmosphere (custom/bevy), ssao (off/on/raw). See docs/visual_testing.md.
+compare preset="earth-reference" axis="atmosphere":
+    cargo build -p thalos_game --features bevy/dynamic_linking --bin thalos_game --example visual_compare
+    {{ if os() == "windows" { "target/debug/examples/visual_compare.exe" } else { "./target/debug/examples/visual_compare" } }} "{{preset}}" "{{axis}}"
 
 # Offline authored terrain package. The MVP producer is the deterministic
 # airless compiler; ADR-0008's diffusion producer will emit the same package

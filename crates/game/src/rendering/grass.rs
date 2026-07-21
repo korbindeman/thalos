@@ -52,12 +52,12 @@ use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::graphics_settings::GraphicsSettings;
 use crate::rendering::ground_terrain::terrain_shading_style_for;
-use crate::structures::{StructureKind, StructurePlacement, StructureRegistry, StructureSite};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::CameraExposure;
 use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
+use crate::structures::{StructureKind, StructurePlacement, StructureRegistry, StructureSite};
 
 // ── Clipmap rings ─────────────────────────────────────────────────────────────
 /// One LOD ring: a coarser lattice with its own density / blade size / fade.
@@ -534,11 +534,7 @@ fn drive_grass_tiles(
     // tiles build while their blades are scaled to ~0 — the build is invisible
     // (no pop-in), and they grow in as the craft approaches.
     let mut candidates: Vec<(f64, RingTileKey)> = Vec::new();
-    for (ring_idx, ring) in GRASS_RINGS
-        .iter()
-        .enumerate()
-        .skip(min_ring as usize)
-    {
+    for (ring_idx, ring) in GRASS_RINGS.iter().enumerate().skip(min_ring as usize) {
         let tps = ring_tps[ring_idx];
         let band = ring_band_m(ring) as f64;
         let lo = (ring.inner_m - band).max(0.0);
@@ -659,7 +655,12 @@ fn finalize_grass_tiles(
         return;
     };
 
-    ensure_ring_materials(&mut grass, &mut materials, &mut images, sun_shadow.as_deref());
+    ensure_ring_materials(
+        &mut grass,
+        &mut materials,
+        &mut images,
+        sun_shadow.as_deref(),
+    );
     let ring_materials = grass.materials.clone();
 
     let mut finished: Vec<(RingTileKey, u64, Option<GrassTileMesh>)> = Vec::new();
@@ -1018,16 +1019,13 @@ fn log_grass_diagnostics(
         grass.dbg.empty,
         grass.dbg.max_rebuild_dh_m,
     );
-    // Always write to a file (default at the game's cwd = repo root) so the
-    // console slow-frame spam is irrelevant and there's nothing to set up.
+    // Always write to the diagnostics tree so machine-readable traces never
+    // mix with curated screenshots. A bare override filename is rooted there;
+    // explicit relative/absolute paths are honored.
     let path =
-        std::env::var("THALOS_GRASS_LOG").unwrap_or_else(|_| "grass_churn.jsonl".to_string());
+        crate::artifact_paths::jsonl_path_from_env_or("THALOS_GRASS_LOG", "grass_churn.jsonl");
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
+    if let Ok(mut f) = crate::artifact_paths::open_jsonl_append(&path) {
         let _ = writeln!(f, "{line}");
     }
 

@@ -9,11 +9,11 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use thalos_terrain::{
-    CubemapFace, PackageNodeAddress, PackageProducer, TerrainCompileContext, TerrainCompileOptions,
-    TerrainPackageManifest, cache, compile_terrain_config, load_static_package,
-    write_static_package,
+    CubemapFace, DynamicSurfaceState, PackageNodeAddress, PackageProducer, PlanetSurface,
+    TerrainCompileContext, TerrainCompileOptions, TerrainPackageManifest, cache,
+    compile_terrain_config, load_static_package, surface_height_m, write_static_package,
 };
 use thalos_world::{BodyDefinition, BodyKind, parsing::load_solar_system_from_dir};
 
@@ -33,7 +33,8 @@ fn context_for(body: &BodyDefinition) -> TerrainCompileContext {
 fn main() {
     let mut args = std::env::args().skip(1);
     let first = args.next().unwrap_or_else(|| "Mira".into());
-    let (validate_only, body_name) = if first == "validate" || first == "--validate" {
+    let diagnose = first == "diagnose" || first == "--diagnose";
+    let (validate_only, body_name) = if first == "validate" || first == "--validate" || diagnose {
         (true, args.next().unwrap_or_else(|| "Mira".into()))
     } else {
         (false, first)
@@ -75,6 +76,9 @@ fn main() {
             started.elapsed(),
         );
         print_height_stats(&loaded.manifest);
+        if diagnose {
+            print_runtime_height_profile(loaded.static_surface);
+        }
         return;
     }
 
@@ -133,6 +137,100 @@ fn main() {
         loaded.manifest.artifact_fingerprint(),
     );
     print_height_stats(&loaded.manifest);
+}
+
+/// Print a metre-spaced profile through Mira's canonical sub-stellar EVA site.
+///
+/// This is intentionally a diagnostic command rather than a test: the current
+/// planet-generation sprint forbids generation tests, while renderer incidents
+/// still need a cheap, falsifiable way to distinguish a discontinuous source
+/// field from GPU atlas/shader corruption. Run with
+/// `cargo run --release -p thalos_terrain_baker -- diagnose Mira`.
+fn print_runtime_height_profile(static_surface: thalos_terrain::StaticSurfaceData) {
+    let radius_m = static_surface.radius_m as f64;
+    let surface = PlanetSurface {
+        static_surface,
+        dynamic_layers: Default::default(),
+        tectonics: None,
+    };
+    let state = DynamicSurfaceState::for_layers(&surface.dynamic_layers);
+
+    // Exact canonical direction logged by the headless `mira-eva` preset.
+    let center = DVec3::new(
+        -0.999_999_575_328_851_4,
+        -0.000_101_130_876_585_867_94,
+        -0.000_916_032_020_594_805_4,
+    )
+    .normalize();
+    let reference = if center.y.abs() > 0.99 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let tangent = reference.cross(center).normalize();
+    let bitangent = center.cross(tangent).normalize();
+
+    let profile = |half_span_m: i32, step_m: i32, direction_count: i32| {
+        let mut heights = Vec::new();
+        let mut deltas = Vec::new();
+        for direction_index in 0..direction_count {
+            let azimuth =
+                std::f64::consts::TAU * f64::from(direction_index) / f64::from(direction_count);
+            let along = tangent * azimuth.cos() + bitangent * azimuth.sin();
+            let mut previous: Option<f32> = None;
+            for offset_m in (-half_span_m..=half_span_m).step_by(step_m as usize) {
+                let dir = (center + along * (f64::from(offset_m) / radius_m)).normalize();
+                let height = surface_height_m(&surface, &state, dir, step_m as f32);
+                if let Some(previous) = previous {
+                    deltas.push((height - previous).abs());
+                }
+                previous = Some(height);
+                heights.push(height);
+            }
+        }
+        deltas.sort_by(f32::total_cmp);
+        let percentile =
+            |fraction: f32| deltas[((deltas.len() - 1) as f32 * fraction).round() as usize];
+        let min_h = heights.iter().copied().fold(f32::INFINITY, f32::min);
+        let max_h = heights.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        println!(
+            "  runtime profile: {} directions × ±{} km at {} m, height {:.2}..{:.2} m; |dh| p50/p90/p99/max {:.3}/{:.3}/{:.3}/{:.3} m",
+            direction_count,
+            half_span_m / 1_000,
+            step_m,
+            min_h,
+            max_h,
+            percentile(0.50),
+            percentile(0.90),
+            percentile(0.99),
+            percentile(1.0),
+        );
+    };
+    profile(2_000, 1, 1);
+    profile(30_000, 10, 8);
+
+    // Audit the canonical screenshot boom independently of its azimuth. A
+    // focus on a crater floor can put a low-elevation orbit camera inside the
+    // surrounding wall even though the focus sample itself is exact.
+    let center_height = surface_height_m(&surface, &state, center, 1.0) as f64;
+    let elevation = 3.0f64.to_radians();
+    let distance_m = 1_000.0;
+    let mut min_clearance = f64::INFINITY;
+    let mut max_clearance = f64::NEG_INFINITY;
+    for direction_index in 0..64 {
+        let azimuth = std::f64::consts::TAU * f64::from(direction_index) / 64.0;
+        let horizontal = tangent * azimuth.cos() + bitangent * azimuth.sin();
+        let offset = horizontal * elevation.cos() + center * elevation.sin();
+        let camera = center * (radius_m + center_height) + offset * distance_m;
+        let camera_dir = camera.normalize();
+        let ground = f64::from(surface_height_m(&surface, &state, camera_dir, 1.0));
+        let clearance = camera.length() - (radius_m + ground);
+        min_clearance = min_clearance.min(clearance);
+        max_clearance = max_clearance.max(clearance);
+    }
+    println!(
+        "  mira-eva 1 km/3° camera clearance over 64 azimuths: {min_clearance:.2}..{max_clearance:.2} m (focus height {center_height:.2} m)"
+    );
 }
 
 fn print_height_stats(manifest: &TerrainPackageManifest) {

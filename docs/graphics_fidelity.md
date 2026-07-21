@@ -35,9 +35,11 @@ specific gaps + tuning + one structural split, not missing machinery.
   env-BRDF, Kulla–Conty energy compensation, Kaplanyan specular AA).
 - **Scene lighting** — `SceneLighting` is one clean CPU mirror feeding every
   body material; eclipse occluders + planetshine come free to anything binding it.
-- **Atmosphere** — custom per-body single-scatter raymarch (`body_sky.wgsl` /
-  BodySky) with aerial perspective keyed to a copied **scene-depth** texture, a
-  CPU-baked multi-scatter LUT, and a vendored volumetric cloud slab.
+- **Atmosphere** — Bevy `AtmosphereMode::Raymarched` is the canonical
+  rocky-body sky (ADR-0010), projected onto one camera-local proxy selected by
+  `ViewAnchor`. Authored Rayleigh terms feed an Earth aerosol + ozone medium.
+  The former `BodySky` atmosphere is retained only for debug A/B captures while
+  its cloud/depth composites are migrated independently.
 - **Shadows** — a self-managed **3-cascade** ortho sun-shadow rig
   (`rendering/sun_shadow.rs`, `SHADOW_CASTER_LAYER = 8`, 4096², copy-node →
   `Depth32Float`) sampled by terrain/trees/grass/rocks via `thalos::shadow`.
@@ -141,10 +143,10 @@ Concretely, the invariants every surface must satisfy:
    first). Extended 2026-07-20 to the celestial-backdrop twilight/Kármán term
    after freecam exposed its remaining `ship_state()` anchor (BL-12).
 
-Today, items 1–6 hold *within* the spine (terrain ↔ vegetation ↔ rock), partially
-for water, and **almost none of them hold for crafts/structures** (which only get
-shared aerial perspective, because BodySky is a fullscreen depth-keyed pass the
-hull happens to fall under). The foundation (§3) is what makes 1–6 hold for
+Today, Bevy's atmosphere pass gives terrain and opaque objects one shared
+raymarched air volume. The other items hold *within* the spine (terrain ↔
+vegetation ↔ rock), partially for water, and **almost none of them hold for
+crafts/structures**. The foundation (§3) is what makes all six hold for
 *everything*.
 
 ## 2.4 The shared-substrate contract
@@ -155,13 +157,13 @@ to be collapsed into the spine column.
 
 | Surface | Lighting | Terminator | Exposure | Shadow | IBL | AO | Atmosphere |
 |---|---|---|---|---|---|---|---|
-| Terrain | spine | shared | gain | rig (recv) | analytic | analytic | BodySky |
-| Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | recession |
-| Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | recession |
-| Water | own GGX | shared | manual | SceneLighting | tint hack | — | BodySky |
-| Impostor | spine (Hapke) | shared | gain | — | analytic | — | own/BodySky |
-| **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | BodySky (depth) |
-| **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | BodySky (depth) |
+| Terrain | spine | shared | gain | rig (recv) | analytic | analytic | Bevy raymarch |
+| Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
+| Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
+| Water | own GGX | shared | manual | SceneLighting | tint hack | — | pending re-enable |
+| Impostor | spine (Hapke) | shared | gain | — | analytic | — | Bevy raymarch |
+| **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
+| **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
 
 The spine already covers ~4 of 8 columns; the craft path re-implements all 8 in
 parallel and is missing shadow + AO entirely. **Foundation = collapse the
@@ -290,7 +292,7 @@ phase dependencies, and acceptance criteria live there.
 
 | ID | Item | Status | Effort | Sprint | Notes / source |
 |---|---|---|---|---|---|
-| — | Atmosphere Mie retune (clean continental haze) | ◐ | — | THIS | `assets/bodies/thalos.ron`; awaiting noon screenshot |
+| BL-13 | Earth-reference Bevy raymarched atmosphere convergence | ☑ | Med | THIS | ADR-0010; deterministic land-only `earth-reference` capture inspected 2026-07-20; normal-path live verification pending |
 | — | Object aerial recession (foliage/rocks → sky haze) | ◐ | — | THIS | `object_aerial_recession`; fold inside `shade_surface` so it can't be forgotten (one-world invariant #5) |
 | W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
 | W15 | Atmosphere-coupled Nubis cloud lighting (powder + multi-scatter octaves + shared sun/sky transmittance) (= CLOUD-4) | ☐ | High | later | cloud §3.4 · Schneider 2023 |
@@ -337,6 +339,18 @@ materials** instead of constant colours.
 | C1 | **Tonemapper base decision**: keep AgX or switch to Khronos PBR Neutral (keeps an authored analytic palette faithful — i.e. `landcover`). **Reject ACES** (saturated sky + green veg + bright sun = textbook hue skew) | ☐ | Low | THIS | one A/B; **Open Q2** |
 | C2 | CA + grain: reduce/gate for a long-sightline planet sim (the `just preview` tool already strips them) | ☐ | Low | THIS? | **Open Q4** |
 | — | Single exposure authority | see W10/F2 | — | THIS | tonemapper A/B should run *after* W9 changes the inputs underneath it |
+
+## 4.10 Visual diagnosis tooling
+
+Visual conclusions must come from controlled evidence, not from two manually
+framed screenshots or a split-screen renderer that changes viewport-dependent
+inputs. ADR-0011 makes isolated headless capture matrices the canonical path;
+the operational contract and artifact layout live in `visual_testing.md`.
+
+| ID | Item | Status | Effort | Sprint | Notes / source |
+|---|---|---|---|---|---|
+| BL-18 | Typed `just compare <preset> <axis>` runner: isolated variants, full captures, labelled contact sheet, baseline diffs/wipes, JSON provenance + metrics | ✅ | Med | THIS | runtime-verified 2026-07-21: `earth-reference/atmosphere` A/B + `spaceport-aerial/ssao` off/on/raw artifacts inspected · ADR-0011 · INC-0008 |
+| BL-19 | Expand shared diagnostic channels (normals/depth/LOD/shadow/material/atmosphere/lighting lobes); optional interactive image wipe only if needed | ☐ | Med | later | extend the capture matrix, never a second `ShipCamera`/`ViewAnchor` path |
 
 ---
 

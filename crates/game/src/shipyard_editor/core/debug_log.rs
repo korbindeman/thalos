@@ -15,10 +15,9 @@
 //! THALOS_SHIPYARD_SELECT_LOG=shipyard-select.jsonl cargo run -p thalos_game -- shipyard
 //! ```
 //!
-//! then inspect with e.g. `jq -c . shipyard-select.jsonl`.
+//! then inspect `tools/diagnostics/shipyard-select.jsonl`.
 
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -130,22 +129,24 @@ pub struct SelectionLog {
 }
 
 impl SelectionLog {
-    /// Build from `THALOS_SHIPYARD_SELECT_LOG`. Appends (never truncates) so a
-    /// run's trace accumulates; delete the file between runs for a clean log.
+    /// Build from `THALOS_SHIPYARD_SELECT_LOG`. A bare filename is placed under
+    /// `tools/diagnostics/`. Appends (never truncates) so a run's trace
+    /// accumulates; delete the file between runs for a clean log.
     pub fn from_env() -> Self {
-        let Ok(path) = std::env::var("THALOS_SHIPYARD_SELECT_LOG") else {
+        let Some(path) = crate::artifact_paths::jsonl_path_from_env("THALOS_SHIPYARD_SELECT_LOG")
+        else {
             return Self::default();
         };
-        match OpenOptions::new().create(true).append(true).open(&path) {
+        match crate::artifact_paths::open_jsonl_append(&path) {
             Ok(file) => {
-                info!(target: "thalos::shipyard", "selection trace → {path}");
+                info!(target: "thalos::shipyard", "selection trace → {}", path.display());
                 Self {
                     writer: Some(Mutex::new(file)),
                     seq: AtomicU64::new(0),
                 }
             }
             Err(err) => {
-                warn!(target: "thalos::shipyard", "selection trace disabled (cannot open {path}): {err}");
+                warn!(target: "thalos::shipyard", "selection trace disabled (cannot open {}): {err}", path.display());
                 Self::default()
             }
         }

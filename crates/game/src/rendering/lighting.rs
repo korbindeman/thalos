@@ -231,7 +231,13 @@ pub(super) fn update_solid_planet_params(
             })
             .unwrap_or(Vec4::new(0.0, 0.0, 0.0, 1.0));
         for (handle, occluders, scale, want, halo) in [
-            (&mats.map, map_slice, MAP_SCALE, do_map, mats.map_halo.as_ref()),
+            (
+                &mats.map,
+                map_slice,
+                MAP_SCALE,
+                do_map,
+                mats.map_halo.as_ref(),
+            ),
             (&mats.ship, ship_slice, SHIP_SCALE, do_ship, None),
         ] {
             if !want {
@@ -452,8 +458,12 @@ pub(super) fn update_sun_light(
                 let inv_orient = body.orientation.normalize().inverse();
                 let craft_bf = inv_orient * (craft_pos - body.position);
                 let sun_bf = inv_orient * to_sun;
-                horizon_vis =
-                    thalos_body_render::horizon_sun_visibility(craft_bf, sun_bf, radius, source.as_ref());
+                horizon_vis = thalos_body_render::horizon_sun_visibility(
+                    craft_bf,
+                    sun_bf,
+                    radius,
+                    source.as_ref(),
+                );
             }
             // One shared terminator (altitude-aware umbra entry) — see
             // `surface_daylight`. At the surface this reduces to the terrain
@@ -639,12 +649,12 @@ pub(super) fn update_moon_light(
         let to_craft_from_moon = (craft_pos - moon_state.position).normalize_or_zero();
         let cos_g = to_star_from_moon.dot(to_craft_from_moon).clamp(-1.0, 1.0);
         let g = cos_g.acos();
-        let phase = ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI)
-            .clamp(0.0, 1.0);
+        let phase =
+            ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI).clamp(0.0, 1.0);
 
         let color_lin = Color::srgb(moon.color[0], moon.color[1], moon.color[2]).to_linear();
-        let albedo_lum = (0.2126 * color_lin.red + 0.7152 * color_lin.green
-            + 0.0722 * color_lin.blue) as f64;
+        let albedo_lum =
+            (0.2126 * color_lin.red + 0.7152 * color_lin.green + 0.0722 * color_lin.blue) as f64;
         let ang = moon.radius_m / d;
         let shape = albedo_lum * ang * ang;
         let rel = (shape / MOON_REF_SHAPE).clamp(0.0, 1.5);

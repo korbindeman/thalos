@@ -136,7 +136,7 @@ struct GpuGrassControl;
 #[derive(Component)]
 struct MsaaControl;
 #[derive(Component)]
-struct StockAtmosphereControl;
+struct LegacyBodySkyControl;
 #[derive(Component)]
 struct ResetGraphicsControl;
 
@@ -263,7 +263,14 @@ fn setup_ui(mut commands: Commands, theme: Res<UiTheme>) {
                     })
                     .with_children(|strip| {
                         for tab in Tab::ALL {
-                            spawn_button(strip, &theme, TabButton(tab), tab.label(), ButtonVariant::Ghost, 24.0);
+                            spawn_button(
+                                strip,
+                                &theme,
+                                TabButton(tab),
+                                tab.label(),
+                                ButtonVariant::Ghost,
+                                24.0,
+                            );
                         }
                     });
 
@@ -289,7 +296,6 @@ fn setup_ui(mut commands: Commands, theme: Res<UiTheme>) {
             });
         });
 }
-
 
 // ── Chrome systems ──────────────────────────────────────────────────────────
 
@@ -375,15 +381,17 @@ fn rebuild_tab_body(
     }
 
     let theme = theme.clone();
-    commands.entity(body_entity).with_children(|b| match menu.tab {
-        Tab::Window => build_window_tab(b, &theme, &window, &overrides, &monitors),
-        Tab::Graphics => build_graphics_tab(b, &theme, &graphics),
-        Tab::Units => build_units_tab(b, &theme, &units),
-        Tab::Keyboard => build_binding_tab(b, &theme, &input, BindingKind::Keyboard),
-        Tab::Mouse => build_binding_tab(b, &theme, &input, BindingKind::Mouse),
-        Tab::Controller => build_binding_tab(b, &theme, &input, BindingKind::Controller),
-        Tab::Hotas => build_hotas_tab(b, &theme, &input),
-    });
+    commands
+        .entity(body_entity)
+        .with_children(|b| match menu.tab {
+            Tab::Window => build_window_tab(b, &theme, &window, &overrides, &monitors),
+            Tab::Graphics => build_graphics_tab(b, &theme, &graphics),
+            Tab::Units => build_units_tab(b, &theme, &units),
+            Tab::Keyboard => build_binding_tab(b, &theme, &input, BindingKind::Keyboard),
+            Tab::Mouse => build_binding_tab(b, &theme, &input, BindingKind::Mouse),
+            Tab::Controller => build_binding_tab(b, &theme, &input, BindingKind::Controller),
+            Tab::Hotas => build_hotas_tab(b, &theme, &input),
+        });
 }
 
 // ── Window tab ────────────────────────────────────────────────────────────────
@@ -408,11 +416,7 @@ fn build_window_tab(
             b,
             theme,
             "Mode",
-            vec![
-                "Windowed".into(),
-                "Borderless".into(),
-                "Fullscreen".into(),
-            ],
+            vec!["Windowed".into(), "Borderless".into(), "Fullscreen".into()],
             index,
             WindowModeControl,
         );
@@ -420,7 +424,13 @@ fn build_window_tab(
 
     // Resolution (windowed).
     if let Some((w, h)) = overrides.resolution {
-        pinned_row(b, theme, "Resolution", format!("{w} × {h}"), "THALOS_WINDOW_SIZE");
+        pinned_row(
+            b,
+            theme,
+            "Resolution",
+            format!("{w} × {h}"),
+            "THALOS_WINDOW_SIZE",
+        );
     } else {
         let mut values: Vec<(u32, u32)> = RESOLUTION_PRESETS.to_vec();
         if !values.contains(&settings.resolution) {
@@ -431,8 +441,19 @@ fn build_window_tab(
             .position(|&r| r == settings.resolution)
             .unwrap_or(0);
         let options = values.iter().map(|(w, h)| format!("{w} × {h}")).collect();
-        spawn_cycle_row(b, theme, "Resolution", options, index, ResolutionControl { values });
-        note(b, theme, "Applies in windowed mode; drag-resizing updates it too.");
+        spawn_cycle_row(
+            b,
+            theme,
+            "Resolution",
+            options,
+            index,
+            ResolutionControl { values },
+        );
+        note(
+            b,
+            theme,
+            "Applies in windowed mode; drag-resizing updates it too.",
+        );
     }
 
     // Monitor.
@@ -472,7 +493,14 @@ fn build_window_tab(
         names.push(Some(wanted.to_string()));
         index = names.len() - 1;
     }
-    spawn_cycle_row(b, theme, "Monitor", options, index, MonitorControl { names });
+    spawn_cycle_row(
+        b,
+        theme,
+        "Monitor",
+        options,
+        index,
+        MonitorControl { names },
+    );
     note(b, theme, "Used by the fullscreen modes.");
 
     // VSync.
@@ -499,7 +527,14 @@ fn build_window_tab(
     );
 
     spacer(b);
-    spawn_button(b, theme, ResetWindowControl, "Reset to defaults", ButtonVariant::Ghost, 26.0);
+    spawn_button(
+        b,
+        theme,
+        ResetWindowControl,
+        "Reset to defaults",
+        ButtonVariant::Ghost,
+        26.0,
+    );
     note(
         b,
         theme,
@@ -509,8 +544,18 @@ fn build_window_tab(
 
 // ── Graphics tab ────────────────────────────────────────────────────────────────
 
-fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: &GraphicsSettings) {
-    spawn_checkbox_row(b, theme, "Volumetric clouds", settings.clouds, CloudsControl);
+fn build_graphics_tab(
+    b: &mut ChildSpawnerCommands<'_>,
+    theme: &UiTheme,
+    settings: &GraphicsSettings,
+) {
+    spawn_checkbox_row(
+        b,
+        theme,
+        "Volumetric clouds",
+        settings.clouds,
+        CloudsControl,
+    );
     note(
         b,
         theme,
@@ -548,7 +593,10 @@ fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, setting
         .iter()
         .position(|m| *m == settings.msaa)
         .unwrap_or(0);
-    let options = MsaaSetting::ALL.iter().map(|m| m.label().to_string()).collect();
+    let options = MsaaSetting::ALL
+        .iter()
+        .map(|m| m.label().to_string())
+        .collect();
     spawn_cycle_row(b, theme, "Anti-aliasing", options, index, MsaaControl);
     note(
         b,
@@ -562,19 +610,25 @@ fn build_graphics_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, setting
     spawn_checkbox_row(
         b,
         theme,
-        "Stock Bevy atmosphere (experimental)",
-        settings.stock_atmosphere,
-        StockAtmosphereControl,
+        "Legacy custom atmosphere (debug)",
+        settings.legacy_body_sky,
+        LegacyBodySkyControl,
     );
     note(
         b,
         theme,
-        "A/B comparison: replaces the custom sky pass with Bevy's raymarched \
-         atmosphere. Ocean and volumetric clouds are hidden while it is on.",
+        "Matched A/B fallback only. Bevy's raymarched atmosphere is the normal rendering path.",
     );
 
     spacer(b);
-    spawn_button(b, theme, ResetGraphicsControl, "Reset to defaults", ButtonVariant::Ghost, 26.0);
+    spawn_button(
+        b,
+        theme,
+        ResetGraphicsControl,
+        "Reset to defaults",
+        ButtonVariant::Ghost,
+        26.0,
+    );
     note(b, theme, "Saved to user/graphics.ron.");
 }
 
@@ -585,7 +639,10 @@ fn build_units_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: 
         .iter()
         .position(|s| *s == settings.system)
         .unwrap_or(0);
-    let options = UnitSystem::ALL.iter().map(|s| s.label().to_string()).collect();
+    let options = UnitSystem::ALL
+        .iter()
+        .map(|s| s.label().to_string())
+        .collect();
     spawn_cycle_row(b, theme, "Measurement", options, index, UnitsControl);
     note(
         b,
@@ -636,9 +693,7 @@ fn build_binding_tab(
         BindingKind::Controller => is_gamepad_spec,
     };
 
-    let any = sections
-        .iter()
-        .any(|(_, s)| section_has_spec(s, filter));
+    let any = sections.iter().any(|(_, s)| section_has_spec(s, filter));
     if !any {
         let msg = match kind {
             BindingKind::Mouse => "No mouse bindings configured.",
@@ -647,7 +702,11 @@ fn build_binding_tab(
         };
         note(b, theme, msg);
         if matches!(kind, BindingKind::Controller) {
-            note(b, theme, "Add GamepadButton(…) entries to assets/input.ron.");
+            note(
+                b,
+                theme,
+                "Add GamepadButton(…) entries to assets/input.ron.",
+            );
         }
         return;
     }
@@ -670,15 +729,29 @@ fn build_binding_group(
     section_header(b, theme, &title.to_uppercase());
 
     for (action, specs) in &section.bindings {
-        let bound: Vec<String> = specs.iter().filter(|s| filter(s)).map(format_binding).collect();
+        let bound: Vec<String> = specs
+            .iter()
+            .filter(|s| filter(s))
+            .map(format_binding)
+            .collect();
         if bound.is_empty() {
             continue;
         }
         binding_row(b, theme, &format_action(action), &bound.join(" / "));
     }
     for (axis_name, axis) in &section.axes {
-        let pos: Vec<String> = axis.positive.iter().filter(|s| filter(s)).map(format_binding).collect();
-        let neg: Vec<String> = axis.negative.iter().filter(|s| filter(s)).map(format_binding).collect();
+        let pos: Vec<String> = axis
+            .positive
+            .iter()
+            .filter(|s| filter(s))
+            .map(format_binding)
+            .collect();
+        let neg: Vec<String> = axis
+            .negative
+            .iter()
+            .filter(|s| filter(s))
+            .map(format_binding)
+            .collect();
         if pos.is_empty() && neg.is_empty() {
             continue;
         }
@@ -688,7 +761,12 @@ fn build_binding_group(
             (true, false) => neg.join(", "),
             (true, true) => String::new(),
         };
-        binding_row(b, theme, &format!("{} +/−", format_action(axis_name)), &value);
+        binding_row(
+            b,
+            theme,
+            &format!("{} +/−", format_action(axis_name)),
+            &value,
+        );
     }
 }
 
@@ -726,7 +804,13 @@ fn binding_row(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, action: &str, 
 
 fn build_hotas_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: &InputSettings) {
     let hotas = &settings.game.hotas;
-    spawn_checkbox_row(b, theme, "HOTAS enabled", hotas.enabled, HotasEnabledControl);
+    spawn_checkbox_row(
+        b,
+        theme,
+        "HOTAS enabled",
+        hotas.enabled,
+        HotasEnabledControl,
+    );
 
     spacer(b);
 
@@ -838,12 +922,25 @@ fn build_hotas_axis_row(
             Val::Px(56.0),
             HotasCodeControl { axis },
         );
-        spawn_button(row, theme, HotasRemoveControl { axis }, "✕", ButtonVariant::Ghost, 20.0);
+        spawn_button(
+            row,
+            theme,
+            HotasRemoveControl { axis },
+            "✕",
+            ButtonVariant::Ghost,
+            20.0,
+        );
     });
 
     // Invert + deadzone, each on its own full-width row (indented under the axis).
     indented(b, |row| {
-        spawn_checkbox_row(row, theme, "invert", binding.invert, HotasInvertControl { axis });
+        spawn_checkbox_row(
+            row,
+            theme,
+            "invert",
+            binding.invert,
+            HotasInvertControl { axis },
+        );
     });
     indented(b, |row| {
         spawn_slider_row(
@@ -898,7 +995,14 @@ fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, axi
                 ..default()
             },
         ));
-        spawn_button(row, theme, HotasAddControl { axis }, "Add", ButtonVariant::Ghost, 20.0);
+        spawn_button(
+            row,
+            theme,
+            HotasAddControl { axis },
+            "Add",
+            ButtonVariant::Ghost,
+            20.0,
+        );
     });
 }
 
@@ -963,7 +1067,7 @@ fn apply_graphics_controls(
     clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
     grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
     gpu_grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GpuGrassControl>)>,
-    stock_atmosphere_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<StockAtmosphereControl>)>,
+    legacy_body_sky_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<LegacyBodySkyControl>)>,
     msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
@@ -982,9 +1086,9 @@ fn apply_graphics_controls(
             settings.gpu_grass = checkbox.checked;
         }
     }
-    for checkbox in &stock_atmosphere_q {
-        if settings.stock_atmosphere != checkbox.checked {
-            settings.stock_atmosphere = checkbox.checked;
+    for checkbox in &legacy_body_sky_q {
+        if settings.legacy_body_sky != checkbox.checked {
+            settings.legacy_body_sky = checkbox.checked;
         }
     }
     for cycle in &msaa_q {

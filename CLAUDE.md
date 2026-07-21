@@ -160,6 +160,9 @@ just bake Mira            # rebuild assets/terrain_packages/Mira.bin offline
 just validate-bake Mira   # validate package schema/index/checksums/payload
 just screenshot mira-orbit   # headless cratered-horizon verification
 just screenshot mira-surface # headless close regolith/Hapke verification
+just screenshot mira-eva     # canonical EVA-site horizon/LOD verification
+just compare earth-reference atmosphere # isolated A/B + contact sheet/diff/manifest
+just compare spaceport-aerial ssao       # off/on/raw multi-test of the AO path
 just terrain-lab          # static slippy-map terrain sketchpad at localhost:8787/tools/terrain-lab/
 just map                  # whole-planet biome map export → target/world_map.png
                           #   (true macro palette, hillshaded, web-mercator) +
@@ -210,13 +213,33 @@ Compiler/linker performance tuning that is platform-specific or finnicky
 belongs in local Cargo config, not committed workspace config. This includes
 incremental overrides, debug-info reductions, custom linkers, and backend
 experiments. Bevy dynamic linking is the exception: it is cross-platform and not
-finnicky, so `just game` enables `bevy/dynamic_linking` by committed default (in
-the `justfile`'s `game_command`), scoped to the dev run so it never reaches
-`just build`/`just trace`/release. Override `game_command` in `.env.just` to opt
-out locally. The normal Windows iteration path stays on LLVM. The workspace-local
+finnicky, so every renderer dev entry point (`just game`, `just screenshot`,
+`just compare`, `just preview`, `just ui-preview`) enables `bevy/dynamic_linking` by committed
+default, while `just build`/`just trace`/release stay static. Override
+`game_command` in `.env.just` to opt out for game/screenshot locally. The normal
+Windows iteration path stays on LLVM. Do not add nightly `-Zthreads`: the
+2026-07-20 parallel-MIR ICE poisoned incremental objects and turned a proposed
+speedup into a full recovery build (INC-0006). The workspace-local
 `.cargo/config.toml` and `.env.just` are ignored by Git for this purpose. The full policy plus
 Windows fast-incremental and macOS workaround examples live in
 `docs/tooling.md`.
+
+**Fast iteration invariants:**
+
+- Run only **one Cargo command at a time** against the workspace `target/`.
+  Concurrent game/check/screenshot invocations mostly wait on Cargo's target
+  lock while competing for CPU and memory; they make an already large Bevy link
+  appear even slower. Use `cargo check-game` during edits, then perform one
+  linked `just game` or `just screenshot` when needed.
+- Keep every normal dev renderer on the same Bevy/wgpu feature fingerprint.
+  Adding a feature to only one entry point forces Cargo to build another full
+  `bevy_dylib` plus its Windows PDB. In particular, wgpu's diagnostic
+  `counters` feature is intentionally opt-in as `thalos_game/gpu-counters`; do
+  not enable it in the default dependency graph.
+- Expect the first build after changing compiler flags, profiles, or Bevy/wgpu
+  features to take several minutes. That is a one-time graph rebuild, not the
+  steady-state iteration time. Avoid changing these inputs casually, because
+  doing so invalidates most of the expensive renderer cache.
 
 ## Planet generation iteration
 
@@ -325,7 +348,11 @@ equatorial wet belt), poses the *actual*
 `ShipCamera` at a scripted god-view over the
 focus — reusing the real camera keeps the scene-depth / atmosphere / SSAO /
 sun-shadow render graph coupled — hides the HUD, renders one frame off-screen to
-`tools/screenshots/*.png`, and exits. So an agent can now see the composed
+its stable preset filename under `tools/screenshots/`, and exits. This folder is
+the curated latest-view surface: one image per canonical preset, overwritten on
+the next capture. Numbered experiments, crops, and alternate framings belong in
+`tools/agent_scratch/screenshots/` via `THALOS_SCREENSHOT_OUT`; `just compare`
+uses that scratch tree automatically. So an agent can now see the composed
 in-game world (lighting-in-context, terrain, base layout, shadows), not just
 isolated assets — **Read the PNG directly**. Frame it without recompiling via
 `THALOS_SCREENSHOT_{AZIMUTH,ELEVATION,DISTANCE,SIZE,OUT,WARMUP}` (angles in
@@ -335,6 +362,75 @@ default) — the loop for iterating on HUD chrome. Add a preset by extending
 `ScreenshotPreset`. Still the user's call: interactive "does it feel right",
 live behaviour, and any framing that needs a specific in-flight moment — the tool
 captures a static, scripted vantage of a fresh spawn, not a play session.
+
+### Visual diagnosis and comparison workflow
+
+**Visual work is headless-screenshot- and controlled-comparison-driven.** Use
+the smallest canonical tool that answers the question:
+
+- `just screenshot <preset>` — one in-context beauty frame: reproduce a visual
+  symptom, establish a baseline, or verify a change when no competing renderer
+  configuration needs comparison.
+- `just compare <preset> <axis>` — A/B or N-way attribution: compare render
+  paths, feature toggles, diagnostic fields, or tuning alternatives while one
+  declared factor changes and every other capture input stays fixed.
+- `just preview` — isolated procedural asset geometry/material only. It may
+  supplement, but never replaces, the in-context game capture.
+- `just game <mode>` — user-run only, for motion, interaction, temporal feel, or
+  a specific play moment a scripted fresh-spawn capture cannot represent.
+
+Do **not** build a live multi-camera/split-screen comparison renderer. Do not
+take two ad-hoc manual screenshots and call them an A/B. ADR-0011 makes isolated,
+sequential, full-resolution headless captures the one comparison path; a split
+viewport changes LOD, SSAO, shadows, antialiasing, and other inputs under test.
+
+**Required loop for every graphical bug or visual iteration:**
+
+1. Before editing, state the visible symptom or visual goal and the plausible
+   causes/alternatives. A comparison exists to distinguish hypotheses, not just
+   to produce attractive images.
+2. Reproduce it with an existing preset. If no preset frames the relevant
+   surface, distance, time of day, or camera regime, add a deterministic
+   `ScreenshotPreset`; do not approximate it with manual camera placement.
+3. Choose one typed axis that separates the candidates. Initial axes are
+   `atmosphere` (`custom`/`bevy`) and `ssao` (`off`/`on`/`raw`). Add a new axis in
+   `crates/game/examples/visual_compare.rs` only when all variants are values of
+   the **same factor** and use capture-only overrides that never persist user
+   settings. Never smuggle several setting changes into one variant.
+4. Run the matrix, for example:
+
+   ```bash
+   just compare earth-reference atmosphere   # orbital limb / space view
+   just compare runway-atmosphere atmosphere # surface sky + long-path haze
+   just compare spaceport-aerial ssao         # off / applied / raw AO
+   ```
+
+   `THALOS_SCREENSHOT_{SIZE,AZIMUTH,ELEVATION,DISTANCE,WARMUP,HUD}` overrides
+   are allowed, but set them once for the whole run. The runner owns the output
+   path and axis override so they cannot drift between variants.
+5. Inspect `tools/agent_scratch/screenshots/comparisons/<preset>/<axis>/` in this order:
+   **(a)** process output/stderr, **(b)** `manifest.json` for revision, dirty
+   state, dimensions, and invariant inputs, **(c)** `contact_sheet.png`,
+   **(d)** the full-resolution numbered captures, then **(e)** wipes and amplified
+   diffs. Pixel metrics are evidence, not a verdict: temporal/stochastic noise
+   can change many pixels without a meaningful regression.
+6. Reject the entire comparison if any variant logged a shader/render-pipeline
+   error or is missing a render layer. **Known gap BL-20:** Bevy can currently
+   log a fatal pipeline validation error while the headless process still exits
+   zero, so the existence of PNGs alone is not proof of a valid run.
+7. Use the result to eliminate candidates. For bugs, do not patch until the root
+   cause is pinned; for tuning, record which single change produced the desired
+   effect. After editing, rerun the exact preset/axis and keep the matched
+   before/after evidence. The canonical comparison directory is overwritten on
+   rerun, so copy it to a clearly labelled evidence directory before editing
+   whenever revision-to-revision proof is required.
+
+`just compare` is not a performance benchmark: independent startup/warm-up and
+artifact readback deliberately favor isolation over timing. Use the FPS/trace
+profiling workflow for performance attribution. New debug channels (normals,
+depth, LOD/tile IDs, shadow factor/cascade, material IDs, atmosphere
+transmittance, lighting lobes) extend the typed comparison runner; they do not
+get a parallel camera or orchestration path. Full details: `docs/visual_testing.md`.
 
 **Terrain iteration/design is verified by screenshot — always.** Any change to
 terrain generation, landcover/biomes, or surface scatter (trees/grass/rocks)
@@ -347,7 +443,8 @@ round-tripping through the user:
 - `just screenshot <preset>` — the in-context ground view. Pick the preset that
   frames what you changed: `dry-belt` for desert/biome/scatter work,
   `spaceport-aerial` / `hub` for the base and the wet-belt look, or
-  `mira-orbit` / `mira-surface` for package/Hapke work. If no preset frames it,
+  `mira-orbit` / `mira-surface` for package/Hapke work, or `mira-eva` for the
+  canonical eye-level spawn and horizon/LOD coverage. If no preset frames it,
   add one (`ScreenshotPreset`) rather than skipping the check.
 - `just preview` — isolated procedural assets (a tree/rock/grass mesh).
 
@@ -358,8 +455,10 @@ a live play session (feel, in-flight moments) fall back to asking the user.
 **Getting data out of a running session: write it to a file.** When you need
 runtime numbers rather than a picture, don't reach for live inspection — have
 the game *log* the data and read the file afterwards. JSONL (one JSON object
-per line) is the house style for machine-readable runtime data. Existing
-sinks:
+per line) is the house style for machine-readable runtime data, and belongs
+under `tools/diagnostics/`, never beside images. Bare filename overrides for
+the game diagnostics resolve there; explicit paths remain available for a
+specific reproduction bundle. Existing sinks:
 - **`tracing` / `info!` logs** — the game's stdout. Add an
   `info!(target: "thalos::…", …)` where you need a signal, then ask the user
   to run the game and paste the relevant console output.
@@ -515,8 +614,11 @@ wgpu 29: pipeline `push_constant_ranges`→`immediate_size: u32`,
 `DepthStencilState.depth_write_enabled/depth_compare` are `Option<_>`.
 
 **0.19 features we deliberately do NOT use** (we have custom replacements):
-Bevy's built-in atmosphere/Skybox, the new BSN / Next-Gen Scenes, rectangular
-area lights, `EditableText`. **Worth evaluating for the graphics sprint** (new in
+Bevy's Skybox, the new BSN / Next-Gen Scenes, rectangular area lights,
+`EditableText`. Bevy's built-in atmosphere is now the exception:
+`AtmosphereMode::Raymarched` is the canonical rocky-body sky (ADR-0010),
+projected through the active `ViewAnchor`; do not add a second production
+atmosphere path. **Worth evaluating for the graphics sprint** (new in
 0.19, not yet adopted): **contact shadows** (screen-space, kills close-geometry
 peter-panning — complements our `thalos::shadow` rig), **physically-based SSR**,
 **parallax-corrected cubemaps** (relevant to the F3/F4 IBL work), and the
@@ -1013,18 +1115,16 @@ Key modules:
     / sibling fade.
   - `body_lod` — screen-space LOD: icon ↔ impostor crossfade,
     moon-merge fade, double-click-to-focus picking, homeworld focus.
-  - `scene_depth` — `SceneDepthImage` resource + `CopySceneDepthNode`
-    render-graph node. Copies the main pass's `ViewDepthTexture`
-    into a sample-able `Depth32Float` Image between `MainOpaquePass`
-    and `MainTransparentPass` so the unified atmosphere fullscreen
-    pass (`BodySkyMaterial` / `sky_dome.wgsl`) can read terrain /
-    impostor / hull depth and clip its raymarch. Filters via the
-    extracted `ShipCamera` marker — the map camera is not touched.
+  - `scene_depth` — `SceneDepthImage` resource + copy pass. Copies the main
+    view depth into a sample-able `Depth32Float` image for custom effects that
+    still consume it. The canonical rocky-body atmosphere uses Bevy's own
+    depth-aware raymarch; the retained `BodySkyMaterial` is debug/composite
+    migration code, not a second production atmosphere.
   - `ground_terrain` — UDLOD terrain spawn for procedural bodies +
     impostor↔terrain LOD swap (`sync_terrain_impostor_swap`) at
-    `4 × radius`. Also spawns the always-on `BodySky` fullscreen
-    quad per body (rebranded from the deprecated "sky dome" — now
-    handles halo, sky, and aerial perspective in one pass).
+    `4 × radius`. It still spawns the legacy `BodySky` fullscreen quad for
+    debug comparison and retained composites; normal rendering force-hides it
+    in favour of the Bevy raymarched atmosphere.
   - `view_anchor` — the **one per-frame answer to "where is the view?"**
     for every view-dependent detail system. `ViewAnchor` (sole writer
     `update_view_anchor`, top of `SimStage::Sync` before

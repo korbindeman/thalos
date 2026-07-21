@@ -111,10 +111,7 @@ pub struct ActiveCraft(pub Option<Entity>);
 /// rebuild window). Centralises the one `q.single()` so every other consumer can
 /// take the active craft by id without its own single-craft assumption; when N
 /// craft exist this is where "which is active" is decided.
-pub fn track_active_craft(
-    ships: Query<Entity, With<PlayerShip>>,
-    mut active: ResMut<ActiveCraft>,
-) {
+pub fn track_active_craft(ships: Query<Entity, With<PlayerShip>>, mut active: ResMut<ActiveCraft>) {
     let current = ships.iter().next();
     if active.0 != current {
         active.0 = current;

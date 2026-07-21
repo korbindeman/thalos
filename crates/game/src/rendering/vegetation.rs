@@ -22,6 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use bevy::camera::Hdr;
 use bevy::camera::primitives::MeshAabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
@@ -29,7 +30,6 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DVec3, Vec2, Vec3A};
 use bevy::prelude::*;
-use bevy::camera::Hdr;
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
@@ -38,9 +38,9 @@ use thalos_body_render::{
     ImpostorParams, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeBakeMaterial,
     TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput,
     VegSpeciesPlacement, build_foliage_atlas, build_foliage_material_atlas, build_scatter_tile,
-    build_tree_mesh_data,
-    combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map, hemioct_decode,
-    impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    build_tree_mesh_data, combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map,
+    hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
+    tree_bounding_sphere,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;

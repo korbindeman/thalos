@@ -90,8 +90,9 @@ runs all widget interaction/visual systems globally.
   `init_theme` is ordered after `init_ui_theme`), so every panel in the game
   is one surface.
 - **HUD screenshots**: the headless capture normally hides the HUD; set
-  `THALOS_SCREENSHOT_HUD=1` to keep it visible when iterating on HUD chrome
-  (e.g. `THALOS_SCREENSHOT=1 THALOS_SCREENSHOT_HUD=1 cargo run -p thalos_game`).
+  `THALOS_SCREENSHOT_HUD=1` to keep it visible when iterating on HUD chrome,
+  then use `just screenshot` so the shared dynamic-link dev path stays active
+  (PowerShell: `$env:THALOS_SCREENSHOT_HUD='1'; just screenshot`).
 
 ## Shipyard editor UX (2026-07-05 pass)
 

@@ -42,6 +42,7 @@ The project's design and planning docs. Start here to find the right one.
 | [shadow_unification_prompt.md](shadow_unification_prompt.md) | F6 one-shadow-world status block + tuning knobs |
 | [planetary_rendering_baseline.md](planetary_rendering_baseline.md) | Rendering baseline reference |
 | [tooling.md](tooling.md) | Toolchain policy; local-only compiler tuning recipes |
+| [visual_testing.md](visual_testing.md) | Deterministic headless screenshot A/B and multi-test workflow |
 | [lore/](lore/) | Solar-system reference + civilization narrative |
 | [archive/](archive/) | Superseded terrain-*generation* design — reference only, see its README |
 

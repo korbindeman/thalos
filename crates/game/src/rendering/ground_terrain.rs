@@ -359,6 +359,25 @@ pub(super) fn terrain_tile_provider_mode() -> TerrainTileProviderMode {
     TerrainTileProviderMode::from_env()
 }
 
+/// Fullbright terrain is a capture-only diagnostic that separates missing
+/// raster coverage from Hapke/shadow/BRDF output. It never changes geometry,
+/// tile synthesis, or attachment data.
+fn terrain_inspection_flag() -> f32 {
+    let Ok(value) = std::env::var("THALOS_TERRAIN_INSPECTION") else {
+        return 0.0;
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "" | "lit" | "default" | "off" => 0.0,
+        "fullbright" | "albedo" | "on" => 1.0,
+        "geo-normal" | "geometric-normal" | "smooth-normal" => 2.0,
+        "legacy-regolith" | "unfiltered-regolith" => 3.0,
+        other => {
+            warn!("unknown THALOS_TERRAIN_INSPECTION={other:?}; using lit terrain");
+            0.0
+        }
+    }
+}
+
 fn analytic_provider_height_range() -> f32 {
     // Mountain-scale relief regardless of the body's authored range. With
     // the multi-octave fBm signal sharpened to favour peaks (see
@@ -705,7 +724,12 @@ pub(crate) fn spawn_body_terrain(
             debug,
             // w = 1.0 enables screen-space AO (F5) on the surface terrain; the
             // live `ao` handle is patched in each frame (see the terrain loop).
-            inspection: Vec4::new(0.0, shading_style.shader_flag(), 0.0, 1.0),
+            inspection: Vec4::new(
+                terrain_inspection_flag(),
+                shading_style.shader_flag(),
+                0.0,
+                1.0,
+            ),
             ..Default::default()
         },
         sun_shadow_map_0: sun_shadow_maps[0].clone(),

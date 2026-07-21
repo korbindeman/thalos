@@ -131,6 +131,11 @@ pub enum ScreenshotPreset {
     /// scenario, which builds the whole spaceport + settles the terrain behind
     /// the loading screen.
     SpaceportAerial,
+    /// Low, near-horizontal view across the spaceport basin. This is the
+    /// canonical inside-atmosphere regression probe: it exercises the surface
+    /// sky, long slant-path haze, terrain recession, structures, and the real
+    /// runway scenario through the same `ShipCamera` used in play.
+    RunwayAtmosphere,
     /// The space-center hub exactly as PLAY presents it: a clean start with the
     /// spaceport built but **no craft placed** — the canonical placeholder craft
     /// stays in orbit while the camera god-views the base. Boots the `hub`
@@ -149,6 +154,13 @@ pub enum ScreenshotPreset {
     /// should be sparse-to-absent here and the ground tan; contrast with the
     /// green spaceport `spaceport-aerial` shot (equatorial wet belt).
     DryBelt,
+    /// A fixed ISS-like orbital view over Thalos's land near the spaceport.
+    /// The 3:2 frame and high horizon mirror the Earth reference used to
+    /// calibrate atmosphere thickness, aerial perspective, and exposure. This
+    /// framing contains no rendered ocean. Defaults to Bevy's raymarched atmosphere;
+    /// `THALOS_SCREENSHOT_ATMOSPHERE=custom` produces the matched legacy
+    /// `BodySky` A/B without changing any other input.
+    EarthReference,
     /// Mira's cratered horizon from low orbit. Boots the canonical orbit
     /// scenario around Mira, then frames the daylight surface with enough boom
     /// distance for curvature and large impact structure to read.
@@ -156,6 +168,10 @@ pub enum ScreenshotPreset {
     /// A close oblique survey of Mira regolith. This is the primary verification
     /// probe for package detail, terrain streaming, and the Hapke phase response.
     MiraSurface,
+    /// Eye-level survey at the canonical `mira-eva` spawn site. Keeps live EVA
+    /// terrain regressions reproducible without depending on the separate
+    /// landmark-crater framing used by [`Self::MiraSurface`].
+    MiraEva,
 }
 
 impl ScreenshotPreset {
@@ -164,10 +180,17 @@ impl ScreenshotPreset {
             // Truthy / unnamed → the default preset.
             "" | "1" | "true" | "yes" | "on" | "spaceport" | "spaceport-aerial" | "aerial"
             | "base" => Self::SpaceportAerial,
+            "runway-atmosphere" | "runway_atmosphere" | "runway-sky" | "surface-atmosphere" => {
+                Self::RunwayAtmosphere
+            }
             "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
             "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
+            "earth-reference" | "earth_reference" | "earth-ref" | "atmosphere" | "atmo" => {
+                Self::EarthReference
+            }
             "mira" | "mira-orbit" | "mira_orbit" => Self::MiraOrbit,
             "mira-surface" | "mira_surface" | "regolith" => Self::MiraSurface,
+            "mira-eva" | "mira_eva" | "regolith-eva" => Self::MiraEva,
             other => {
                 eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
                 Self::SpaceportAerial
@@ -178,7 +201,7 @@ impl ScreenshotPreset {
     /// The scenario the world must be booted into for this preset.
     pub fn spawn_situation(self) -> SpawnSituation {
         match self {
-            Self::SpaceportAerial => SpawnSituation::Runway,
+            Self::SpaceportAerial | Self::RunwayAtmosphere => SpawnSituation::Runway,
             // The hub is the PLAY path: the placeholder parking orbit plus the
             // spaceport build (armed by `main.rs` via `boots_hub`).
             Self::Hub => SpawnSituation::ShipOrbit,
@@ -186,14 +209,16 @@ impl ScreenshotPreset {
             // scenario is enough; the driver poses the camera over the searched
             // desert site (the craft stays in orbit, irrelevant to the framing).
             Self::DryBelt => SpawnSituation::ShipOrbit,
+            Self::EarthReference => SpawnSituation::Runway,
             Self::MiraOrbit | Self::MiraSurface => SpawnSituation::ShipOrbit,
+            Self::MiraEva => SpawnSituation::Eva,
         }
     }
 
     /// Body that owns the world and terrain framed by this preset.
     pub fn target_body_name(self) -> &'static str {
         match self {
-            Self::MiraOrbit | Self::MiraSurface => "Mira",
+            Self::MiraOrbit | Self::MiraSurface | Self::MiraEva => "Mira",
             _ => "Thalos",
         }
     }
@@ -219,6 +244,23 @@ impl ScreenshotPreset {
                 warmup_frames: 180,
                 tail_frames: 24,
                 keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+            },
+            Self::RunwayAtmosphere => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/runway_atmosphere.png"),
+                width: 1920,
+                height: 1080,
+                // A 1.4 km boom at 3 degrees is ~73 m above the flattened
+                // spaceport basin: low enough for the sky and long air column
+                // to dominate, high enough to keep the camera above structures.
+                azimuth_deg: 270.0,
+                elevation_deg: 3.0,
+                distance_m: 1_400.0,
+                warmup_frames: 480,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
             },
             // Matches the hub's establishing view (`BASE_ESTABLISHING_DISTANCE_M`,
             // the one god-view framing per base) so the capture shows what PLAY shows.
@@ -233,6 +275,7 @@ impl ScreenshotPreset {
                 warmup_frames: 240,
                 tail_frames: 24,
                 keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
             },
             // Low oblique, close in, so individual trees vs bare desert read
             // (like an eye-level survey across the ground). A long warmup: cold
@@ -249,6 +292,22 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+            },
+            Self::EarthReference => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/earth_reference_bevy.png"),
+                // The Earth reference is 1000×667 (approximately 3:2). Keep
+                // that composition instead of comparing a wider 16:9 crop.
+                width: 1800,
+                height: 1200,
+                azimuth_deg: 270.0,
+                elevation_deg: 34.0,
+                distance_m: 500_000.0,
+                warmup_frames: 480,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::BevyRaymarched,
             },
             Self::MiraOrbit => ScreenshotConfig {
                 preset: self,
@@ -264,6 +323,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
             },
             Self::MiraSurface => ScreenshotConfig {
                 preset: self,
@@ -279,7 +339,53 @@ impl ScreenshotPreset {
                 warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
             },
+            Self::MiraEva => ScreenshotConfig {
+                preset: self,
+                out: PathBuf::from("tools/screenshots/mira_eva.png"),
+                width: 2048,
+                height: 1280,
+                azimuth_deg: 32.0,
+                // EVA uses tangent-look semantics rather than the aerial
+                // presets' orbit boom: elevation is camera pitch and distance
+                // is eye height over the exact surface focus.
+                elevation_deg: 3.0,
+                distance_m: 1.7,
+                warmup_frames: 1_200,
+                tail_frames: 24,
+                keep_hud: false,
+                atmosphere: ScreenshotAtmosphere::Configured,
+            },
+        }
+    }
+}
+
+/// Atmosphere renderer selected for a headless capture. Normal gameplay keeps
+/// reading [`GraphicsSettings`](crate::graphics_settings::GraphicsSettings);
+/// this only makes visual-regression probes deterministic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScreenshotAtmosphere {
+    Configured,
+    CustomBodySky,
+    BevyRaymarched,
+}
+
+impl ScreenshotAtmosphere {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "configured" | "settings" | "default" => Some(Self::Configured),
+            "custom" | "body-sky" | "bodysky" | "legacy" => Some(Self::CustomBodySky),
+            "bevy" | "raymarched" | "raymarch" | "stock" => Some(Self::BevyRaymarched),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn stock_override(self) -> Option<bool> {
+        match self {
+            Self::Configured => None,
+            Self::CustomBodySky => Some(false),
+            Self::BevyRaymarched => Some(true),
         }
     }
 }
@@ -316,6 +422,10 @@ pub struct ScreenshotConfig {
     /// (`THALOS_SCREENSHOT_HUD=1`). Default hides them for clean scene shots;
     /// set it when iterating on the HUD itself.
     pub keep_hud: bool,
+    /// Deterministic atmosphere renderer for this capture. This is deliberately
+    /// not written through `GraphicsSettings`, so headless A/B runs never
+    /// rewrite the user's persisted preferences.
+    pub atmosphere: ScreenshotAtmosphere,
 }
 
 impl ScreenshotConfig {
@@ -360,6 +470,14 @@ impl ScreenshotConfig {
                 v.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
             );
+        }
+        if let Ok(v) = env::var("THALOS_SCREENSHOT_ATMOSPHERE") {
+            match ScreenshotAtmosphere::parse(&v) {
+                Some(atmosphere) => cfg.atmosphere = atmosphere,
+                None => eprintln!(
+                    "  Unknown THALOS_SCREENSHOT_ATMOSPHERE '{v}'; expected configured, custom, or bevy."
+                ),
+            }
         }
         Some(cfg)
     }
@@ -613,7 +731,13 @@ fn drive_headless_screenshot(
             &surfaces,
             &mut driver.airless_site_dir,
         ),
-        ScreenshotPreset::SpaceportAerial | ScreenshotPreset::Hub => {
+        ScreenshotPreset::MiraEva => {
+            eva_surface_context(&sim, &solar, &height_sources, homeworld.0)
+        }
+        ScreenshotPreset::SpaceportAerial
+        | ScreenshotPreset::RunwayAtmosphere
+        | ScreenshotPreset::Hub
+        | ScreenshotPreset::EarthReference => {
             hub_context(&sim, &solar, &height_sources, &registry, homeworld.0)
         }
     };
@@ -626,7 +750,11 @@ fn drive_headless_screenshot(
     let Ok((mut transform, mut cell)) = camera.single_mut() else {
         return;
     };
-    pose_camera(&cfg, &ctx, root, &mut transform, &mut cell);
+    if cfg.preset == ScreenshotPreset::MiraEva {
+        pose_eva_camera(&cfg, &ctx, root, &mut transform, &mut cell);
+    } else {
+        pose_camera(&cfg, &ctx, root, &mut transform, &mut cell);
+    }
 
     if driver.captured {
         driver.tail += 1;
@@ -705,6 +833,43 @@ fn daylight_surface_context(
         .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
         .unwrap_or(0.0) as f64;
     let surface_r = radius_m + height_m;
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * surface_r,
+        up_world,
+        pad_r: surface_r,
+    })
+}
+
+/// Exact surface focus under the canonical EVA spawn.
+///
+/// EVA site selection deliberately moves away from the initial sub-stellar
+/// seed to find a usable plain (or a relief site selected through
+/// `THALOS_EVA_SITE`). Derive this probe from the canonical craft state after
+/// that placement instead of duplicating the site search here. Height comes
+/// from the live atlas-backed authority so the camera follows the exact LOD
+/// surface currently rendered during warm-up, including provider A/Bs.
+fn eva_surface_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let height_source = height_sources.get(body_id)?;
+
+    let craft_world = sim.simulation.craft_state().translation.position;
+    let up_world = (craft_world - body_state.position)
+        .try_normalize()
+        .unwrap_or_else(|| (-body_state.position).try_normalize().unwrap_or(DVec3::Y));
+    let dir_body = (body_state.orientation.inverse() * up_world).normalize();
+    let height_m = height_source
+        .sample_height_m(dir_body.as_vec3(), 1.0)
+        .unwrap_or(0.0) as f64;
+    let surface_r = radius_m + height_m;
+
     Some(HubContext {
         body_id,
         center_world: body_state.position + up_world * surface_r,
@@ -821,6 +986,38 @@ fn pose_camera(
     *cell = next_cell;
     *transform =
         Transform::from_translation(local).looking_to(to_focus.as_vec3(), look_up.as_vec3());
+}
+
+/// Put the screenshot camera at EVA eye height and look along the local
+/// horizon. An aerial orbit boom is invalid for this preset: at grazing angles
+/// its kilometre-long horizontal offset can put the camera inside an unrelated
+/// crater wall even though the spawn focus itself is safe.
+fn pose_eva_camera(
+    cfg: &ScreenshotConfig,
+    ctx: &HubContext,
+    root: &Grid,
+    transform: &mut Transform,
+    cell: &mut CellCoord,
+) {
+    let up = ctx.up_world;
+    let seed = if up.dot(DVec3::Y).abs() < 0.99 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
+    let east = seed.cross(up).normalize();
+    let north = up.cross(east).normalize();
+
+    let az = (cfg.azimuth_deg as f64).to_radians();
+    let elev = (cfg.elevation_deg as f64).to_radians();
+    let horiz = east * az.cos() + north * az.sin();
+    let look_dir = (horiz * elev.cos() + up * elev.sin()).normalize();
+    let camera_world = ctx.center_world + up * cfg.distance_m;
+
+    let (next_cell, local) = root.translation_to_grid(camera_world);
+    *cell = next_cell;
+    *transform =
+        Transform::from_translation(local).looking_to(look_dir.as_vec3(), up.as_vec3());
 }
 
 /// Sample LOD hint (m) for the dry-site search's height / moisture probes — a

@@ -155,13 +155,15 @@ impl Plugin for SceneDepthPlugin {
             .add_systems(Update, resize_scene_depth_image);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.add_systems(RenderStartup, init_msaa_depth_resolve).add_systems(
-                Core3d,
-                copy_scene_depth
-                    .in_set(Core3dSystems::MainPass)
-                    .after(main_opaque_pass_3d)
-                    .before(main_transparent_pass_3d),
-            );
+            render_app
+                .add_systems(RenderStartup, init_msaa_depth_resolve)
+                .add_systems(
+                    Core3d,
+                    copy_scene_depth
+                        .in_set(Core3dSystems::MainPass)
+                        .after(main_opaque_pass_3d)
+                        .before(main_transparent_pass_3d),
+                );
         }
     }
 }

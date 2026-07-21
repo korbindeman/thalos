@@ -14,9 +14,9 @@ use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera, S
 use crate::coords::{
     MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, to_render_pos,
 };
-use crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M;
 use crate::flight_plan_view::FlightPlanView;
 use crate::map_view::{LinearMapProjection, MapProjection, MapSnapshot};
+use crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M;
 use crate::view::ViewMode;
 
 fn ghost_position(

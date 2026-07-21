@@ -385,7 +385,18 @@ where
             },
             primitive: PrimitiveState {
                 front_face: FrontFace::Ccw,
-                cull_mode: Some(Face::Back),
+                // Process-static diagnostic override used by the headless
+                // comparison harness. `none` tests whether a transparent
+                // stipple is missing raster coverage from backface culling;
+                // production remains conventional backface culling.
+                cull_mode: match std::env::var("THALOS_TERRAIN_CULL")
+                    .ok()
+                    .as_deref()
+                    .map(str::trim)
+                {
+                    Some("none" | "two-sided" | "off") => None,
+                    _ => Some(Face::Back),
+                },
                 unclipped_depth: false,
                 polygon_mode: key.flags.polygon_mode(),
                 conservative: false,

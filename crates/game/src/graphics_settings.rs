@@ -103,11 +103,11 @@ pub struct GraphicsSettings {
     /// Multisample anti-aliasing level for the main 3D view. `Off` keeps SMAA;
     /// a multisampled level replaces it. See [`MsaaSetting`].
     pub msaa: MsaaSetting,
-    /// **Experimental A/B**: render the sky with Bevy's stock raymarched
-    /// atmosphere instead of the custom `BodySky` pass. While on, the custom
-    /// pass is hidden — losing its ocean, cloud composite, and star-crush
-    /// coupling. See `rendering::stock_atmosphere`.
-    pub stock_atmosphere: bool,
+    /// Debug A/B fallback to the superseded custom `BodySky` atmosphere.
+    /// Normal rendering uses Bevy's `AtmosphereMode::Raymarched`; this exists
+    /// only to produce matched legacy comparison frames while the migration is
+    /// being visually verified.
+    pub legacy_body_sky: bool,
 }
 
 impl Default for GraphicsSettings {
@@ -120,9 +120,9 @@ impl Default for GraphicsSettings {
             // MSAA depth-resolve path is opt-in from the Graphics tab until it
             // has been runtime-verified.
             msaa: MsaaSetting::Off,
-            // The custom BodySky pass stays the default sky; the stock pass
-            // is a look-comparison experiment.
-            stock_atmosphere: false,
+            // Bevy raymarching is canonical; the custom BodySky is an opt-in
+            // debug comparison only.
+            legacy_body_sky: false,
         }
     }
 }

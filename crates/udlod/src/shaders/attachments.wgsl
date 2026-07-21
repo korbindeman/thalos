@@ -52,30 +52,42 @@ fn decode_height_m(height_sample: vec4<f32>) -> f32 {
     return mix(config.min_height, config.max_height, decode_height_unit(height_sample));
 }
 
-fn load_attachment0_texel(layer: u32, texel: vec2<i32>) -> vec4<f32> {
-    let dims = vec2<i32>(textureDimensions(attachment0_atlas, 0));
+fn load_attachment0_texel_lod(layer: u32, texel: vec2<i32>, mip: i32) -> vec4<f32> {
+    let dims = vec2<i32>(textureDimensions(attachment0_atlas, mip));
     let p = clamp(texel, vec2<i32>(0), dims - vec2<i32>(1));
-    return textureLoad(attachment0_atlas, p, i32(layer), 0);
+    return textureLoad(attachment0_atlas, p, i32(layer), mip);
 }
 
-fn sample_height_unit_atlas_uv(tile: AtlasTile, atlas_uv: vec2<f32>) -> f32 {
+fn sample_height_unit_atlas_uv_lod(
+    tile: AtlasTile,
+    atlas_uv: vec2<f32>,
+    mip: i32,
+) -> f32 {
     // RG16 height is a packed fixed-point value: x is the coarse UNORM16 and
     // y is a sub-LSB residual. Hardware linear filtering blends x and y before
     // decoding, which is invalid because y wraps from ~1 to 0 whenever x steps.
     // That creates false height terraces that become dark normal/shadow bands.
     // Load texels explicitly, decode each complete fixed-point value, then
     // bilinear-filter the decoded scalar height.
-    let dims = vec2<f32>(textureDimensions(attachment0_atlas, 0));
+    let dims = vec2<f32>(textureDimensions(attachment0_atlas, mip));
     let p = atlas_uv * dims - vec2<f32>(0.5);
     let base = vec2<i32>(floor(p));
     let f = fract(p);
 
-    let h00 = decode_height_unit(load_attachment0_texel(tile.index, base + vec2<i32>(0, 0)));
-    let h10 = decode_height_unit(load_attachment0_texel(tile.index, base + vec2<i32>(1, 0)));
-    let h01 = decode_height_unit(load_attachment0_texel(tile.index, base + vec2<i32>(0, 1)));
-    let h11 = decode_height_unit(load_attachment0_texel(tile.index, base + vec2<i32>(1, 1)));
+    let h00 = decode_height_unit(load_attachment0_texel_lod(tile.index, base + vec2<i32>(0, 0), mip));
+    let h10 = decode_height_unit(load_attachment0_texel_lod(tile.index, base + vec2<i32>(1, 0), mip));
+    let h01 = decode_height_unit(load_attachment0_texel_lod(tile.index, base + vec2<i32>(0, 1), mip));
+    let h11 = decode_height_unit(load_attachment0_texel_lod(tile.index, base + vec2<i32>(1, 1), mip));
 
     return mix(mix(h00, h10, f.x), mix(h01, h11, f.x), f.y);
+}
+
+fn sample_height_unit_atlas_uv(tile: AtlasTile, atlas_uv: vec2<f32>) -> f32 {
+    return sample_height_unit_atlas_uv_lod(tile, atlas_uv, 0);
+}
+
+fn sample_height_atlas_uv_lod_m(tile: AtlasTile, atlas_uv: vec2<f32>, mip: i32) -> f32 {
+    return mix(config.min_height, config.max_height, sample_height_unit_atlas_uv_lod(tile, atlas_uv, mip));
 }
 
 fn sample_height_atlas_uv_m(tile: AtlasTile, atlas_uv: vec2<f32>) -> f32 {
@@ -125,13 +137,32 @@ fn sample_normal(tile: AtlasTile, vertex_normal: vec3<f32>) -> vec3<f32> {
 
     // Todo: this is only an approximation of the S2 distance (pixels are not spaced evenly and they are not perpendicular)
     let pixels_per_side = attachments[0u].size * tile_count(tile.coordinate.lod);
-    let distance_between_samples = side_length / pixels_per_side;
-    let offset = 0.5 / attachments[0u].size;
+    // A grazing ridge can compress many height texels into one screen pixel.
+    // Differentiating mip 0 there aliases the relief normal into bright/dark
+    // single-pixel facets (especially visible through Hapke on airless bodies).
+    // Choose the normal's height mip from the atlas-UV derivatives, while the
+    // vertex stage continues to sample mip 0 for full-resolution geometry.
+#ifdef FRAGMENT
+    let base_dims = vec2<f32>(textureDimensions(attachment0_atlas, 0));
+    let dx_texels = dpdx(uv) * base_dims;
+    let dy_texels = dpdy(uv) * base_dims;
+    let footprint_texels = max(length(dx_texels), length(dy_texels));
+    let max_mip = f32(textureNumLevels(attachment0_atlas) - 1u);
+    let mip_f = clamp(floor(log2(max(footprint_texels, 1.0))), 0.0, max_mip);
+    let mip = i32(mip_f);
+    let mip_scale = exp2(mip_f);
+#else
+    let mip = 0;
+    let mip_scale = 1.0;
+#endif
 
-    let left  = sample_height_atlas_uv_m(tile, uv + vec2<f32>(-offset,     0.0));
-    let up    = sample_height_atlas_uv_m(tile, uv + vec2<f32>(    0.0, -offset));
-    let right = sample_height_atlas_uv_m(tile, uv + vec2<f32>( offset,     0.0));
-    let down  = sample_height_atlas_uv_m(tile, uv + vec2<f32>(    0.0,  offset));
+    let distance_between_samples = side_length / pixels_per_side * mip_scale;
+    let offset = 0.5 * mip_scale / attachments[0u].size;
+
+    let left  = sample_height_atlas_uv_lod_m(tile, uv + vec2<f32>(-offset,     0.0), mip);
+    let up    = sample_height_atlas_uv_lod_m(tile, uv + vec2<f32>(    0.0, -offset), mip);
+    let right = sample_height_atlas_uv_lod_m(tile, uv + vec2<f32>( offset,     0.0), mip);
+    let down  = sample_height_atlas_uv_lod_m(tile, uv + vec2<f32>(    0.0,  offset), mip);
 
     let surface_normal = normalize(vec3<f32>(left - right, down - up, distance_between_samples));
 

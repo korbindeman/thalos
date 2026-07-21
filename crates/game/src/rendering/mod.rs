@@ -19,15 +19,15 @@ pub(crate) mod ground_terrain;
 mod lighting;
 mod map_terrain;
 mod materials;
-pub(crate) mod tile_cache;
 pub(crate) mod real_space;
+pub(crate) mod tile_cache;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
 // Re-enable by uncommenting this and the `RockScatterPlugin` registration below.
 // mod rocks;
 mod scene_depth;
 mod spawn;
-mod stock_atmosphere;
 pub(crate) mod ssao;
+mod stock_atmosphere;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
 mod trails;
@@ -198,7 +198,7 @@ impl Plugin for RenderingPlugin {
                     // Graphics). The suppressor must run after the LOD pass:
                     // it overrides the `BodySky` visibility the LOD pass just
                     // wrote, and the LOD pass restores it when toggled off.
-                    stock_atmosphere::sync_stock_atmosphere,
+                    stock_atmosphere::sync_stock_atmosphere.after(update_real_space_body_positions),
                     stock_atmosphere::sync_impostor_atmosphere_with_stock,
                     stock_atmosphere::suppress_body_sky_for_stock_atmosphere
                         .after(sync_body_render_lod),
@@ -230,7 +230,9 @@ impl Plugin for RenderingPlugin {
                     draw_orbits
                         .after(recompute_orbit_trails)
                         .after(update_render_origin)
-                        .run_if(crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view)),
+                        .run_if(
+                            crate::photo_mode::not_in_photo_mode.and_then(crate::view::in_map_view),
+                        ),
                     sync_body_icons.run_if(crate::view::in_map_view),
                     double_click_focus_system
                         .after(update_ship_position)

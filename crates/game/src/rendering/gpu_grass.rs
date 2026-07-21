@@ -23,22 +23,22 @@
 
 use std::sync::Arc;
 
+use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::image::Image;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DVec3, UVec4, Vec3, Vec4};
 use bevy::prelude::*;
-use bevy::asset::RenderAssetUsages;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, GPU_GRASS_BAND_COUNT, GPU_GRASS_WINDOW_HALF_M, GPU_GRASS_WINDOW_SIZE_PX,
-    GpuGrassAnchor, GpuGrassMaterial, GpuGrassWindow, GpuGrassWindowInput, LIGHT_AT_1AU,
-    TerrainShadingStyle, build_gpu_grass_template, build_gpu_grass_window, fallback_shadow_map,
-    gpu_grass_anchor, gpu_grass_style_table,
+    AU_M, GPU_GRASS_BAND_COUNT, GPU_GRASS_WINDOW_HALF_M, GPU_GRASS_WINDOW_SIZE_PX, GpuGrassAnchor,
+    GpuGrassMaterial, GpuGrassWindow, GpuGrassWindowInput, LIGHT_AT_1AU, TerrainShadingStyle,
+    build_gpu_grass_template, build_gpu_grass_window, fallback_shadow_map, gpu_grass_anchor,
+    gpu_grass_style_table,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -46,8 +46,8 @@ use thalos_world::BodyId;
 use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::graphics_settings::GraphicsSettings;
-use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::grass::grass_scatter_regions;
+use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::CameraExposure;
@@ -228,8 +228,7 @@ fn drive_gpu_grass(
             if let Some(entity) = state.entity
                 && let Ok(mut visual) = visuals.get_mut(entity)
             {
-                visual.anchor_surface_body =
-                    anchor.dir * (radius_m + state.anchor_height_m as f64);
+                visual.anchor_surface_body = anchor.dir * (radius_m + state.anchor_height_m as f64);
             }
         }
     }
@@ -423,7 +422,10 @@ fn finalize_gpu_grass(
                 // Generous local bound: the field surrounds the camera and the
                 // window's terrain relief rides in the vertex shader, so give
                 // the culler the full envelope rather than a tight box.
-                Aabb::from_min_max(Vec3::new(-220.0, -800.0, -220.0), Vec3::new(220.0, 800.0, 220.0)),
+                Aabb::from_min_max(
+                    Vec3::new(-220.0, -800.0, -220.0),
+                    Vec3::new(220.0, 800.0, 220.0),
+                ),
                 ChildOf(root.entity),
                 GpuGrassVisual {
                     body_id,
@@ -477,11 +479,9 @@ fn update_gpu_grass_material(
     height_sources: Res<HeightSourceRegistry>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
 ) {
-    let (Some(body_id), Some(states), Some(material_handle)) = (
-        state.body,
-        solar.states.as_deref(),
-        state.material.clone(),
-    ) else {
+    let (Some(body_id), Some(states), Some(material_handle)) =
+        (state.body, solar.states.as_deref(), state.material.clone())
+    else {
         return;
     };
     let (Some(body_state), Some(body)) = (states.get(body_id), sim.system.bodies.get(body_id))
@@ -592,8 +592,7 @@ fn update_gpu_grass_material(
 
     for i in 0..GPU_GRASS_BAND_COUNT {
         let (cx, cy) = anchor.band_cell[i];
-        material.params.band_cell[i] =
-            UVec4::new(cx as u32, cy as u32, anchor.face as u32, 0);
+        material.params.band_cell[i] = UVec4::new(cx as u32, cy as u32, anchor.face as u32, 0);
         let (cu, cv) = anchor.band_cell_m[i];
         let (fx, fy) = anchor.band_frac[i];
         material.params.band_geom[i] = Vec4::new(cu as f32, cv as f32, fx as f32, fy as f32);

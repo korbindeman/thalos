@@ -19,10 +19,24 @@ The playable MVP deliberately lands before the trained diffusion producer:
 - the package fingerprint participates in memory/disk tile-cache namespaces, so
   a rebake cannot reuse stale reconstructed tiles;
 - `just game mira` / `just game mira-eva` parameterise the existing spawn path,
-  and `mira-orbit` / `mira-surface` headless captures provide stable probes;
+  and `mira-orbit` / `mira-surface` / `mira-eva` headless captures provide
+  stable orbit, landmark-regolith, and canonical eye-level probes;
 - airless archetypes select the shared Hapke regolith path and suppress
   terrestrial vegetation/grass. Close detail is reconstructed deterministically
   by the existing client tile synthesis and cached on device.
+
+The canonical `mira-eva` probe added 2026-07-21 exposed and now guards the
+transparent-looking horizon stipple fixed in `BL-16` / `INC-0009`. It poses the
+camera at the actual canonical EVA site, samples the live atlas-backed height,
+and uses eye-height tangent-look semantics; `mira-surface` alone did not frame
+the affected spawn site. The terrain was always opaque and completely
+rasterised. Unfiltered metre-scale procedural colour and normal octaves fell
+below the screen-space Nyquist limit on grazing ridges, and Hapke amplified the
+normal aliasing. Airless shader detail must therefore fade each octave against
+the fragment's body-space pixel footprint, not camera distance alone. The
+compatibility crater compositor also keeps exact angular distance in f64;
+downcasting a near-unit direction dot product before `acos` quantises Mira-scale
+surface distance into visible height steps.
 
 For this compatibility slice only, the offline producer puts non-height
 `StaticSurfaceData` metadata in one global v1 node and authoritative height in

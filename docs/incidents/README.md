@@ -33,3 +33,7 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0003](0003-orbital-black-continents-coast-speckle.md) | Black continents from orbit + dotted land-through-water coast speckle | visual | 2026-07-19 |
 | [0004](0004-coarse-lod-mask-step-clamp-grey-shiny.md) | Distant terrain grey/shiny/pixelated — mask stencil step clamped below coarse texel spacing | visual | 2026-07-20 |
 | [0005](0005-smoothstep-epsilon-guard-inverted-forest.md) | Forest painted onto the driest ground — `.max(EPSILON)` guard inverted descending-edge smoothsteps | visual | 2026-07-20 |
+| [0006](0006-parallel-rustc-poisoned-incremental-link.md) | Experimental parallel rustc ICE poisoned incremental objects and broke the next link | perf | 2026-07-20 |
+| [0007](0007-atmosphere-proxy-omitted-camera-render-offset.md) | Raymarched atmosphere detached from the planet — proxy omitted the camera render offset | visual | 2026-07-20 |
+| [0008](0008-direct-dynamic-game-launch-missed-library-path.md) | Direct dynamic game launch missed Cargo's library search path | crash | 2026-07-21 |
+| [0009](0009-mira-horizon-regolith-normal-aliasing.md) | Mira's opaque horizon looked transparent — unresolved regolith normals aliased through Hapke | visual | 2026-07-21 |

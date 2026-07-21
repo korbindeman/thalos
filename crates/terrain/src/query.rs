@@ -812,7 +812,7 @@ fn runtime_height_m(surface: &PlanetSurface, dir: DVec3, lod_m: f32, base_height
             // Legacy cascade is f32 (orbital-scale bake heritage); downcast here.
             let dir_f = dir.as_vec3();
             let feature_base_m =
-                compose_runtime_features_m(&surface.static_surface, dir_f, base_height_m);
+                compose_runtime_features_m(&surface.static_surface, dir, base_height_m);
             let plan = detail_plan_for_lod(lod_m, DETAIL_BASE_WL_M);
             let detail_h = compute_detail_height(dir_f, surface.static_surface.radius_m, plan);
             combine_base_and_detail(feature_base_m, detail_h, surface.static_surface.sea_level_m)
@@ -826,7 +826,7 @@ fn runtime_height_m(surface: &PlanetSurface, dir: DVec3, lod_m: f32, base_height
             // parent→child tile handoff doesn't terrace the ground mesh.
             let dir_f = dir.as_vec3();
             let feature_base_m =
-                compose_runtime_features_m(&surface.static_surface, dir_f, base_height_m);
+                compose_runtime_features_m(&surface.static_surface, dir, base_height_m);
             let detail_h =
                 compute_regolith_detail_height(dir_f, surface.static_surface.radius_m, params);
             feature_base_m + detail_h

@@ -116,7 +116,7 @@ impl Default for BodySkyExtra {
 ///
 /// `params.x`: mode flag — `0.0` disables the checkerboard overlay, `>= 0.5`
 ///             enables it. Body-fixed detail anchoring is always active.
-/// `params.y`: unused (kept for `vec4` alignment).
+/// `params.y`: unused.
 /// `params.z`: checker cell size in metres.
 /// `params.w`: unused.
 #[derive(Clone, Copy, ShaderType)]
