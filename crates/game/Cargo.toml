@@ -37,6 +37,11 @@ half = "2"
 wgpu = { version = "29", default-features = false, features = ["counters"], optional = true }
 
 [features]
+# Agent-facing persistent renderer loop. `embedded_watcher` includes Bevy's
+# normal file watcher, so both `assets/shaders/*` and crate-embedded WGSL are
+# reloaded in the running capture process. Hotpatching stays dev-only and is
+# driven by the Dioxus `dx serve --hot-patch` launcher.
+dev-iteration = ["bevy/hotpatching", "bevy/embedded_watcher"]
 # Profiling. Enable one at a time. Chrome produces trace-*.json in cwd;
 # Tracy streams to a running Tracy client over localhost.
 profile-chrome = ["bevy/trace_chrome"]

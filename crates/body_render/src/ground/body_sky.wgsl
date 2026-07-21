@@ -802,7 +802,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
 #ifdef OCEAN_ONLY
     // Ocean owns a separate transparent projection. Sky pixels must be truly
-    // transparent so Bevy's canonical atmosphere (or the legacy A/B pass)
+    // transparent so the canonical atmosphere
     // remains the sole sky renderer, and we avoid paying for its integration.
     if !water_here {
         return vec4<f32>(0.0);

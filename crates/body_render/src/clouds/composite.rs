@@ -2,9 +2,9 @@
 //!
 //! The cloud compute pass is atmosphere-agnostic and writes one premultiplied
 //! cloud layer plus hit depth. This material is the sole screen compositor for
-//! that layer: it runs in Bevy's transparent main pass, after either the
-//! canonical Bevy atmosphere or the explicit legacy `BodySky` A/B, and keeps
-//! cloud ownership independent of which atmosphere renderer is selected.
+//! that layer: it runs in Bevy's transparent main pass after the canonical
+//! `BodySky` atmosphere and keeps cloud ownership independent of the sky
+//! material.
 
 use bevy::asset::embedded_asset;
 use bevy::mesh::MeshVertexBufferLayoutRef;

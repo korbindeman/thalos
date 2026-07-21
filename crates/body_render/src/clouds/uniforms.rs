@@ -28,8 +28,6 @@ pub(crate) struct CloudsUniform {
     pub clouds_ambient_color_bottom: Vec4,
     pub clouds_min_transmittance: f32,
     pub planet_radius: f32,
-    pub atmosphere_top_height: f32,
-    pub atmosphere_lut_enabled: u32,
     pub forward_scattering_g: f32,
     pub backward_scattering_g: f32,
     pub scattering_lerp: f32,
@@ -54,8 +52,6 @@ impl Default for CloudsUniform {
             clouds_raymarch_steps_count: 0,
             clouds_shadow_raymarch_steps_count: 0,
             planet_radius: 0.0,
-            atmosphere_top_height: 0.0,
-            atmosphere_lut_enabled: 0,
             clouds_bottom_height: 0.,
             clouds_top_height: 0.,
             clouds_coverage: 0.0,
@@ -129,15 +125,4 @@ pub(crate) struct CloudsImage {
     /// for motion reprojection.
     #[texture(6, visibility(compute), sample_type = "float", filterable = false)]
     pub history_distance_image: Handle<Image>,
-
-    /// Layout/fallback image for the canonical atmosphere LUT inputs. The
-    /// render-world prepare system substitutes Bevy's live transmittance and
-    /// sky-view textures when the active ship view owns an atmosphere; the
-    /// 1x1 black fallback keeps the bind group valid for legacy/custom A/Bs.
-    #[texture(7, visibility(compute))]
-    #[sampler(9, visibility(compute))]
-    pub atmosphere_fallback_image: Handle<Image>,
-
-    #[texture(8, visibility(compute))]
-    pub atmosphere_sky_fallback_image: Handle<Image>,
 }

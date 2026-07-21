@@ -1,4 +1,3 @@
-use bevy::pbr::resources::{AtmosphereSampler, AtmosphereTextures};
 use bevy::{
     asset::load_embedded_asset,
     ecs::system::ResMut,
@@ -26,7 +25,7 @@ use bevy::{
 /// Controls the compute shader which renders the volumetric clouds.
 use std::borrow::Cow;
 
-use super::{CloudView, config::CloudsConfig};
+use super::config::CloudsConfig;
 
 use super::{
     images::VOLUME_SIZE,
@@ -74,8 +73,6 @@ fn prepare_uniforms_bind_group(
 
     buffer.clouds_raymarch_steps_count = clouds_config.clouds_raymarch_steps_count;
     buffer.planet_radius = clouds_config.planet_radius;
-    buffer.atmosphere_top_height = clouds_config.atmosphere_top_height;
-    buffer.atmosphere_lut_enabled = u32::from(clouds_config.atmosphere_lut_enabled);
     buffer.clouds_bottom_height = clouds_config.clouds_bottom_height;
     buffer.clouds_top_height = clouds_config.clouds_top_height;
     buffer.clouds_coverage = clouds_config.clouds_coverage;
@@ -133,8 +130,6 @@ fn prepare_textures_bind_group(
     gpu_images: Res<RenderAssets<GpuImage>>,
     clouds_image: Res<CloudsImage>,
     render_device: Res<RenderDevice>,
-    atmosphere_textures: Query<&AtmosphereTextures, With<CloudView>>,
-    atmosphere_sampler: Option<Res<AtmosphereSampler>>,
 ) {
     let cloud_render_view = gpu_images.get(&clouds_image.cloud_render_image).unwrap();
     let cloud_worley_view = gpu_images.get(&clouds_image.cloud_worley_image).unwrap();
@@ -144,21 +139,6 @@ fn prepare_textures_bind_group(
     let history_distance_view = gpu_images
         .get(&clouds_image.history_distance_image)
         .unwrap();
-    let atmosphere_fallback = gpu_images
-        .get(&clouds_image.atmosphere_fallback_image)
-        .unwrap();
-    let atmosphere = atmosphere_textures.iter().next();
-    let transmittance_view = atmosphere
-        .map(|textures| &textures.transmittance_lut.default_view)
-        .unwrap_or(&atmosphere_fallback.texture_view);
-    let sky_view = atmosphere
-        .map(|textures| &textures.sky_view_lut.default_view)
-        .unwrap_or(&atmosphere_fallback.texture_view);
-    let lut_sampler = atmosphere_sampler
-        .as_deref()
-        .map(|sampler| &**sampler)
-        .unwrap_or(&atmosphere_fallback.sampler);
-
     let bind_group = render_device.create_bind_group(
         None,
         &pipeline_cache.get_bind_group_layout(&pipeline.texture_bind_group_layout),
@@ -170,9 +150,6 @@ fn prepare_textures_bind_group(
             (4, &weather_view.sampler),
             (5, &history_view.texture_view),
             (6, &history_distance_view.texture_view),
-            (7, transmittance_view),
-            (8, sky_view),
-            (9, lut_sampler),
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));

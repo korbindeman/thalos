@@ -74,7 +74,6 @@ pub struct CloudImages {
     pub weather_image: Handle<Image>,
     pub history_image: Handle<Image>,
     pub history_distance_image: Handle<Image>,
-    pub atmosphere_fallback_image: Handle<Image>,
 }
 
 pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
@@ -168,24 +167,6 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
         WEATHER_FACE_SIZE,
     );
 
-    // Bind-group fallback for the stock atmosphere's Rgba16Float
-    // transmittance / sky-view LUTs. The shader never samples this while
-    // `atmosphere_lut_enabled == 0`; it only keeps the compute layout complete
-    // for airless bodies and the legacy custom-atmosphere comparison path.
-    let mut atmosphere_fallback_image = Image::new_fill(
-        Extent3d {
-            width: 1,
-            height: 1,
-            depth_or_array_layers: 1,
-        },
-        TextureDimension::D2,
-        &[0; 8],
-        TextureFormat::Rgba16Float,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    atmosphere_fallback_image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING;
-    atmosphere_fallback_image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor::linear());
-
     CloudImages {
         cloud_render_image: images.add(cloud_render_image),
         cloud_worley_image: images.add(cloud_worley_image),
@@ -193,7 +174,6 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
         weather_image: images.add(weather_image),
         history_image: images.add(history_image),
         history_distance_image: images.add(history_distance_image),
-        atmosphere_fallback_image: images.add(atmosphere_fallback_image),
     }
 }
 

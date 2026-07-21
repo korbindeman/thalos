@@ -4,8 +4,8 @@ use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::extract_component::{ExtractComponent, ExtractComponentPlugin};
 use big_space::prelude::CellCoord;
+use thalos_body_render::HeightSource;
 use thalos_body_render::space_camera_post_stack;
-use thalos_body_render::{CloudView, HeightSource};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::types::BodyState;
 use thalos_physics_local::HeightSourceRegistry;
@@ -460,7 +460,6 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         space_camera_post_stack(),
         OrbitCamera,
         ShipCamera,
-        CloudView,
         // The frosted-glass UI blurs this camera's output (thalos_ui).
         thalos_ui::UiBackdropSource,
         bevy::picking::mesh_picking::MeshPickingCamera,

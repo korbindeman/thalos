@@ -22,9 +22,8 @@
 //!
 //! **Compositing.** One dedicated [`thalos_body_render::CloudCompositeMaterial`]
 //! owns both the near-volume layer and the weather-derived orbital projection.
-//! It renders after either atmosphere backend, so the canonical Bevy atmosphere
-//! cannot hide clouds and the legacy `BodySky` A/B cannot acquire a second
-//! cloud path. [`sync_cloud_composite_materials`] mirrors the active body's
+//! It renders after the canonical `BodySky` atmosphere without acquiring a
+//! second cloud path. [`sync_cloud_composite_materials`] mirrors the active body's
 //! planet/light state and binds the live textures each frame.
 
 use bevy::math::DVec3;
@@ -39,12 +38,11 @@ use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
 use crate::graphics_settings::GraphicsSettings;
-use crate::screenshot::ScreenshotConfig;
 
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
 
-/// Per-body fullscreen cloud projection. Separate from `BodySky` so switching
-/// the canonical atmosphere implementation never changes cloud visibility.
+/// Per-body fullscreen cloud projection. Separate from `BodySky` so cloud
+/// ownership and visibility remain independent of the atmosphere material.
 #[derive(Component, Debug)]
 pub(super) struct BodyClouds {
     pub(super) body_id: BodyId,
@@ -112,7 +110,7 @@ impl Plugin for CloudsRenderPlugin {
 }
 
 /// Match the cloud compositor's lifecycle to the resident terrain projection,
-/// independently of `BodySky` (which the canonical Bevy atmosphere hides).
+/// independently of `BodySky`.
 fn sync_cloud_composite_visibility(
     terrains: Query<(&super::ground_terrain::BodyTerrain, &Visibility), Without<BodyClouds>>,
     mut composites: Query<
@@ -140,8 +138,8 @@ fn sync_cloud_composite_visibility(
 
 /// Mirror the active body's already-resolved planet/sun/orientation state from
 /// its custom sky material, but bind the cloud textures to the dedicated
-/// compositor. This is the one cloud-composition writer; `BodySky` retains only
-/// atmosphere/ocean responsibilities for its explicit debug A/B.
+/// compositor. This is the one cloud-composition writer; `BodySky` retains the
+/// atmosphere projection.
 fn sync_cloud_composite_materials(
     active: Res<ActiveCloudBody>,
     cloud_layer: Option<Res<CloudRenderTexture>>,
@@ -221,7 +219,6 @@ fn drive_clouds(
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     graphics: Res<GraphicsSettings>,
-    screenshot: Option<Res<ScreenshotConfig>>,
     mut active: ResMut<ActiveCloudBody>,
     mut cam_mat: ResMut<CameraMatrices>,
     mut config: ResMut<CloudsConfig>,
@@ -363,11 +360,6 @@ fn drive_clouds(
     // Project authored, quality-neutral climate plus dynamic view/light state.
     // Sampling/reconstruction quality remains independently editable.
     config.planet_radius = radius;
-    config.atmosphere_top_height = atmosphere.karman_line_m.max(1.0);
-    config.atmosphere_lut_enabled = screenshot
-        .as_deref()
-        .and_then(|cfg| cfg.atmosphere.stock_override())
-        .unwrap_or(true);
     config.clouds_bottom_height = climate.base_altitude_m.max(0.0);
     config.clouds_top_height =
         (climate.base_altitude_m + climate.thickness_m).max(config.clouds_bottom_height + 1.0);
@@ -394,13 +386,7 @@ fn drive_clouds(
     // Albedo is applied once here; the volume does not re-multiply climate
     // albedo, so keep it a touch under 1.0 to leave headroom for phase peaks.
     let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
-    let sun_rgb = if config.atmosphere_lut_enabled {
-        // The shader samples the canonical transmittance LUT at every cloud
-        // point, so keep this source neutral and apply atmosphere colour once.
-        albedo * scene_flux * SUN_FLUX_SCALE
-    } else {
-        sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance
-    };
+    let sun_rgb = sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
     // Sky-like ambient: more blue at the top, greyer fill under overcast cores.
     let horizon_ambient = 0.28 + 0.72 * day_blend;

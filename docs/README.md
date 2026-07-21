@@ -16,7 +16,7 @@ The project's design and planning docs. Start here to find the right one.
 
 | Doc | System |
 |-----|--------|
-| [architecture.md](architecture.md) | Crate-distillation refactor: `thalos_world` / `thalos_body_render` phase plan |
+| [architecture.md](architecture.md) | Target workspace and dependency boundaries: apps, runtime, domain/simulation/rendering libraries, tools, labs, and artifacts |
 | [simulation.md](simulation.md) | Orbital mechanics, authority, warp, map decoupling, big_space, local bubble |
 | [regimes.md](regimes.md) | Per-craft `CraftRegime` resolver — the one classification record |
 | [surface_local.md](surface_local.md) | The SLF: body-fixed tangent-frame near-surface physics (§10 = shipped-vs-design) |
@@ -43,7 +43,9 @@ The project's design and planning docs. Start here to find the right one.
 | [shadow_unification_prompt.md](shadow_unification_prompt.md) | F6 one-shadow-world status block + tuning knobs |
 | [planetary_rendering_baseline.md](planetary_rendering_baseline.md) | Rendering baseline reference |
 | [tooling.md](tooling.md) | Toolchain policy; local-only compiler tuning recipes |
+| [build_speed.md](build_speed.md) | Cross-platform build acceleration, sccache, and the per-environment agent build workflow |
 | [visual_testing.md](visual_testing.md) | Deterministic headless screenshot A/B and multi-test workflow |
+| [capture.md](capture.md) | Agent-first capture architecture: shared runtime, persistent/cold stills, comparisons, and deterministic video |
 | [lore/](lore/) | Solar-system reference + civilization narrative |
 | [archive/](archive/) | Superseded terrain-*generation* design — reference only, see its README |
 

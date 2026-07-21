@@ -19,6 +19,7 @@
 //! flat, sky-less, shadow-less scene.
 
 use std::{
+    collections::BTreeMap,
     env, fs,
     fs::OpenOptions,
     io::Write,
@@ -29,7 +30,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use bevy::{
-    asset::RenderAssetUsages,
+    asset::{AssetEvent, RenderAssetUsages},
     camera::{ImageRenderTarget, RenderTarget},
     diagnostic::{DiagnosticPath, DiagnosticsStore},
     math::{DQuat, DVec3},
@@ -38,12 +39,15 @@ use bevy::{
         render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages},
         view::screenshot::{Capturing, Screenshot, ScreenshotCaptured, save_to_disk},
     },
+    shader::Shader,
     window::{CursorIcon, PrimaryWindow, SystemCursorIcon},
 };
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
-use thalos_body_render::{CloudsConfig, HeightSource, cloud_target_memory_for};
+use thalos_body_render::{
+    BodyTerrainMaterial, CloudsConfig, HeightSource, cloud_target_memory_for,
+};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -51,6 +55,7 @@ use thalos_world::BodyId;
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::loading::AppState;
 use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
+use crate::rendering::ssao::SsaoConfig;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::space_center::{HubContext, hub_context};
 use crate::spawn::{Homeworld, SpawnSituation};
@@ -59,6 +64,10 @@ use crate::terrain_registry::BodySurfaceRegistry;
 
 const SAVED_PERSPECTIVE_SCHEMA: &str = "thalos.saved-perspective.v1";
 const SAVED_PERSPECTIVE_FILENAME: &str = "latest_perspective.json";
+const CAPTURE_REQUEST_FILENAME: &str = "visual_capture_request.json";
+const CAPTURE_RESPONSE_FILENAME: &str = "visual_capture_response.json";
+const CAPTURE_SERVER_STATE_FILENAME: &str = "visual_capture_server.json";
+const CAPTURE_PROTOCOL_SCHEMA: u32 = 1;
 
 fn saved_perspective_path() -> PathBuf {
     crate::artifact_paths::default_diagnostic_path(SAVED_PERSPECTIVE_FILENAME)
@@ -500,9 +509,8 @@ pub enum ScreenshotPreset {
     /// A fixed ISS-like orbital view over Thalos's land near the spaceport.
     /// The 3:2 frame and high horizon mirror the Earth reference used to
     /// calibrate atmosphere thickness, aerial perspective, and exposure. This
-    /// framing contains no rendered ocean. Defaults to Bevy's raymarched atmosphere;
-    /// `THALOS_SCREENSHOT_ATMOSPHERE=custom` produces the matched legacy
-    /// `BodySky` A/B without changing any other input.
+    /// framing contains no rendered ocean. This is the orbital regression
+    /// probe for the canonical custom atmosphere.
     EarthReference,
     /// Eye-level open-ocean validation shot. Selects deep water under a low sun
     /// and aligns the view near the specular path so wave scale, sun glitter,
@@ -745,8 +753,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/latest_perspective.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("latest_perspective.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -764,8 +771,7 @@ impl ScreenshotPreset {
                 warmup_frames: 180,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/spaceport_aerial.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("spaceport_aerial.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -786,8 +792,7 @@ impl ScreenshotPreset {
                 warmup_frames: 480,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/runway_atmosphere.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("runway_atmosphere.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -807,8 +812,7 @@ impl ScreenshotPreset {
                 warmup_frames: 240,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/hub.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("hub.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -830,8 +834,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/dry_belt.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("dry_belt.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -849,8 +852,7 @@ impl ScreenshotPreset {
                 warmup_frames: 300,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/cloud_runway.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("cloud_runway.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     // Human-scale weather acceptance view: just above the
                     // runway, pitched into the cloud-bearing sky. The old
@@ -870,7 +872,7 @@ impl ScreenshotPreset {
                 let mut cfg = Self::CloudRunway.defaults();
                 cfg.preset = self;
                 cfg.out = PathBuf::from("tools/screenshots/cloud_motion.png");
-                cfg.report = PathBuf::from("tools/screenshots/cloud_motion.jsonl");
+                cfg.report = crate::artifact_paths::default_jsonl_path("cloud_motion.jsonl");
                 // End directly toward the projected sun, where forward-scatter
                 // contrast makes stale history easiest to see.
                 cfg.azimuth_deg = 0.0;
@@ -889,8 +891,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/cloud_cruise.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("cloud_cruise.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     // Above the ordinary cumulus deck but below the tallest
                     // authored storm tops: the aviation-scale view across
@@ -918,8 +919,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/cloud_interior.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("cloud_interior.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 2_650.0,
                     look_elevation_deg: 0.0,
@@ -945,8 +945,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/cloud_limb.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("cloud_limb.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 200_000.0,
                     look_elevation_deg: 0.35,
@@ -975,8 +974,7 @@ impl ScreenshotPreset {
                 warmup_frames: 240,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/cloud_planet.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("cloud_planet.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     // Outside the terrain LOD swap (4× radius ≈ 12.7 Mm for
                     // Thalos): SolidPlanet owns the disc so the CLOUD-6 orbital
@@ -1005,8 +1003,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/cloud_sunset.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("cloud_sunset.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 700.0,
                     look_elevation_deg: 1.5,
@@ -1021,7 +1018,7 @@ impl ScreenshotPreset {
             Self::EarthReference => ScreenshotConfig {
                 preset: self,
                 saved: None,
-                out: PathBuf::from("tools/screenshots/earth_reference_bevy.png"),
+                out: PathBuf::from("tools/screenshots/earth_reference.png"),
                 // The Earth reference is 1000×667 (approximately 3:2). Keep
                 // that composition instead of comparing a wider 16:9 crop.
                 width: 1800,
@@ -1032,8 +1029,7 @@ impl ScreenshotPreset {
                 warmup_frames: 480,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::BevyRaymarched,
-                report: PathBuf::from("tools/screenshots/earth_reference_bevy.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("earth_reference.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1056,8 +1052,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::BevyRaymarched,
-                report: PathBuf::from("tools/screenshots/ocean.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("ocean.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1075,8 +1070,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::BevyRaymarched,
-                report: PathBuf::from("tools/screenshots/ocean_slopes.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("ocean_slopes.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1097,8 +1091,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/mira_orbit.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("mira_orbit.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1119,8 +1112,7 @@ impl ScreenshotPreset {
                 warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/mira_surface.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("mira_surface.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1141,42 +1133,12 @@ impl ScreenshotPreset {
                 warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
-                atmosphere: ScreenshotAtmosphere::Configured,
-                report: PathBuf::from("tools/screenshots/mira_eva.jsonl"),
+                report: crate::artifact_paths::default_jsonl_path("mira_eva.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
-        }
-    }
-}
-
-/// Atmosphere renderer selected for a headless capture. Normal gameplay keeps
-/// reading [`GraphicsSettings`](crate::graphics_settings::GraphicsSettings);
-/// this only makes visual-regression probes deterministic.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ScreenshotAtmosphere {
-    Configured,
-    CustomBodySky,
-    BevyRaymarched,
-}
-
-impl ScreenshotAtmosphere {
-    fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().to_ascii_lowercase().as_str() {
-            "configured" | "settings" | "default" => Some(Self::Configured),
-            "custom" | "body-sky" | "bodysky" | "legacy" => Some(Self::CustomBodySky),
-            "bevy" | "raymarched" | "raymarch" | "stock" => Some(Self::BevyRaymarched),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn stock_override(self) -> Option<bool> {
-        match self {
-            Self::Configured => None,
-            Self::CustomBodySky => Some(false),
-            Self::BevyRaymarched => Some(true),
         }
     }
 }
@@ -1214,10 +1176,6 @@ pub struct ScreenshotConfig {
     /// (`THALOS_SCREENSHOT_HUD=1`). Default hides them for clean scene shots;
     /// set it when iterating on the HUD itself.
     pub keep_hud: bool,
-    /// Deterministic atmosphere renderer for this capture. This is deliberately
-    /// not written through `GraphicsSettings`, so headless A/B runs never
-    /// rewrite the user's persisted preferences.
-    pub atmosphere: ScreenshotAtmosphere,
     /// Machine-readable CLOUD-0 timing/memory report. One JSON object is
     /// written per capture so reports can be concatenated directly.
     pub report: PathBuf,
@@ -1252,12 +1210,23 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION` — raw, dense, or sparse;
     ///   capture-only diagnostic override used by the moving-cloud A/B.
     /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
-    /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults beside PNG).
+    /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults under
+    ///   `tools/diagnostics/`).
     /// - `THALOS_SCREENSHOT_OCEAN_TIME` — optional fixed canonical ocean time
     ///   in seconds (ocean diagnostics/phase comparisons only).
     pub fn from_env() -> Option<Self> {
         let raw = env::var("THALOS_SCREENSHOT").ok()?;
         let preset = ScreenshotPreset::parse(&raw);
+        let mut cfg = Self::for_preset(preset);
+        let overrides = CAPTURE_OVERRIDE_KEYS
+            .iter()
+            .filter_map(|key| env::var(key).ok().map(|value| ((*key).to_owned(), value)))
+            .collect();
+        cfg.apply_overrides(&overrides);
+        Some(cfg)
+    }
+
+    fn for_preset(preset: ScreenshotPreset) -> Self {
         let mut cfg = preset.defaults();
         if preset == ScreenshotPreset::LatestPerspective {
             let saved = SavedPerspective::load_from(saved_perspective_path())
@@ -1270,93 +1239,87 @@ impl ScreenshotConfig {
             cfg.height = saved.viewport[1];
             cfg.saved = Some(saved);
         }
+        cfg
+    }
 
-        if let Some(out) = env::var_os("THALOS_SCREENSHOT_OUT") {
-            cfg.out = PathBuf::from(out);
+    fn apply_overrides(&mut self, overrides: &BTreeMap<String, String>) {
+        if let Some(out) = overrides.get("THALOS_SCREENSHOT_OUT") {
+            self.out = PathBuf::from(out);
         }
-        cfg.report = env::var_os("THALOS_SCREENSHOT_REPORT")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| cfg.out.with_extension("jsonl"));
-        if let Some((w, h)) = env::var("THALOS_SCREENSHOT_SIZE")
-            .ok()
-            .and_then(|s| parse_size(&s))
+        if let Some(report) = overrides.get("THALOS_SCREENSHOT_REPORT") {
+            self.report = PathBuf::from(report);
+        }
+        if let Some((w, h)) = overrides
+            .get("THALOS_SCREENSHOT_SIZE")
+            .and_then(|value| parse_size(value))
         {
-            cfg.width = w;
-            cfg.height = h;
+            self.width = w;
+            self.height = h;
         }
-        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_AZIMUTH") {
-            cfg.azimuth_deg = v;
+        if let Some(v) = override_parse::<f32>(overrides, "THALOS_SCREENSHOT_AZIMUTH") {
+            self.azimuth_deg = v;
         }
-        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_ELEVATION") {
-            cfg.elevation_deg = v.clamp(1.0, 90.0);
+        if let Some(v) = override_parse::<f32>(overrides, "THALOS_SCREENSHOT_ELEVATION") {
+            self.elevation_deg = v.clamp(1.0, 90.0);
         }
-        if let Some(v) = env_parse::<f64>("THALOS_SCREENSHOT_DISTANCE") {
-            cfg.distance_m = v.max(1.0);
+        if let Some(v) = override_parse::<f64>(overrides, "THALOS_SCREENSHOT_DISTANCE") {
+            self.distance_m = v.max(1.0);
         }
-        if let Some(v) = env_parse::<u32>("THALOS_SCREENSHOT_WARMUP") {
-            cfg.warmup_frames = v;
+        if let Some(v) = override_parse::<u32>(overrides, "THALOS_SCREENSHOT_WARMUP") {
+            self.warmup_frames = v;
         }
-        if let Ok(v) = env::var("THALOS_SCREENSHOT_HUD") {
-            cfg.keep_hud = matches!(
+        if let Some(v) = overrides.get("THALOS_SCREENSHOT_HUD") {
+            self.keep_hud = matches!(
                 v.trim().to_ascii_lowercase().as_str(),
                 "1" | "true" | "yes" | "on"
             );
         }
-        if let Ok(v) = env::var("THALOS_SCREENSHOT_ATMOSPHERE") {
-            match ScreenshotAtmosphere::parse(&v) {
-                Some(atmosphere) => cfg.atmosphere = atmosphere,
-                None => eprintln!(
-                    "  Unknown THALOS_SCREENSHOT_ATMOSPHERE '{v}'; expected configured, custom, or bevy."
-                ),
-            }
-        }
-        if let Some(v) = env_parse::<f64>("THALOS_SCREENSHOT_CAMERA_ALTITUDE") {
+        if let Some(v) = override_parse::<f64>(overrides, "THALOS_SCREENSHOT_CAMERA_ALTITUDE") {
             if let ScreenshotFraming::LocalCloud {
                 camera_altitude_m, ..
-            } = &mut cfg.framing
+            } = &mut self.framing
             {
                 *camera_altitude_m = v.max(0.0);
             }
         }
-        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_LOOK_ELEVATION") {
+        if let Some(v) = override_parse::<f32>(overrides, "THALOS_SCREENSHOT_LOOK_ELEVATION") {
             if let ScreenshotFraming::LocalCloud {
                 look_elevation_deg, ..
-            } = &mut cfg.framing
+            } = &mut self.framing
             {
                 *look_elevation_deg = v.clamp(-90.0, 90.0);
             }
         }
-        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_SUN_ELEVATION") {
+        if let Some(v) = override_parse::<f32>(overrides, "THALOS_SCREENSHOT_SUN_ELEVATION") {
             if let ScreenshotFraming::LocalCloud {
                 site_sun_elevation_deg,
                 ..
-            } = &mut cfg.framing
+            } = &mut self.framing
             {
                 *site_sun_elevation_deg = Some(v.clamp(-10.0, 90.0));
             }
         }
-        if let Ok(raw) = env::var("THALOS_SCREENSHOT_CLOUD_QUALITY") {
+        if let Some(raw) = overrides.get("THALOS_SCREENSHOT_CLOUD_QUALITY") {
             if let Some(quality) = CloudCaptureQuality::parse(&raw) {
-                cfg.cloud_quality = quality;
+                self.cloud_quality = quality;
             } else {
                 eprintln!(
                     "  Unknown THALOS_SCREENSHOT_CLOUD_QUALITY={raw:?}; using {}.",
-                    cfg.cloud_quality.name()
+                    self.cloud_quality.name()
                 );
             }
         }
-        if let Ok(raw) = env::var("THALOS_SCREENSHOT_CLOUD_TEMPORAL") {
+        if let Some(raw) = overrides.get("THALOS_SCREENSHOT_CLOUD_TEMPORAL") {
             match parse_bool(&raw) {
-                Some(value) => cfg.cloud_temporal = value,
+                Some(value) => self.cloud_temporal = value,
                 None => eprintln!(
                     "  Unknown THALOS_SCREENSHOT_CLOUD_TEMPORAL={raw:?}; expected on/off."
                 ),
             }
         }
-        if let Some(v) = env_parse::<f32>("THALOS_SCREENSHOT_CLOUD_COVERAGE") {
-            cfg.cloud_coverage_scale = Some(v.clamp(0.0, 4.0));
+        if let Some(v) = override_parse::<f32>(overrides, "THALOS_SCREENSHOT_CLOUD_COVERAGE") {
+            self.cloud_coverage_scale = Some(v.clamp(0.0, 4.0));
         }
-        Some(cfg)
     }
 
     /// Body whose authored world must be loaded before the capture app boots.
@@ -1384,6 +1347,57 @@ impl ScreenshotConfig {
     }
 }
 
+const CAPTURE_OVERRIDE_KEYS: &[&str] = &[
+    "THALOS_SCREENSHOT_OUT",
+    "THALOS_SCREENSHOT_REPORT",
+    "THALOS_SCREENSHOT_SIZE",
+    "THALOS_SCREENSHOT_AZIMUTH",
+    "THALOS_SCREENSHOT_ELEVATION",
+    "THALOS_SCREENSHOT_DISTANCE",
+    "THALOS_SCREENSHOT_WARMUP",
+    "THALOS_SCREENSHOT_HUD",
+    "THALOS_SCREENSHOT_CAMERA_ALTITUDE",
+    "THALOS_SCREENSHOT_LOOK_ELEVATION",
+    "THALOS_SCREENSHOT_SUN_ELEVATION",
+    "THALOS_SCREENSHOT_CLOUD_QUALITY",
+    "THALOS_SCREENSHOT_CLOUD_TEMPORAL",
+    "THALOS_SCREENSHOT_CLOUD_COVERAGE",
+    "THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION",
+    "THALOS_SCREENSHOT_OCEAN_TIME",
+    "THALOS_SSAO",
+    "THALOS_TERRAIN_INSPECTION",
+    "THALOS_TERRAIN_CULL",
+];
+
+#[derive(Resource, Clone, Debug, Default)]
+struct CaptureRuntimeOverrides {
+    values: BTreeMap<String, String>,
+}
+
+impl CaptureRuntimeOverrides {
+    fn from_env() -> Self {
+        Self {
+            values: CAPTURE_OVERRIDE_KEYS
+                .iter()
+                .filter_map(|key| env::var(key).ok().map(|value| ((*key).to_owned(), value)))
+                .collect(),
+        }
+    }
+
+    fn get(&self, key: &str) -> Option<&str> {
+        self.values.get(key).map(String::as_str)
+    }
+}
+
+fn override_parse<T: std::str::FromStr>(
+    overrides: &BTreeMap<String, String>,
+    key: &str,
+) -> Option<T> {
+    overrides
+        .get(key)
+        .and_then(|value| value.trim().parse::<T>().ok())
+}
+
 fn env_parse<T: std::str::FromStr>(key: &str) -> Option<T> {
     env::var(key).ok().and_then(|s| s.trim().parse::<T>().ok())
 }
@@ -1400,6 +1414,120 @@ fn parse_bool(raw: &str) -> Option<bool> {
 fn parse_size(s: &str) -> Option<(u32, u32)> {
     let (w, h) = s.trim().split_once(['x', 'X', '*'])?;
     Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+}
+
+fn capture_request_path() -> PathBuf {
+    crate::artifact_paths::default_diagnostic_path(CAPTURE_REQUEST_FILENAME)
+}
+
+fn capture_response_path() -> PathBuf {
+    crate::artifact_paths::default_diagnostic_path(CAPTURE_RESPONSE_FILENAME)
+}
+
+fn capture_server_state_path() -> PathBuf {
+    crate::artifact_paths::default_diagnostic_path(CAPTURE_SERVER_STATE_FILENAME)
+}
+
+#[derive(Debug, Deserialize)]
+struct CaptureRequest {
+    schema_version: u32,
+    id: String,
+    #[serde(default = "capture_action")]
+    action: String,
+    #[serde(default)]
+    preset: String,
+    #[serde(default)]
+    overrides: BTreeMap<String, String>,
+}
+
+fn capture_action() -> String {
+    "capture".to_owned()
+}
+
+#[derive(Debug, Serialize)]
+struct CaptureResponse<'a> {
+    schema_version: u32,
+    id: &'a str,
+    ok: bool,
+    message: String,
+    output: Option<String>,
+    completed_unix_ms: u128,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptureServerState<'a> {
+    schema_version: u32,
+    pid: u32,
+    preset: &'a str,
+    width: u32,
+    height: u32,
+    ready: bool,
+    busy: bool,
+    completed_captures: u64,
+    code_reload_unix_ms: u128,
+    shader_reload_unix_ms: u128,
+    heartbeat_unix_ms: u128,
+}
+
+#[derive(Resource, Debug, Default)]
+struct PersistentCaptureServer {
+    boot_preset: Option<ScreenshotPreset>,
+    boot_width: u32,
+    boot_height: u32,
+    active_id: Option<String>,
+    last_request_id: Option<String>,
+    completed_captures: u64,
+    code_reload_unix_ms: u128,
+    shader_reload_unix_ms: u128,
+    settle_frames: u32,
+    heartbeat_frame: u32,
+}
+
+impl PersistentCaptureServer {
+    fn publish(&self, ready: bool) {
+        let Some(preset) = self.boot_preset else {
+            return;
+        };
+        let state = CaptureServerState {
+            schema_version: CAPTURE_PROTOCOL_SCHEMA,
+            pid: std::process::id(),
+            preset: preset.name(),
+            width: self.boot_width,
+            height: self.boot_height,
+            ready,
+            busy: self.active_id.is_some(),
+            completed_captures: self.completed_captures,
+            code_reload_unix_ms: self.code_reload_unix_ms,
+            shader_reload_unix_ms: self.shader_reload_unix_ms,
+            heartbeat_unix_ms: timestamp_millis(),
+        };
+        if let Err(error) = write_json(capture_server_state_path(), &state) {
+            warn!(target: "thalos::screenshot", "could not publish capture-server state: {error}");
+        }
+    }
+
+    fn respond(&self, id: &str, ok: bool, message: impl Into<String>, output: Option<&PathBuf>) {
+        let response = CaptureResponse {
+            schema_version: CAPTURE_PROTOCOL_SCHEMA,
+            id,
+            ok,
+            message: message.into(),
+            output: output.map(|path| path.display().to_string()),
+            completed_unix_ms: timestamp_millis(),
+        };
+        if let Err(error) = write_json(capture_response_path(), &response) {
+            warn!(target: "thalos::screenshot", "could not publish capture response: {error}");
+        }
+    }
+}
+
+fn write_json(path: PathBuf, value: &impl Serialize) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("create {}: {error}", parent.display()))?;
+    }
+    let bytes = serde_json::to_vec_pretty(value).map_err(|error| error.to_string())?;
+    fs::write(&path, bytes).map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1429,18 +1557,22 @@ struct ScreenshotDriver {
     airless_site_dir: Option<DVec3>,
 }
 
-pub struct HeadlessScreenshotPlugin;
+pub struct HeadlessScreenshotPlugin {
+    pub persistent: bool,
+}
 
 impl Plugin for HeadlessScreenshotPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScreenshotDriver>()
-            .add_systems(
-                Startup,
-                (setup_screenshot_target, configure_ocean_diagnostic),
-            )
+            .insert_resource(CaptureRuntimeOverrides::from_env())
+            .add_systems(Startup, setup_screenshot_target)
             .add_systems(
                 Update,
-                (retarget_ship_camera, hide_overlays, configure_cloud_capture),
+                (
+                    retarget_ship_camera,
+                    hide_overlays,
+                    apply_live_capture_diagnostics,
+                ),
             )
             // The pose + capture driver runs *after* the flight camera so it wins
             // (last writer of the `ShipCamera` transform), and only once the world
@@ -1454,18 +1586,173 @@ impl Plugin for HeadlessScreenshotPlugin {
             // Diagnostic transect across the spaceport basin (headless runs
             // only): resident tile LOD + rendered height vs the basin plane.
             .add_systems(Update, probe_apron_lod.run_if(in_state(AppState::Running)));
+
+        if self.persistent {
+            app.init_resource::<PersistentCaptureServer>()
+                .add_systems(Startup, initialize_capture_server)
+                .add_systems(
+                    Update,
+                    (
+                        poll_capture_requests.before(apply_live_capture_diagnostics),
+                        publish_capture_server_state,
+                    )
+                        .chain()
+                        .before(drive_headless_screenshot),
+                )
+                .add_systems(Update, record_shader_reloads);
+            #[cfg(feature = "dev-iteration")]
+            app.add_systems(Update, record_code_hotpatches);
+        }
     }
+}
+
+fn record_shader_reloads(
+    mut events: MessageReader<AssetEvent<Shader>>,
+    mut server: ResMut<PersistentCaptureServer>,
+) {
+    if events.read().next().is_some() {
+        server.shader_reload_unix_ms = timestamp_millis();
+    }
+}
+
+#[cfg(feature = "dev-iteration")]
+fn record_code_hotpatches(
+    mut events: MessageReader<bevy::ecs::HotPatched>,
+    mut server: ResMut<PersistentCaptureServer>,
+) {
+    if events.read().next().is_some() {
+        server.code_reload_unix_ms = timestamp_millis();
+        info!(target: "thalos::screenshot", "Rust hot patch applied");
+    }
+}
+
+fn initialize_capture_server(
+    cfg: Res<ScreenshotConfig>,
+    mut server: ResMut<PersistentCaptureServer>,
+) {
+    server.boot_preset = Some(cfg.preset);
+    server.boot_width = cfg.width;
+    server.boot_height = cfg.height;
+    server.settle_frames = env_parse("THALOS_CAPTURE_SETTLE_FRAMES").unwrap_or(60);
+    server.publish(false);
+}
+
+fn publish_capture_server_state(
+    driver: Res<ScreenshotDriver>,
+    mut server: ResMut<PersistentCaptureServer>,
+) {
+    server.heartbeat_frame = server.heartbeat_frame.wrapping_add(1);
+    if server.heartbeat_frame % 30 == 0 || server.heartbeat_frame == 1 {
+        server.publish(driver.retargeted);
+    }
+}
+
+fn poll_capture_requests(
+    mut cfg: ResMut<ScreenshotConfig>,
+    mut runtime: ResMut<CaptureRuntimeOverrides>,
+    mut driver: ResMut<ScreenshotDriver>,
+    mut server: ResMut<PersistentCaptureServer>,
+    mut exit: MessageWriter<AppExit>,
+) {
+    let Ok(bytes) = fs::read(capture_request_path()) else {
+        return;
+    };
+    let Ok(request) = serde_json::from_slice::<CaptureRequest>(&bytes) else {
+        // The controller writes through an atomic rename, but tolerate a
+        // partially-written request from a manually-authored client.
+        return;
+    };
+    if server.last_request_id.as_deref() == Some(request.id.as_str()) {
+        return;
+    }
+    server.last_request_id = Some(request.id.clone());
+
+    if request.schema_version != CAPTURE_PROTOCOL_SCHEMA {
+        server.respond(
+            &request.id,
+            false,
+            format!(
+                "capture protocol {} is unsupported; server expects {}",
+                request.schema_version, CAPTURE_PROTOCOL_SCHEMA
+            ),
+            None,
+        );
+        return;
+    }
+    if request.action == "shutdown" {
+        server.respond(&request.id, true, "capture server shutting down", None);
+        exit.write(AppExit::Success);
+        return;
+    }
+    if request.action != "capture" {
+        server.respond(
+            &request.id,
+            false,
+            format!("unknown capture action {:?}", request.action),
+            None,
+        );
+        return;
+    }
+    if server.active_id.is_some() {
+        server.respond(&request.id, false, "capture server is already busy", None);
+        return;
+    }
+
+    let requested_preset = ScreenshotPreset::parse(&request.preset);
+    if Some(requested_preset) != server.boot_preset {
+        server.respond(
+            &request.id,
+            false,
+            format!(
+                "server booted for {}; restart it for {}",
+                server.boot_preset.map_or("unknown", ScreenshotPreset::name),
+                requested_preset.name()
+            ),
+            None,
+        );
+        return;
+    }
+
+    let mut next = ScreenshotConfig::for_preset(requested_preset);
+    next.apply_overrides(&request.overrides);
+    if next.width != server.boot_width || next.height != server.boot_height {
+        server.respond(
+            &request.id,
+            false,
+            format!(
+                "server target is {}x{}; restart it for {}x{}",
+                server.boot_width, server.boot_height, next.width, next.height
+            ),
+            None,
+        );
+        return;
+    }
+    if server.completed_captures > 0 && !request.overrides.contains_key("THALOS_SCREENSHOT_WARMUP")
+    {
+        next.warmup_frames = server.settle_frames;
+    }
+
+    runtime.values = request.overrides;
+    *cfg = next;
+    driver.running_frames = 0;
+    driver.captured = false;
+    driver.tail = 0;
+    server.active_id = Some(request.id);
+    server.publish(driver.retargeted);
 }
 
 /// Apply capture-only cloud quality controls once, after the cloud plugin's
 /// startup initialization. The normal game never sees these overrides because
 /// this system only exists in [`HeadlessScreenshotPlugin`].
-fn configure_cloud_capture(
+fn apply_live_capture_diagnostics(
     cfg: Res<ScreenshotConfig>,
+    runtime: Res<CaptureRuntimeOverrides>,
     mut clouds: ResMut<CloudsConfig>,
-    mut applied: Local<bool>,
+    mut ocean_debug: ResMut<OceanDebugSettings>,
+    mut ssao: ResMut<SsaoConfig>,
+    mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
 ) {
-    if *applied {
+    if !cfg.is_changed() && !runtime.is_changed() {
         return;
     }
     clouds.clouds_raymarch_steps_count = cfg.cloud_quality.view_steps();
@@ -1476,8 +1763,8 @@ fn configure_cloud_capture(
     } else {
         "raw"
     };
-    let reconstruction = env::var("THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION")
-        .ok()
+    let reconstruction = runtime
+        .get("THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION")
         .map(|raw| raw.trim().to_ascii_lowercase())
         .unwrap_or_else(|| default_mode.to_owned());
     let (reprojection_strength, sparse_march) = match reconstruction.as_str() {
@@ -1502,6 +1789,18 @@ fn configure_cloud_capture(
     if let Some(coverage) = cfg.cloud_coverage_scale {
         clouds.clouds_coverage = coverage;
     }
+    clouds.history_epoch = clouds.history_epoch.wrapping_add(1).max(1);
+
+    ocean_debug.slope_view = matches!(cfg.preset, ScreenshotPreset::OceanSlopes);
+    ocean_debug.phase_time_override_s = runtime
+        .get("THALOS_SCREENSHOT_OCEAN_TIME")
+        .and_then(|value| value.trim().parse().ok());
+
+    ssao.apply_capture_mode(runtime.get("THALOS_SSAO"));
+    let inspection = terrain_inspection_override(runtime.get("THALOS_TERRAIN_INSPECTION"));
+    for (_, material) in terrain_materials.iter_mut() {
+        material.extras.inspection.x = inspection;
+    }
     info!(
         target: "thalos::screenshot",
         "cloud probe: quality={} view_steps={} shadow_steps={} reconstruction={} coverage={:.2}",
@@ -1511,15 +1810,19 @@ fn configure_cloud_capture(
         reconstruction,
         clouds.clouds_coverage,
     );
-    *applied = true;
 }
 
-fn configure_ocean_diagnostic(
-    cfg: Res<ScreenshotConfig>,
-    mut ocean_debug: ResMut<OceanDebugSettings>,
-) {
-    ocean_debug.slope_view = matches!(cfg.preset, ScreenshotPreset::OceanSlopes);
-    ocean_debug.phase_time_override_s = env_parse("THALOS_SCREENSHOT_OCEAN_TIME");
+fn terrain_inspection_override(raw: Option<&str>) -> f32 {
+    match raw.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
+        "" | "lit" | "default" | "off" => 0.0,
+        "fullbright" | "albedo" | "on" => 1.0,
+        "geo-normal" | "geometric-normal" | "smooth-normal" => 2.0,
+        "legacy-regolith" | "unfiltered-regolith" => 3.0,
+        other => {
+            warn!(target: "thalos::screenshot", "unknown terrain inspection {other:?}; using lit");
+            0.0
+        }
+    }
 }
 
 /// Diagnostic: for each probe offset across the basin (metres from the pad
@@ -1675,6 +1978,7 @@ fn hide_overlays(
 fn drive_headless_screenshot(
     cfg: Res<ScreenshotConfig>,
     mut driver: ResMut<ScreenshotDriver>,
+    server: Option<Res<PersistentCaptureServer>>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     height_sources: Res<HeightSourceRegistry>,
@@ -1693,6 +1997,13 @@ fn drive_headless_screenshot(
     };
     if !driver.retargeted {
         return; // wait until the camera renders into our target
+    }
+    let persistent = server.is_some();
+    if server
+        .as_ref()
+        .is_some_and(|server| server.active_id.is_none())
+    {
+        return;
     }
 
     // Resolve the focus and pose the camera. If anything is not ready yet, hold
@@ -1777,6 +2088,9 @@ fn drive_headless_screenshot(
     }
 
     if driver.captured {
+        if persistent {
+            return;
+        }
         driver.tail += 1;
         if driver.tail >= cfg.tail_frames {
             info!(target: "thalos::screenshot", "headless capture flushed — exiting");
@@ -1810,9 +2124,47 @@ fn drive_headless_screenshot(
             cfg.report.display()
         );
     }
-    commands
-        .spawn(Screenshot::image(target))
-        .observe(save_to_disk(cfg.out.clone()));
+    if let Some(request_id) = server
+        .as_ref()
+        .and_then(|server| server.active_id.as_ref())
+        .cloned()
+    {
+        let output = cfg.out.clone();
+        commands.spawn(Screenshot::image(target)).observe(
+            move |captured: On<ScreenshotCaptured>, mut server: ResMut<PersistentCaptureServer>| {
+                let result = captured
+                    .image
+                    .clone()
+                    .try_into_dynamic()
+                    .map_err(|error| format!("could not encode the captured image: {error}"))
+                    .and_then(|dynamic_image| {
+                        dynamic_image
+                            .to_rgb8()
+                            .save_with_format(&output, image::ImageFormat::Png)
+                            .map_err(|error| {
+                                format!("could not write {}: {error}", output.display())
+                            })
+                    });
+                match result {
+                    Ok(()) => {
+                        info!(target: "thalos::screenshot", "saved {}", output.display());
+                        server.completed_captures += 1;
+                        server.respond(&request_id, true, "capture complete", Some(&output));
+                    }
+                    Err(error) => {
+                        warn!(target: "thalos::screenshot", "{error}");
+                        server.respond(&request_id, false, error, None);
+                    }
+                }
+                server.active_id = None;
+                server.publish(true);
+            },
+        );
+    } else {
+        commands
+            .spawn(Screenshot::image(target))
+            .observe(save_to_disk(cfg.out.clone()));
+    }
     driver.captured = true;
 }
 

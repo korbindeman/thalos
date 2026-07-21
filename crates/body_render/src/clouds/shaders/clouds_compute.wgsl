@@ -74,8 +74,6 @@ struct Config {
     clouds_ambient_color_bottom: vec4f,
     clouds_min_transmittance: f32,
     planet_radius: f32,
-    atmosphere_top_height: f32,
-    atmosphere_lut_enabled: u32,
     forward_scattering_g: f32,
     backward_scattering_g: f32,
     scattering_lerp: f32,
@@ -115,14 +113,6 @@ struct Config {
 // paints coherent streak artifacts.
 @group(1) @binding(5) var history_texture: texture_2d<f32>;
 @group(1) @binding(6) var history_distance_texture: texture_2d<f32>;
-// Canonical Bevy-atmosphere LUTs for the active ship view. The render-world
-// bind-group prepare substitutes these directly from `AtmosphereTextures`;
-// custom/legacy atmosphere captures bind a 1x1 fallback and keep
-// `atmosphere_lut_enabled == 0`.
-@group(1) @binding(7) var atmosphere_transmittance_lut: texture_2d<f32>;
-@group(1) @binding(8) var atmosphere_sky_view_lut: texture_2d<f32>;
-@group(1) @binding(9) var atmosphere_lut_sampler: sampler;
-
 struct Ray {
     step_distance: f32,
     dir_length: f32,
@@ -329,87 +319,6 @@ fn atmosphere_air_mass(r: f32, mu: f32) -> f32 {
     return dens * m;
 }
 
-fn atmosphere_outer_radius() -> f32 {
-    return config.planet_radius + max(config.atmosphere_top_height, 1.0);
-}
-
-fn atmosphere_distance_to_top(r: f32, mu: f32) -> f32 {
-    let outer = atmosphere_outer_radius();
-    let disc = max(r * r * (mu * mu - 1.0) + outer * outer, 0.0);
-    return max(-r * mu + sqrt(disc), 0.0);
-}
-
-// Bruneton 2008 transmittance parameterization used byte-for-byte in Bevy's
-// atmosphere LUT producer (`transmittance_lut_r_mu_to_uv`). Keeping the map
-// here lets the cloud compute pass consume the live texture without importing
-// Bevy's bind-group globals (which belong to a different pipeline layout).
-fn atmosphere_transmittance_uv(r_in: f32, mu: f32) -> vec2f {
-    let inner = config.planet_radius;
-    let outer = atmosphere_outer_radius();
-    let r = clamp(r_in, inner, outer);
-    let H = sqrt(max(outer * outer - inner * inner, 0.0));
-    let rho = sqrt(max(r * r - inner * inner, 0.0));
-    let d = atmosphere_distance_to_top(r, mu);
-    let d_min = outer - r;
-    let d_max = rho + H;
-    return vec2f((d - d_min) / max(d_max - d_min, 1.0e-5), rho / max(H, 1.0e-5));
-}
-
-fn sample_atmosphere_transmittance(r: f32, mu: f32) -> vec3f {
-    return textureSampleLevel(
-        atmosphere_transmittance_lut,
-        atmosphere_lut_sampler,
-        atmosphere_transmittance_uv(r, clamp(mu, -1.0, 1.0)),
-        0.0,
-    ).rgb;
-}
-
-fn atmosphere_ray_intersects_ground(r: f32, mu: f32) -> bool {
-    return mu < 0.0
-        && r * r * (mu * mu - 1.0) + config.planet_radius * config.planet_radius >= 0.0;
-}
-
-fn atmosphere_lut_segment_transmittance(
-    start_pos: vec3f,
-    direction: vec3f,
-    distance: f32,
-) -> vec3f {
-    let r = clamp(length(start_pos), config.planet_radius, atmosphere_outer_radius());
-    let mu = clamp(dot(start_pos / max(r, 1.0), direction), -1.0, 1.0);
-    let t = min(distance, atmosphere_distance_to_top(r, mu));
-    let r_t = max(sqrt(max(r * r + t * t + 2.0 * r * mu * t, 0.0)), 1.0);
-    let mu_t = clamp((r * mu + t) / r_t, -1.0, 1.0);
-    if atmosphere_ray_intersects_ground(r, mu) {
-        return min(
-            sample_atmosphere_transmittance(r_t, -mu_t)
-                / max(sample_atmosphere_transmittance(r, -mu), vec3f(1.0e-5)),
-            vec3f(1.0),
-        );
-    }
-    return min(
-        sample_atmosphere_transmittance(r, mu)
-            / max(sample_atmosphere_transmittance(r_t, mu_t), vec3f(1.0e-5)),
-        vec3f(1.0),
-    );
-}
-
-fn atmosphere_sky_zenith_radiance(camera_r_in: f32) -> vec3f {
-    let r = clamp(camera_r_in, config.planet_radius, atmosphere_outer_radius());
-    let rho = sqrt(max(r * r - config.planet_radius * config.planet_radius, 0.0));
-    let cos_beta = clamp(rho / max(r, 1.0), -1.0, 1.0);
-    let horizon_zenith = 3.14159265 - acos(cos_beta);
-    let l = -horizon_zenith; // zenith ray: view_zenith = 0
-    let v = 0.5 + 0.5 * sign(l) * sqrt(abs(l) / 1.57079633);
-    let dims = vec2f(textureDimensions(atmosphere_sky_view_lut));
-    let uv = (vec2f(0.5, v) + 0.5 / dims) * (dims / (dims + 1.0));
-    return textureSampleLevel(
-        atmosphere_sky_view_lut,
-        atmosphere_lut_sampler,
-        uv,
-        0.0,
-    ).rgb;
-}
-
 /// Sun → sample transmittance (RGB). Applied on top of the CPU-fed sun colour
 /// so low solar elevation and low-altitude samples both lose blue.
 fn atmosphere_sun_transmittance(sample_pos: vec3f) -> vec3f {
@@ -420,9 +329,6 @@ fn atmosphere_sun_transmittance(sample_pos: vec3f) -> vec3f {
     let horizon_mu = -sqrt(max(1.0 - (config.planet_radius * config.planet_radius) / (r * r), 0.0));
     if mu <= horizon_mu {
         return vec3f(0.0);
-    }
-    if config.atmosphere_lut_enabled != 0u {
-        return sample_atmosphere_transmittance(r, mu);
     }
     let am = atmosphere_air_mass(r, mu);
     // Column τ ≈ β * H * air_mass_factor; β_sea already per-metre, so × H.
@@ -438,9 +344,6 @@ fn atmosphere_view_transmittance(sample_pos: vec3f, camera_pos: vec3f) -> vec3f 
     let dist = length(delta);
     if (dist < 1.0) {
         return vec3f(1.0);
-    }
-    if config.atmosphere_lut_enabled != 0u {
-        return atmosphere_lut_segment_transmittance(sample_pos, -delta / dist, dist);
     }
     // Midpoint density proxy — good enough for ≤50 km cloud reach.
     let mid = 0.5 * (sample_pos + camera_pos);
@@ -587,21 +490,6 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     );
     var ambient_bottom = config.clouds_ambient_color_bottom.rgb;
     var ambient_top = config.clouds_ambient_color_top.rgb;
-    if config.atmosphere_lut_enabled != 0u {
-        // The sky-view LUT is photometric, while the cloud volume still uses
-        // the spine's scene-flux units. Raw LUT radiance here overwhelms the
-        // reddened direct term and turns low-sun clouds white. Consume the
-        // canonical sky chromaticity, but retain the calibrated scene-flux
-        // ambient energy until F7 gives both paths one radiometric contract.
-        let sky_zenith = atmosphere_sky_zenith_radiance(length(ray_origin));
-        let sky_peak = max(max(sky_zenith.r, sky_zenith.g), max(sky_zenith.b, 1.0e-5));
-        let sky_chroma = sky_zenith / sky_peak;
-        let top_energy = max(max(ambient_top.r, ambient_top.g), ambient_top.b);
-        let bottom_energy = max(max(ambient_bottom.r, ambient_bottom.g), ambient_bottom.b);
-        ambient_top = sky_chroma * config.cloud_albedo.rgb * top_energy;
-        ambient_bottom = sky_chroma * config.cloud_albedo.rgb * bottom_energy;
-    }
-
     var dir_length = ray.dir_length;
     var dist = max_dist;
     var scattered_light = vec3f(0.0, 0.0, 0.0);

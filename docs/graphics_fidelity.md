@@ -35,12 +35,11 @@ specific gaps + tuning + one structural split, not missing machinery.
   env-BRDF, Kulla–Conty energy compensation, Kaplanyan specular AA).
 - **Scene lighting** — `SceneLighting` is one clean CPU mirror feeding every
   body material; eclipse occluders + planetshine come free to anything binding it.
-- **Atmosphere** — Bevy `AtmosphereMode::Raymarched` is the canonical
-  rocky-body sky (ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere), projected onto one camera-local proxy selected by
-  `ViewAnchor`. Authored Rayleigh terms feed an Earth aerosol + ozone medium.
-  The former `BodySky` atmosphere is retained only for process-isolated debug
-  A/B captures—never as a live/persisted graphics setting—while its cloud/depth
-  composites are migrated independently.
+- **Atmosphere** — the shared `BodySkyMaterial` raymarch is the sole rocky-body
+  sky (ADR-20260721T185221Z-custom-rocky-atmosphere). It reads the same authored
+  `AtmosphereBlock` as the sky-view LUT, terrain, ocean, and cloud coupling and
+  clips against the shared opaque scene depth. The Bevy camera-local proxy and
+  backend-selection machinery are deleted.
 - **Shadows** — a self-managed **3-cascade** ortho sun-shadow rig
   (`rendering/sun_shadow.rs`, `SHADOW_CASTER_LAYER = 8`, 4096², copy-node →
   `Depth32Float`) sampled by terrain/trees/grass/rocks via `thalos::shadow`.
@@ -144,7 +143,7 @@ Concretely, the invariants every surface must satisfy:
    first). Extended 2026-07-20 to the celestial-backdrop twilight/Kármán term
    after freecam exposed its remaining `ship_state()` anchor (BL-12).
 
-Today, Bevy's atmosphere pass gives terrain and opaque objects one shared
+Today, the custom atmosphere pass gives terrain and opaque objects one shared
 raymarched air volume. The other items hold *within* the spine (terrain ↔
 vegetation ↔ rock), partially for water, and **almost none of them hold for
 crafts/structures**. The foundation (§3) is what makes all six hold for
@@ -158,13 +157,13 @@ to be collapsed into the spine column.
 
 | Surface | Lighting | Terminator | Exposure | Shadow | IBL | AO | Atmosphere |
 |---|---|---|---|---|---|---|---|
-| Terrain | spine | shared | gain | rig (recv) | analytic | analytic | Bevy raymarch |
-| Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
-| Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | Bevy raymarch |
-| Water | own GGX (F9 pending) | shared | gain | SceneLighting | atmosphere-derived analytic sky | — | Bevy raymarch + dedicated ocean composite |
-| Impostor | spine (Hapke) | shared | gain | — | analytic | — | Bevy raymarch |
-| **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
-| **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | Bevy raymarch |
+| Terrain | spine | shared | gain | rig (recv) | analytic | analytic | custom raymarch |
+| Vegetation | `shade_foliage` | shared | gain | rig (cast+recv) | analytic | baked vtx | custom raymarch |
+| Rock | spine | shared | gain | rig (cast+recv) | analytic | baked vtx | custom raymarch |
+| Water | own GGX (F9 pending) | shared | gain | SceneLighting | atmosphere-derived analytic sky | — | custom raymarch + dedicated ocean composite |
+| Impostor | spine (Hapke) | shared | gain | — | analytic | — | custom raymarch |
+| **Craft** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | custom raymarch |
+| **Structures** | **Bevy PBR** | **CPU mirror** | **histogram** | **none** | **CPU cubemap** | **none** | custom raymarch |
 
 The spine already covers ~4 of 8 columns; the craft path re-implements all 8 in
 parallel and is missing shadow + AO entirely. **Foundation = collapse the
@@ -293,7 +292,7 @@ phase dependencies, and acceptance criteria live there.
 
 | ID | Item | Status | Effort | Sprint | Notes / source |
 |---|---|---|---|---|---|
-| BL-13 | Earth-reference Bevy raymarched atmosphere convergence | ☑ | Med | THIS | ADR-20260721T032343Z-bevy-raymarched-rocky-atmosphere; deterministic land-only `earth-reference` capture inspected 2026-07-20; normal-path live verification pending |
+| BL-30 | Custom rocky atmosphere restored as the sole renderer | ☑ | Med | THIS | ADR-20260721T185221Z-custom-rocky-atmosphere; Bevy proxy/layout/LUT and backend A/B machinery deleted; deterministic `earth-reference` + `runway-atmosphere` verification |
 | — | Object aerial recession (foliage/rocks → sky haze) | ◐ | — | THIS | `object_aerial_recession`; fold inside `shade_surface` so it can't be forgotten (one-world invariant #5) |
 | W11 | Hillaire aerial-perspective **froxel** LUT | ☐ | High | later | keep the raymarch as the space/upper-atmosphere fallback; 3-channel transmittance for sunset |
 | W15 | Atmosphere-coupled Nubis cloud lighting (powder + multi-scatter octaves + shared sun/sky transmittance) (= CLOUD-4) | ☐ | High | later | cloud §3.4 · Schneider 2023 |

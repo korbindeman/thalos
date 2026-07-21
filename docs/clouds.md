@@ -58,7 +58,7 @@ This is an upgrade, not a greenfield renderer. Preserve these foundations:
   256×256×6 RGBA cubemap carrying coverage/type/base/top.
 - Per-pixel cloud hit distance and deterministic composition through one
   fullscreen `CloudCompositeMaterial`, including opaque-scene occlusion and
-  independence from the selected atmosphere backend.
+  independence from the atmosphere material's cloud ownership.
 - Static-view sparse accumulation plus fresh full-pixel raymarching during
   camera motion; body-fixed reprojection only stabilizes a freshly marched
   moving result.
@@ -254,17 +254,15 @@ air` ordering is an approximation: it attenuates some foreground air as if it
 were behind the cloud. The replacement contract must make the ordering
 explicit before lighting polish begins.
 
-**Slices landed (2026-07-21):** near-volume march applies sun and sample→camera
-transmittance from the active Bevy atmosphere's canonical transmittance LUT,
-with sky fill chromaticity from its sky-view LUT; because Bevy's LUT is
-photometric while the current cloud/spine light scale is separately calibrated,
-the LUT sample is peak-normalized and the authored cloud ambient retains energy
-authority (INC-0014). An analytic exponential air-mass fallback remains for
-explicit legacy-atmosphere comparisons. Dual-lobe multi-scatter
+**Slices landed (2026-07-21):** near-volume march applies analytic sun and
+sample→camera transmittance from the shared authored atmosphere coefficients.
+The former direct dependency on Bevy's private atmosphere LUT resources was
+deleted with that renderer; binding the shared Thalos sky/transmittance LUT is
+the remaining CLOUD-4 coupling slice. Dual-lobe multi-scatter
 phase octaves, HZD powder, volumetric self-shadow, and a soft Reinhard peak sit
 on that shared transport. One dedicated `CloudCompositeMaterial` now owns both
-near-volume and weather-derived orbital composition, so switching atmosphere
-backends cannot hide the clouds or restore a parallel cloud path. Orbital
+near-volume and weather-derived orbital composition, so the atmosphere
+material cannot hide clouds or restore a parallel cloud path. Orbital
 projection (SolidPlanet + the cloud composite) uses greyer albedo and the same
 solar-elevation chromaticity so the full disc no longer clips pure white.
 CLOUD-4 still needs an explicit foreground/background atmosphere split; the
@@ -407,8 +405,8 @@ in `docs/cloud_baseline.md`.
   limb on the development RTX 4070 Ti. These are checkpoint measurements, not
   the CLOUD-2 budget exit: viewport-relative targets, sparse scheduling,
   history clamp/moments, and empty-space skipping remain.
-- Lighting has darker cores, deterministic sparse self-shadow, canonical Bevy
-  atmosphere LUT coupling, and a first solar-elevation tint, but CLOUD-4 still
+- Lighting has darker cores, deterministic sparse self-shadow, analytic shared-
+  coefficient atmosphere coupling, and a first solar-elevation tint, but CLOUD-4 still
   owns correct foreground/background media ordering. CLOUD-5 still owns world
   cloud shadows. CLOUD-6's first orbital-moments slice is in (live weather-column
   projection on SolidPlanet + BodySky); the offline OD/normal atlas and

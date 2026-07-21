@@ -283,6 +283,10 @@ fn main() {
         .unwrap_or_default();
     let request = spawn_request.trim().to_ascii_lowercase();
     let screenshot_config = screenshot::ScreenshotConfig::from_env();
+    let persistent_capture = screenshot_config.is_some()
+        && std::env::var("THALOS_CAPTURE_SERVER")
+            .ok()
+            .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"));
     let homeworld_name = screenshot_config
         .as_ref()
         .map(|cfg| cfg.target_body_name())
@@ -714,13 +718,17 @@ fn main() {
 
     // Headless screenshot: the fixed-step runner (no winit event loop) plus the
     // off-screen capture driver + its resolved config, layered over the fully
-    // built game app.
+    // built game app. The persistent agent lane keeps this same process alive
+    // for later capture requests; the cold verification lane still exits after
+    // one image.
     if let Some(config) = screenshot_config {
         app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
             1.0 / 60.0,
         )))
         .add_plugins(RenderDiagnosticsPlugin)
-        .add_plugins(screenshot::HeadlessScreenshotPlugin)
+        .add_plugins(screenshot::HeadlessScreenshotPlugin {
+            persistent: persistent_capture,
+        })
         .insert_resource(config);
     }
 

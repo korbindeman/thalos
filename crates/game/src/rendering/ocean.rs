@@ -2,8 +2,8 @@
 //!
 //! Ocean visibility follows resident ground terrain, but its material is a
 //! sibling of the atmosphere and clouds. This keeps the analytic sphere and
-//! signed sea field alive under either atmosphere backend: legacy BodySky may
-//! be hidden, while ocean and cloud ownership remain unchanged.
+//! signed sea field independent of the custom `BodySky` material while their
+//! explicit composition order remains stable.
 
 use bevy::prelude::*;
 use thalos_body_render::{BodyOceanMaterial, BodySkyMaterial};

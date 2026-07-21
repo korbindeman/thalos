@@ -28,14 +28,6 @@ pub struct CloudsConfig {
     /// Radius of the planet the clouds encompass. Determines the curvature of the cloud layer near
     /// the horizon.
     pub planet_radius: f32,
-    /// Height of the canonical rocky-body atmosphere above the reference
-    /// sphere, in metres. Together with [`Self::planet_radius`] this maps cloud
-    /// samples into Bevy's transmittance / sky-view LUT parameterization.
-    pub atmosphere_top_height: f32,
-    /// Whether the canonical Bevy-atmosphere LUTs are bound for this view.
-    /// The legacy custom-atmosphere A/B keeps the analytic fallback so cloud
-    /// diagnostics remain available without a stock atmosphere entity.
-    pub atmosphere_lut_enabled: bool,
     /// Height of the `clouds_bottom_height` of the cloud layer.
     pub clouds_bottom_height: f32,
     /// Height of the `clouds_top_height` of the cloud layer.
@@ -118,8 +110,6 @@ impl Default for CloudsConfig {
             clouds_raymarch_steps_count: 80,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
-            atmosphere_top_height: 100_000.0,
-            atmosphere_lut_enabled: false,
             clouds_bottom_height: 1250.0,
             clouds_top_height: 2400.0,
             clouds_coverage: 0.5,

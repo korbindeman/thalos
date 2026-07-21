@@ -7,7 +7,7 @@ data had no single home, and the planet-rendering concern was spread across
 three crates that must stay byte-for-byte consistent. Per the project rule
 (CLAUDE.md): infrastructure changes are announced here before they land.
 
-## Two organizing principles
+## Three organizing principles
 
 1. **One authored source of truth for the world.** Every physical parameter of
    the system and its bodies lives in one pure crate, `thalos_world`, consumed
@@ -19,10 +19,16 @@ three crates that must stay byte-for-byte consistent. Per the project rule
    impostor billboard (distant) and the udlod ground mesh (close) are two
    consumers of it — a backend chooses geometry, never its own shading.
 
+3. **One game runtime, multiple application shells.** Interactive play and
+   headless capture compose the same plugin graph through `thalos_runtime`.
+   `thalos_game` and `thalos_capture_host` are thin launchers; neither owns a
+   parallel world or renderer. Capture is a first-class surface for stills,
+   comparisons, deterministic video, and agent verification (see `capture.md`).
+
 ### The appearance invariant
 
 > A body's look = one authored dataset (`thalos_world`) + one dynamic
-> environment state (`SolarSystemState`, single-writer in `thalos_game`) + one
+> environment state (`SolarSystemState`, single-writer in `thalos_runtime`) + one
 > shading library (`thalos_body_render::shading`). A render backend may choose
 > its geometry (billboard vs LOD mesh) but never defines its own lighting,
 > atmosphere, cloud, or water math.
@@ -43,28 +49,88 @@ aggregates live *down* in `world`; `Simulation`, the propagators,
 as `world` never references a physics runtime type, the dependency points one
 way.
 
-## Target crate layout
+## Target workspace
 
-**Pure (no Bevy — CI-guarded):**
+The hierarchy separates runnable products, reusable libraries, production
+tools, visual laboratories, authored/runtime assets, and generated evidence.
+Within `crates/`, folders express responsibility and intended dependency
+direction; ordinary feature size is handled with Rust modules rather than a
+crate per feature.
 
-| Crate | Role |
-|---|---|
-| `thalos_world` | Authored source of truth: `BodyDefinition`, `OrbitalElements`, `StateVector`, the RON loader (`parsing`), and the body subsystem-config aggregate. Folds in the `atmosphere` data crate (Phase 2). Depends down on `terrain` + `atmosphere`; re-exports their config types so consumers have one import surface. |
-| `thalos_physics_canonical` | Orbital-mechanics **algorithms** + runtime simulation state. Depends on `world`. Name retained to contrast with `physics_local` (Avian), not because it is the foundation. |
-| `thalos_terrain` | Procedural terrain generation. A leaf — `compile_terrain_config(config)` takes `TerrainConfig` as an argument, so callers read it from `world` and pass it in. |
-| `thalos_celestial` | Far-field sky model (stars/galaxies/nebulae as flux sources). |
+```text
+apps/
+  game/                         # bin: thalos_game
+  capture_host/                 # bin: thalos_capture_host
 
-**Bevy:**
+crates/
+  vendor/
+    big_space/                  # foundational, upstream-derived dependency
+  domain/
+    world/                      # authored body/system truth
+    celestial/                  # physical far-field sky model
+    terrain/                    # SurfaceQuery + terrain generation
+      erosion_filter/           # author-owned temporary implementation
+    construction/               # current shipyard package/model
+  simulation/
+    physics_canonical/
+    physics_local/
+    control/
+  rendering/
+    render/                     # current body_render; state-in/pixels-out
+    udlod/                      # Thalos-owned terrain-render backend
+  interface/
+    input/
+    ui/
+  runtime/
+    game/                       # lib: thalos_runtime, sole app composition
+  capture/
+    protocol/                   # Serde-only request/result types
+    runtime/                    # Bevy capture state machine/readback
+  offline/
+    texgen/                     # compiler source, no runtime edge
+    terrain_learned/
 
-| Crate | Role |
-|---|---|
-| `thalos_input` | Enhanced-input contexts + intent resources. |
-| `thalos_body_render` | **(Phase 2)** Merge of `planet_lighting` + `planet_rendering` + `terrain_render`. `shading/` (shared BRDF/atmosphere/cloud/water uniforms + WGSL), `impostor/` (billboard materials), `ground/` (udlod-backed terrain materials). Both backends import the same `shading/`. |
-| `thalos_udlod` | Vendored terrain renderer, sealed behind `thalos_body_render` (no direct `game`/editor imports). Replacing the ground backend stays localized to `ground/`. |
-| `thalos_physics_local` | Avian f64 local-physics boundary. Owns the `SharedTerrainRegistry` height provider (Phase 2; currently moving into `game`). |
-| `thalos_game` | The consumer. |
-| `thalos_body_editor` | **(renamed from `planet_editor`)** Interactive body editor. |
-| `thalos_shipyard`, `thalos_bake_dump` | Tools. |
+tools/
+  capture/                      # CLI: shot/compare/record/verify/status/stop
+  terrain_baker/
+  terrain_train/
+  texgen/
+  world_map/
+
+labs/
+  object_preview/
+  ui_preview/
+  terrain/
+
+assets/
+  generated/
+  terrain_packages/
+
+artifacts/
+  visual/latest/
+  visual/runs/
+  video/
+  diagnostics/
+```
+
+The target dependency direction is:
+
+```text
+apps → thalos_runtime → domain + simulation + rendering + interface
+capture_host → thalos_runtime + capture_runtime → capture_protocol
+capture CLI → capture_protocol
+rendering → construction
+physics_local + rendering → terrain height/query contract
+```
+
+Two current backwards edges must disappear: construction must not depend on
+rendering, and local physics must not depend on the renderer for terrain-height
+types. `thalos_render` consumes the construction model; `thalos_terrain` owns
+the shared height/query contract, with renderer-backed implementations supplied
+above it. `thalos_texgen` becomes offline and rendering loads its baked assets.
+
+See ADR-20260721T194628Z-role-based-agent-first-workspace and
+ADR-20260721T194629Z-first-class-headless-capture-runtime.
 
 ## Migration phases
 

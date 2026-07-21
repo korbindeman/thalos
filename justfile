@@ -55,9 +55,10 @@ ui-preview-window:
 preview-window:
     cargo run -p thalos_body_render --features bevy/dynamic_linking --example object_preview -- --window
 
-# Headless screenshot: boots the game off-screen (no window), builds the world
-# for the preset, poses the camera, and writes a PNG to tools/screenshots/, then
-# exits — agent-runnable like `just preview`, but of a whole composed scene.
+# Headless screenshot: the first call boots one persistent off-screen renderer;
+# later calls reuse it while Dioxus/Subsecond hot-patches Rust systems and Bevy
+# reloads both file-backed and embedded WGSL. Switching preset/viewport performs
+# a managed restart because those inputs shape the boot world/render target.
 # `just screenshot` does the spaceport aerial; `just screenshot runway-atmosphere`
 # captures a low near-horizontal view inside the atmosphere; `just screenshot hub` captures
 # the space-center hub exactly as PLAY presents it (spaceport built, no craft
@@ -69,32 +70,46 @@ preview-window:
 # captures its resolved-slope / mip-roughness diagnostic. `mira-orbit` and
 # `mira-surface` verifies the landmark crater/package/Hapke view; `mira-eva`
 # reproduces the canonical eye-level EVA spawn and its horizon/LOD coverage.
-# `earth-reference` is the 3:2 ISS-like atmosphere calibration view; it defaults
-# to Bevy raymarching, while THALOS_SCREENSHOT_ATMOSPHERE=custom captures the
-# matched legacy BodySky A/B.
+# `earth-reference` is the 3:2 ISS-like custom-atmosphere calibration view.
 # `just screenshot latest` replays the active 3-D perspective most recently
 # saved by the player with F8 and writes tools/screenshots/latest_perspective.png.
 # Override the framing
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP,
-# _ATMOSPHERE (configured/custom/bevy).
 # Cloud probes additionally accept _CAMERA_ALTITUDE, _LOOK_ELEVATION,
 # _SUN_ELEVATION, _CLOUD_QUALITY (low/baseline/high/reference),
 # _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL). Ocean probes
 # additionally accept THALOS_SCREENSHOT_OCEAN_TIME for deterministic phase.
 screenshot preset="spaceport-aerial":
+    python tools/visual_capture.py capture "{{preset}}"
+
+# Authoritative one-shot capture: clean process, full preset warmup, then exit.
+screenshot-cold preset="spaceport-aerial":
     {{ if os() == "windows" { "$env:THALOS_SCREENSHOT='" + preset + "'; " } else { "THALOS_SCREENSHOT='" + preset + "' " } }}{{game_command}}
 
-# Deterministic visual A/B or N-way comparison. Builds the normal dynamic-link
-# game once, then the lightweight orchestrator launches that exact binary in a
-# clean process per typed variant. Outputs full captures + contact sheet +
+capture-status:
+    python tools/visual_capture.py status
+
+capture-stop:
+    python tools/visual_capture.py stop
+
+# Deterministic visual A/B or N-way comparison. The lightweight orchestrator
+# sends every variant to the same persistent renderer used by `just screenshot`,
+# resetting temporal histories between captures. Outputs full captures + contact sheet +
 # diffs/wipes + manifest under the disposable agent scratch tree at
 # tools/agent_scratch/screenshots/comparisons/<preset>/<axis>/.
-# Axes: atmosphere (custom/bevy), ssao (off/on/raw). See docs/visual_testing.md.
-compare preset="earth-reference" axis="atmosphere":
-    cargo build -p thalos_game --features bevy/dynamic_linking --bin thalos_game --example visual_compare
+# Axes include ssao (off/on/raw), terrain-lighting, terrain-culling,
+# terrain-regolith-filter, and cloud-reconstruction. See docs/visual_testing.md.
+compare preset="spaceport-aerial" axis="ssao":
+    cargo build -p thalos_game --example visual_compare
     {{ if os() == "windows" { "target/debug/examples/visual_compare.exe" } else { "./target/debug/examples/visual_compare" } }} "{{preset}}" "{{axis}}"
+
+# Clean-process evidence lane. Use after exploratory iteration and for structural
+# pipeline axes (terrain-culling automatically falls back here).
+compare-cold preset="spaceport-aerial" axis="ssao":
+    cargo build -p thalos_game --features bevy/dynamic_linking --bin thalos_game --example visual_compare
+    {{ if os() == "windows" { "target/debug/examples/visual_compare.exe" } else { "./target/debug/examples/visual_compare" } }} "{{preset}}" "{{axis}}" --cold
 
 # Offline authored terrain package. The MVP producer is the deterministic
 # airless compiler; ADR-20260720T211046Z-offline-terrain-packages's diffusion producer will emit the same package
@@ -115,9 +130,10 @@ validate-bake body="Mira":
 map:
     cargo run --release -p thalos_terrain --example world_map
 
-# CLOUD-0's repeatable five-view baseline. Each preset writes a PNG and a
-# same-named JSONL report under tools/screenshots/. Use the single-preset
-# `screenshot` recipe with overrides for 1440p, temporal-off, or quality sweeps.
+# CLOUD-0's repeatable five-view baseline. Each preset writes a PNG under
+# tools/screenshots/ and a same-named JSONL report under tools/diagnostics/.
+# Use the single-preset `screenshot` recipe with overrides for 1440p,
+# temporal-off, or quality sweeps.
 cloud-baseline:
     $presets = @('cloud-runway', 'cloud-cruise', 'cloud-interior', 'cloud-limb', 'cloud-sunset'); foreach ($preset in $presets) { $env:THALOS_SCREENSHOT = $preset; cargo run -p thalos_game; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }
 

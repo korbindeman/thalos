@@ -89,8 +89,8 @@ flowchart LR
 
 Mechanism lives in `thalos_body_render`; the game-side driver only projects
 simulation/body/camera state into the render uniforms. The ocean is a dedicated
-fullscreen sibling of atmosphere and clouds (ADR-20260721T050036Z): selecting
-Bevy or the legacy atmosphere never changes water ownership. `BodySkyMaterial`
+fullscreen sibling of atmosphere and clouds (ADR-20260721T050036Z): atmosphere
+visibility never changes water ownership. `BodySkyMaterial`
 and `BodyOceanMaterial` compile one shared optical shader with mutually
 exclusive atmosphere/ocean definitions and delegate one bind implementation,
 so the signed-field lookup and spectral path cannot drift. That boundary

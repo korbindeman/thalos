@@ -85,7 +85,7 @@ impl Material for BodyOceanMaterial {
 
     fn depth_bias(&self) -> f32 {
         // Stable transparent order for body-centred fullscreen siblings:
-        // legacy BodySky atmosphere (0) < ocean (500) < clouds (1000).
+        // BodySky atmosphere (0) < ocean (500) < clouds (1000).
         500.0
     }
 

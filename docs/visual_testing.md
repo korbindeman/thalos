@@ -1,21 +1,26 @@
 # Visual testing
 
 Thalos diagnoses and iterates on graphics with deterministic, full-resolution
-headless captures. ADR-20260721T032344Z-isolated-headless-visual-comparisons rejects a live multi-camera split screen: it would
+headless captures. ADR-20260721T192218Z-persistent-visual-iteration keeps the
+one-camera design while making the normal loop persistent and hot-patched.
+A live multi-camera split screen is still rejected: it would
 duplicate the one-view renderer and change LOD, SSAO, shadow, antialiasing, and
 other viewport-dependent inputs while supposedly holding them constant.
 
 ## Canonical workflows
 
-- `just screenshot <preset>` captures one in-context beauty frame.
+- `just screenshot <preset>` captures one in-context beauty frame through the
+  persistent renderer. Compatible subsequent captures reuse its world and GPU.
 - F8 in a live 3-D view + `just screenshot latest` hands the player's exact
   body-fixed camera position, orientation, lens, and viewport to an agent.
 - F2 desktop screenshots and F8 perspective handoffs show saved/error toasts
   only after the capture outcome is known, so F2 feedback is never baked into
   its own image. Neither appears in F1 photo mode, whose clean frame hides the
   shared toast container.
-- `just compare <preset> <axis>` captures every typed variant for one axis in
-  isolated game processes, then assembles one comparison artifact set.
+- `just compare <preset> <axis>` captures every live-compatible typed variant in
+  that same renderer, then assembles one comparison artifact set.
+- `just screenshot-cold` and `just compare-cold` are the clean-process,
+  full-warm-up acceptance lanes.
 - `just preview` remains the supplemental isolated-asset path. It does not replace
   the in-context game capture.
 
@@ -51,10 +56,9 @@ still needs a normal screenshot or a dedicated deterministic preset.
 
 Atmosphere has two complementary canonical framings: `earth-reference` for the
 space/orbital limb and `runway-atmosphere` for the near-surface sky, long
-slant-path haze, and terrain/structure recession. Both support the typed
-`atmosphere` comparison axis. The legacy renderer is capture-only: there is no
-live or persisted gameplay atmosphere selector, because sequentially switching
-renderer-global resources inside one process invalidates the isolation contract.
+slant-path haze, and terrain/structure recession. Both capture the sole custom
+atmosphere renderer; ADR-20260721T185221Z removed the resolved Bevy/custom
+comparison axis and all backend-selection state.
 
 One comparison run changes exactly one declared axis. Any normal screenshot
 framing overrides (`THALOS_SCREENSHOT_SIZE`, `_AZIMUTH`, `_ELEVATION`,
@@ -62,19 +66,25 @@ framing overrides (`THALOS_SCREENSHOT_SIZE`, `_AZIMUTH`, `_ELEVATION`,
 The runner owns `THALOS_SCREENSHOT_OUT` and the axis-specific override so those
 cannot drift between captures.
 
-The recipe performs one Cargo build for both the game and orchestrator, then
-launches the built orchestrator directly. It must not invoke nested or repeated
-Cargo processes against the shared workspace target directory. The orchestrator
-reproduces Cargo's platform dynamic-library search path when spawning the game;
-this includes the profile, profile/deps, and `rustc --print target-libdir`
-(dynamic `std` may live there). Directly launching a `bevy/dynamic_linking`
-binary without that complete environment is the INC-0008 pre-main crash.
+The first persistent capture launches the hotpatch-enabled game through `dx`.
+Later Rust-system edits are compiled as Subsecond patches; file-backed and
+embedded WGSL changes reload through Bevy's asset watcher. The client waits for
+the relevant reload event before capture. A preset or viewport change performs a
+managed restart because it changes the boot world or viewport-sized resources.
+Type/layout, plugin/schedule, and resource-initialization changes require `just
+capture-stop`; ordinary system-body edits do not.
+
+Every request reapplies live diagnostic resources and invalidates cloud temporal
+history. The first frame uses the preset's full warm-up; subsequent requests use
+60 settle frames unless `_WARMUP` is explicitly set. This fast lane intentionally
+retains streamed terrain and renderer caches. Use the cold lane for final
+regression proof; its orchestrator reproduces Cargo's complete dynamic-library
+search path (INC-0008) and starts one clean process per variant.
 
 ## Initial axes
 
 | Axis | Variants | Intended diagnosis |
 |---|---|---|
-| `atmosphere` | `custom`, `bevy` | Legacy `BodySky` against the canonical Bevy raymarch |
 | `ssao` | `off`, `on`, `raw` | No AO, normal AO application, and the raw AO field |
 | `terrain-lighting` | `lit`, `fullbright`, `geometric-normal` | Separate raster coverage from lighting, then isolate the terrain normal stack |
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
@@ -84,6 +94,11 @@ Axes are intentionally typed in `crates/game/examples/visual_compare.rs`. Add a
 new one only when every variant can be selected by a capture-only override that
 does not persist user settings. A multi-test may have N variants, but they must
 all remain values of the same factor.
+
+`terrain-culling` is structural pipeline specialization, so the normal comparison
+command automatically sends that axis through the cold lane. New axes should be
+runtime resources/material inputs when possible; otherwise mark them cold rather
+than pretending an existing pipeline changed.
 
 ## Artifact contract
 
@@ -105,7 +120,7 @@ latest views. The original variant PNGs remain full-resolution. The labelled
 contact sheet is for rapid inspection; each diff amplifies absolute RGB error
 against variant 1; each wipe preserves the baseline on the left and the
 compared variant on the right. The manifest records the Git revision/dirty
-state, invariant screenshot overrides, per-variant environment override, image
+state, capture lane, invariant screenshot overrides, per-variant environment override, image
 paths, and numerical diff metrics. Copy a result to an explicitly named
 evidence location only when a revision-to-revision artifact must be retained.
 
@@ -114,7 +129,7 @@ can produce a non-zero diff without a meaningful visual regression. Use the
 contact sheet/wipe to interpret the numbers and keep the diagnosis tied to a
 specific hypothesis.
 
-Known harness gap (BL-20): a headless game process can currently exit zero even
+Known harness gap (BL-20): a headless game process can currently keep running or exit zero even
 after Bevy logs a shader/pipeline validation failure, leaving a PNG with missing
 render layers. Until the runner promotes those errors to a failed variant,
 inspect stderr and reject any comparison containing a pipeline-cache error.
@@ -128,7 +143,8 @@ inspect stderr and reject any comparison containing a pipeline-cache error.
 5. Inspect the contact sheet, full captures, wipe, and diff metrics.
 6. Eliminate hypotheses, then repeat on the next single axis until the cause is
    pinned.
-7. Keep the matched before/after comparison as verification of the fix.
+7. Rerun the matched before/after with `just compare-cold` and keep that result as
+   verification of the fix.
 
 Future debug channels—normals, depth, terrain LOD/tile IDs, shadow factor and
 cascade, material IDs, atmosphere transmittance, and lighting lobes—join this
@@ -136,10 +152,12 @@ same runner. They do not get their own camera or comparison framework.
 
 ## Verification
 
-Runtime-verified 2026-07-21 with both initial axis shapes:
+Runtime-verified 2026-07-21 with the comparison runner's two- and three-variant
+axis shapes:
 
-- `just compare earth-reference atmosphere` produced two aligned 1800×1200
-  captures, a labelled A/B sheet, diff, wipe, metrics, and manifest.
+- The now-removed `earth-reference / atmosphere` axis produced two aligned
+  1800×1200 captures and resolved the renderer decision recorded by
+  ADR-20260721T185221Z.
 - `just compare spaceport-aerial ssao` produced three aligned 1920×1080
   captures (off/on/raw), a labelled 2×2 sheet, two baseline diffs/wipes,
   metrics, and manifest through the direct dynamic-game launcher.

@@ -125,10 +125,9 @@ mod tests {
 
     #[test]
     fn stale_legacy_atmosphere_setting_is_ignored() {
-        let parsed: GraphicsSettings = ron::from_str(
-            "(clouds:true,grass:true,gpu_grass:true,msaa:Off,legacy_body_sky:true)",
-        )
-        .expect("removed debug setting should not invalidate an existing settings file");
+        let parsed: GraphicsSettings =
+            ron::from_str("(clouds:true,grass:true,gpu_grass:true,msaa:Off,legacy_body_sky:true)")
+                .expect("removed debug setting should not invalidate an existing settings file");
 
         assert_eq!(parsed, GraphicsSettings::default());
     }

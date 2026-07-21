@@ -1,7 +1,6 @@
-// Canonical fullscreen cloud composite. Atmosphere rendering happens earlier
-// in the frame (Bevy raymarch normally, legacy BodySky only for an explicit
-// A/B); this pass owns both the near-volume layer and the weather-derived
-// orbital projection, so changing atmosphere backends never hides clouds.
+// Canonical fullscreen cloud composite. The custom BodySky atmosphere renders
+// earlier in the frame; this pass owns both the near-volume layer and the
+// weather-derived orbital projection.
 
 #import bevy_pbr::mesh_view_bindings::view
 #import thalos::atmosphere::{

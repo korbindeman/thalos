@@ -1,6 +1,6 @@
 # ADR-20260721T032344Z-isolated-headless-visual-comparisons: Visual comparisons run as isolated headless captures
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR-20260721T192218Z-persistent-visual-iteration
 - **Date:** 2026-07-21
 
 ## Context

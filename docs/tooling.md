@@ -1,8 +1,9 @@
 # Tooling
 
 Thalos keeps committed Cargo and Rust toolchain configuration deliberately
-plain. `rust-toolchain.toml` pins nightly, and `Cargo.toml` sets only shared
-profile choices that are expected to be sane across Windows, macOS, and Linux.
+plain. `rust-toolchain.toml` pins Rust 1.97.0 (the current stable release) and
+the `clippy`/`rustfmt` components; `Cargo.toml` sets only shared profile choices
+that are expected to be sane across Windows, macOS, and Linux.
 
 ## Local compiler tuning
 
@@ -16,32 +17,30 @@ This includes:
 
 - `CARGO_INCREMENTAL` overrides for platform-specific incremental behavior.
 - Debug-info reductions for local iteration.
-- Local linker or backend experiments.
-- `rustc-codegen-cranelift-preview` / `codegen-backend = "cranelift"`.
+- Local linker experiments.
 
-Do not commit a Cargo backend override unless the project intentionally adopts
-that backend for all supported platforms. The default checked-in backend is the
-Rust toolchain's normal LLVM backend.
+Do not add a compiler-backend override. The pinned stable toolchain uses LLVM;
+any future deviation is a cross-platform architecture decision, not local tuning.
 
-### Bevy dynamic linking (committed default for every dev renderer)
+### Renderer iteration: persistent hotpatch lane and dynamic-link lane
 
-`just game` and `just screenshot` use the `justfile`'s shared `game_command`,
-which defaults to
+`just game` and the explicit cold screenshot lane use the `justfile`'s shared
+`game_command`, which defaults to
 `cargo run -p thalos_game --features bevy/dynamic_linking`. `just preview` and
 `just ui-preview` enable the same Bevy feature for their own packages; the UI
 preview also requests the game's `wayland`/`jpeg` Bevy feature set so Cargo can
 reuse the same `bevy_dylib` artifact instead of compiling a second variant.
-Dynamic linking is a cross-platform dev-iteration speedup — Bevy links once into
+Dynamic linking is a cross-platform interactive/cold-iteration speedup — Bevy links once into
 a shared `bevy_dylib` and subsequent rebuilds relink only our crates — and it is
 not platform-specific, so it belongs in committed config rather than each
 developer's `.env.just`.
 
 Cargo also supplies a dynamic-library search path when it runs a built renderer.
-Any tool that launches a dev renderer executable directly must reproduce that
+Any cold-path tool that launches a dynamic dev renderer executable directly must reproduce that
 contract by prepending the Cargo profile directory, its `deps` directory, and
 `rustc --print target-libdir` to `PATH` (Windows),
 `DYLD_FALLBACK_LIBRARY_PATH` (macOS), or `LD_LIBRARY_PATH` (other Unix).
-`visual_compare` owns this for `just compare`; omitting the rustc directory can
+`visual_compare` owns this for `just compare-cold`; omitting the rustc directory can
 still miss dynamically linked `std` even after `bevy_dylib` is found. See
 INC-0008.
 
@@ -54,6 +53,32 @@ e.g. on a platform where the feature misbehaves — override the whole command i
 ```dotenv
 THALOS_GAME_COMMAND="cargo run -p thalos_game"
 ```
+
+The high-frequency graphics loop is separate: `just screenshot` starts (or
+reuses) one static `thalos_game` renderer through Dioxus/Subsecond, with the
+`dev-iteration` feature. Rust ECS-system bodies hot-patch without relinking or
+restarting the world. Bevy watches normal asset shaders and WGSL registered via
+`embedded_asset!`, so both shader forms reload in the same process. `just compare`
+sends its variants to that exact process. The first use requires the one-time
+developer install `cargo binstall dioxus-cli`; the repository controller then
+starts `dx serve --hot-patch` automatically.
+
+Useful lifecycle commands:
+
+```text
+just capture-status
+just capture-stop
+just screenshot-cold spaceport-aerial
+just compare-cold spaceport-aerial ssao
+```
+
+The server restarts automatically when the preset or viewport changes. Stop it
+manually after structural Rust changes (types/layout, plugin or schedule wiring,
+resource initialization) that cannot be represented by a function patch. The
+next screenshot rebuilds and starts it again. The hotpatch lane deliberately does
+not enable `bevy/dynamic_linking`: on Windows those two runtime-loading mechanisms
+compete over DLL/link contracts, while either one already removes the dominant
+steady-state relink.
 
 ### Game window / renderer launch toggles
 
@@ -138,80 +163,35 @@ The procedural-object and UI preview galleries keep their existing dedicated
 locations because they are stable multi-view galleries, not whole-scene
 iteration history.
 
-### Windows fast incremental loop
+### Fast build setup — see docs/build_speed.md
 
-A good Windows-local starting point is:
+The full cross-platform build-acceleration guide — fast linkers per platform
+(rust-lld on Windows, mold on Linux/WSL), incremental + trimmed debug, **sccache**
+setup, Windows Defender exclusions, headless-Vulkan requirements, and the
+**per-environment agent build workflow** (single machine vs. parallel worktrees
+vs. a Linux cloud box) — is [build_speed.md](build_speed.md). Run
+`scripts/setup-build-env.sh` (Linux/macOS/WSL) or `scripts/setup-build-env.ps1`
+(Windows) to install the tools and write the local, gitignored config.
 
-```toml
-[env]
-CARGO_INCREMENTAL = "1"
+Invariants that still bind here (detailed in build_speed.md):
 
-[profile.dev]
-incremental = true
-debug = "line-tables-only"
-
-[profile.dev.package."*"]
-debug = "line-tables-only"
-
-[target.x86_64-pc-windows-msvc]
-linker = "rust-lld.exe"
-
-[alias]
-check-game = "check -p thalos_game"
-```
-
-Use `just game` as the single app path on every platform. Bevy's
-`dynamic_linking` is already the committed default for `just game` (see above),
-so `.env.just` only needs to carry Windows-specific bits if any — the Cargo
-config above keeps the compiler backend on LLVM and uses LLD for faster
-MSVC-target linking. Release commands stay on the checked-in defaults because
-neither `Cargo.toml` nor the release-path `just` recipes (`just build`,
-`just trace`) enable `bevy/dynamic_linking`.
-
-Use `cargo check-game` for fast type checking when no app launch is needed.
-Avoid adding a second local run alias unless the default Windows path changes
-deliberately.
-
-Do **not** add nightly `-Zthreads` to this config. The 2026-07-20 Windows
-nightly produced a parallel-MIR ICE under `-Zthreads=8`, then left incremental
-codegen objects with missing LLVM symbols. That turns a speculative compile
-speedup into a full non-incremental recovery build. Cargo's normal crate-level
-parallelism plus reliable incremental reuse is the faster loop in practice.
-
-Run one Cargo command at a time against the workspace `target/` directory.
-Concurrent game/screenshot/check invocations serialize on Cargo locks, compete
-for CPU and several GiB of compiler memory, and make failures harder to
-attribute. Prefer `cargo check-game` while editing, then one `just game` or
-`just screenshot` when a linked artifact is actually needed.
-
-The temporary wgpu driver counters used by `mem_diag` are intentionally absent
-from the default graph: enabling them globally changes wgpu's feature hash and
-forces a second complete `bevy_dylib`. For a focused leak investigation, opt in
-explicitly with a temporary
-`THALOS_GAME_COMMAND="cargo run -p thalos_game --features bevy/dynamic_linking,gpu-counters"`
-override together with `THALOS_MEM_DIAG=1`; normal iteration must leave the
-feature off.
-
-If `rust-lld.exe` is not on `PATH`, either install/update the Rust LLVM tools
-for the active toolchain or use the absolute path to the toolchain copy in
-local config. On Windows that copy usually lives under:
-
-```text
-%USERPROFILE%\.rustup\toolchains\<toolchain>\lib\rustlib\x86_64-pc-windows-msvc\bin\rust-lld.exe
-```
-
-### macOS incremental workaround
-
-If a macOS toolchain hits stale `.llvm.<hash>` anonymous symbol references
-between incremental codegen objects, disable incremental compilation locally
-instead of changing the workspace profile:
-
-```toml
-[profile.dev]
-incremental = false
-```
-
-macOS developers who want Cranelift for local iteration can also configure it
-locally or pass one-off `cargo --config` flags. Keep that opt-in local so
-Windows and Linux continue to use LLVM unless the project makes a deliberate
-cross-platform backend decision.
+- **One Cargo command at a time** against the workspace `target/` — concurrent
+  `game`/`screenshot`/`check` invocations serialize on the target lock and
+  contend for CPU + several GiB of compiler memory. Use `cargo check-game` while
+  editing, then one linked `just game`/`just screenshot`. (Genuinely parallel
+  agents get their own worktree + target dir + shared sccache instead — see
+  build_speed.md §7.2.)
+- **No unstable `-Zthreads`** — the 2026-07-20 parallel-MIR ICE (INC-0006) left
+  unlinkable incremental objects; a speculative speedup became a full recovery
+  build.
+- **No compiler-backend experiments** — LLVM is the stable pinned toolchain's
+  backend on every platform. The former Windows Cranelift attempt also failed
+  with cross-crate undefined statics (reverted 2026-07-04).
+- **One fingerprint per intentional renderer lane** — interactive/cold tools use
+  the shared dynamic Bevy fingerprint, while the persistent capture server alone
+  uses the static `dev-iteration` fingerprint. Do not create additional mixtures.
+  The `mem_diag` GPU counters stay
+  opt-in as `thalos_game/gpu-counters`; enabling them globally forces a second
+  `bevy_dylib`. Use a temporary
+  `THALOS_GAME_COMMAND="cargo run -p thalos_game --features bevy/dynamic_linking,gpu-counters"`
+  with `THALOS_MEM_DIAG=1` only for a focused leak probe.

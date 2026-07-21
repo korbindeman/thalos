@@ -1,9 +1,9 @@
 //! Deterministic headless visual-comparison orchestrator.
 //!
 //! The game itself still renders exactly one canonical `ShipCamera`. This tool
-//! starts one clean headless game process per typed variant, then assembles the
-//! full-resolution captures into evidence an agent or human can inspect. See
-//! `docs/visual_testing.md` and ADR-20260721T032344Z-isolated-headless-visual-comparisons.
+//! sends typed variants to the persistent headless renderer, then assembles the
+//! full-resolution captures into evidence an agent or human can inspect. The
+//! `--cold` lane retains one clean game process per variant for final evidence.
 
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{
@@ -44,7 +44,6 @@ const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_DISTANCE",
     "THALOS_SCREENSHOT_WARMUP",
     "THALOS_SCREENSHOT_HUD",
-    "THALOS_SCREENSHOT_ATMOSPHERE",
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
@@ -64,17 +63,6 @@ struct Axis {
     env_key: &'static str,
     variants: &'static [Variant],
 }
-
-const ATMOSPHERE_VARIANTS: &[Variant] = &[
-    Variant {
-        label: "custom",
-        value: "custom",
-    },
-    Variant {
-        label: "bevy",
-        value: "bevy",
-    },
-];
 
 const SSAO_VARIANTS: &[Variant] = &[
     Variant {
@@ -145,11 +133,6 @@ const CLOUD_RECONSTRUCTION_VARIANTS: &[Variant] = &[
 
 const AXES: &[Axis] = &[
     Axis {
-        name: "atmosphere",
-        env_key: "THALOS_SCREENSHOT_ATMOSPHERE",
-        variants: ATMOSPHERE_VARIANTS,
-    },
-    Axis {
         name: "ssao",
         env_key: "THALOS_SSAO",
         variants: SSAO_VARIANTS,
@@ -182,6 +165,7 @@ struct Args {
     axis: Axis,
     out_dir: Option<PathBuf>,
     game: Option<PathBuf>,
+    cold: bool,
 }
 
 #[derive(Serialize)]
@@ -193,6 +177,7 @@ struct Manifest {
     preset: String,
     axis: String,
     axis_env_key: String,
+    capture_mode: String,
     game_executable: String,
     invariant_environment: BTreeMap<String, Option<String>>,
     image_width: u32,
@@ -243,14 +228,24 @@ fn run() -> Result<(), String> {
         return Ok(());
     };
     let workspace = workspace_root();
-    let game = args.game.unwrap_or_else(game_binary_from_current_exe);
-    if !game.is_file() {
-        return Err(format!(
-            "game binary not found at {}; run through `just compare` or pass --game <path>",
-            game.display()
-        ));
+    // Pipeline specialization reads terrain culling before a material pipeline
+    // exists, so this structural axis cannot be changed safely in-process.
+    let cold = args.cold || args.axis.name == "terrain-culling";
+    if args.axis.name == "terrain-culling" && !args.cold {
+        println!("terrain-culling specializes a render pipeline; using isolated cold captures");
     }
-    let dynamic_library_path = dynamic_library_path(&game, &workspace)?;
+    let game = args.game.unwrap_or_else(game_binary_from_current_exe);
+    let dynamic_library_path = if cold {
+        if !game.is_file() {
+            return Err(format!(
+                "game binary not found at {}; run `just compare-cold` or pass --game <path>",
+                game.display()
+            ));
+        }
+        Some(dynamic_library_path(&game, &workspace)?)
+    } else {
+        None
+    };
 
     let out_dir = absolutize(
         &workspace,
@@ -267,10 +262,11 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("create {}: {error}", out_dir.display()))?;
 
     println!(
-        "visual comparison: preset={} axis={} ({} isolated captures)",
+        "visual comparison: preset={} axis={} ({} {} captures)",
         args.preset,
         args.axis.name,
-        args.axis.variants.len()
+        args.axis.variants.len(),
+        if cold { "isolated" } else { "persistent" },
     );
 
     let mut capture_paths = Vec::with_capacity(args.axis.variants.len());
@@ -292,14 +288,33 @@ fn run() -> Result<(), String> {
             args.axis.env_key,
             variant.value
         );
-        let mut command = Command::new(&game);
-        command
-            .current_dir(&workspace)
-            .env("THALOS_SCREENSHOT", &args.preset)
-            .env("THALOS_SCREENSHOT_OUT", &path)
-            .env("THALOS_SCREENSHOT_REPORT", &report_path)
-            .env(args.axis.env_key, variant.value);
-        command.env(dynamic_library_env_key(), &dynamic_library_path);
+        let mut command = if cold {
+            let mut command = Command::new(&game);
+            command
+                .env("THALOS_SCREENSHOT", &args.preset)
+                .env("THALOS_SCREENSHOT_OUT", &path)
+                .env("THALOS_SCREENSHOT_REPORT", &report_path)
+                .env(args.axis.env_key, variant.value)
+                .env(
+                    dynamic_library_env_key(),
+                    dynamic_library_path.as_ref().expect("cold path has dylibs"),
+                );
+            command
+        } else {
+            let mut command = Command::new(python_executable());
+            command
+                .arg(workspace.join("tools/visual_capture.py"))
+                .arg("capture")
+                .arg(&args.preset)
+                .arg("--out")
+                .arg(&path)
+                .arg("--report")
+                .arg(&report_path)
+                .arg("--set")
+                .arg(format!("{}={}", args.axis.env_key, variant.value));
+            command
+        };
+        command.current_dir(&workspace);
         let status = command
             .status()
             .map_err(|error| format!("launch {}: {error}", game.display()))?;
@@ -394,7 +409,7 @@ fn run() -> Result<(), String> {
         })
         .collect();
     let manifest = Manifest {
-        schema_version: 1,
+        schema_version: 2,
         created_unix_s: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -404,6 +419,7 @@ fn run() -> Result<(), String> {
         preset: args.preset,
         axis: args.axis.name.to_owned(),
         axis_env_key: args.axis.env_key.to_owned(),
+        capture_mode: if cold { "cold" } else { "persistent" }.to_owned(),
         game_executable: game.display().to_string(),
         invariant_environment,
         image_width: width,
@@ -427,6 +443,7 @@ fn parse_args() -> Result<Option<Args>, String> {
     let mut positional = Vec::new();
     let mut out_dir = None;
     let mut game = None;
+    let mut cold = false;
     let mut args = env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -444,6 +461,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             "--game" => {
                 game = Some(PathBuf::from(args.next().ok_or("--game requires a path")?));
             }
+            "--cold" => cold = true,
             option if option.starts_with('-') => {
                 return Err(format!("unknown option '{option}'"));
             }
@@ -461,7 +479,7 @@ fn parse_args() -> Result<Option<Args>, String> {
             KNOWN_PRESETS.join(", ")
         ));
     }
-    let axis_name = canonical_slug(positional.get(1).map_or("atmosphere", String::as_str));
+    let axis_name = canonical_slug(positional.get(1).map_or("ssao", String::as_str));
     let axis = AXES
         .iter()
         .copied()
@@ -481,15 +499,16 @@ fn parse_args() -> Result<Option<Args>, String> {
         axis,
         out_dir,
         game,
+        cold,
     }))
 }
 
 fn print_help() {
     println!(
         "\
-Usage: visual_compare [preset] [axis] [--out DIR] [--game PATH]\n\
+Usage: visual_compare [preset] [axis] [--out DIR] [--cold] [--game PATH]\n\
        visual_compare --list\n\n\
-Defaults: preset=earth-reference axis=atmosphere\n\
+Defaults: preset=earth-reference axis=ssao\n\
 Artifacts: tools/agent_scratch/screenshots/comparisons/<preset>/<axis>/\n\
 Run through: just compare [preset] [axis]"
     );
@@ -532,6 +551,10 @@ fn game_binary_from_current_exe() -> PathBuf {
         .and_then(Path::parent)
         .expect("visual_compare lives under <target>/<profile>/examples");
     profile_dir.join(format!("thalos_game{}", env::consts::EXE_SUFFIX))
+}
+
+fn python_executable() -> std::ffi::OsString {
+    env::var_os("PYTHON").unwrap_or_else(|| "python".into())
 }
 
 /// Reproduce Cargo's dynamic-library launch environment when the comparison

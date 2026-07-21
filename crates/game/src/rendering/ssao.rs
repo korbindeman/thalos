@@ -93,6 +93,30 @@ impl SsaoConfig {
         }
     }
 
+    /// Apply a capture-only diagnostic mode without rebuilding the renderer.
+    /// The persistent screenshot server uses this between requests; normal
+    /// gameplay still resolves the same values once from the environment.
+    pub(crate) fn apply_capture_mode(&mut self, mode: Option<&str>) {
+        let selected = match mode
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" | "0" | "false" => Self {
+                enabled: false,
+                ..Default::default()
+            },
+            "show" | "debug" => Self {
+                debug_show: true,
+                ..Default::default()
+            },
+            _ => Self::default(),
+        };
+        self.enabled = selected.enabled;
+        self.debug_show = selected.debug_show;
+    }
+
     /// The terrain-material gate value carried in `inspection.w`:
     /// 0 = skip AO, 1 = apply AO, 2 = paint raw AO (debug).
     pub fn terrain_flag(&self) -> f32 {

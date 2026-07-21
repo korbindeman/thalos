@@ -28,7 +28,6 @@ pub(crate) mod tile_cache;
 mod scene_depth;
 mod spawn;
 pub(crate) mod ssao;
-mod stock_atmosphere;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
 mod trails;
@@ -191,15 +190,6 @@ impl Plugin for RenderingPlugin {
                     sync_body_render_lod
                         .after(update_real_space_body_positions)
                         .after(pause_surface_terrain_streaming_at_high_warp),
-                    // Canonical stock Bevy atmosphere. Headless comparisons
-                    // can select the retained legacy renderer process-wide.
-                    // The suppressor must run after the LOD pass:
-                    // it overrides the `BodySky` visibility the LOD pass just
-                    // wrote, and the LOD pass restores it when toggled off.
-                    stock_atmosphere::sync_stock_atmosphere.after(update_real_space_body_positions),
-                    stock_atmosphere::sync_impostor_atmosphere_with_stock,
-                    stock_atmosphere::suppress_body_sky_for_stock_atmosphere
-                        .after(sync_body_render_lod),
                     // `update_body_terrain_atmosphere` moved to PostUpdate
                     // (see below) so it reads body GlobalTransforms after
                     // big_space's `TransformSystems::Propagate` finishes
