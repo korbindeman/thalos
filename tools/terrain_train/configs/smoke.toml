@@ -1,0 +1,41 @@
+[run]
+name = "mira_s2_smoke"
+seed = 1004
+output_dir = "../../terrain_runs/mira_s2_smoke"
+data_dir = "../../terrain_data/synthetic/mira_s2_smoke"
+
+[data]
+sample_count = 48
+patch_size = 64
+metres_per_pixel = 250.0
+validation_fraction = 0.20
+crater_density = [10.0, 30.0]
+mare_fraction = [0.15, 0.35]
+gardening = [0.15, 0.75]
+rim_sharpness = [0.6, 1.4]
+
+[model]
+base_channels = 24
+condition_dim = 4
+
+[diffusion]
+timesteps = 64
+sample_steps = 16
+beta_start = 0.0001
+beta_end = 0.02
+
+[train]
+epochs = 2
+batch_size = 8
+learning_rate = 0.0005
+ema_decay = 0.995
+gradient_clip = 1.0
+num_workers = 0
+device = "auto"
+resume = false
+checkpoint_every_epochs = 1
+
+[validation]
+canvas_width = 128
+canvas_height = 96
+stride = 32

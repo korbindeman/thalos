@@ -43,8 +43,9 @@ dynamic flatten state.
 
 ## Consequences
 
-- Diffusion model training and inference can use Python/PyTorch offline, while
-  Rust owns the package reader, validator, tile contract, and gameplay sampling.
+- ADR-0013 selects one Rust/Burn model definition for training and inference;
+  Rust also owns the package reader, validator, tile contract, and gameplay
+  sampling.
 - The package format, not the model implementation, is the durable boundary.
   New models can rebake packages without changing render/collision consumers.
 - Adaptive residual storage spends bytes according to measured error and

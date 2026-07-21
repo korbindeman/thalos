@@ -1,0 +1,41 @@
+[run]
+name = "mira_s2_patch_v0"
+seed = 1004
+output_dir = "../../terrain_runs/mira_s2_patch_v0"
+data_dir = "../../terrain_data/processed/mira_s2"
+
+[data]
+sample_count = 16384
+patch_size = 256
+metres_per_pixel = 250.0
+validation_fraction = 0.10
+crater_density = [8.0, 36.0]
+mare_fraction = [0.15, 0.35]
+gardening = [0.10, 0.85]
+rim_sharpness = [0.5, 1.6]
+
+[model]
+base_channels = 96
+condition_dim = 4
+
+[diffusion]
+timesteps = 1000
+sample_steps = 50
+beta_start = 0.0001
+beta_end = 0.02
+
+[train]
+epochs = 120
+batch_size = 16
+learning_rate = 0.0002
+ema_decay = 0.9999
+gradient_clip = 1.0
+num_workers = 8
+device = "cuda"
+resume = true
+checkpoint_every_epochs = 1
+
+[validation]
+canvas_width = 768
+canvas_height = 512
+stride = 128

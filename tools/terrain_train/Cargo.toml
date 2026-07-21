@@ -1,0 +1,23 @@
+[package]
+name = "thalos_terrain_train"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[features]
+default = ["cpu"]
+cpu = ["burn/flex"]
+gpu = ["burn/wgpu"]
+
+[dependencies]
+burn = { workspace = true, features = ["std", "autodiff", "store"] }
+image = { version = "0.25.8", default-features = false, features = ["png"] }
+rand = "0.10"
+rand_chacha = "0.10"
+safetensors = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thalos_terrain_learned = { path = "../../crates/terrain_learned" }
+tiff = "0.11"
+toml = "0.9"

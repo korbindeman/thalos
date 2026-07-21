@@ -38,3 +38,4 @@ and why. Read here before reopening a settled choice.
 | [0010](0010-bevy-raymarched-rocky-atmosphere.md) | Bevy raymarching is the canonical rocky-body atmosphere | Accepted |
 | [0011](0011-isolated-headless-visual-comparisons.md) | Visual comparisons run as isolated headless captures | Accepted |
 | [0012](0012-cloud-skips-require-conservative-bounds.md) | Cloud ray leaps require conservative density bounds; cadence-preserving reuse is the default | Accepted |
+| [0013](0013-rust-native-learned-terrain.md) | Mira learned terrain is authored once in Rust with Burn | Accepted |

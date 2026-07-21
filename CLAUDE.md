@@ -301,6 +301,14 @@ temporary offline Mira producer/global package payload. Do not reconnect them
 to a runtime startup bake or revive the dump/editor flow. MIRA-0's adaptive
 package tracer is complete; MIRA-1/2 replace the producer with diffusion. New bakery
 work follows ADR-0008 and the package spec behind the same `SurfaceQuery` seam.
+MIRA learned models are Rust-native and authored once with pinned Burn 0.21 per
+ADR-0010. `thalos_terrain_learned` is Bevy-independent shared model/sampler code;
+training checkpoints carry raw/EMA weights plus path-remapped Adam state so
+cross-process resume remains deterministic. `thalos_terrain_train` is the
+offline producer tool. Candle may be selected as a
+Burn backend or used as a diffusion reference, but must not become a second
+model implementation. Keep both learned crates out of `thalos_game` until a
+measured optional runtime feature needs them; gameplay remains package-first.
 
 ## Running and inspecting the game
 

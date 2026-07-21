@@ -239,16 +239,20 @@ RAM reconstructed-tile cache
 
 ## 6. Offline bakery
 
-The bakery is a separately runnable toolchain, with model training/inference
-allowed to live in Python/PyTorch while package contracts and validation remain
-Rust-owned.
+The bakery is a separately runnable Rust toolchain. Per ADR-0013, Burn owns one
+backend-generic model, diffusion, and sampling definition across offline
+training and inference. Campaigns may select WGPU, CUDA, ROCm, CPU, or Burn's
+Candle backend without forking model code. Learned crates remain independent of
+Bevy and outside the game dependency graph until a measured optional runtime
+feature needs them; normal play consumes packages and never requires planetary
+diffusion.
 
 ### Production inputs and reproducibility
 
 The first airless corpus uses complementary teachers:
 
-- a checksum-pinned global SLDEM2015 pyramid for planetary through regional
-  structure;
+- checksum-pinned SLDEM2015 regions at the 236.901 m/px macro training scale,
+  with the global product retained as the later whole-sphere source;
 - selected, aligned Kaguya Terrain Camera DTMs for fine high-pass examples;
   and
 - parameter-labelled synthetic crater, ejecta, secondary-chain, gardening, and
@@ -389,6 +393,64 @@ independent-tile blending and the current analytic crater reference. Pin the
 global and regional lunar inputs, build their Gaussian/Laplacian pyramids and
 geographic holdouts, add labelled synthetic process surfaces, then overfit a
 single stage before training the S0–S3 ladder.
+
+The implementation is split into `thalos_terrain_learned`, containing the
+backend-generic Burn model/sampler contract, and `thalos_terrain_train`, the
+offline corpus/training/validation binary. Checkpoints use portable model
+records and record the Burn version/backend; package output remains independent
+of the training backend.
+
+**Tracer evidence, 2026-07-20:** the Rust smoke command generated 48
+ChaCha8-seeded 64² patches at 250 m/px with labelled mare, crater density,
+gardening, rim, ejecta, and secondary-chain controls, then decomposed them into
+physical S0–S3 Laplacian bands. A compact eight-channel Burn denoiser completed
+10 Flex/autodiff batches in 6.55 s (`0.999119 → 0.972475` noise MSE), wrote
+SafeTensors with canonical tensor SHA-256
+`fd3b2807bc03cee347b1c44852b5b5e24fb843d4291cacf5fa6ceaf4fab63b3c`,
+and ran six shared-coordinate-noise 64² DDIM windows over a 128×96 canvas.
+Repeated inference was bit-identical (`0 m` max delta); overlap predictions
+disagreed by `1.674274 m RMS` before weighted fusion. CPU and WGPU feature
+graphs both compile. The inspected corpus/Laplacian sheet has crater structure,
+but the two-epoch sampled residual remains noise-like, so this proves the
+data/model/checkpoint/overlap path only and does **not** satisfy MIRA-1's quality
+exit.
+
+Three exact CC0 USGS Kaguya/LOLA-aligned S3 teachers are now pinned by URL,
+STAC item, byte size, SHA-256, shape, bounding box, physical resolution, and
+split: a 30.33 m/px mare/highland contact for training, 19.07 m/px Copernicus
+block for validation, and 38.82 m/px Tycho block for holdout. The Rust
+preprocessor verifies the complete download before decoding its float32 COG,
+resamples all three to 40 m/px, rejects patches below 99% valid coverage,
+locally inpaints the remaining small no-data islands, removes vertical bias,
+and produced 23 train / 5 validation / 28 holdout 256² patches. Their
+hillshades were inspected and the split regions do not overlap. The partial
+Tycho download was deliberately rejected by the checksum gate before the
+complete 4,209,915-byte artifact was adopted.
+
+The complementary macro teacher is now an exact subset of the official
+SLDEM2015 128 ppd PDS FLOAT product (236.901 m/px map scale). Three 2° latitude
+strips are pinned as inclusive HTTP byte ranges from the 2.8 GB source, keeping
+each fetch at 47,185,920 bytes. The Rust `prepare-sldem` path checksum-gates the
+range, crops a 256² longitude window, decodes little-endian kilometre samples
+to metres, and reuses the Kaguya validation/index/preview path. The adopted
+train, Copernicus-validation, and Tycho-holdout range hashes are recorded in
+`terrain_data/manifest.json`; all three have 100% valid samples, zero >150 m
+single-pixel impulses, and inspected structurally distinct hillshades.
+
+Training now applies the configured EMA after every optimizer step and uses it
+for validation/export. Each epoch checkpoint stores raw and EMA SafeTensors,
+full-precision Adam state, deterministic progress, physical scales, and a
+parameter-path-to-Burn-ID map. Resume remaps Adam slots by path because Burn
+parameter IDs are randomized per process. In the smoke proof, a run resumed
+from epoch 2 through epoch 3 exactly matched an uninterrupted 3-epoch run:
+final loss `0.9612839`, EMA hash
+`f982b142fc91b904a7103b72acb7a0b6fe9dcd6af8dbdf7dc0dd3127054c47ff`,
+and raw hash
+`41858e5b929da18af031f148065c0d68617fec987c09fc1528d40e946be943e6`.
+
+SLDEM distribution-rights confirmation for derived-weight release, combined
+campaign training, spectral/slope/SFD validation, and GPU VRAM/timing remain
+open.
 
 **Exit:** a fixed-seed patch set shows plausible fresh/old crater morphology,
 no terrestrial drainage signature, seamless overlap interiors, stable repeated
