@@ -81,7 +81,7 @@ pub enum SurfaceMountKind {
 
 /// **Surface / footprint** placement: this entity sits on `parent`'s skin
 /// at a `(station, angle)` point rather than mating an end node. This is
-/// the second placement capability from `docs/construction.md` §4.3 —
+/// the second placement capability from `docs/gameplay/construction.md` §4.3 —
 /// wings, wing-hosted nacelles, and later gear / footprint cockpits.
 /// Surface mounts deliberately **opt out of diameter propagation**: a
 /// footprint part's size is its own, not the host's local diameter.

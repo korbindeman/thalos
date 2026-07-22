@@ -95,7 +95,7 @@ pub struct GraphicsSettings {
     /// albedo still carries the grass colour, so the ground reads green.
     pub grass: bool,
     /// Generate the near/mid grass blades on the GPU (the zero-persistent-memory
-    /// vegetation path — `rendering::gpu_grass`, see `docs/vegetation.md` §13).
+    /// vegetation path — `rendering::gpu_grass`, see `docs/world/vegetation.md` §13).
     /// When on, the CPU blade rings park and only the far card ring builds
     /// tiles; when off, the CPU clipmap covers the whole reach (the pre-rewrite
     /// behaviour, as a fallback). Draws nothing unless `grass` is also on.

@@ -122,7 +122,7 @@ fill.
   only while the view is screen-static. During camera motion every current ray
   must be evaluated unless a future reconstruction stores conservative
   multi-layer/interval information capable of representing the translucent
-  integral. See [clouds.md §3.3](../clouds.md#33-sampling-and-temporal-reconstruction).
+  integral. See [clouds.md §3.3](../rendering/clouds.md#33-sampling-and-temporal-reconstruction).
 - Keep `just compare cloud-motion cloud-reconstruction` as the first diagnostic
   for screen-aligned blocks, horizontal trails, slow fill, or artifacts that
   strengthen around the sun.

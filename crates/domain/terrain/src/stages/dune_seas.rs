@@ -10,7 +10,7 @@
 //! - albedo: direct grading toward darker interdune sand and brighter active
 //!   crests
 //!
-//! See `docs/gen/dunes.md` §B.2-B.3 for the math and §F.1 for placement.
+//! See `docs/archive/gen/dunes.md` §B.2-B.3 for the math and §F.1 for placement.
 //! The dune-scale band (sub-km) is left for the impostor to synthesize
 //! per fragment — bodies of Mira-to-Earth size can't resolve it in a
 //! cubemap.
@@ -141,7 +141,7 @@ impl Stage for DuneSeas {
                         // the displaced point. A slower wavelength jitter
                         // breaks the "radio-wave" regularity without
                         // losing the prevailing wind read.
-                        // (See `docs/gen/dunes.md §B.3`.)
+                        // (See `docs/archive/gen/dunes.md §B.3`.)
                         let warp_seed = sub_seed(region_seed, "draa_warp") as u32;
                         let warp = fbm3(
                             dir.x * region.warp_freq,

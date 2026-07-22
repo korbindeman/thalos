@@ -4,7 +4,7 @@ Planet-scale procedural vegetation for Thalos: grass and ground cover that
 stretches to the horizon, plus shrubs and trees, all with smooth LOD and good
 close-up fidelity. This document is the **unified spec and implementation
 plan** for the whole vegetation stack. The near-camera grass blade layer that
-shipped 2026-06 (described in `docs/terrain.md` *Vegetation decoration layer*)
+shipped 2026-06 (described in `docs/world/terrain.md` *Vegetation decoration layer*)
 is the **foundation** this plan generalizes — its tile lattice, deterministic
 hashed placement, shared placement gate, f64 per-tile anchoring, and
 async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
@@ -274,7 +274,7 @@ bands.
 
 ## 2. Current state (shipped 2026-06)
 
-The grass blade near-ring — the Phase 1.0 baseline. See `docs/terrain.md` for
+The grass blade near-ring — the Phase 1.0 baseline. See `docs/world/terrain.md` for
 the canonical description; summarized here because the plan extends it.
 
 - **Lattice:** self-contained cube-sphere lattice, ~25 m tiles
@@ -294,7 +294,7 @@ grass-mask / coverage gates). `Clear` always wins over `Lawn`. The grass driver
 (`BaseSite` → `Lawn`, runway/building/launchpad/tank → `Clear`), so a spaceport
 reads as lawn between the structures with bare paving under them. This is the
 seam the future tree/prop scatter on a base plugs into (thread the same regions
-into `build_scatter_tile`); see `docs/base_building.md` *Ground scatter*. Off-base
+into `build_scatter_tile`); see `docs/gameplay/base_building.md` *Ground scatter*. Off-base
 the region set is empty, so wild terrain is unaffected. Trees/rocks still use the
 older `TerrainFlatten` `nearest_flatten` exclusion.
 - **Payload:** one batched `Mesh` per tile of curved tapered 7-vertex blade
@@ -947,6 +947,6 @@ sends screenshots (agents do not launch it).
 - Anchoring reference: `crates/runtime/game/src/runway.rs`
   (`update_runway_transform`), `crates/runtime/game/src/rendering/grass.rs`
   (`update_grass_transforms`).
-- Related specs: `docs/terrain.md` (tile contract + shipped grass layer),
-  `docs/atmosphere.md` (wind/weather neighbor systems),
-  `docs/surface.md` (on-foot context).
+- Related specs: `docs/world/terrain.md` (tile contract + shipped grass layer),
+  `docs/rendering/atmosphere.md` (wind/weather neighbor systems),
+  `docs/simulation/surface.md` (on-foot context).

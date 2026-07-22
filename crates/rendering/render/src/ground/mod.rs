@@ -1,6 +1,6 @@
 //! Thalos integration of the forked `thalos_udlod` UDLOD renderer.
 //!
-//! M3 staging ([docs/terrain.md](../../docs/terrain.md), "Rendering: ground
+//! M3 staging ([docs/world/terrain.md](../../docs/world/terrain.md), "Rendering: ground
 //! LOD"):
 //!
 //! - **Stage 1**: wire the fork into the workspace + run a deterministic

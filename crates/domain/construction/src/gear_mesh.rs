@@ -186,7 +186,7 @@ pub fn build_gear_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Mesh {
 }
 
 /// Build the **stow bay** box for a gearbox: the volume *inside* the host that
-/// will house the gear when it retracts (`docs/construction.md` §4.4 — the
+/// will house the gear when it retracts (`docs/gameplay/construction.md` §4.4 — the
 /// future recess morph carves this into the belly). The box is flush with the
 /// host skin and extends inward toward the body axis, sized to swallow the
 /// folded legs + wheels. Pure geometry, like [`build_gear_mesh`]; the editor

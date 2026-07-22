@@ -4,15 +4,16 @@ These documents describe **superseded terrain-*generation* internals**. They
 were archived (2026-06) when the project reframed generation as a **black box
 behind the tile contract**: from every consumer's perspective (renderer,
 collider, shadows, dynamic features), generation is just "something that
-produces tiles conforming to the tile contract in [`../terrain.md`](../terrain.md)."
+produces tiles conforming to the tile contract in
+[terrain](../world/terrain.md)."
 The new generator is being built fresh against that contract.
 
 They are kept as **reference**, not as live specs. Do not treat anything here
 as the current design. The canonical, current terrain docs are:
 
-- [`../terrain.md`](../terrain.md) — the tile contract, ground-LOD rendering,
+- [Terrain](../world/terrain.md) — the tile contract, ground-LOD rendering,
   surface shadows, colliders, and dynamic features (the consumer side).
-- [`../atmosphere.md`](../atmosphere.md) — atmospheric optics, ocean, clouds,
+- [Atmosphere and lighting](../rendering/atmosphere.md) — atmospheric optics, ocean, clouds,
   reflections, and lighting/GI.
 
 ## What's here
@@ -29,8 +30,5 @@ as the current design. The canonical, current terrain docs are:
   visual targets the new generator should aim at — mine it, don't follow its
   pipeline framing.
 
-Some legacy `crates/terrain` source comments still point into these files by
-their **old** `docs/` paths (e.g. `docs/gen/dunes.md`,
-`docs/planet-generation-pipeline-*.md`) rather than the archived paths; those
-crates are themselves the legacy generator slated for replacement against the
-new tile contract, so the comments were left untouched.
+Legacy producer source comments point here explicitly so a historical reference
+cannot be mistaken for the live world specification.

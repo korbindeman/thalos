@@ -77,7 +77,7 @@ internally inconsistent set of codegen units.
 ## Prevention & recurrence signals
 
 - Do not add nightly `-Zthreads` to the recommended local config; see
-  [tooling.md](../tooling.md#windows-fast-incremental-loop) and `CLAUDE.md`.
+  [tooling.md](../development/tooling.md#windows-fast-incremental-loop) and `CLAUDE.md`.
 - Run only one Cargo command at a time against the workspace `target/`.
 - The recurrence signature is `stealing value which is locked` followed by
   anonymous `.llvm` undefined symbols. Stop retrying the poisoned cache: remove

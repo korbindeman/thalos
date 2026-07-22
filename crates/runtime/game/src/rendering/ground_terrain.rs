@@ -1057,7 +1057,7 @@ pub(super) fn sync_body_render_lod(
 /// and that airlight is far brighter than the surface even over short paths, so
 /// the ground washes out into a uniform veil at any altitude. Extinction
 /// (transmittance) is already Earth-clear-day correct (~50–90 km visibility);
-/// the wash is purely the additive airlight. See `docs/atmosphere.md` *Aerial
+/// the wash is purely the additive airlight. See `docs/rendering/atmosphere.md` *Aerial
 /// perspective*.
 ///
 /// **The fix.** `aerial_perspective_strength` is an **absolute** in-scatter

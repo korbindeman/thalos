@@ -1,6 +1,6 @@
 //! Aeolian (wind-driven) primitives for dune generation.
 //!
-//! Math primitives for the layered-dune recipe in `docs/gen/dunes.md`.
+//! Math primitives for the layered-dune recipe in `docs/archive/gen/dunes.md`.
 //! Used by both the bake-time draa-scale rasterization and the
 //! per-fragment dune-scale synthesis in the impostor.
 //!
@@ -19,7 +19,7 @@ use glam::Vec3;
 /// sand produces between its stoss face (~10–15°) and its slip face
 /// (~32–34° angle of repose). Symmetric `(sin(phase) * 0.5 + 0.5).powf(k)`
 /// will never look like sand — the asymmetry is the entire visual
-/// signature. See `docs/gen/dunes.md` §B.2.
+/// signature. See `docs/archive/gen/dunes.md` §B.2.
 ///
 /// `phase` is unnormalized; only its fractional part matters. `alpha` is
 /// clamped to `[0.05, 0.95]` so neither face collapses.

@@ -65,6 +65,6 @@ also updated after real-space body positions in the sync schedule.
 
 - A camera-relative effect must be placed in the same extracted render frame as
   the camera: `camera_global + relative_offset`; BigSpace does not imply
-  `camera_global == 0`. The invariant is recorded in `docs/atmosphere.md`.
+  `camera_global == 0`. The invariant is recorded in `docs/rendering/atmosphere.md`.
 - A straight or diagonal atmosphere boundary that does not share the terrain's
   curvature is a frame-placement bug. Do not start by retuning density.

@@ -30,7 +30,7 @@
 //!     the game to composite over its own scene with true depth occlusion.
 //!
 //! Remaining work (evolving/advected weather, storms, half-res + temporal
-//! upscale) is tracked in `docs/atmosphere.md`.
+//! upscale) is tracked in `docs/rendering/atmosphere.md`.
 
 mod composite;
 mod compute;

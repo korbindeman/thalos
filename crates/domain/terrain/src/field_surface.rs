@@ -1,6 +1,6 @@
 //! `FieldSurface` — the field-DAG-era live backing for the Query API seam.
 //!
-//! Migration phase P2 (see docs/planet-generation-pipeline-migration.md):
+//! Migration phase P2 (see docs/archive/planet-generation-pipeline-migration.md):
 //! `FieldSurface` is the strangler-fig seam between the analytic terrain
 //! evaluator and the Query API. It owns a body's terrain definition (today the
 //! oceanic/continental params) plus a **reusable continent-intent cache**, and

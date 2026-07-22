@@ -1,6 +1,6 @@
 //! Terrain collider patch lifecycle: attach/detach band, streaming rebuilds, SLF pose.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;
@@ -53,7 +53,7 @@ pub(crate) fn attach_terrain_patch_when_close(
     {
         return;
     }
-    // Regime gate (A3 port, `docs/regimes.md`): the record's
+    // Regime gate (A3 port, `docs/simulation/regimes.md`): the record's
     // `terrain_collider_allowed` folds the 1×-warp-lock requirement with the
     // craft-has-a-collider capability. The capability term subsumes the old
     // per-`VesselKind` EVA skip — the EVA capsule's `Collider` is removed at
@@ -228,7 +228,7 @@ pub(crate) fn maintain_terrain_patch(
     let lateral = (delta - along * current.center_dir_body).length();
     let current_revision = height_source.revision();
     // Re-center before the craft drifts off the patch edge. The tile-based
-    // collider window (docs/surface.md §3.6) is only tens of metres, so cap the
+    // collider window (docs/simulation/surface.md §3.6) is only tens of metres, so cap the
     // global drift distance by a fraction of the patch's own half-extent; the
     // coarse tangent-grid fallback (km-scale half-extent) keeps the global
     // distance. `patch_half_extent_m` is 0 only with no patch attached, which

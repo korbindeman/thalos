@@ -24,7 +24,7 @@ atmosphere renderer.
 > **Rendering vs physics.** This doc covers atmosphere *rendering* (how the sky
 > and aerial perspective look). The *physical* atmosphere — air density vs
 > altitude, and the aerodynamic drag/lift forces it produces — is a separate
-> concern in `docs/aerodynamics.md`. They share one authored boundary, the
+> concern in `docs/simulation/aerodynamics.md`. They share one authored boundary, the
 > `karman_line_m` on `TerrestrialAtmosphere`, but the physical profile
 > (`TerrestrialAtmosphere::sample_at_altitude_m` → density / pressure /
 > temperature / speed-of-sound) feeds forces, not shading.
@@ -652,7 +652,7 @@ foundation (the single terrain height authority):
   absent from the BLAS) reflects the sky but **not the ground**, exactly the
   wrong artifact for a grounded stainless vehicle. Making terrain RT-visible
   means extending the collider-patch trimesh extraction (see
-  [terrain.md](terrain.md) *The tile contract* / *M5 colliders*) into a BLAS
+  [terrain.md](../world/terrain.md) *The tile contract* / *M5 colliders*) into a BLAS
   region, accepting raster-vs-RT geometry divergence at LOD seams, and solving
   acceleration-structure precision under the floating origin. A research
   project, not a toggle — the single height authority is what keeps the door
@@ -796,11 +796,11 @@ This is a switch on the body, not per-pixel.
 
 ## References
 
-- [archive/gen/planet_aesthetics.md](archive/gen/planet_aesthetics.md) —
+- [archive/gen/planet_aesthetics.md](../archive/gen/planet_aesthetics.md) —
   visual target reference (archived). Read this before tuning M4.
-- [terrain.md](terrain.md) — supplies the surface heights and ocean
+- [terrain.md](../world/terrain.md) — supplies the surface heights and ocean
   topology that atmosphere/ocean read against.
-- [simulation.md](simulation.md) — ship state and floating origin
+- [simulation.md](../simulation/simulation.md) — ship state and floating origin
   the reflection probe reads.
 - Bruneton 2008, *Precomputed Atmospheric Scattering*. Canonical
   scattering reference.

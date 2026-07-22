@@ -12,7 +12,7 @@
 //! # Why CPU / why here
 //!
 //! This is the **mechanism** half of graphics-fidelity F3 (see
-//! `docs/graphics_fidelity.md` §3), so it lives in `thalos_body_render`. Its first
+//! `docs/roadmap/graphics_fidelity.md` §3), so it lives in `thalos_body_render`. Its first
 //! consumer is the game's reflection probe (`crates/runtime/game/src/reflection_probe.rs`),
 //! which already paints its environment cubemap on the CPU on a slow cadence: it
 //! swaps its hand-kept analytic `cpu_surface_sky` (a WGSL mirror that had to be

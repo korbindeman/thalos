@@ -5,7 +5,7 @@
 > solver family is **TGS-Soft** (substepped soft-constraint, the
 > Box2D/Rapier lineage) — *not* literal XPBD (patent note below). This doc
 > is the target design + phased roadmap. The legacy backend-seam analysis in
-> `docs/regimes.md` §4 ("Avian stays through Phases A–B") is **superseded by
+> `docs/simulation/regimes.md` §4 ("Avian stays through Phases A–B") is **superseded by
 > this decision** — it correctly scoped the seam work, which becomes Phase 0
 > here.
 
@@ -70,18 +70,18 @@ landing/collision.** These are the non-negotiable design rules that follow:
    every ~1.5 km of drift, so f64 gives sub-micron precision at the contact.
    The solver must be structurally incapable of leaving this regime. (The
    SLF math already lives in `physics_canonical::surface_local`; see
-   `docs/surface_local.md`.)
+   `docs/simulation/surface_local.md`.)
 
 2. **Single owner of the surface state → no internal desync.** In the
    surface regime the canonical state *is* the solver state — nothing is
    reconciled per frame. Kepler↔surface handoff happens once, at a regime
-   boundary, not every frame. (`docs/regimes.md` owns the regime classifier
+   boundary, not every frame. (`docs/simulation/regimes.md` owns the regime classifier
    that fires these boundaries.)
 
 3. **Fixed-timestep physics + accumulator + render interpolation.** A fixed
    physics `dt` (accumulator drains real frame time; render interpolates
    between the last two physics states). Variable-dt is a known cause of
-   stiff-contact/spring blowups. **This overrides the `docs/regimes.md` §4
+   stiff-contact/spring blowups. **This overrides the `docs/simulation/regimes.md` §4
    note about "variable-dt stepping for free"** — the stability requirement
    settles that tradeoff toward fixed-dt + determinism.
 

@@ -19,7 +19,7 @@ synthesisers into one.
 - **[planet-generation-pipeline-spec.md](planet-generation-pipeline-spec.md)**
   is the architectural target and owns the *what*. This doc owns the
   *how and in what order*.
-- **[terrain.md](terrain.md)**'s **generation half is superseded** by
+- **[terrain.md](../world/terrain.md)**'s **generation half is superseded** by
   the spec. Its feature-compiler model (`PlanetTerrainSpec → TerrainPrior
   → FeatureManifest → SurfaceField`, populations + promotion, era
   ordering, the v2 backlog) is not thrown away — it is *folded in* as the
@@ -55,12 +55,12 @@ existing code. `REPLACE` = different architecture, rebuild behind a seam.
 
 | Spec concept (§) | Today | Action |
 |---|---|---|
-| Self-describing `Planet` value (§3) | `TerrainConfig` enum of archetype presets + per-body RON ([terrain_config.rs](../crates/terrain/src/terrain_config.rs)) | REPLACE schema, keep RON-on-disk |
+| Self-describing `Planet` value (§3) | `TerrainConfig` enum of archetype presets + per-body RON ([terrain_config.rs](../../crates/domain/terrain/src/terrain_config.rs)) | REPLACE schema, keep RON-on-disk |
 | Named **fields** + automatic **DAG** ordering (§3) | none — archetype stages mutate `BodyBuilder` in fixed order | NEW |
 | **Feature types** as declared schemas (§3) | `FeatureKind` hardcoded; only `Megabasin` authorable | REPLACE with declarations |
 | Explicit + procedural **instances**, **promotion** (§4) | `AuthoredFeatureConfig` + `FeatureSeed`/`FeatureLock` seeds; promotion designed in terrain.md, not built | ADAPT/BUILD — terrain.md's populations+promotion model ≈ the spec |
 | **Stamps / generators / author overlay** (§4) | none | NEW |
-| **Sparse quadtree** storage on cube-sphere (§5) | full-res `Cubemap<T>` ≤ 4096² baked into `StaticSurfaceData` ([static_surface.rs](../crates/terrain/src/static_surface.rs)) | REPLACE storage; cube-sphere param is already there |
+| **Sparse quadtree** storage on cube-sphere (§5) | full-res `Cubemap<T>` ≤ 4096² baked into `StaticSurfaceData` ([static_surface.rs](../../crates/domain/terrain/src/static_surface.rs)) | REPLACE storage; cube-sphere param is already there |
 | **Two-path composition** (procedural + overlay) (§5) | none | NEW |
 | **Output fields** (`continent_sdf`, `structural_intent`, …) (§6) | implicit, pre-composited into baked cubemaps | NEW (the intent layer) |
 | **Two-band heightfield**, fine detail non-geometric (§7) | **three geometric layers** (cubemap + crater SSBO + statistical noise, all displace height) **plus** a separate geometric HMF cascade in ground LOD | REPLACE — see §4 |
@@ -68,9 +68,9 @@ existing code. `REPLACE` = different architecture, rebuild behind a seam.
 | **Query API** — `generate_terrain_tile`, `sample_field`, `query_features`/`query_scatter`, `prewarm` (§9) | `sample_static_surface(dir, lod)` point sampler + UDLOD-specific `TileProvider::request_tile` | NEW seam (wrap, then swap — §5) |
 | **Tile contract** — height + 4-ch splat + macro albedo (§9) | ad-hoc per-attachment R16/Rgba8 in `PipelineTileProvider`; single material-ID cubemap + palette | ADAPT (material model changes — §7) |
 | **Scatter** stream + renderer (§7, §9) | none | NEW (stub the API early, fill in Phase B) |
-| **Physics collider** as a Query consumer (§9) | `rendered_height_m` + `build_rendered_terrain_patch` already share the ground surface ([rendered_height.rs](../crates/terrain_render/src/rendered_height.rs)) | KEEP approach, re-point at Query API; gain band-limiting |
+| **Physics collider** as a Query consumer (§9) | `rendered_height_m` + `build_rendered_terrain_patch` already share the ground surface ([rendered_height.rs](../../crates/rendering/render/src/ground/rendered_height.rs)) | KEEP approach, re-point at Query API; gain band-limiting |
 | Normals derived in-shader, not stored (§9) | impostor + ground LOD both finite-difference height; baked `normal_cubemap` largely unused | KEEP — drop the baked normal cube |
-| **Four-tier cache** (§10) | single-file whole-planet bake ([cache.rs](../crates/terrain/src/cache.rs)) + UDLOD `TileAtlas` (GPU) | ADAPT: add L2 RAM + per-tile L3; keep a planet-load bake |
+| **Four-tier cache** (§10) | single-file whole-planet bake ([cache.rs](../../crates/domain/terrain/src/cache.rs)) + UDLOD `TileAtlas` (GPU) | ADAPT: add L2 RAM + per-tile L3; keep a planet-load bake |
 | **CPU/GPU split** — feature gens on GPU (§11) | all CPU (rayon) | DEFER; keep `terrain` Bevy-free, dispatch GPU scatter on the consumer side (§6) |
 | **Temporal dynamics** (§8) | `DynamicSurfaceLayers` (ice, dunes) bolted onto the baked product | ADAPT into time-varying intent fields / feature trajectories |
 | **Learned synthesis** (§7) | none | Aspirational (spec Phases E/F) |
@@ -79,10 +79,10 @@ existing code. `REPLACE` = different architecture, rebuild behind a seam.
 
 Today a single body is described by **two surfaces that do not agree**:
 
-- **Impostor** ([sample.rs](../crates/terrain/src/sample.rs)): baked
+- **Impostor** ([sample.rs](../../crates/domain/terrain/src/sample.rs)): baked
   cubemap + screen-faded explicit crater SSBO + statistical crater noise
   below 500 m. All three displace height.
-- **Ground LOD** ([pipeline.rs](../crates/terrain_render/src/pipeline.rs)):
+- **Ground LOD** ([pipeline.rs](../../crates/rendering/render/src/ground/pipeline.rs)):
   the same baked cubemap + a domain-warped **ridged-HMF cascade**
   (`DETAIL_AMP_M = 250 m`, down to ~0.49 m wavelength). Different noise,
   different character.
@@ -159,7 +159,7 @@ crate. Remaining P0 cleanup is listed at the end.
 What landed:
 
 - The Query API seam lives in
-  [`thalos_terrain::query`](../crates/terrain/src/query.rs): a
+  [`thalos_terrain::query`](../../crates/domain/terrain/src/query.rs): a
   `SurfaceQuery` trait (`sample` / `sample_height_m` / `radius_m` /
   `height_range_m` / `prewarm`), a `BakedSurface` implementation wrapping
   today's `PlanetSurface`, and free-function evaluators
@@ -169,7 +169,7 @@ What landed:
   so there is now exactly **one** surface synthesiser, in the crate the
   spec says the pipeline belongs to.
 - Consumers re-pointed at the seam:
-  [`PipelineTileProvider`](../crates/terrain_render/src/pipeline.rs)
+  [`PipelineTileProvider`](../../crates/rendering/render/src/ground/pipeline.rs)
   evaluates pixels via `surface_sample`; `rendered_height_m` /
   `rendered_height_range` are now thin wrappers over the seam, so the
   collider (`build_rendered_terrain_patch`), the character-controller

@@ -41,7 +41,7 @@ burn = { version = "=0.21.0", default-features = false }
 
 # Shared dev defaults stay portable and apply in every worktree. Platform-
 # specific linkers, compiler-cache paths, and per-machine job limits belong in
-# local, ignored Cargo config; see `docs/build_speed.md`.
+# local, ignored Cargo config; see `docs/development/build_speed.md`.
 [profile.dev]
 opt-level = 1
 incremental = true

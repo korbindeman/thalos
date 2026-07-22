@@ -20,7 +20,7 @@ use crate::impostor::film_grain::FilmGrain;
 /// HDR + AgX tonemap, subtle bloom, conservative color grading, SMAA, CAS
 /// sharpening, mild chromatic aberration, and exposure-driven film grain.
 ///
-/// **No auto-exposure** (graphics-fidelity F2 — `docs/graphics_fidelity.md` §3).
+/// **No auto-exposure** (graphics-fidelity F2 — `docs/roadmap/graphics_fidelity.md` §3).
 /// The Bevy `AutoExposure` histogram was retired because it was a second
 /// exposure authority compounding with `CameraExposure`: it wrote a global
 /// `color_grading.exposure` at tonemap on top of the distance gain

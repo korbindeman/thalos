@@ -72,7 +72,7 @@ impl Volcano {
 /// the bake stage and the impostor's per-fragment dune synthesis.
 ///
 /// Two morphological bands compose the visible dune signature
-/// (see `docs/gen/dunes.md` §C.3):
+/// (see `docs/archive/gen/dunes.md` §C.3):
 /// - **Draa** (~2–5 km): rasterized into the height + albedo cubemaps at
 ///   bake time. Sun-shadowed silhouettes that read from orbit.
 /// - **Dune** (~30–500 m): synthesized per fragment in the impostor shader
@@ -109,7 +109,7 @@ pub struct DuneSea {
 
     /// Stoss-fraction of the asymmetric ridge in [0.5, 0.95]. ~0.85 gives
     /// a ~5.7:1 stoss/slip slope ratio matching dry granular media's
-    /// angle of repose. See `docs/gen/dunes.md §B.2`.
+    /// angle of repose. See `docs/archive/gen/dunes.md §B.2`.
     pub alpha_skew: f32,
 
     /// Anisotropic cross-wind warp amplitude, in unit-sphere coordinates.
@@ -532,7 +532,7 @@ pub enum PlateKind {
 /// One tectonic plate on the sphere. Represented kinematically by an Euler
 /// pole + angular velocity rather than by an integrated trajectory; boundary
 /// motions and types are derived analytically from pairs of Euler poles at
-/// the boundary midpoint. See `docs/gen/thalos_processes.md §Plates`.
+/// the boundary midpoint. See `docs/archive/gen/terrestrial_pipeline_research.md §Plates`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Plate {
     pub id: u16,

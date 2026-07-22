@@ -15,7 +15,7 @@
 //!
 //! Frame dynamics are exact, not flat-earth: gravity is radial per position,
 //! and [`surface_local_acceleration`] includes the centrifugal and Coriolis
-//! terms of the rotating frame. See `docs/surface_local.md`.
+//! terms of the rotating frame. See `docs/simulation/surface_local.md`.
 
 use glam::{DMat3, DQuat, DVec3};
 

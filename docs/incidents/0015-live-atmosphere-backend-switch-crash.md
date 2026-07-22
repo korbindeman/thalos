@@ -89,5 +89,5 @@ unnecessary because isolated comparisons already owned the diagnostic use case.
 - A new `GraphicsSettings` field that changes render-graph ownership, view bind
   layouts, or fullscreen-pass identity is a recurrence signal; require an ADR
   before exposing it live.
-- See [atmosphere.md](../atmosphere.md), [visual_testing.md](../visual_testing.md),
+- See [atmosphere.md](../rendering/atmosphere.md), [visual_testing.md](../development/visual_testing.md),
   ADR-20260721T032343Z, and ADR-20260721T032344Z.

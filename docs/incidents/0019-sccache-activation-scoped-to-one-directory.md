@@ -88,7 +88,7 @@ inherited the repo-root config by accident, while `C:/tmp/thalos-*` and
 override. They built uncached with stock `link.exe`. Compounding it,
 `setup-build-env.sh` (which has `--all-worktrees`) hard-exits on MinGW, and
 `setup-build-env.ps1` had no equivalent flag: on Windows there was **no supported
-way to provision a worktree at all**, while `docs/build_speed.md` §7.2 instructed
+way to provision a worktree at all**, while `docs/development/build_speed.md` §7.2 instructed
 the operator to use the flag they could not run.
 
 **(b) Snapshot normalization.** `SCCACHE_BASEDIRS` is what strips each checkout
@@ -127,7 +127,7 @@ because the helper declined to restart a healthy server.
 ## Prevention & recurrence signals
 
 - **Standing rule** (added to CLAUDE.md "Fast iteration invariants" and
-  `docs/build_speed.md` §5.0/§5.3.1): *build-environment activation must not
+  `docs/development/build_speed.md` §5.0/§5.3.1): *build-environment activation must not
   depend on the current directory, and `SCCACHE_BASEDIRS` must be resynced after
   every `git worktree add`.*
 - **Corollary worth remembering:** a healthy-looking `--show-stats` is not

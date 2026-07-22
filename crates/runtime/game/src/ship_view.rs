@@ -51,7 +51,7 @@ const PART_RESOLUTION: u32 = 128;
 /// Whole-craft crash tolerance (m/s of surface-relative approach speed).
 /// A terrain contact above this destroys the vessel. Forgiving first-slice
 /// constant — a future per-part model derives it from the contacting parts.
-/// See `docs/surface.md`.
+/// See `docs/simulation/surface.md`.
 // TEMP (camera-judder repro): survive a hard touchdown so the craft settles in
 // Full on the terrain instead of being destroyed. Restore to 12.0 after.
 const SHIP_IMPACT_TOLERANCE_M_S: f64 = 1.0e9;
@@ -251,10 +251,10 @@ pub(crate) fn build_player_ship(
         dry_mass_kg: stats.dry_mass_kg,
         // Whole-craft crash tolerance (forgiving first-slice constant; a
         // future per-part model derives this from the contacting parts).
-        // See docs/surface.md.
+        // See docs/simulation/surface.md.
         impact_tolerance_m_s: SHIP_IMPACT_TOLERANCE_M_S,
         // Per-vehicle aerodynamic drag: frontal area from the actual part
-        // geometry, blunt-body Cd. See docs/aerodynamics.md.
+        // geometry, blunt-body Cd. See docs/simulation/aerodynamics.md.
         reference_area_m2: stats.frontal_area_m2,
         drag_coefficient: SHIP_DRAG_COEFFICIENT,
     });

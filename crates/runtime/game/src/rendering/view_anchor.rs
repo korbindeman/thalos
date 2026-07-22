@@ -2,7 +2,7 @@
 //! every view-dependent world-detail system.
 //!
 //! Thalos is one physical world that must render consistently from any camera
-//! (see `docs/graphics_fidelity.md` §2.3, the one-world principle). The UDLOD
+//! (see `docs/roadmap/graphics_fidelity.md` §2.3, the one-world principle). The UDLOD
 //! terrain already streams around its camera view; this module extends the same
 //! rule to everything else that builds or centres detail around a point:
 //! surface scatter (trees / grass / rocks), the sun-shadow cascade centre, and

@@ -89,7 +89,7 @@ struct GrassRing {
 /// The clipmap: near full-detail blades → one far wide-clump ring → **terrain
 /// albedo carries the rest** (the shared `landcover` field paints the ground the
 /// same grass colour, so beyond the blades the field still reads as grass — see
-/// `docs/vegetation.md`). Cut from 5 rings/1.5 km to 3 rings/~340 m: the far
+/// `docs/world/vegetation.md`). Cut from 5 rings/1.5 km to 3 rings/~340 m: the far
 /// rings were heavy churn + visible LOD bands for blades that, from any altitude,
 /// the terrain albedo already covers. Gentle width progression + two Full rings
 /// keep the ring boundaries subtle.
@@ -310,7 +310,7 @@ const GRASS_REBUILD_CHECK_S: f32 = 0.5;
 /// it chases). The GPU height mirror stores R16-quantized heights, so re-serving
 /// the same point from a different LOD/atlas slot shifts it by ~1 quantization
 /// step (~0.05–0.10 m on Thalos, measured). Terrain is LOD-invariant by design
-/// (see `docs/terrain.md`), so the only *real* change grass must chase is a
+/// (see `docs/world/terrain.md`), so the only *real* change grass must chase is a
 /// flatten-pad install (the runway — metres); 0.5 m clears the noise with margin
 /// and still catches pads.
 const GRASS_REBUILD_DELTA_M: f32 = 0.5;
@@ -695,7 +695,7 @@ fn finalize_grass_tiles(
         let material = ring_materials[rk.ring as usize].clone();
         // Explicit local-space AABB so the tile is **frustum-culled**. The mesh is
         // `RENDER_WORLD`-only, so Bevy never auto-computes an `Aabb` for it (see
-        // `docs/vegetation.md`) — without this, every tile in the full 360° ring
+        // `docs/world/vegetation.md`) — without this, every tile in the full 360° ring
         // around the camera runs its (now per-vertex-lit, so heavier) vertex
         // shader every frame, including the ~⅔ behind/beside the view. Rest-pose
         // bound; the shader's ≤6 cm wind sway is far inside the frustum margin.

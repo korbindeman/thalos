@@ -1,7 +1,7 @@
 # ADR-20260720T185956Z-replace-avian-owned-tgs-soft-solver: Replace Avian with an owned TGS-Soft solver crate (`thalos_physics`)
 
 - **Status:** Accepted (Phase 0 seam landed; Phase 1 specced, deferred until asked)
-- **Date:** 2026-06-28 (recorded 2026-07-18; full design + roadmap in `docs/physics.md`)
+- **Date:** 2026-06-28 (recorded 2026-07-18; full design + roadmap in `docs/simulation/physics.md`)
 
 ## Context
 

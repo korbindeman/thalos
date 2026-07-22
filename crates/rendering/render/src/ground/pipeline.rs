@@ -2,7 +2,7 @@
 //! to the Thalos synthesis pipeline.
 //!
 //! As of P0 of the planet-generation migration
-//! ([docs/planet-generation-pipeline-migration.md]), the surface itself is
+//! ([docs/archive/planet-generation-pipeline-migration.md]), the surface itself is
 //! evaluated by the **Query API seam** in `thalos_terrain`
 //! ([`thalos_terrain::query`]): one band-limited surface shared by the
 //! impostor, these UDLOD tiles, and the physics collider. This module is now
@@ -279,7 +279,7 @@ struct TilePixel {
     /// Macro landcover moisture in `[-1, 1]` — encoded into the albedo
     /// attachment's **alpha** channel (linear even on the sRGB texture), where
     /// the ground shader decodes it and adds its wrapped fine detail tier
-    /// (docs/terrain_macro.md). The attachment alpha is NOT opacity.
+    /// (docs/world/terrain_macro.md). The attachment alpha is NOT opacity.
     moisture: f32,
     /// Packed procedural material intent for the ground shader:
     /// R = vegetation/grass, G = soil/peat/sediment, B = exposed rock,

@@ -148,7 +148,7 @@ impl Stage for BiomeReliefColor {
                 ];
 
                 // The biome palette IS the body's color authority — see
-                // `docs/terrain.md` lines 387-398. With `strength = 1.0`
+                // `docs/world/terrain.md` lines 387-398. With `strength = 1.0`
                 // the post-pass fully owns color in flat regions, so the
                 // inline base color doesn't compete with the per-biome
                 // weighted blend. Lower the stage's `strength` to fade

@@ -371,7 +371,7 @@ identical result: `runway::build_spaceport` (site build minus craft place),
 Composes with the space-center hub: a VAB LAUNCH clears the `ContextHistory`
 return stack and drops to `GameContext::Flight` (the "launched to fly" path), so
 `begin_launch_flow` opens the picker as a `BaseEditor` context parented to Flight
-rather than reopening the hub (see `docs/ui_flow.md` Phase 3).
+rather than reopening the hub (see `docs/gameplay/ui_flow.md` Phase 3).
 
 ## Not built yet (ordered follow-ups)
 

@@ -33,7 +33,7 @@ state, so structures render above the ground *by construction*.
 ## Evidence
 
 - The mechanism was already documented in-repo at the spaceport-build rebuild
-  call ([runway.rs](../../crates/game/src/runway.rs) `rebuild.request`): the
+  call ([runway.rs](../../crates/runtime/game/src/runway.rs) `rebuild.request`): the
   vertex-stage LOD blend/morph "pull[s] the rendered ground ~decimetres off the
   flat plane in the LOD-transition bands … enough to z-fight the flush
   aprons/taxiways". The rebuild only repairs the *stale-tile* subset; the
@@ -70,7 +70,7 @@ against — with error proportional to texel size.
 ## Fix
 
 Make the flatten plane a **render-time authority** (structural; see
-docs/terrain.md "Structures render above the ground"):
+docs/world/terrain.md "Structures render above the ground"):
 
 - `body_terrain.wgsl` gains a custom vertex entry (`flattened_height`):
   inside a pad rectangle the vertex height is overridden to the exact
@@ -96,7 +96,7 @@ top-down — base fully above ground in all three, no pad-edge crease.
 
 ## Prevention & recurrence signals
 
-- **Invariant (docs/terrain.md):** rendered ground under structures equals the
+- **Invariant (docs/world/terrain.md):** rendered ground under structures equals the
   plane they were built against, by construction; any future ground renderer
   must honor the flatten handle at render time, not only at bake time.
 - WGSL gotchas hit while landing it are in the `wgsl-bevy` skill: `meta` is a

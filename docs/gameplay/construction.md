@@ -727,7 +727,7 @@ you can also author a bare nose and place a footprint cockpit behind it.
 - Decks / multi-deck interiors (§6.3) — bulkheads-only carries fighters,
   GA, landers, most cargo.
 - Aero *simulation* for **planes** — the native flight model now exists
-  (`docs/aerodynamics.md`, `thalos_physics_canonical::aero`) with lift / control
+  (`docs/simulation/aerodynamics.md`, `thalos_physics_canonical::aero`) with lift / control
   surfaces, but richer wings wait on this construction system's geometry. The
   mapping is direct: **each airfoil-stationed wing / control-surface Module
   becomes one `AeroSurface`** (chord, area, twist, deflection → coefficients),

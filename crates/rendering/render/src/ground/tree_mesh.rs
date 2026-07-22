@@ -9,7 +9,7 @@
 //! them into instanced draws.
 //!
 //! `lod` reduces the radial/ring resolution and the blob count for the far mesh
-//! LODs in the tree cascade (see `docs/vegetation.md`).
+//! LODs in the tree cascade (see `docs/world/vegetation.md`).
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Vec3;

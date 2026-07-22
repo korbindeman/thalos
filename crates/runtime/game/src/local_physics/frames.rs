@@ -1,6 +1,6 @@
 //! Inertial <-> bubble-frame conversions (ship SLF / EVA body-centered) and anchors.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;
@@ -74,7 +74,7 @@ pub(crate) fn bubble_frame_to_inertial(
 ///
 /// Ships use the **surface-local frame (SLF)**: a body-fixed tangent frame
 /// anchored at a surface point, Y-up, small coordinates near the anchor
-/// (`thalos_physics_canonical::surface_local`, `docs/surface_local.md`). The
+/// (`thalos_physics_canonical::surface_local`, `docs/simulation/surface_local.md`). The
 /// frame co-rotates with the body, so a craft parked on or taxiing across the
 /// surface is ~stationary instead of translating at the surface co-rotation
 /// speed (`ω×r`, hundreds of m/s), and the ground colliders are genuinely

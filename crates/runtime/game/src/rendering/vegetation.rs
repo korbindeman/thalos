@@ -86,7 +86,7 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 ///
 /// **Size consistency (`grove_scale = 1` everywhere).** The constant-coverage
 /// rule (grow a far element to stand in for the clump it replaces — see
-/// `docs/vegetation.md` §5.1) is right for *grass* (a blade is never resolvable)
+/// `docs/world/vegetation.md` §5.1) is right for *grass* (a blade is never resolvable)
 /// but wrong for trees (enlarging a resolvable tree just makes a giant tree and
 /// snaps its size at each ring boundary). `grove_scale` is kept as a knob but
 /// stays 1.
@@ -1106,7 +1106,7 @@ fn finalize_veg_tiles(
             center_surface_body: center,
         };
         // Explicit frustum-cull AABB: these meshes are `RENDER_WORLD`-only, so Bevy
-        // never auto-computes one (see `docs/vegetation.md`), and without it the
+        // never auto-computes one (see `docs/world/vegetation.md`), and without it the
         // full 360° ring of tree tiles around the camera is processed every frame
         // (in every view). Per-view culling still feeds the sun-shadow pass from its
         // own frustum, so off-screen casters whose shadows fall into view stay.

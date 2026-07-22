@@ -75,7 +75,7 @@ then:
     angular rate** (this is what makes a spin impossible to pump).
   - **Control** — pitch/roll/yaw control-surface deflection × authority. The
     deflection is **not** the raw stick: it is the command the fly-by-wire
-    layer (`thalos_control`, see `docs/control.md`) allocates to the control
+    layer (`thalos_control`, see `docs/simulation/control.md`) allocates to the control
     surfaces — the same command the reaction wheels execute, so the two
     effectors pull together instead of fighting (the old raw-stick path was
     half of the SAS jitter). Sourced from `RealizedControl::aero`.
@@ -398,7 +398,7 @@ tumbling. Attitude authority comes from the reaction wheels plus **engine gimbal
 (see *Thrust vectoring* above) — the gimbal is what makes a controllable ascent
 possible. Trimming a blunt capsule heatshield-forward instead is future work.
 
-**Planes from the construction editor (future).** When `docs/construction.md`'s
+**Planes from the construction editor (future).** When `docs/gameplay/construction.md`'s
 wing **Modules** exist, the same `wing_aero_panels` aggregation generalises
 (control surfaces become wing parameters).
 

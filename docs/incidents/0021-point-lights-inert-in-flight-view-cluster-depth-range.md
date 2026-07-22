@@ -63,7 +63,7 @@ The light is correctly specified and simply never contributes. This is a
 code — no intensity, range, or layer configuration fixes it.
 
 It is a concrete instance of the "two lighting universes" debt in
-`docs/graphics_fidelity.md` §3: terrain/vegetation/water shade through the
+`docs/roadmap/graphics_fidelity.md` §3: terrain/vegetation/water shade through the
 `thalos::lighting` spine with analytic light terms, while crafts and structures
 go through Bevy's stock PBR — and stock PBR's *clustered* machinery is the part
 that this project's camera cannot satisfy.

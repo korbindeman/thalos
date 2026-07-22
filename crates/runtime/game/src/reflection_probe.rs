@@ -7,7 +7,7 @@
 //! asset is marked changed, so metallic ship parts get IBL reflections
 //! that respond to orbital state.
 //!
-//! See `docs/reflection_probe.md` for the full design note — why this
+//! See `docs/rendering/atmosphere.md` for the full design note — why this
 //! is CPU-painted rather than a 6-camera render of the actual scene,
 //! the Bevy 0.18 `camera_system` trap that blocks the "correct" path,
 //! upstream status (PR #13840), and the migration plan when it lands.
@@ -95,7 +95,7 @@ const SUN_DISC_GAIN: f32 = 3.0;
 
 // ── Physical surface sky (graphics-fidelity F3) ───────────────────────────────
 // The reflection cubemap is CPU-painted (the GPU cubemap-render path is blocked —
-// see docs/atmosphere.md), so the sky it reflects is evaluated on the CPU. The
+// see docs/rendering/atmosphere.md), so the sky it reflects is evaluated on the CPU. The
 // *sky* upper hemisphere is now the physical `SkyViewLut` (a raymarch of the same
 // single+multi-scatter model the terrain shades through), replacing the former
 // hand-kept `cpu_surface_sky` analytic mirror of the WGSL `compute_surface_sky` —
@@ -530,7 +530,7 @@ fn default_environment() -> EnvParams {
 /// the metallic hull now reflects the world it is actually in, and dielectric
 /// structures pick up the real sky as ambient. The sky is now the physical
 /// sky-view LUT (F3); the eventual upgrade is a GPU cubemap render of the actual
-/// scene; see `docs/atmosphere.md`.)
+/// scene; see `docs/rendering/atmosphere.md`.)
 fn derive_environment(sim: &SimulationState, gain: f32) -> (EnvParams, Option<SkyLutInputs>) {
     let ship_pos = sim.simulation.ship_state().position;
     let epoch = thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time());

@@ -3,7 +3,7 @@
 # incremental so workspace crates become cacheable and shareable across
 # worktrees (Cargo's dev profile sets incremental = true, and sccache cannot
 # cache an incrementally compiled crate at all).
-# See docs/build_speed.md section 5.
+# See docs/development/build_speed.md section 5.
 #
 # Usage:  . scripts\sccache-on.ps1      (dot-source, not run)
 

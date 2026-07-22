@@ -837,7 +837,7 @@ pub fn gate_throttle_on_fuel_availability(
     let real_dt = clock.delta_secs_f64();
 
     // A destroyed craft can't burn — force throttle to zero so the HUD arc
-    // and canonical throttle both read inert. See `docs/surface.md`.
+    // and canonical throttle both read inert. See `docs/simulation/surface.md`.
     if sim.simulation.is_destroyed() {
         last_burn.engines.clear();
         finish_with_throttle(0.0, &mut throttle, &mut sim, &mut refresh);

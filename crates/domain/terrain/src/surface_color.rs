@@ -416,7 +416,7 @@ pub fn surface_color_at(
 // where; the *biome* defines which materials are in a region's palette and
 // tints them. This is the one place that mapping lives, so the impostor bake,
 // the UDLOD ground tiles, and the editor preview agree. See
-// docs/planet-generation-pipeline-migration.md §P2C.
+// docs/archive/planet-generation-pipeline-migration.md §P2C.
 
 /// BRDF / shading model a material is rendered with. The single shading
 /// dispatch in `thalos_planet_lighting` (P2C-C) switches on this; today it

@@ -26,14 +26,14 @@ This doc is the spec for the simulation-unification pass: Phase A
 (regime resolver), Phase B (vocabulary + module cleanup), and the
 Phase C sketch (unified force model). It supersedes the
 *target-design* role of the "Avian's three roles" /
-authority-handoff narrative in `docs/simulation.md` — that doc still
+authority-handoff narrative in `docs/simulation/simulation.md` — that doc still
 accurately describes today's implementation; this one describes where
 it goes.
 
-Related: `docs/simulation.md` (canonical core, authority, warp),
-`docs/surface_local.md` (the SLF ships integrate in),
-`docs/control.md` (the fly-by-wire pattern this generalizes),
-`docs/aerodynamics.md` (the aero model Phase C unifies into
+Related: `docs/simulation/simulation.md` (canonical core, authority, warp),
+`docs/simulation/surface_local.md` (the SLF ships integrate in),
+`docs/simulation/control.md` (the fly-by-wire pattern this generalizes),
+`docs/simulation/aerodynamics.md` (the aero model Phase C unifies into
 prediction).
 
 ## 1. Motivation — what falls short today
@@ -52,7 +52,7 @@ what:
   (`crates/runtime/game/src/local_physics.rs`), which carries two
   special-case pins jumped ahead of its generic match (grounded EVA
   pinned to `LocalRigidBody`; landed ship + warp request collapsed to
-  `BodyFixed`). `docs/surface_local.md` §5 predicted this machinery
+  `BodyFixed`). `docs/simulation/surface_local.md` §5 predicted this machinery
   would collapse when the SLF landed; it survived intact.
 - **The same predicates re-derived in N places.** "Is the ship
   sitting quietly on the ground" (contact + speed below
@@ -102,13 +102,13 @@ kinematic exception: walking.**
   KSP-style, decoupling splits into independent bodies, debris is
   independent bodies.
 - *Walking* stays a kinematic character controller, per the
-  `docs/surface_local.md` §10 rationale (it never touches the contact
+  `docs/simulation/surface_local.md` §10 rationale (it never touches the contact
   solver; folding it into the SLF is cosmetic and risky). But it is
   reframed from "EVA is a separate vessel universe" to "walking is
   one **locomotion mode** that takes translation ownership while
   active". Jetpack/vacuum EVA becomes a *normal craft* — a capsule
   rigid body with an RCS effector through the fly-by-wire allocator
-  (`docs/control.md` already lists RCS and the EVA jetpack as
+  (`docs/simulation/control.md` already lists RCS and the EVA jetpack as
   designed-in extension points).
 - Consequently the regime classifier must not branch on vessel
   *kind*. It classifies from **craft capabilities** (wheels/gear,
@@ -268,18 +268,18 @@ The record, resolver, and executors are written against "a craft"
 multi-craft (`Simulation` still owns one `CraftState`) and per-craft
 bubbles (`ActiveLocalBubble` stays a singleton; the likely
 generalization — a shared per-body frame with per-craft anchors — is
-sketched in `docs/surface_local.md` §9). The constraint on new code
+sketched in `docs/simulation/surface_local.md` §9). The constraint on new code
 is only that nothing *new* bakes in single-craft assumptions.
 
 ## 4. Backend seam — the Avian decision
 
-> **Superseded (2026-06-28) — see `docs/physics.md`.** The re-evaluation
+> **Superseded (2026-06-28) — see `docs/simulation/physics.md`.** The re-evaluation
 > below has happened: the decision is now to **replace Avian** with an owned
 > solver (`thalos_physics`, TGS-Soft on `parry3d-f64`), driven by the
 > BeamNG-style deformation endgame and the dual-integrator impedance
 > mismatch. The seam-tightening this section scopes becomes **Phase 0** of
-> the `docs/physics.md` roadmap (still the right first step — it makes the
-> swap surgical). One override: `docs/physics.md` chooses **fixed-dt**
+> the `docs/simulation/physics.md` roadmap (still the right first step — it makes the
+> swap surgical). One override: `docs/simulation/physics.md` chooses **fixed-dt**
 > stepping for stability/determinism, *not* the "variable-dt for free" this
 > section floated. The original analysis is kept below for context.
 
@@ -303,7 +303,7 @@ the authority dance (snap/readback, role→clock mapping,
 two integrators co-owning one state; the vehicle thesis (§2) needs no
 constraint solver; an owned integrator gives per-render-frame
 variable-dt f64 stepping for free (the fixed-timestep deviation
-deferred in `docs/surface_local.md` §10); and a sequential-impulse
+deferred in `docs/simulation/surface_local.md` §10); and a sequential-impulse
 resolver for "one body vs static ground, destruction above modest
 impact speeds" is the easiest contact problem there is. The case
 against doing it *now*: it serializes against Phase A (which shrinks
@@ -347,7 +347,7 @@ and compare stability and effort directly.
   `ground` (backstop/friction/impact), `frames` (the conversion seam),
   `colliders` — re-exported from `mod.rs` so every external
   `crate::local_physics::X` path is unchanged.
-- **Reconciled `docs/simulation.md`**: an implementation-status banner
+- **Reconciled `docs/simulation/simulation.md`**: an implementation-status banner
   separating shipped architecture from target design (provider
   policies, `WarpIntegrator`, navigation contexts, the
   `sim_core`/`ephemeris`/`flight` crate split — all explicitly marked
@@ -361,7 +361,7 @@ and compare stability and effort directly.
 
 Phase A — behavior parity at every step:
 
-- **A1. This doc.** Plus pointers from `docs/simulation.md` and
+- **A1. This doc.** Plus pointers from `docs/simulation/simulation.md` and
   CLAUDE.md.
 - **A2. Introduce the record + resolver in shadow mode.** The
   resolver computes `CraftRegime` alongside the existing machinery;

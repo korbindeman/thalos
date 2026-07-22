@@ -82,4 +82,4 @@ and view-path attenuation.
 - A rocky-atmosphere change must include the deterministic 1°
   `cloud-sunset / atmosphere` comparison plus `runway-atmosphere`. A return of
   navy low-sun sky, white clouds, or surface white-out is a recurrence signal.
-- See [atmosphere.md](../atmosphere.md) and [clouds.md](../clouds.md).
+- See [atmosphere.md](../rendering/atmosphere.md) and [clouds.md](../rendering/clouds.md).

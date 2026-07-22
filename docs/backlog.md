@@ -1,8 +1,8 @@
 # Backlog
 
 **Role:** the *execution layer* beneath the sprint plan docs. The plans —
-[architecture_cleanup.md](architecture_cleanup.md) (`clean`) and
-[graphics_fidelity.md](graphics_fidelity.md) (`gfx`) — are **strategy**: what to
+[architecture_cleanup.md](roadmap/architecture_cleanup.md) (`clean`) and
+[graphics_fidelity.md](roadmap/graphics_fidelity.md) (`gfx`) — are **strategy**: what to
 build, why, in what order, with the full rationale. This file is the
 **operational queue** that answers **"what's next?"** — concrete, scoped,
 status-tracked items in a rolling near-term window. Agent-maintained: kept in
@@ -33,10 +33,17 @@ sync as work lands.
 
 **Conventions:**
 
-- **IDs are stable.** Reuse the plan docs' own IDs where they exist (packages
-  `CL-A`…`CL-G` from `clean §3`, `F1`–`F9` / `W`-numbers / `TM` / `C1` from
-  `gfx`); mint `BL-n` for items with no plan-doc home. Never renumber; mark
-  `done`, don't delete — the queue is also the record of what was done.
+- **IDs are stable and chronological.** Reuse the plan docs' own IDs where they
+  exist (packages `CL-A`…`CL-G` from `clean §3`, `F1`–`F9` / `W`-numbers / `TM` /
+  `C1` from `gfx` — those are owned by one document, so they don't collide). For
+  an item with no plan-doc home, mint `BL-YYYYMMDDTHHMMSSZ-slug` from the current
+  UTC time (`date -u '+%Y%m%dT%H%M%SZ'`). **Never allocate the next `BL-n`** — a
+  shared counter makes parallel branches mint the same ID for unrelated items,
+  and those IDs are cited from Rust source, so a collision becomes a wrong
+  permanent reference (ADR-20260722T170714Z-one-chronological-identity-rule).
+  `BL-1`–`BL-40` are frozen legacy IDs: cite them, never extend or renumber them.
+  Never renumber anything; mark `done`, don't delete — the queue is also the
+  record of what was done.
 - **Rolling window.** Only the two active sprints are tracked at item
   granularity. The graphics later-sprint pool stays at doc granularity in
   `gfx §4`; pull items in here as they near.
@@ -45,7 +52,8 @@ sync as work lands.
   reasoning. Flip the plan doc's checkbox and this row **in the same change**.
 - **Discovered work becomes a row, never a silent TODO.**
 - **Refs:** `clean §N` = architecture_cleanup.md · `gfx §N` =
-  graphics_fidelity.md · `ADR-YYYYMMDDTHHMMSSZ-slug` = adr/ · `INC-NNNN` = incidents/ · other
+  graphics_fidelity.md · `ADR-YYYYMMDDTHHMMSSZ-slug` = adr/ ·
+  `INC-YYYYMMDDTHHMMSSZ-slug` = incidents/ (plus frozen legacy `INC-NNNN`) · other
   docs by filename.
 
 > Statuses below were seeded 2026-07-18 from the plan docs (whose checkboxes
@@ -162,6 +170,7 @@ sprint.
 
 | ID | Item | Status | Est | Deps | Refs |
 |----|------|--------|-----|------|------|
+| BL-20260722T170654Z-documentation-taxonomy | **Reorganize the documentation tree by role:** keep only the canonical index, backlog, architecture, and gameplay vision at `docs/` root; group roadmap, gameplay-system, simulation, world, rendering, development, and reference docs into named folders; repair cross-references and record the taxonomy | done | S | — | docs/README.md · ADR-20260722T170654Z-documentation-taxonomy · link/path audit clean 2026-07-22 |
 | BL-2 | Adopt the steering harness: this backlog + `steer` skill + ADR log + incident log + docs README | done | — | — | ADR-20260720T185953Z-steering-harness · 2026-07-18 |
 | BL-3 | Polar orbit scenario (`just game polar` / start-screen + destruction picker) — same 200 km parking altitude as `orbit`, inclination 90° | verify | S | — | **user:** `just game polar`, confirm map/navball show polar path + ground track over poles | spawn.rs · debug_orbits.rs · boot.md |
 | BL-17 | Codify headless screenshot + controlled A/B diagnosis as the required workflow for graphical fixes and visual iteration | done | XS | — | CLAUDE.md · documentation verified 2026-07-21 |

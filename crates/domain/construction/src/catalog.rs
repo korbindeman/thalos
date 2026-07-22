@@ -83,7 +83,7 @@ pub enum PodGeometry {
     /// own*. It surface-mounts inside a parametric fuselage near the nose and
     /// supplies command / crew / reaction-wheel capability; the fuselage's own
     /// parametric nose is the visible nose, and a windshield region is morphed
-    /// into the skin (see `docs/construction.md` §5.6). Used in place of a
+    /// into the skin (see `docs/gameplay/construction.md` §5.6). Used in place of a
     /// nose-cone pod on loft-bodied aircraft.
     Inline,
 }
@@ -141,7 +141,7 @@ pub struct EngineSpec {
     /// thrust vectoring. A gimballed engine steers the craft in pitch/yaw
     /// under power: the effective attitude torque is `thrust · sin(range) ·
     /// arm` about the CoM, wired into the fly-by-wire allocator alongside the
-    /// reaction wheels. See `docs/aerodynamics.md` *Thrust vectoring*.
+    /// reaction wheels. See `docs/simulation/aerodynamics.md` *Thrust vectoring*.
     #[serde(default)]
     pub gimbal_range_deg: f32,
     /// Whitelisted resource storage this part may carry.

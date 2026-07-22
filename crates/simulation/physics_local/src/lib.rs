@@ -3,7 +3,7 @@
 //! This crate deliberately contains the Avian dependency so `thalos_physics_canonical`
 //! remains pure Rust and rails/canonical code does not learn Avian APIs.
 //!
-//! # Backend seam (`docs/physics.md`)
+//! # Backend seam (`docs/simulation/physics.md`)
 //!
 //! This crate is the **backend executor boundary**: the Avian types it wraps
 //! (re-exported as [`avian`]) may only be named by the executor layer — this
@@ -59,7 +59,7 @@ pub fn ground_collision_layers() -> avian::CollisionLayers {
 /// contact against the ground (which otherwise fought the gear and flung the
 /// craft on its gear). Crash detection switches to the gear's weight-on-wheels
 /// signal. Gearless craft (landers/rockets) keep the default all-vs-all layers
-/// so their hull/legs rest on the ground directly. See `docs/surface_local.md`.
+/// so their hull/legs rest on the ground directly. See `docs/simulation/surface_local.md`.
 pub fn wheeled_craft_collision_layers() -> avian::CollisionLayers {
     avian::CollisionLayers::new(
         avian::LayerMask(CRAFT_LAYER),
@@ -114,7 +114,7 @@ impl Default for LocalBubbleConfig {
             // dominant surface-frame CPU cost. 129² (~32k tris) covered far
             // more ground than any resting craft contacts; 65² (~8k tris)
             // keeps native-texel density in a still-generous window around the
-            // craft at a quarter of the collision cost. See docs/surface.md.
+            // craft at a quarter of the collision cost. See docs/simulation/surface.md.
             patch_resolution: 65,
             patch_rebuild_distance_m: 1024.0,
             stable_contact_time_s: 2.0,
@@ -145,7 +145,7 @@ impl Default for LocalBubbleConfig {
 /// Ship Avian bodies live in the **surface-local frame (SLF)** — a
 /// body-fixed tangent frame anchored at a surface point, Y-up, with small
 /// (meters–km) coordinates near the anchor; see
-/// `thalos_physics_canonical::surface_local` and `docs/surface_local.md`.
+/// `thalos_physics_canonical::surface_local` and `docs/simulation/surface_local.md`.
 /// Gravity + the rotating-frame centrifugal/Coriolis terms come from
 /// `surface_local_acceleration`. Ground colliders are static in this frame:
 /// posed once from their body-fixed geometry via
@@ -166,7 +166,7 @@ pub struct LocalBubble {
     pub basis: TerrainPatchBasis,
     /// Metric lateral half-extent of the attached collider patch. Drives a
     /// window-relative rebuild so the small tile-based collider window
-    /// (`docs/surface.md` §3.6, only tens of metres) re-centers before the
+    /// (`docs/simulation/surface.md` §3.6, only tens of metres) re-centers before the
     /// craft drifts off its edge — the global `patch_rebuild_distance_m` is
     /// too coarse for it. Zero when no patch is attached, and left at the
     /// fallback patch's `half_extent_m` for the coarse tangent-grid path.
@@ -202,7 +202,7 @@ impl ActiveLocalBubble {
 ///
 /// It exists so **non-executor** code (e.g. the fly-by-wire control bus) can
 /// read the craft's SLF pose / air-relative velocity without naming Avian types
-/// — the backend seam (`docs/physics.md`). The fields are the live Avian body
+/// — the backend seam (`docs/simulation/physics.md`). The fields are the live Avian body
 /// state relabelled as plain `glam` types. Note these are the **co-rotating SLF**
 /// kinematics (air-relative velocity, frame-anchored position), *not* the
 /// canonical *inertial* state (that is `thalos_game`'s `CraftStateMirror`).
@@ -241,7 +241,7 @@ pub struct TerrainColliderPatch {
 /// by [`sync_structure_collider_pose`], exactly like the terrain heightfield
 /// patch. Spawn it with [`spawn_structure_collider`]; the consumer supplies the
 /// body-fixed geometry and this executor owns the Avian construction + per-frame
-/// pose, so structure code never names Avian types (`docs/physics.md`).
+/// pose, so structure code never names Avian types (`docs/simulation/physics.md`).
 #[derive(Component, Debug, Clone, Copy)]
 pub struct StructureCollider {
     pub body_id: BodyId,
@@ -312,7 +312,7 @@ impl Plugin for LocalPhysicsPlugin {
             // unpause `transform_to_position` would clobber the snapped rotation
             // with that stale `Transform`, snapping the ship off retrograde. Keep
             // the one-way `position_to_transform` so renderers/debug still see the
-            // pose; drop the reverse direction. See `docs/surface.md`.
+            // pose; drop the reverse direction. See `docs/simulation/surface.md`.
             .insert_resource(avian3d::physics_transform::PhysicsTransformConfig {
                 transform_to_position: false,
                 ..default()
@@ -358,7 +358,7 @@ pub fn spawn_terrain_collider_patch(
     // a defined interior, so resting contact resolves gently and a craft that
     // dips a little into it is pushed straight back out — instead of the violent
     // one-step penetration-recovery a one-sided trimesh applies (which launched
-    // the craft off its gear). See `docs/surface_local.md` §3.
+    // the craft off its gear). See `docs/simulation/surface_local.md` §3.
     //
     // Authored in the patch-tangent frame (`X = tangent_x`, `Y = up = normal`,
     // `Z = tangent_z`) with heights along local `Y`. The grid is sampled in
@@ -434,7 +434,7 @@ pub fn spawn_terrain_collider_patch(
 ///
 /// Generalises the runway slab into a reusable structure-collider primitive
 /// (the runway's former bespoke `RunwayCollider`); future terrain-anchored
-/// structures reuse it. See `docs/physics.md` (backend seam).
+/// structures reuse it. See `docs/simulation/physics.md` (backend seam).
 pub fn spawn_structure_collider(
     commands: &mut Commands,
     body_id: BodyId,
@@ -492,7 +492,7 @@ pub fn sync_structure_collider_pose(
 /// [`LocalCraftKinematics`] readout. Runs at the **end** of the physics chain
 /// (after re-anchoring) so the snapshot is frame-consistent with the bubble's
 /// `frame` for the next frame's non-executor readers — the backend seam
-/// (`docs/physics.md`).
+/// (`docs/simulation/physics.md`).
 ///
 /// **Sole writer of [`LocalCraftKinematics`].**
 pub fn publish_local_craft_kinematics(
@@ -602,7 +602,7 @@ mod tests {
 
     // The stable-contact settle predicate moved into the unit-tested pure
     // regime classifier (`thalos_physics_canonical::regime::classify_ground`,
-    // Phase A3 — see docs/regimes.md); the timer lives in `RegimeMemory`.
+    // Phase A3 — see docs/simulation/regimes.md); the timer lives in `RegimeMemory`.
 
     #[test]
     fn compound_builder_accepts_blueprint_primitives() {

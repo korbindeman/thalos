@@ -1,7 +1,7 @@
 # thalos_udlod Architecture Note
 
 This file used to carry the early fork plan. The canonical terrain rendering
-spec now lives in [`docs/terrain.md`](../../docs/terrain.md).
+spec now lives in [`docs/world/terrain.md`](../../docs/world/terrain.md).
 
 Current direction:
 

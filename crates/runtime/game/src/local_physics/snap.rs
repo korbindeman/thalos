@@ -1,6 +1,6 @@
 //! Canonical<->Avian state flow: the role-conditional snap, readback, and SLF re-anchoring.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;

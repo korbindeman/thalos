@@ -103,7 +103,7 @@ Two mechanisms compounded:
 
 ## Prevention & recurrence signals
 
-- The standing contract is [ocean.md invariant 4](../ocean.md#1-invariants):
+- The standing contract is [ocean.md invariant 4](../rendering/ocean.md#1-invariants):
   ocean LOD is directional at grazing incidence. Never drive a 2-D normal
   field from the major footprint alone.
 - Do not expose a sparse scalar-noise derivative directly as a low-roughness

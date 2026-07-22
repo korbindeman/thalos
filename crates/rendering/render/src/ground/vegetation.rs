@@ -111,7 +111,7 @@ pub fn grass_tile_frame(
 /// Blade geometry level of detail. Near rings use the full curved 7-vertex
 /// blade; far rings use a cheap 3-vertex flat blade, widened into a clump so
 /// ground coverage holds as per-blade density drops (the constant-coverage
-/// rule — see `docs/vegetation.md`).
+/// rule — see `docs/world/vegetation.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GrassBladeLod {
     /// 7 vertices, curved + tapered. Near ring.
@@ -128,7 +128,7 @@ pub enum GrassBladeLod {
     /// layered blades, the classic grass-card technique — discarding the gaps
     /// and modulating the per-clump tint, so it reads as real grass at distance;
     /// the card reuses the blade displacement (it sways + fade-shrinks like a
-    /// tall blade). See `docs/vegetation.md` §6.
+    /// tall blade). See `docs/world/vegetation.md` §6.
     Card,
 }
 
@@ -407,7 +407,7 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         // by construction regardless of the underlying material/moisture field.
         // Climate-shifted (ecological) altitude: the treeline fade descends
         // with latitude, so polar tundra thins out at low ground exactly like
-        // the terrain paint (docs/terrain_macro.md Phase 2).
+        // the terrain paint (docs/world/terrain_macro.md Phase 2).
         let eco_h = h + thalos_terrain::climate_cold_lift_m(dir.y.abs()) as f32;
         if !lawn {
             // Acceptance: keep (near-)all candidates on real grassland — the old
@@ -529,7 +529,7 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
 /// Unlike [`build_grass_tile_mesh`] this is `HeightSource`-free: blades sit on a
 /// flat XZ plane with `+Y` up, centred on the origin, so the tuft can be rendered
 /// from a hemisphere of view directions into an octahedral impostor atlas (the
-/// "billboard a clump, not a blade" path — see `docs/vegetation.md` §5/§7) and
+/// "billboard a clump, not a blade" path — see `docs/world/vegetation.md` §5/§7) and
 /// previewed on its own with [`GrassMaterial`]. The blade geometry mirrors
 /// [`GrassBladeLod::Full`] so the impostor and the near blades read as the same
 /// grass.

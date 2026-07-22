@@ -8,7 +8,7 @@
 //! data — the GoT tile textures). Memory is O(1): the template (built once at
 //! startup) + two window textures, regardless of reach, density, or movement —
 //! this replaces the CPU megamesh blade rings whose per-tile meshes and
-//! rebuild churn were the confirmed grass OOM (docs/vegetation.md §5.0/§13).
+//! rebuild churn were the confirmed grass OOM (docs/world/vegetation.md §5.0/§13).
 //!
 //! Structure:
 //! - **Bands** ([`GPU_GRASS_BANDS`]): concentric density/LOD rings baked into
@@ -294,7 +294,7 @@ pub struct GpuGrassWindow {
     /// height source's wrapped surface. Per-window constant — the finest macro
     /// tier (~9 km) is far wider than the ±420 m window — carried to the
     /// shader in `GpuGrassParams.phase.w`, where the wrapped fine detail tier
-    /// is added per blade (docs/terrain_macro.md).
+    /// is added per blade (docs/world/terrain_macro.md).
     pub anchor_moisture: f32,
     /// `HeightSource::revision()` at fill time.
     pub built_revision: u64,

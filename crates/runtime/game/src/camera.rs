@@ -519,7 +519,7 @@ fn apply_graphics_msaa(
 // floated. Brightness is now governed solely by `CameraExposure`'s input gain
 // (the artist distance curve) plus the fixed global-exposure baseline in
 // `thalos_body_render`'s `space_camera_post_stack`. See
-// `docs/graphics_fidelity.md` §3 (F2).
+// `docs/roadmap/graphics_fidelity.md` §3 (F2).
 
 // ---------------------------------------------------------------------------
 // Systems

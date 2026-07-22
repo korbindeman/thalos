@@ -4,7 +4,7 @@
 //! RGB pixels, so the same `Universe` feeds both the realtime skybox and
 //! (later) a telescope imaging path at arbitrary wavelengths.
 //!
-//! See `docs/celestial.md` for architecture.
+//! See `docs/world/celestial.md` for architecture.
 
 pub mod coords;
 pub mod spectrum;

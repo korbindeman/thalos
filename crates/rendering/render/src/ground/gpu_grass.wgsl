@@ -427,7 +427,7 @@ fn vertex(in: VertexInput) -> VertexOutput {
 
     // ── Grass type + tint from the shared landcover field ───────────────────
     // Macro moisture rides `phase.w` (per-window, sampled at the anchor from
-    // the planet-scale f64 field — docs/terrain_macro.md); the wrapped fine
+    // the planet-scale f64 field — docs/world/terrain_macro.md); the wrapped fine
     // tier is added per blade so blades match the terrain's per-pixel field.
     let p_body = gg.phase.xyz + east * clump_2d.x + north * clump_2d.y + r_up * h_rel;
     let moisture = clamp(gg.phase.w + moisture_detail(p_body), -1.0, 1.0);

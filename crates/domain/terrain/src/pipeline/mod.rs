@@ -1,8 +1,8 @@
 //! The field-DAG planet-generation pipeline (the spec's target architecture).
 //!
 //! This module is the new pipeline described by
-//! [docs/planet-generation-pipeline-spec.md] and built per
-//! [docs/planet-generation-pipeline-migration.md] (migration phase P1+). It is
+//! [docs/archive/planet-generation-pipeline-spec.md] and built per
+//! [docs/archive/planet-generation-pipeline-migration.md] (migration phase P1+). It is
 //! deliberately separate from the legacy archetype compiler
 //! ([`crate::feature_compiler`] + [`crate::stages`]): the two coexist behind
 //! the Query API seam ([`crate::query`]) until bodies are cut over one at a

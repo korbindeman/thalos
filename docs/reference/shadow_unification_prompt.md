@@ -164,11 +164,11 @@
 > are answered by step 3, not by larger boxes, which is what forces every bias
 > constant in `thalos::shadow` to be hard-capped today. Round-robin
 > far-cascade updates remain available as perf headroom. Status also recorded
-> in `docs/graphics_fidelity.md` §3 F6 + §4.2 W5/W6/W12/W18, and queued as
+> in `docs/roadmap/graphics_fidelity.md` §3 F6 + §4.2 W5/W6/W12/W18, and queued as
 > backlog rows W18 / W12r / BL-37.
 
 Self-contained prompt for the agent taking on the shadow sprint. Read
-`docs/graphics_fidelity.md` §2.3 (one-world invariants #2 and #3), §3 (F6), and
+`docs/roadmap/graphics_fidelity.md` §2.3 (one-world invariants #2 and #3), §3 (F6), and
 §4.2 (W5/W6/W12/W18/W2) first — this file adds the current state, the user's
 verdict, and the plan skeleton.
 
@@ -291,7 +291,7 @@ through warp and settle instantly after.
 
 `crates/runtime/game/src/rendering/sun_shadow.rs` · `crates/rendering/render/src/shading/shaders/shadow.wgsl`
 · hull material `crates/rendering/render/src/craft/` · `crates/runtime/game/src/runway.rs`,
-`structures.rs` · doc rows W5/W6/W12/W18/W2 in `docs/graphics_fidelity.md` §4.2
+`structures.rs` · doc rows W5/W6/W12/W18/W2 in `docs/roadmap/graphics_fidelity.md` §4.2
 · memories: `craft-shadow-caster-layer`, `directional-light-cascade-count-invariant`,
 `grass-receives-sun-shadows`, `f5-screen-space-ao` (the AO field is the ambient
 complement of this work), `f3-sky-view-lut` (warp-staleness lesson).

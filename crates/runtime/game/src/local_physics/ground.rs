@@ -1,6 +1,6 @@
 //! Hull-ground interaction: floor backstop, surface friction, impact destruction.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;
@@ -388,7 +388,7 @@ impl ImpactSpeedWindow {
 ///
 /// EVA is exempt (the capsule has no collider, so no contacts). A craft that
 /// is already destroyed short-circuits so debris settling on the ground
-/// doesn't re-trigger. See `docs/surface.md`.
+/// doesn't re-trigger. See `docs/simulation/surface.md`.
 pub(crate) fn detect_terrain_impact(
     contact_graph: Res<ContactGraph>,
     active: Res<ActiveLocalBubble>,

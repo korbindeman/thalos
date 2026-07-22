@@ -7,8 +7,8 @@ the ad-hoc `LoadingProgress` counter (four hard-coded gates poked directly
 by producer systems, with no way to boot into anything but the CLI-chosen
 scenario).
 
-Related: `docs/simulation.md` (authority + warp the scenario starts drive),
-`docs/surface_local.md` (the runway placement this gates on),
+Related: `docs/simulation/simulation.md` (authority + warp the scenario starts drive),
+`docs/simulation/surface_local.md` (the runway placement this gates on),
 CLAUDE.md *Agent-driven inspection* (the paused-on-spawn / `THALOS_AUTO_RUN`
 contract).
 

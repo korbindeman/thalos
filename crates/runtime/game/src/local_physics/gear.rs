@@ -1,6 +1,6 @@
 //! Raycast spring-damper landing gear: wheels, tuning, parking brake, ground forces.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;
@@ -312,7 +312,7 @@ pub(crate) fn build_wheel_set(
 /// translation ([`AvianRole::Full`]) for a live Ship — exactly when there is a
 /// ground collider (runway slab or terrain patch) under the craft. The
 /// craft-excluded downward raycast is itself the "is there ground here" test:
-/// no hit → that wheel is airborne and contributes nothing. See `docs/surface.md`.
+/// no hit → that wheel is airborne and contributes nothing. See `docs/simulation/surface.md`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_landing_gear_forces(
     active: Res<ActiveLocalBubble>,
@@ -495,7 +495,7 @@ pub(crate) fn apply_landing_gear_forces(
     // frame (or a discrete-step pumping cycle) can no longer spike the craft to
     // hundreds of rad/s and fling it off the runway — while leaving normal
     // taxi/landing loads (well under these limits) untouched. Without this the
-    // gear was the one unclamped force path; see `docs/surface_local.md`.
+    // gear was the one unclamped force path; see `docs/simulation/surface_local.md`.
     const GEAR_MAX_LIN_ACCEL_M_S2: f64 = 50.0; // ~5 g
     const GEAR_MAX_ANG_ACCEL_RAD_S2: f64 = 4.0;
     let lin_accel = net_force / mass;

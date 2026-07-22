@@ -281,7 +281,7 @@ const MID_MOUNTAIN_AMP_M: f64 = 700.0;
 
 // --- Macro landcover (moisture) --------------------------------------------
 //
-// The planet-scale moisture/landcover field (docs/terrain_macro.md Phase 1).
+// The planet-scale moisture/landcover field (docs/world/terrain_macro.md Phase 1).
 // This is the f64, unlimited-wavelength macro layer the 4 km-wrapped shader
 // noise structurally cannot carry: it bakes into the tile albedo attachment's
 // alpha channel and rides `SurfaceSample::moisture`, and the terrain shader /
@@ -325,7 +325,7 @@ const TONE_AMP: f64 = 0.10;
 
 // --- Climate (latitude → cold lift / warmth) -------------------------------
 //
-// Phase 2 of docs/terrain_macro.md: a minimal insolation model expressed as a
+// Phase 2 of docs/world/terrain_macro.md: a minimal insolation model expressed as a
 // **cold lift** — how many metres the ecological altitude bands (lush belt,
 // treeline, snowline) descend at a given latitude. Zero in the tropics (the
 // fixed bands stay the authored look at the runway site, lat 7.6°), rising to
@@ -936,7 +936,7 @@ impl ProceduralSurface {
     /// drier than coasts) layered with three decorrelated gradient-fBm tiers —
     /// climatic provinces, regional mosaic, stand/valley patchiness — with only
     /// the finest tier LOD-aware. This is the f64 macro layer the 4 km-wrapped
-    /// shader noise cannot carry (docs/terrain_macro.md); the shader and the
+    /// shader noise cannot carry (docs/world/terrain_macro.md); the shader and the
     /// grass builders add a fine (≤125 m) wrapped detail tier on top.
     pub fn macro_moisture(&self, p: DVec3, lod_m: f32, c: f64, sin_lat: f64) -> f64 {
         let region = fbm(p / MOIST_REGION_WL_M, self.seed ^ 0x4C43_0001, 3.0);
@@ -1061,7 +1061,7 @@ impl ProceduralSurface {
 /// same nested band weights the macro albedo blends continuously (see
 /// [`macro_band_ts`]). This is the read-only stats/iteration view consumed by
 /// the `world_map` biome export, and the seam the biome-expansion work
-/// (docs/terrain_macro.md Phase 2 remainder) grows explicit classes from.
+/// (docs/world/terrain_macro.md Phase 2 remainder) grows explicit classes from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MacroBiome {
     Ocean,

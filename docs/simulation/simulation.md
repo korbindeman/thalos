@@ -8,9 +8,9 @@ implementation is the patched-conics + `KeplerianPropagator` core.
 > **Implementation status (2026-06-12).** Shipped and current:
 > the canonical core (one `ShipPropagator` for live + prediction, one
 > `CraftState`/`AuthorityMode` with a transition log), the
-> surface-local-frame ship physics (`docs/surface_local.md`), the
-> fly-by-wire control layer (`docs/control.md`), and the **per-craft
-> regime resolver** (`docs/regimes.md`) which now drives authority
+> surface-local-frame ship physics (`docs/simulation/surface_local.md`), the
+> fly-by-wire control layer (`docs/simulation/control.md`), and the **per-craft
+> regime resolver** (`docs/simulation/regimes.md`) which now drives authority
 > transitions, the Avian role, prediction gating, terrain-collider
 > gating, and the warp policy from one sole-writer classification.
 > `AuthorityMode` is now three variants (`OnRails` / `LocalRigidBody`
@@ -557,7 +557,7 @@ removed in regimes Phase B. The warp-integration regime returns as a
 real design in regimes Phase C (the unified force model); docking gets
 its variant when docking is built. Transitions between the live
 variants are owned by the regime executor
-(`crate::regime::apply_regime_authority`, see `docs/regimes.md`).
+(`crate::regime::apply_regime_authority`, see `docs/simulation/regimes.md`).
 
 Authority meaning:
 
@@ -596,7 +596,7 @@ keeps working without re-running thrust on the canonical side.
 
 ### Avian's three roles
 
-> **Superseded as a decision-maker (2026-06-12): see `docs/regimes.md`.**
+> **Superseded as a decision-maker (2026-06-12): see `docs/simulation/regimes.md`.**
 > The migration landed: the role is classified by the per-craft
 > `CraftRegime` resolver and `AvianAuthority` survives only as a derived
 > projection (`compute_avian_authority` applies
@@ -848,7 +848,7 @@ The exact entry rule is policy data, not hardcoded into the integrator.
 Initial implementation can use altitude and density thresholds; later
 versions can add dynamic pressure and heating.
 
-**Implemented (see `docs/aerodynamics.md`).** The *aerodynamic flight
+**Implemented (see `docs/simulation/aerodynamics.md`).** The *aerodynamic flight
 regime* exists for spacecraft drag + aircraft lift/control via the native
 `thalos_physics_canonical::aero` whole-body model, applied **bubble-side**
 (force-only into Avian) rather than as a canonical `ForceProvider`. The
@@ -990,7 +990,7 @@ Autopilot is a controller that emits torque or desired torque. It is not
 a magical transform setter.
 
 > **Realized by the fly-by-wire layer (`thalos_control`, see
-> `docs/control.md`).** This principle is now concrete: every attitude
+> `docs/simulation/control.md`).** This principle is now concrete: every attitude
 > command source — pilot stick, the SAS hold, the directional nav modes,
 > and the scheduled-burn autopilot — emits a `ControlDemand`; one
 > `AttitudeController` turns the arbitrated demand into a torque; that
@@ -1012,7 +1012,7 @@ Current M5 first slice:
   part-level bodies. Collider primitives are derived from
   `ships/apollo.ron` + `assets/parts.ron`; mass and principal inertia
   come from the existing aggregate ship stats.
-> **Superseded for ships (2026-06): see `docs/surface_local.md`.** The
+> **Superseded for ships (2026-06): see `docs/simulation/surface_local.md`.** The
 > body-centered-inertial *ship* bubble described in the next two bullets
 > was replaced by the **surface-local frame** (a body-fixed Y-up tangent
 > frame anchored under the craft, re-anchored on drift) with a **solid**
@@ -1688,18 +1688,18 @@ each using the body-centered inertial frame (`rel_vel = craft.vel −
 body.vel`):
 
 - **SAS holds** — `compute_target_direction`
-  ([navigation.rs:179](crates/runtime/game/src/navigation.rs:179)); Prograde arm
-  at [:191](crates/runtime/game/src/navigation.rs:191), Normal via
-  `orbital_frame` at [:205](crates/runtime/game/src/navigation.rs:205), Radial at
-  [:223](crates/runtime/game/src/navigation.rs:223).
+  ([navigation.rs:179](../../crates/runtime/game/src/navigation.rs#L179)); Prograde arm
+  at [:191](../../crates/runtime/game/src/navigation.rs#L191), Normal via
+  `orbital_frame` at [:205](../../crates/runtime/game/src/navigation.rs#L205), Radial at
+  [:223](../../crates/runtime/game/src/navigation.rs#L223).
 - **Navball markers** — `compute_marker_directions`
-  ([markers.rs:274](crates/runtime/game/src/navball/markers.rs:274)); the
+  ([markers.rs:274](../../crates/runtime/game/src/navball/markers.rs#L274)); the
   `rel_pos`/`rel_vel` basis at
-  [:302](crates/runtime/game/src/navball/markers.rs:302).
+  [:302](../../crates/runtime/game/src/navball/markers.rs#L302).
 - **Speed readout** — `update`
-  ([flight_panel.rs:153](crates/runtime/game/src/hud/flight_panel.rs:153)); label
+  ([flight_panel.rs:153](../../crates/runtime/game/src/hud/flight_panel.rs#L153)); label
   hardcoded `"ORBITAL VELOCITY"` at
-  [:105](crates/runtime/game/src/hud/flight_panel.rs:105).
+  [:105](../../crates/runtime/game/src/hud/flight_panel.rs#L105).
 
 Adding Surface/Target by branching each of the three is exactly the
 divergence the "one source of truth" invariant exists to prevent. §4
@@ -1708,9 +1708,9 @@ collapses them into one.
 #### 2.2 The frame math already exists (pure, in physics_canonical)
 
 - Orbital reference velocity = `body.velocity` (body-centered inertial;
-  see [body_centered.rs](crates/simulation/physics_canonical/src/body_centered.rs)).
+  see [body_centered.rs](../../crates/simulation/physics_canonical/src/body_centered.rs)).
 - Surface reference velocity = `body.velocity + ω × r` —
-  [`body_fixed_surface_velocity`](crates/simulation/physics_canonical/src/body_fixed.rs:18).
+  [`body_fixed_surface_velocity`](../../crates/simulation/physics_canonical/src/body_fixed.rs#L18).
   `BodyState` carries `orientation` + `angular_velocity`.
 - `orbital_frame(ship_pos, ship_vel, body_pos, body_vel)` returns the
   orbital prograde/normal/radial triad and already lives in
@@ -1719,10 +1719,10 @@ collapses them into one.
 #### 2.3 SAS holds and markers already enumerate the directions
 
 - `NavigationMode`
-  ([navigation.rs:24](crates/runtime/game/src/navigation.rs:24)) — Stability,
+  ([navigation.rs:24](../../crates/runtime/game/src/navigation.rs#L24)) — Stability,
   Prograde, Retrograde, Normal, AntiNormal, Radial{In,Out}, Target,
   AntiTarget, ManeuverNode.
-- `MarkerKind` ([markers.rs:41](crates/runtime/game/src/navball/markers.rs:41)) —
+- `MarkerKind` ([markers.rs:41](../../crates/runtime/game/src/navball/markers.rs#L41)) —
   the same nine markers.
 - **"Target" already exists, but as a *pointing* direction** ("aim nose
   at target"), not a *velocity frame*. KSP's Target speed mode reframes
@@ -1733,24 +1733,24 @@ collapses them into one.
 #### 2.4 The navball sphere is frame-independent
 
 `NavballFrame`
-([navball/attitude.rs](crates/runtime/game/src/navball/attitude.rs)) paints the
+([navball/attitude.rs](../../crates/runtime/game/src/navball/attitude.rs)) paints the
 sphere in local East/North/Up. The speed mode does **not** rotate the
 sphere — only the velocity markers + readout change. Contained change.
 
 #### 2.5 UI toggle pattern + situation signals
 
 - The Ship/Map `ViewMode` toggle
-  ([hud/view_mode_panel.rs](crates/runtime/game/src/hud/view_mode_panel.rs)) is
+  ([hud/view_mode_panel.rs](../../crates/runtime/game/src/hud/view_mode_panel.rs)) is
   the resource+button pattern to mirror.
 - Landed signal: `AuthorityMode::BodyFixed`
-  ([canonical.rs:144](crates/simulation/physics_canonical/src/canonical.rs:144)).
+  ([canonical.rs:144](../../crates/simulation/physics_canonical/src/canonical.rs#L144)).
 - Altitude: the HUD GND readout already computes AGL via the
   `HeightSource` registry (orbital_panel.rs); altitude above the
   reference sphere is `|r| − body.radius`.
 
 ### 3. Target abstraction today
 
-`TargetBody { target: Option<usize> }` ([target.rs](crates/runtime/game/src/target.rs))
+`TargetBody { target: Option<usize> }` ([target.rs](../../crates/runtime/game/src/target.rs))
 is a celestial-body world-id, forwarded into the `Simulation`. Good
 enough for the Target frame's reference velocity (`= target_body.velocity`)
 now; vessel-vs-vessel uses the same path later.
@@ -1851,7 +1851,7 @@ auto-select Surface. Deliberate, small divergence.
 ### 7. Switching UI
 
 - Make the speed readout
-  ([flight_panel.rs:105](crates/runtime/game/src/hud/flight_panel.rs:105))
+  ([flight_panel.rs:105](../../crates/runtime/game/src/hud/flight_panel.rs#L105))
   interactive; a click cycles **Orbit → Surface → Target → Orbit**,
   **skipping Target when `TargetBody` is unset** (degrades to a 2-way
   toggle). Sets `manual_override`. Mirror the `view_mode_panel.rs` button
@@ -1881,7 +1881,7 @@ auto-select Surface. Deliberate, small divergence.
 ### 9. To verify / open
 
 - **Atmosphere-top query** from the game side (`thalos_atmosphere` /
-  Kármán authoring, [atmosphere.md](docs/atmosphere.md)) — confirm or use
+  Kármán authoring, [atmosphere.md](../rendering/atmosphere.md)) — confirm or use
   the radius-default until wired.
 - **Per-body ceiling default fraction** — tune live.
 - **Radial/normal in Target mode** — KSP de-emphasizes them; decide
@@ -1915,7 +1915,7 @@ Shipped close to §4–§8. File map:
   `SimStage::Physics` `.before(control_bus::realize_control)`.
 - **SAS** — `navigation::nav_attitude_demand` / `compute_target_direction`
   take the active frame and emit an `AttitudeDemand` for the fly-by-wire
-  bus (`docs/control.md`); the velocity holds resolve through
+  bus (`docs/simulation/control.md`); the velocity holds resolve through
   `active_nav_basis` (ephemeris-sourced, Physics stage).
 - **Navball** — `navball::markers::compute_marker_directions` reads the
   active frame + `nav_basis` (solar-system-snapshot-sourced).

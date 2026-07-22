@@ -100,7 +100,7 @@ pub struct PlayerShip;
 /// one craft via `q.single()` — a call that *panics* the moment a second craft
 /// entity exists. When N craft land, this picks the active one and nothing else
 /// changes. New per-craft state should be a **component on this entity**, not a
-/// new global resource (see `docs/architecture_cleanup.md` §E).
+/// new global resource (see `docs/roadmap/architecture_cleanup.md` §E).
 ///
 /// **Sole writer:** [`track_active_craft`].
 #[derive(Resource, Default)]

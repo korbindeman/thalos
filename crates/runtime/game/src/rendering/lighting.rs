@@ -315,7 +315,7 @@ const LUX_PER_SPINE_FLUX: f32 = 1_000.0;
 /// stand-in** the surface fades in over (`SkyAmbient::surface_blend`) — there is no
 /// atmosphere out there, so it is a coarse fill for planetshine/zodiacal light that
 /// env-map IBL at photometric intensity (W7/F7) will retire. The day value keeps a
-/// ~7:1 lit:shadow ratio against the 10 000-lux sun. See `docs/graphics_fidelity.md` §3.
+/// ~7:1 lit:shadow ratio against the 10 000-lux sun. See `docs/roadmap/graphics_fidelity.md` §3.
 const AMBIENT_DAY_BRIGHTNESS: f32 = 700.0;
 const AMBIENT_NIGHT_BRIGHTNESS: f32 = 4.0;
 /// Sky-blue tint for the **space-regime** ambient fill (see [`AMBIENT_DAY_BRIGHTNESS`]);
@@ -364,7 +364,7 @@ fn surface_daylight(sun_elevation: f64, altitude_ratio: f64) -> f64 {
 /// Point the directional sun light from the star toward the camera's focus
 /// body, and set its illuminance + the global ambient floor as a *projection of
 /// the shading spine's lighting* (F1 of the graphics-fidelity unification —
-/// `docs/graphics_fidelity.md` §3).
+/// `docs/roadmap/graphics_fidelity.md` §3).
 ///
 /// The ship hull, gear, structures, and runway are Bevy `StandardMaterial`s lit by
 /// this one directional light + `GlobalAmbientLight`, while the terrain / vegetation

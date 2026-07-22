@@ -15,37 +15,30 @@ when the same class could plausibly recur. A typo-grade fix doesn't need one.
    agreed root cause. Search here for a matching prior (`rg 'RenderOrigin|jitter|<symptom>'
    docs/incidents/`) before re-deriving.
 2. **Fix the mechanism**, not the symptom.
-3. **Write the post-mortem in the same change**: copy `0000-template.md` to the next
-   `NNNN-kebab-title.md`, fill every section (especially **Evidence**, **Hypotheses
-   considered**, and **Prevention**), add a row to the index below. If the lesson is a standing
-   rule, add/extend the matching CLAUDE.md gotcha or spec-doc invariant and link it from
-   **Prevention**.
-4. **Reference later**: cite `INC-NNNN` in discussion and backlog rows.
+3. **Write the post-mortem in the same change**: copy `template.md` to
+   `YYYYMMDDTHHMMSSZ-kebab-title.md`, using the current UTC time (`date -u '+%Y%m%dT%H%M%SZ'`).
+   Fill every section — especially **Evidence**, **Hypotheses considered**, and **Prevention**.
+   If the lesson is a standing rule, add/extend the matching CLAUDE.md gotcha or spec-doc
+   invariant and link it from **Prevention**.
+4. **Reference later**: cite `INC-YYYYMMDDTHHMMSSZ-slug` in discussion and backlog rows.
 
 Historical incidents migrated from auto-memory keep their original dates.
 
-## Index
+## Identity and ordering
 
-| INC | Title | Severity | Date |
-|-----|-------|----------|------|
-| [0001](0001-render-origin-god-view-shadow-desync.md) | God-view shadows vanished — `RenderOrigin` tracked the focus target, not the camera | visual | 2026-07-05 |
-| [0002](0002-terrain-covers-structures-lod-flatten.md) | Terrain intermittently covered / z-fought the space center — LOD height error vs the flatten plane | visual | 2026-07-18 |
-| [0003](0003-orbital-black-continents-coast-speckle.md) | Black continents from orbit + dotted land-through-water coast speckle | visual | 2026-07-19 |
-| [0004](0004-coarse-lod-mask-step-clamp-grey-shiny.md) | Distant terrain grey/shiny/pixelated — mask stencil step clamped below coarse texel spacing | visual | 2026-07-20 |
-| [0005](0005-smoothstep-epsilon-guard-inverted-forest.md) | Forest painted onto the driest ground — `.max(EPSILON)` guard inverted descending-edge smoothsteps | visual | 2026-07-20 |
-| [0006](0006-parallel-rustc-poisoned-incremental-link.md) | Experimental parallel rustc ICE poisoned incremental objects and broke the next link | perf | 2026-07-20 |
-| [0007](0007-atmosphere-proxy-omitted-camera-render-offset.md) | Raymarched atmosphere detached from the planet — proxy omitted the camera render offset | visual | 2026-07-20 |
-| [0008](0008-direct-dynamic-game-launch-missed-library-path.md) | Direct dynamic game launch missed Cargo's library search path | crash | 2026-07-21 |
-| [0009](0009-mira-horizon-regolith-normal-aliasing.md) | Mira's opaque horizon looked transparent — unresolved regolith normals aliased through Hapke | visual | 2026-07-21 |
-| [0010](0010-cloud-detail-period-eighth-scale.md) | Cloud detail collapsed into stipple — authored cell size was treated as an eight-cell tile period | visual | 2026-07-21 |
-| [0011](0011-cloud-hierarchy-resume-strata.md) | Cloud hierarchy posterized volumes — heuristic leaps resumed on repeated height isosurfaces | visual | 2026-07-21 |
-| [0012](0012-ocean-gradient-worms-isotropic-detail-loss.md) | Ocean gradient worms + premature isotropic detail loss | visual | 2026-07-21 |
-| [0013](0013-stock-atmosphere-hid-analytic-ocean.md) | Stock atmosphere hid the analytic ocean | visual | 2026-07-21 |
-| [0014](0014-density-and-lut-units-erased-bevy-sunset.md) | Density and LUT-unit adapters erased the Bevy sunset | visual | 2026-07-21 |
-| [0015](0015-live-atmosphere-backend-switch-crash.md) | Live atmosphere-backend switching escaped the isolated comparison boundary | crash | 2026-07-21 |
-| [0016](0016-cloud-sparse-history-motion-smear.md) | Sparse cloud history smeared during camera motion | visual | 2026-07-21 |
-| [0017](0017-dx-host-asset-root-double-relative.md) | dx-launched capture host resolved assets outside the workspace | crash | 2026-07-22 |
-| [0018](0018-weather-cube-mip-chain-image-new-assert.md) | Mip-mapped weather cube crashed the capture host via `Image::new`'s level-0-only size assert | crash | 2026-07-22 |
-| [0019](0019-sccache-activation-scoped-to-one-directory.md) | sccache silently inactive in worktrees; job budget halved for the solo case | perf | 2026-07-22 |
-| [0020](0020-plume-uniform-slot-repurposed-stale-reader.md) | Repurposing a uniform slot left a stale reader that erased the plume in vacuum | visual | 2026-07-22 |
-| [0021](0021-point-lights-inert-in-flight-view-cluster-depth-range.md) | Bevy point lights are inert in the flight view — cluster grid spans 0.5 m → 1e11 m | visual | 2026-07-22 |
+Incident identifiers have the form `INC-YYYYMMDDTHHMMSSZ-short-title`. The filename is that
+identifier without the `INC-` prefix, plus `.md`, so lexical directory order is chronological
+recording order. The UTC timestamp is the record's creation time; the semantic slug keeps
+independently authored records on separate paths, so parallel branches don't compete for one
+number. See `ADR-20260722T170714Z-one-chronological-identity-rule` (which extends
+`ADR-20260721T034338Z-distributed-chronological-identifiers` to every mintable record).
+
+**`INC-0001`–`INC-0021` are frozen legacy identifiers.** They keep their sequential numbers,
+filenames, and headings permanently, and remain valid citations — they were deliberately not
+migrated, to avoid rewriting references across in-flight branches. Do not mint new sequential
+numbers, and do not renumber an old one.
+
+There is deliberately no hand-maintained index: it was a merge hotspot on this path and had
+already drifted out of sync with the directory. The timestamp-sorted files are the index. List
+titles in order with `rg --sort path '^# INC-' docs/incidents`, or search content with
+`rg '<symptom>' docs/incidents`.

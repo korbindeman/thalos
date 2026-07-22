@@ -283,7 +283,7 @@ fn synthesize_albedo(
     let sample_count = SUPERSAMPLE_FACTOR * SUPERSAMPLE_FACTOR;
 
     // Albedo alpha carries macro landcover moisture ([-1, 1] → [0, 255], see
-    // docs/terrain_macro.md); the synthetic surface has none, so encode
+    // docs/world/terrain_macro.md); the synthetic surface has none, so encode
     // neutral (128 → 0.0) rather than 255 (fully wet).
     let mut out: Vec<[u8; 4]> = vec![[0, 0, 0, 128]; (size * size) as usize];
     out.par_chunks_mut(size as usize)

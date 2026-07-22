@@ -185,7 +185,7 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
 - **Phase 3** — rename `planet_editor` → `body_editor`. *(done)* Migrating
   "planet" terminology in the render layer to celestial-body terms remains.
 - **Phase 4** — render *mechanism* consolidation (state-in / pixels-out).
-  *(planned — sequenced AFTER the graphics-fidelity foundation, `docs/graphics_fidelity.md`
+  *(planned — sequenced AFTER the graphics-fidelity foundation, `docs/roadmap/graphics_fidelity.md`
   §3.)* The scene-level rendering mechanism is currently split between crates: the
   camera/post bundle (`body_render::impostor::post_stack`, mis-filed under
   `impostor/`), the `scene_depth` and `sun_shadow` render-graph nodes (in
@@ -212,7 +212,7 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
     unified into one `thalos_shipyard::appearance::ship_part_params` (was copy-pasted
     in `game::ship_view` and the editor's `editor::visuals`). This **unblocks the
     craft hull *receiving* the shared sun-shadow cascade** (graphics-fidelity
-    F6b/F7 — `docs/graphics_fidelity.md`), since `thalos::shadow` + the metallic
+    F6b/F7 — `docs/roadmap/graphics_fidelity.md`), since `thalos::shadow` + the metallic
     BRDF branch now live alongside the material.
   - **Done (2026-07-01):** the editor was slimmed *out* of `thalos_shipyard`
     entirely. The `editor/` module (`ShipEditorCorePlugin` + placement / visuals /

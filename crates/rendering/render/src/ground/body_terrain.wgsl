@@ -347,7 +347,7 @@ const MACRO_VAR_AMT: f32 = 0.14;     // ± low-frequency value mottle
 // lowland reads as a varied carpet, not one flat green. The MACRO moisture
 // (regions / mosaics / stands, ≥ ~500 m) is NOT synthesised here — it is the
 // f64 `ProceduralSurface::macro_moisture` field baked into the albedo
-// attachment's alpha channel (docs/terrain_macro.md); the fragment decodes it
+// attachment's alpha channel (docs/world/terrain_macro.md); the fragment decodes it
 // and adds only `thalos::landcover::moisture_detail` (the wrapped ~125 m tier).
 // Do not re-add coarse wrapped tiers: anything at km scale visibly tiles on
 // the 4 km coordinate wrap — that was the "repeating leopard-print planet".
@@ -690,7 +690,7 @@ struct TerrainMaterialSample {
 // slope on top of the tile provider's grass/soil/rock intent masks.
 //   eco_altitude_m — CLIMATE-SHIFTED altitude (`height + climate_cold_lift`),
 //                    so the treeline/snow bands descend with latitude (polar
-//                    caps at sea level) — docs/terrain_macro.md Phase 2
+//                    caps at sea level) — docs/world/terrain_macro.md Phase 2
 //   slope_t    — geometric steepness in [0,1] (0 flat, 1 vertical)
 //   variation  — low-frequency value noise in [-1,1] (jitters bands, mottles)
 //   warmth     — hot-climate weight (1 tropics → 0 cool): dry ground reads as
@@ -1141,7 +1141,7 @@ fn surface_detail(
 
 // Grass-field detail for the VEGETATED ground (see the GRASS_CLUMP_* /
 // GRASS_TUSSOCK_* constants): the band-2 "grass as terrain shading" layer of
-// the vegetation cascade (docs/vegetation.md §5.0). Two gradient-noise scales
+// the vegetation cascade (docs/world/vegetation.md §5.0). Two gradient-noise scales
 // give BOTH the value mottle (`.x`) and the fluffy normal (`.yzw`); each scale
 // fades by pixel footprint, so the grassland stays textured from any altitude
 // at whichever scale still resolves. `grass_w` is the grass coverage at this
@@ -1393,7 +1393,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         // Climate: the cube-sphere coordinate gives the body-fixed unit
         // direction (terrain model space is body-fixed), so latitude — and the
         // cold lift that descends the ecological bands toward the poles — is
-        // exact per fragment. docs/terrain_macro.md Phase 2.
+        // exact per fragment. docs/world/terrain_macro.md Phase 2.
         let body_dir = compute_local_position(info.coordinate);
         let cold_lift = climate_cold_lift(body_dir.y);
         let warmth = climate_warmth(cold_lift);

@@ -121,7 +121,7 @@ pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>
 }
 
 /// Drive the cached trajectory prediction from the regime record (A3 port
-/// #3, `docs/regimes.md`): `PredictionDisplay::Hide` clears the plan —
+/// #3, `docs/simulation/regimes.md`): `PredictionDisplay::Hide` clears the plan —
 /// landed (`BodyFixed`), in ground contact under the backend (the velocity
 /// carries contact reactions Kepler can't follow), or walking on foot
 /// (analytically glued to the rotating surface; predicting it at high warp
@@ -177,7 +177,7 @@ impl Default for WarpLimits {
     }
 }
 
-/// Apply the regime record's warp policy (A4, `docs/regimes.md`): publish
+/// Apply the regime record's warp policy (A4, `docs/simulation/regimes.md`): publish
 /// `CraftRegime.warp.max_level` as [`WarpLimits`] for the input handler and
 /// HUD, and clamp the current level down to it.
 ///
@@ -336,14 +336,14 @@ pub struct CraftStateMirror {
     /// bubble this is the live Avian body rate (written back to canonical by
     /// `local_physics::readback_local_craft`); a diagnostic for attitude /
     /// control-stability work — a steady non-decaying oscillation here is
-    /// SAS chatter. See `docs/control.md`.
+    /// SAS chatter. See `docs/simulation/control.md`.
     pub angular_velocity_rad_s: [f64; 3],
     pub mass_kg: f64,
     pub dominant_body_id: u32,
     /// Discriminant name of `AuthorityMode` (variant fields elided).
     pub authority: String,
     /// Whole-craft structural failure from a terrain impact. See
-    /// `docs/surface.md`.
+    /// `docs/simulation/surface.md`.
     pub destroyed: bool,
     /// Surface-relative approach speed (m/s) of the destroying impact;
     /// `0.0` unless `destroyed`.

@@ -16,8 +16,8 @@ This project self-steers through these documents plus this skill:
 
 - **`docs/backlog.md`** — *execution*. A rolling, status-tracked queue of concrete scoped
   items across the active sprints. Answers *what's the next thing*.
-- **The sprint plan docs** — *strategy*: `docs/architecture_cleanup.md` (`clean`, the primary
-  sprint) and `docs/graphics_fidelity.md` (`gfx`, secondary). They hold the rationale, package
+- **The sprint plan docs** — *strategy*: `docs/roadmap/architecture_cleanup.md` (`clean`, the primary
+  sprint) and `docs/roadmap/graphics_fidelity.md` (`gfx`, secondary). They hold the rationale, package
   designs, and open forks. Slow-changing. Answers *why* and *in what order*. CLAUDE.md's
   "Current focus" section names which sprint is primary.
 - **`docs/adr/`** — resolved decisions (why things are the way they are). A fork resolving in
@@ -76,8 +76,10 @@ fork gates everything queued), say so and switch to Mode 2 on that fork.
 ## Mode 1 — concrete work (capture + do)
 
 1. **File it** in `backlog.md` as a `next` item — right track, reuse the plan doc's ID if one
-   exists, else mint `BL-n`; note deps / est. Even a quick fix gets a one-line row; the
-   backlog is the record of what was done.
+   exists, else mint `BL-YYYYMMDDTHHMMSSZ-slug` from the current UTC time (`date -u
+   '+%Y%m%dT%H%M%SZ'`) — never a sequential `BL-n`, which collides across parallel branches
+   (`ADR-20260722T170714Z-one-chronological-identity-rule`). Note deps / est. Even a quick fix
+   gets a one-line row; the backlog is the record of what was done.
 2. **Do the work** — normal implementation, obeying `CLAUDE.md` (diagnosis-before-patching
    for bugs; the sprint rules of engagement in `clean §4`).
 3. **Close the loop** — mark the item `verify` (or `done` if fully observed working), update
@@ -90,7 +92,8 @@ fork gates everything queued), say so and switch to Mode 2 on that fork.
 
 1. **Discuss** and sharpen the aspiration with the user.
 2. **Record it at the right altitude** — extend a plan doc's scope, revise a fork's options,
-   or (for a genuinely new area) start a new `docs/` design doc in the house style. If a fork
+   or (for a genuinely new area) start a design doc in the appropriate `docs/` category from
+   `docs/README.md`; do not add another root doc by default. If a fork
    is *resolved*, write an **ADR** (`docs/adr/`, per its README) and flip the fork's row in
    the backlog's "Decisions pending" table.
 3. **Decompose** the new direction into concrete `backlog.md` items (`next` or `later`).

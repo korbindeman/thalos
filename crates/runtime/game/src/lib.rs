@@ -188,7 +188,7 @@ fn wgpu_settings_from_env() -> WgpuSettings {
         // Thalos default: Vulkan on Windows. wgpu's own default prefers DX12
         // there, and DX12 is this project's documented unstable path
         // (swapchain-acquire panics, silent device death, and a full
-        // DeviceLost wedge — see docs/tooling.md). Other platforms keep the
+        // DeviceLost wedge — see docs/development/tooling.md). Other platforms keep the
         // wgpu default (Metal on macOS); THALOS_WGPU_BACKEND=auto restores
         // the wgpu default everywhere.
         cfg!(target_os = "windows").then_some(Backends::VULKAN)
@@ -535,7 +535,7 @@ impl AppBuilder {
         app
             // The `SimStage` sets are gated by the `GameContext` sub-state (the
             // single in-`Running` mode authority — see `crate::game_context` and
-            // `docs/ui_flow.md`), replacing the former `*_closed` boolean helpers:
+            // `docs/gameplay/ui_flow.md`), replacing the former `*_closed` boolean helpers:
             // - **VAB** (`GameContext::Vab`) is a separate scene that hides the
             //   world, so it gates *all three* sets off (`not_vab`) — physics, world
             //   sync, and the game camera all freeze; the editor owns the frame.

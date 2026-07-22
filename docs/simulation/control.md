@@ -222,11 +222,11 @@ later:
   pitch/yaw authority, folded into the controller's `effector_authority`
   (alongside the aero surfaces) and realized in
   `local_physics::forces::compute_angular_acceleration`. It is what makes a
-  launch-vehicle ascent steerable — see `docs/aerodynamics.md` *Thrust
+  launch-vehicle ascent steerable — see `docs/simulation/aerodynamics.md` *Thrust
   vectoring*. Roll stays on the reaction wheels.
 - **RCS.** A new translation/attitude effector: a new branch in `allocate`
   (and a dynamic-pressure blend between aero and wheels lives there too);
   new command authority is a new `DemandSource`.
 
-See `docs/aerodynamics.md` for the aero force model the control surfaces
-drive, and `docs/simulation.md` for the authority/integration context.
+See `docs/simulation/aerodynamics.md` for the aero force model the control surfaces
+drive, and `docs/simulation/simulation.md` for the authority/integration context.

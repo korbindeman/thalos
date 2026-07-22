@@ -4,10 +4,10 @@
 CLOUD-4 and CLOUD-6 have second slices landed and headless-verified (see the
 2026-07-22 checkpoint below).
 This document is the strategy and technical plan;
-[backlog.md](backlog.md) is the execution queue, while
+[backlog.md](../backlog.md) is the execution queue, while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
 today. Architecture choices are fixed by
-[ADR-20260720T212214Z-one-weather-field-many-cloud-projections](adr/0009-one-weather-field-many-cloud-projections.md).
+[ADR-20260720T212214Z-one-weather-field-many-cloud-projections](../adr/20260720T212214Z-one-weather-field-many-cloud-projections.md).
 
 The target is a Blackrack-class cloud system for a surface-to-orbit flight
 camera: shaped volumes that can be entered, stable planetary weather seen from
@@ -202,14 +202,14 @@ Use filterable compact formats for generated noise. The former 1920² RGBA32F
 base atlas has been removed; later format work should compact the retained 64³
 RGBA32F basis. A future empty-space hierarchy is optional and may leap only
 from a conservative density bound over the skipped interval
-([ADR-20260721T033055Z-cloud-skips-require-conservative-bounds](adr/0012-cloud-skips-require-conservative-bounds.md)).
+([ADR-20260721T033055Z-cloud-skips-require-conservative-bounds](../adr/20260721T033055Z-cloud-skips-require-conservative-bounds.md)).
 
 **Physical-scale invariant:** an authored feature scale names the feature, not
 the full period of a stored tile containing several cells. The current erosion
 channel contains eight cells per volume axis, so its sampled tile period is
 `detail_scale_m * 8`. Treating `detail_scale_m` itself as the period creates
 ~56 m cells from the authored 450 m scale, below the 200–500 m horizon step and
-recurs as stipple/micro-cloudlets; see [INC-0010](incidents/0010-cloud-detail-period-eighth-scale.md).
+recurs as stipple/micro-cloudlets; see [INC-0010](../incidents/0010-cloud-detail-period-eighth-scale.md).
 
 ### 3.3 View march and reconstruction
 
@@ -355,7 +355,7 @@ User-verifiable:
 **Status (2026-07-20):** complete. Five regime presets,
 temporal/quality/pose overrides, Vulkan
 GPU timing, exact target-memory reporting, 1080p/1440p captures, and the
-artifact inventory are recorded in `docs/cloud_baseline.md`. The 1440p High
+artifact inventory are recorded in `docs/reference/cloud_baseline.md`. The 1440p High
 sunset probe measures 11.06 ms mean on the development RTX 4070 Ti versus the
 provisional 3.5 ms target; persistent cloud textures total 135.98 MiB. The user
 then judged the current result uniformly mediocre against the reference set,
@@ -389,7 +389,7 @@ by CLOUD-2 through CLOUD-6.
 
 **Status (2026-07-21):** historical first checkpoint, captured and compile-clean
 on `codex/cloud-0`. The completed CLOUD-2/3 measurements are recorded below and
-in `docs/cloud_baseline.md`.
+in `docs/reference/cloud_baseline.md`.
 
 - Cloud colour/distance/history targets moved from 1920×1080 to 1280×720;
   the 1920² base atlas was deleted, the generated volume moved 32³ → 64³, and
@@ -435,7 +435,7 @@ Completed reconstruction and corrected density/range slice on `codex/cloud-0`:
   max-density bound over the complete skipped interval. Weather maxima,
   broad-shape proxies, and estimated base/top crossings are correlated hints,
   not bounds; using them as resume gates produced stable height strata
-  ([INC-0011](incidents/0011-cloud-hierarchy-resume-strata.md)).
+  ([INC-0011](../incidents/0011-cloud-hierarchy-resume-strata.md)).
 - Weather producer: slightly stronger cellular gaps (not so strong they shatter
   the limb); taller storm tops / thinner stratus decks so type channels read in
   both near volume and limb silhouettes.
@@ -555,7 +555,7 @@ reduced-detail limb volume.
   reverted. This confirms the planned far tier must prefilter the density into
   optical/albedo/normal/height moments; point-sampling more exact density at
   horizon range is not a substitute for that atlas
-  ([ADR-20260722T102639Z](adr/20260722T102639Z-far-cloud-density-must-be-prefiltered.md)).
+  ([ADR-20260722T102639Z](../adr/20260722T102639Z-far-cloud-density-must-be-prefiltered.md)).
 - **Rejected periodic-density atlas.** The next experiment GPU-baked the exact
   broad-density function into a 512² cubemap, first as OD/height moments and
   then as four vertical OD strata. Tangent-footprint filters, continuous
@@ -567,7 +567,7 @@ reduced-detail limb volume.
   `artifacts/visual/runs/bl-33/step-6a/` through `step-6h/`. CLOUD-6 therefore
   needs a weather-conditioned, genuinely non-periodic far-density producer
   before moment/limb reconstruction can be faithful
-  ([ADR-20260722T111036Z](adr/20260722T111036Z-far-atlas-cannot-project-the-periodic-near-tile.md)).
+  ([ADR-20260722T111036Z](../adr/20260722T111036Z-far-atlas-cannot-project-the-periodic-near-tile.md)).
 - **Rejected single-tile phase warp.** Continuous coverage/base/top channels
   now displace both the broad and 21.6 km formation domains. This local change
   passed matched runway/cruise gates (runway coverage 20.32%; contour proxy
@@ -577,7 +577,7 @@ reduced-detail limb volume.
   a phase warp bends one tile's repetition but does not remove its frequency.
   The atlas was fully reverted; evidence is under `step-8a/` and rollback under
   `step-8-rollback/`.
-  ([ADR-20260722T135123Z](adr/20260722T135123Z-weather-phase-warp-does-not-make-a-periodic-cloud-basis-aperiodic.md)).
+  ([ADR-20260722T135123Z](../adr/20260722T135123Z-weather-phase-warp-does-not-make-a-periodic-cloud-basis-aperiodic.md)).
 - **Rejected incommensurate Cartesian basis.** A second independently
   transformed 3-D domain at an incommensurate period passed local runway and
   cruise coverage gates. Both a context-selected crossfade and a guaranteed
@@ -587,7 +587,7 @@ reduced-detail limb volume.
   next producer is therefore surface-parameterized (body cubemap direction +
   normalized layer height) and shared back into near density; the local
   Cartesian volume is not projected over the whole sphere
-  ([ADR-20260722T141000Z](adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md)).
+  ([ADR-20260722T141000Z](../adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md)).
 - **Open residual.** Planet projection is seam-free and preserves broken
   synoptic systems, but grazing limb/cruise/sunset views still reveal the
   weather-column estimator as a smooth slab beyond the 67.2 km resolved handoff.
@@ -614,7 +614,7 @@ reduced-detail limb volume.
 ## 5. Risks and decision gates
 
 These choices were accepted on 2026-07-20 and are recorded in
-[ADR-20260720T212214Z-one-weather-field-many-cloud-projections](adr/0009-one-weather-field-many-cloud-projections.md) and form the
+[ADR-20260720T212214Z-one-weather-field-many-cloud-projections](../adr/20260720T212214Z-one-weather-field-many-cloud-projections.md) and form the
 constraints for every later phase:
 
 1. **Weather topology — recommended: cube/2-D array.** It costs more authoring

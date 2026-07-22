@@ -139,7 +139,7 @@ the on-screen frame time (the FPS overlay) or capture a chrome trace
 (e.g. volumetric clouds) subtract a renderer subsystem; map view / freecam
 change what the scene draws. Frame time unchanged with the heavy 3D path off ⇒
 CPU-bound. This is how the surface frame cost was traced to the Avian terrain
-collider (see `docs/surface.md`). The game has no remote-inspection channel —
+collider (see `docs/simulation/surface.md`). The game has no remote-inspection channel —
 you analyze the artifacts (trace JSON, slow-frame JSONL, console logs), the
 user runs the game.
 
@@ -180,7 +180,7 @@ as separate storage costs. Before removing a worktree, verify both its dirty
 state and commits absent from `main`; unique research branches and their authored
 data are not caches.
 
-### Fast build setup — see docs/build_speed.md
+### Fast build setup — see docs/development/build_speed.md
 
 The full cross-platform build-acceleration guide — fast linkers per platform
 (rust-lld on Windows, mold on Linux/WSL), incremental + trimmed debug, **sccache**

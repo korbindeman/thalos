@@ -114,7 +114,7 @@ fn attach_ship_layer_for_hide_in_map(
 /// Ship-view solid geometry ([`HideInMapView`] — the craft + the EVA player) is
 /// *also* placed on [`SHADOW_CASTER_LAYER`] so it casts into the custom sun-shadow
 /// cascades and grounds with a shadow on the terrain/grass, exactly like trees +
-/// rocks (F6 of the graphics-fidelity unification — `docs/graphics_fidelity.md`
+/// rocks (F6 of the graphics-fidelity unification — `docs/roadmap/graphics_fidelity.md`
 /// §4.2). The cascade cameras read only depth, so this adds the mesh to the shadow
 /// map without changing how the craft itself is shaded (receiving is separate:
 /// `ship_part.wgsl` / `shadowed_standard.wgsl` sample the same rig).

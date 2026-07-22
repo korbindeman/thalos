@@ -190,7 +190,7 @@ pub(super) fn handle_actions(
                 // "Launched to fly": clear the return stack and drop to Flight.
                 // The launch-select flow then re-enters BaseEditor (the picker)
                 // parented to Flight, so placing / cancelling both land in flight
-                // — never back in the VAB or hub (`docs/ui_flow.md`).
+                // — never back in the VAB or hub (`docs/gameplay/ui_flow.md`).
                 history.0.clear();
                 if let Some(next) = next_ctx.as_mut() {
                     next.set(GameContext::Flight);

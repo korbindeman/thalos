@@ -73,6 +73,6 @@ solid cores use the lower-frequency Perlin/Worley basis.
 
 - Authored noise scales name physical features, not implementation tile periods;
   generated channel frequency must be folded into the sampling transform.
-- `docs/clouds.md` records this as a density-scale invariant.
+- `docs/rendering/clouds.md` records this as a density-scale invariant.
 - A recurrence presents as stable micro-cloudlets whose world size tracks the
   marcher step and survives temporal/shadow-jitter A/B tests.

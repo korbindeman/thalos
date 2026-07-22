@@ -87,7 +87,7 @@ fn angular_noise(theta: f32, phases: &[f32; 4]) -> f32 {
 /// population exceeds the equilibrium budget. The equilibrium SFD has
 /// cumulative slope -2 regardless of the production slope, so binning
 /// in factor-√2 steps keeps every bin's cap proportional to D⁻². Doc
-/// §2 (procedural_mira.md): "If density exceeds ~3% of geometric
+/// §4 (`docs/world/mira_airless_mvp.md`): "If density exceeds ~3% of geometric
 /// saturation, cull the oldest craters at that size."
 fn cull_to_saturation(craters: &mut Vec<Crater>, body_radius_m: f32, fraction: f32) {
     if fraction <= 0.0 || craters.is_empty() {

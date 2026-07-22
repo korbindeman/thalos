@@ -1,7 +1,7 @@
 //! Query API — the seam between terrain generation and its consumers.
 //!
 //! This is P0 of the planet-generation pipeline migration
-//! ([docs/planet-generation-pipeline-migration.md]). It establishes a single
+//! ([docs/archive/planet-generation-pipeline-migration.md]). It establishes a single
 //! contract every renderer and the physics collider evaluate the surface
 //! through, so there is exactly **one geometric surface** ("one synth") shared
 //! across the impostor, the UDLOD ground tiles, and the collider — replacing
@@ -116,7 +116,7 @@ pub struct SurfaceSample {
     pub roughness: f32,
     /// Macro landcover moisture in `[-1, 1]` (+ wet, − dry) — the planet-scale
     /// f64 field the terrain shader's wrapped fine noise modulates
-    /// (docs/terrain_macro.md). Baked into the tile albedo attachment's alpha
+    /// (docs/world/terrain_macro.md). Baked into the tile albedo attachment's alpha
     /// channel. `0.0` for backings without a landcover model.
     pub moisture: f32,
 }

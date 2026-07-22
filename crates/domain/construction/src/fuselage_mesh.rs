@@ -1,7 +1,7 @@
 //! Stationed-loft fuselage geometry, shared by the editor and the in-game
 //! ship view so a saved airframe looks identical in both.
 //!
-//! A [`crate::Fuselage`] is a **stationed loft** (`docs/construction.md`
+//! A [`crate::Fuselage`] is a **stationed loft** (`docs/gameplay/construction.md`
 //! §4.2): a straight body axis with a sequence of **superellipse**
 //! cross-section stations, the skin lofted between them. High-level airliner
 //! params (length, nose/tail fractions, droop, upsweep, tail-tip diameter)

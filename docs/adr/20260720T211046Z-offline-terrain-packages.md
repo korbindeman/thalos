@@ -80,7 +80,7 @@ change cannot reuse tiles from an older package with the same authored inputs.
 MIRA-0 is complete; the trained airless diffusion producer remains MIRA-1/2
 work, and this ADR does not treat compatibility output as diffusion output.
 
-The production path is now specified in `docs/mira_airless_mvp.md`: pinned
+The production path is now specified in `docs/world/mira_airless_mvp.md`: pinned
 global and regional lunar DEM teachers plus labelled process simulation feed a
 physical-scale Laplacian S0–S3 patch cascade; the first campaign sphere targets
 4096 texels per face with direction-seeded overlap-belt consensus. These are

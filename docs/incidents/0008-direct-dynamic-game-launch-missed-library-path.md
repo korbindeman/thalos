@@ -79,8 +79,8 @@ contract while retaining the one-Cargo-build comparison recipe.
 
 - Any committed workflow that directly launches a dev renderer built with
   `bevy/dynamic_linking` must install the profile, profile/deps, **and rustc
-  target-libdir** loader paths or keep using `cargo run`; see `docs/tooling.md`
-  and `docs/visual_testing.md`.
+  target-libdir** loader paths or keep using `cargo run`; see `docs/development/tooling.md`
+  and `docs/development/visual_testing.md`.
 - A direct-built renderer that exits before its first log with `0xc0000135`
   (Windows) or a missing `.so` / `.dylib` loader error should be checked for this
   path contract before debugging game startup.

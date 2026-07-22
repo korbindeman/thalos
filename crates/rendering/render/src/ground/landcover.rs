@@ -27,13 +27,13 @@
 //! deliberate mirror; if the terrain palette/scales move, these must move too or
 //! grass and ground will disagree. (The proper long-term home is the
 //! `ProceduralSurface` seam providing the field once, consumed by both — see
-//! `docs/vegetation.md`.)
+//! `docs/world/vegetation.md`.)
 
 use bevy::math::{DVec3, Vec3};
 
 // === Mirror of landcover.wgsl — keep in sync ===============================
 // Fine tiers only: the MACRO moisture (≥ ~500 m) is the f64
-// `ProceduralSurface::macro_moisture` field (docs/terrain_macro.md), passed in
+// `ProceduralSurface::macro_moisture` field (docs/world/terrain_macro.md), passed in
 // by the caller (grass builders read it via `HeightSource::landcover_moisture`;
 // the terrain shader decodes it from the albedo attachment's alpha).
 /// Noise wrap period (m). Every `* SCALE` below is integer, so the wrapped

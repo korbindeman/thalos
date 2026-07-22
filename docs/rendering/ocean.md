@@ -198,9 +198,9 @@ These are explicit `OCEAN-PROG` scope, not hidden TODOs in the shader.
 
 ## References
 
-- [ADR-20260720T185954Z-analytic-planet-water-never-meshed](adr/20260720T185954Z-analytic-planet-water-never-meshed.md)
-- [ADR-20260720T185958Z-water-projects-one-signed-sea-field](adr/20260720T185958Z-water-projects-one-signed-sea-field.md)
-- [ADR-20260721T050036Z-ocean-composite-independent-of-atmosphere](adr/20260721T050036Z-ocean-composite-independent-of-atmosphere.md)
-- [INC-0012](incidents/0012-ocean-gradient-worms-isotropic-detail-loss.md)
+- [ADR-20260720T185954Z-analytic-planet-water-never-meshed](../adr/20260720T185954Z-analytic-planet-water-never-meshed.md)
+- [ADR-20260720T185958Z-water-projects-one-signed-sea-field](../adr/20260720T185958Z-water-projects-one-signed-sea-field.md)
+- [ADR-20260721T050036Z-ocean-composite-independent-of-atmosphere](../adr/20260721T050036Z-ocean-composite-independent-of-atmosphere.md)
+- [INC-0012](../incidents/0012-ocean-gradient-worms-isotropic-detail-loss.md)
 - [Atmospheres, Oceans, and Lighting](atmosphere.md)
-- [Graphics fidelity plan](graphics_fidelity.md)
+- [Graphics fidelity plan](../roadmap/graphics_fidelity.md)

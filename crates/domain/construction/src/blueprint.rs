@@ -42,7 +42,7 @@ pub enum PartParams {
         diameter: f32,
         length: f32,
     },
-    /// Stationed-loft fuselage (`docs/construction.md` §4.2). High-level
+    /// Stationed-loft fuselage (`docs/gameplay/construction.md` §4.2). High-level
     /// airliner params; [`crate::fuselage_mesh`] turns them into the skin.
     Fuselage {
         length: f32,
@@ -487,7 +487,7 @@ fn insert_part(
             // ship_part panel shader maps cleanly — the fuselage flows through
             // the standard body-of-revolution visual path with `PartMaterial`,
             // like a tank. (A non-circular / double-bubble loft would need
-            // loft-derived UVs — `docs/construction.md` §2 — deferred.)
+            // loft-derived UVs — `docs/gameplay/construction.md` §2 — deferred.)
             ec.insert((
                 Fuselage {
                     length: *length,
@@ -524,7 +524,7 @@ fn insert_part(
             // aggregation time (the symmetry lives on `SurfaceMount`, not
             // here). Wings deliberately get no `PartMaterial`: the
             // ship_part shader maps detail by cylindrical coords and would
-            // smear across a lofted skin (`docs/construction.md` §2).
+            // smear across a lofted skin (`docs/gameplay/construction.md` §2).
             let dry_mass = w.mass_per_m2 * wing_panel_area(*span, *root_chord, *tip_chord);
             ec.insert(Wing {
                 span: *span,

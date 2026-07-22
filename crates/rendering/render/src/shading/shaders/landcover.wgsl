@@ -12,7 +12,7 @@
 
 #define_import_path thalos::landcover
 
-// SCALE OWNERSHIP (docs/terrain_macro.md): this wrapped f32 field carries only
+// SCALE OWNERSHIP (docs/world/terrain_macro.md): this wrapped f32 field carries only
 // FINE detail (≤ ~250 m). The macro moisture (≥ ~500 m — regions, mosaics,
 // stands) is the f64 `ProceduralSurface::macro_moisture` field, baked into the
 // tile albedo attachment's alpha channel; callers decode it there and add
@@ -55,7 +55,7 @@ const C_ALPINE: vec3<f32>   = vec3<f32>(0.082, 0.094, 0.074);
 
 // ── Climate (latitude → cold lift / warmth) ────────────────────────────────
 // Mirror of `thalos_terrain::procedural::{climate_cold_lift_m, climate_warmth}`
-// (docs/terrain_macro.md Phase 2) — keep the constants in lockstep. The cold
+// (docs/world/terrain_macro.md Phase 2) — keep the constants in lockstep. The cold
 // lift is how many metres the ecological altitude bands (lush belt, treeline,
 // snowline) descend at a latitude; consumers pass `altitude_m + cold_lift`
 // wherever a band threshold is compared.

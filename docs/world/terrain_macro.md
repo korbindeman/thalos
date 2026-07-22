@@ -7,7 +7,7 @@ continent/island structure. Written 2026-07-18 after a diagnosis of the
 2–3 are design.
 
 Companion docs: `terrain.md` (consumer-side tile contract),
-`docs/vegetation.md` (scatter cascade), `docs/graphics_fidelity.md` (shading).
+`docs/world/vegetation.md` (scatter cascade), `docs/roadmap/graphics_fidelity.md` (shading).
 The generator itself is `thalos_terrain::procedural::ProceduralSurface`.
 
 ## 1. Diagnosis: why the planet read as one repeating texture

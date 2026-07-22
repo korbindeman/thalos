@@ -65,7 +65,7 @@ pub struct ShipParameters {
     /// of `max_torque` in both the controller's authority sum and the realized
     /// torque. Aggregated from each gimballed engine's `thrust · sin(range) ·
     /// CoM arm` (`thalos_runtime::staging`). Zero for aircraft / fixed-bell
-    /// rockets. See `docs/aerodynamics.md` *Thrust vectoring*.
+    /// rockets. See `docs/simulation/aerodynamics.md` *Thrust vectoring*.
     pub gimbal_torque_full: DVec3,
     pub thrust_n: f64,
     pub mass_flow_kg_per_s: f64,
@@ -79,12 +79,12 @@ pub struct ShipParameters {
     /// game's `detect_terrain_impact` compares the pre-contact approach
     /// speed against this. `f64::INFINITY` means "indestructible" — the
     /// sentinel for a craft whose real stats haven't been pushed yet, and
-    /// for EVA (no Avian contact damage). See `docs/surface.md`.
+    /// for EVA (no Avian contact damage). See `docs/simulation/surface.md`.
     pub impact_tolerance_m_s: f64,
     /// Aerodynamic reference (frontal) area in m², for the aggregate
     /// bluff-body drag of this craft. Derived from the ship's geometry
     /// (`ShipStats::frontal_area_m2`); 0 means "no aerodynamic drag" (sentinel
-    /// default and EVA). See `docs/aerodynamics.md`.
+    /// default and EVA). See `docs/simulation/aerodynamics.md`.
     pub reference_area_m2: f64,
     /// Aggregate bluff-body drag coefficient (dimensionless). Blunt capsule
     /// ~1.0–1.4, streamlined rocket ~0.3–0.5. 0 means "no aerodynamic drag".

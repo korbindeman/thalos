@@ -4,8 +4,8 @@ A snapshot of the techniques the Thalos renderer applies today, written as the
 **baseline for research into a next-generation full-scale planetary renderer**.
 It describes what exists and how it works, states the known gaps, and points at
 the code. It is descriptive, not aspirational — for the forward plan see
-`docs/graphics_fidelity.md`; for per-system specs see `docs/terrain.md`,
-`docs/atmosphere.md`, `docs/vegetation.md`.
+`docs/roadmap/graphics_fidelity.md`; for per-system specs see `docs/world/terrain.md`,
+`docs/rendering/atmosphere.md`, `docs/world/vegetation.md`.
 
 Scale context: Thalos (the homeworld) is a ~3.19 Mm-radius terrestrial body
 with ocean, atmosphere, and vegetation; the system also contains airless
@@ -23,7 +23,7 @@ Three ideas organise the renderer:
    terrain, vegetation, rocks, water, crafts, structures — should obey the
    same light, cast into and receive the same shadows, occlude each other, and
    recede into the same air. A surface that opts out reads as a pasted-on
-   cut-out. (`docs/graphics_fidelity.md` §2.3.)
+   cut-out. (`docs/roadmap/graphics_fidelity.md` §2.3.)
 2. **One shared shading spine.** All body-surface materials import a single
    set of WGSL libraries (`thalos::lighting`, `thalos::atmosphere`,
    `thalos::shadow`, `thalos::landcover`, `thalos::foliage`,
@@ -373,7 +373,7 @@ consolidation into the spine's WATER branch (F9/W19).
 
 ## 10. Vegetation & ground detail
 
-Design (docs/vegetation.md): a **four-band representation cascade** per layer,
+Design (docs/world/vegetation.md): a **four-band representation cascade** per layer,
 ending in the terrain albedo — geometry is a near-field detail layer over a
 ground colour that already reads correctly from any distance. Placement is
 **deterministic and view-independent** (body-global cube-sphere tile lattice +
@@ -548,4 +548,4 @@ full-scale planetary renderer" realism:
 | Water | `shading/shaders/water.wgsl`, `ground/body_sky.wgsl` compiled by `BodyOceanMaterial` |
 | Vegetation | `crates/rendering/render/src/ground/{vegetation,scatter,gpu_grass,tree_impostor,landcover}.rs`, drivers in `crates/runtime/game/src/rendering/{grass,gpu_grass,vegetation}.rs` |
 | Celestial | `crates/domain/celestial/`, `crates/runtime/game/src/sky_render.rs` |
-| Plan / specs | `docs/graphics_fidelity.md`, `docs/terrain.md`, `docs/atmosphere.md`, `docs/vegetation.md` |
+| Plan / specs | `docs/roadmap/graphics_fidelity.md`, `docs/world/terrain.md`, `docs/rendering/atmosphere.md`, `docs/world/vegetation.md` |

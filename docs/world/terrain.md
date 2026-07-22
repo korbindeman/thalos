@@ -7,12 +7,12 @@ produces tiles; nothing in this doc depends on *how*.
 
 > **Legacy generation is archived (2026-06).** The previous generation design (feature
 > compiler, field-DAG pipeline spec, migration plan, research surveys) was moved
-> under [`archive/`](archive/) and reframed as a black box. The current runtime
+> under [`archive/`](../archive/) and reframed as a black box. The current runtime
 > generator and the planned offline package bakery both target the tile contract
 > below; see [mira_airless_mvp.md](mira_airless_mvp.md) and ADR-20260720T211046Z-offline-terrain-packages. This doc is the *consumer* side:
 > tile contract → rendering → shadows → colliders → dynamic features.
 > Atmospheric optics, ocean, clouds, reflections, and lighting/GI live in
-> [atmosphere.md](atmosphere.md).
+> [atmosphere.md](../rendering/atmosphere.md).
 
 ## Overview
 
@@ -91,7 +91,7 @@ directly. See *TileProvider interface* under Rendering for the API.
 Generation produces tiles conforming to *The tile contract*. Current procedural
 internals and Mira's temporary deterministic offline producer remain separate
 from the planned diffusion-package producer described
-in [mira_airless_mvp.md](mira_airless_mvp.md). The superseded compiler design is in [`archive/`](archive/)
+in [mira_airless_mvp.md](mira_airless_mvp.md). The superseded compiler design is in [`archive/`](../archive/)
 (`terrain-generation-legacy.md`, the pipeline spec + migration, and the `gen/`
 research surveys) and is reference only.
 
@@ -186,7 +186,7 @@ GPU precision down to centimeter scale without needing big_space
 cells.
 
 big_space's role for terrain is therefore the same as its role
-elsewhere in the sim (see [simulation.md](simulation.md), "big_space
+elsewhere in the sim (see [simulation.md](../simulation/simulation.md), "big_space
 usage"):
 
 - **System frame** — barycentric, where bodies orbit.
@@ -556,7 +556,7 @@ into Thalos and wiring it to the revamped feature compiler.
 - In-memory tile reuse is provided by `thalos_udlod`'s `TileAtlas`;
   an explicit Thalos-side persistent cache is deferred unless tile
   latency proves to be a problem.
-- **Implementation:** [crates/rendering/render/src/ground/pipeline.rs](../crates/rendering/render/src/ground/pipeline.rs).
+- **Implementation:** [crates/rendering/render/src/ground/pipeline.rs](../../crates/rendering/render/src/ground/pipeline.rs).
 - **Exit criterion (met):** body terrain entities are spawned by
   `crates/runtime/game/src/rendering/ground_terrain.rs` from
   `finalize_planet_generation` once the body's `PlanetSurface` task
@@ -603,9 +603,9 @@ into Thalos and wiring it to the revamped feature compiler.
   deferred, but orbital/mid-altitude haze and cloud coverage match the
   impostor handoff.
 - **Implementation:**
-  [crates/rendering/render/src/shading/shaders/lighting.wgsl](../crates/rendering/render/src/shading/shaders/lighting.wgsl),
-  [crates/rendering/render/src/ground/body_terrain.wgsl](../crates/rendering/render/src/ground/body_terrain.wgsl),
-  [crates/runtime/game/src/rendering/ground_terrain.rs](../crates/runtime/game/src/rendering/ground_terrain.rs).
+  [crates/rendering/render/src/shading/shaders/lighting.wgsl](../../crates/rendering/render/src/shading/shaders/lighting.wgsl),
+  [crates/rendering/render/src/ground/body_terrain.wgsl](../../crates/rendering/render/src/ground/body_terrain.wgsl),
+  [crates/runtime/game/src/rendering/ground_terrain.rs](../../crates/runtime/game/src/rendering/ground_terrain.rs).
 - **Exit criterion (met):** terrain ground-LOD pixels go through
   Hapke + eclipse + planetshine + ambient via the shared helper, with
   per-fragment roughness sampled from the third tile attachment.
@@ -653,12 +653,12 @@ normal so residual bands read as smooth terrain rather than terraced
 contour steps.
 
 The cascade — since migration P0, it lives in the Query API seam
-[crates/domain/terrain/src/query.rs](../crates/domain/terrain/src/query.rs) (moved out
+[crates/domain/terrain/src/query.rs](../../crates/domain/terrain/src/query.rs) (moved out
 of `body_render::ground::pipeline`, which now delegates to it) — adds
 high-frequency detail on top of the macro:
 
 - **Musgrave ridged hybrid multifractal** (`hmf_ridged_3d` in
-  [crates/domain/terrain/src/noise.rs](../crates/domain/terrain/src/noise.rs))
+  [crates/domain/terrain/src/noise.rs](../../crates/domain/terrain/src/noise.rs))
   evaluated in body-local 3D so the field is sphere-continuous —
   the same physical point returns the same value regardless of which
   cube face is generating it. The HMF's self-modulating weight
@@ -795,7 +795,7 @@ vacuum-black floor (with a small ambient floor for playability).
    transmittance term (the `cloud_transmittance` factor above); it also feeds
    god rays through the `BodySky` atmosphere pass (depth-coupled via
    `SceneDepthImage`). Owned by the atmosphere/cloud system — see
-   [atmosphere.md](atmosphere.md).
+   [atmosphere.md](../rendering/atmosphere.md).
 4. **Contact / crevice** — SSAO: screen-space, pipeline-agnostic, covers terrain
    and objects uniformly with no custom plumbing.
 5. **Macro day/night + eclipse** — already in `SceneLighting` (terminator N·L,
@@ -804,7 +804,7 @@ vacuum-black floor (with a small ambient floor for playability).
 The current shipping state is layer 2's analytic proxy plus layer 5; the baked
 horizon attachment (layer 1) is the next high-value visual win and the reason
 `horizon` is reserved in *The tile contract*. Reflective-ship reflections and
-ray-traced GI are covered in [atmosphere.md](atmosphere.md); both depend on the
+ray-traced GI are covered in [atmosphere.md](../rendering/atmosphere.md); both depend on the
 same single height authority (a future RT BLAS is the collider-patch trimesh
 extended).
 
@@ -852,7 +852,7 @@ home for the cheap dynamic re-pass.
 > This section describes the **shipped grass near-ring**. The full
 > planet-scale vegetation plan that generalizes it — grass to the horizon,
 > shrubs, trees, LOD cascades, clipmap rings, impostors, instancing, and the
-> phased roadmap — lives in `docs/vegetation.md`.
+> phased roadmap — lives in `docs/world/vegetation.md`.
 
 Near-camera grass blades on vegetated bodies (Thalos), shipped 2026-06 as a
 **self-contained decoration layer on the consumer side of the tile contract** —
@@ -956,14 +956,14 @@ generator, not here.)
 
 ## References
 
-- [atmosphere.md](atmosphere.md) — atmospheric optics, ocean rendering,
+- [atmosphere.md](../rendering/atmosphere.md) — atmospheric optics, ocean rendering,
   clouds, reflections (brushed-stainless → mirror), and lighting/GI
   (bevy_solari). The other half of the surface look.
-- [simulation.md](simulation.md) — big_space hierarchy, save/load, body
+- [simulation.md](../simulation/simulation.md) — big_space hierarchy, save/load, body
   state providers.
-- [lore/solar_system.md](lore/solar_system.md) — the bodies terrain must
+- [lore/solar_system.md](../lore/solar_system.md) — the bodies terrain must
   handle.
-- [archive/](archive/) — **superseded** terrain-generation design
+- [archive/](../archive/) — **superseded** terrain-generation design
   (legacy feature compiler, pipeline spec + migration, `gen/` research
   surveys and aesthetic targets). Reference only; the new generator is
   built against *The tile contract* above.

@@ -73,4 +73,4 @@ atmosphere and before clouds.
   Bevy atmosphere. If the two frames become identical, first inspect whether
   the dedicated ocean entity rendered before debugging spectrum math.
 - See ADR-20260721T050036Z-ocean-composite-independent-of-atmosphere and
-  [ocean.md](../ocean.md).
+  [ocean.md](../rendering/ocean.md).

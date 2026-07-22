@@ -101,7 +101,7 @@ capture-stop:
 # diffs/wipes + manifest under the disposable agent scratch tree at
 # artifacts/visual/runs/comparisons/<preset>/<axis>/.
 # Axes include ssao (off/on/raw), terrain-lighting, terrain-culling,
-# terrain-regolith-filter, and cloud-reconstruction. See docs/visual_testing.md.
+# terrain-regolith-filter, and cloud-reconstruction. See docs/development/visual_testing.md.
 compare preset="spaceport-aerial" axis="ssao":
     cargo build -p thalos_capture --bins
     {{ if os() == "windows" { "target/debug/visual_compare.exe" } else { "./target/debug/visual_compare" } }} "{{preset}}" "{{axis}}"

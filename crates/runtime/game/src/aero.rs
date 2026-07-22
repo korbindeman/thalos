@@ -18,7 +18,7 @@
 //! Frame: the body frame is X=right, Y=nose, Z=dorsal. The model's stability and
 //! damping are explicit and unconditionally stable (see the evaluator docs); the
 //! airfoil / control constants below are a first cut tuned in-game (see
-//! `docs/aerodynamics.md`).
+//! `docs/simulation/aerodynamics.md`).
 
 use bevy::math::DVec3;
 use bevy::prelude::*;

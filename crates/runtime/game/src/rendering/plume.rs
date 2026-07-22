@@ -1,5 +1,5 @@
 //! Rocket-engine exhaust plumes — a data-driven, pressure-responsive renderer
-//! (design: `docs/plume.md`), driven from a typed [`PlumeSignals`] boundary.
+//! (design: `docs/rendering/plume.md`), driven from a typed [`PlumeSignals`] boundary.
 //!
 //! The plume is modelled as an axisymmetric emitting gas column whose *shape* is
 //! set by the nozzle/ambient pressure ratio and whose *brightness follows from
@@ -19,7 +19,7 @@
 //! the cone dissolves on its own; at sea level it barely expands, so entrainment
 //! of ambient air is what cools it, and it reads as a dense, shock-celled,
 //! afterburning column. This module resolves the parameters; `plume.wgsl`
-//! renders the same model. See `docs/plume.md`, and INC-0020 before repurposing
+//! renders the same model. See `docs/rendering/plume.md`, and INC-0020 before repurposing
 //! any packed lane of [`PlumeParams`].
 //!
 //! Pipeline:

@@ -240,7 +240,7 @@ never built an engine. **The integrator is the interesting job**, and it is the 
 game gives the player.
 
 Procedural geometry still carries the *connective* structure — tanks, fuselages,
-interstages, fairings, wings ([construction.md](construction.md)) — so vehicles are
+interstages, fairings, wings ([construction.md](gameplay/construction.md)) — so vehicles are
 proportioned by the player rather than snapped from a fixed diameter set.
 
 > **Realistic-looking rockets are a constraint outcome, not a modelling-tool outcome.**
@@ -315,7 +315,7 @@ answer, and stays interesting as the envelope grows.
 
 Infrastructure is the fourth pressure, and it hooks into what exists: a family shares pad
 configuration, tooling and integration facilities — the spaceport and its launchpads are
-real structures in the world ([base_building.md](base_building.md)), not menu entries.
+real structures in the world ([base_building.md](gameplay/base_building.md)), not menu entries.
 
 ---
 
@@ -360,7 +360,7 @@ flight, unrestricted KSP-style piloting, and modelling true light-time input lag
 
 `thalos_control` already models every attitude command as a tagged `ControlDemand`,
 arbitrated by source priority into one `AttitudeController` and allocated to reaction
-wheels and aero surfaces ([control.md](control.md)). The ladder is a **permissions and
+wheels and aero surfaces ([control.md](simulation/control.md)). The ladder is a **permissions and
 fidelity layer over that**, not a new control path:
 
 | Gated axis | What the tier changes |
@@ -582,13 +582,13 @@ it:
 
 - **The control-authority ladder is a permissions layer over `thalos_control`, not a new
   control path** (§8.2). The demand vocabulary, priority arbitration, one
-  `AttitudeController` and one allocator already exist ([control.md](control.md)); the
+  `AttitudeController` and one allocator already exist ([control.md](simulation/control.md)); the
   ladder gates *which demands and sources are available and how accurate the state estimate
   is*. Keep that seam clean — a guidance tier must never become a second control stack.
 - **Fin and vane actuation is already modelled.** `Wing::control_surfaces` meshes hinged
   sub-surfaces about a real hinge axis, animates them from the fly-by-wire command, and
   derives per-axis authority from the authored window geometry and its CoM moment arm
-  ([construction.md](construction.md), [aerodynamics.md](aerodynamics.md)). Early
+  ([construction.md](gameplay/construction.md), [aerodynamics.md](simulation/aerodynamics.md)). Early
   fin-stabilised vehicles are a parts-catalogue problem, not an engine problem.
 - **`thalos_shipyard` stays the one construction model.** Any mission-spec UI is a front
   end over `ShipBlueprint` (§10.1), never a parallel assembler.

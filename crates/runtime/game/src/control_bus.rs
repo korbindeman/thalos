@@ -20,7 +20,7 @@
 //! **Scope:** attitude. Throttle remains on its existing setpoint path
 //! (`ThrottleState::commanded`, with the autopilot overriding it directly and
 //! [`crate::controls::ControlLocks`] gating the player); folding the throttle
-//! *setpoint* into the bus is the next step (see `docs/control.md`). Warp,
+//! *setpoint* into the bus is the next step (see `docs/simulation/control.md`). Warp,
 //! EVA, and RCS are likewise documented extension points: a new source is a
 //! new [`DemandSource`]; a new effector is a new branch in
 //! [`thalos_control::allocate`].
@@ -51,7 +51,7 @@ use crate::velocity_frame::VelocityFrameState;
 /// dynamic-pressure authority split and build the flight-assist state in
 /// [`realize_control`]. The craft *kinematics* (SLF pose / air-relative
 /// velocity) come from the Avian-free [`LocalCraftKinematics`] readout, not
-/// from Avian components — the backend seam (`docs/physics.md`).
+/// from Avian components — the backend seam (`docs/simulation/physics.md`).
 type ShipAeroQuery<'w, 's> = Query<'w, 's, &'static ShipAero, With<LocalCraftBody>>;
 
 /// Below this stick magnitude the pilot is "hands off" and the lower-priority

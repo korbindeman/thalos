@@ -22,7 +22,7 @@ single-craft / single-site assumptions baked into what should be N-ary systems.
 The goal is to go over every feature area and give it a **proper, unified
 system**: one canonical way to do each thing, DRY across similar features, and
 natural support for any N instances. The plan lives in
-`docs/architecture_cleanup.md`. Guiding rules for this sprint:
+`docs/roadmap/architecture_cleanup.md`. Guiding rules for this sprint:
 
 - **One canonical path per operation.** Spawning/placing/teleporting a craft,
   opening/closing a game mode, placing a structure on terrain — each gets a
@@ -35,8 +35,8 @@ natural support for any N instances. The plan lives in
   behind an accessor, and recorded in the plan doc — not implied by a bare
   resource.
 - **Finish the in-flight unifications before adding parallel machinery.** The
-  `GameContext` sub-state (docs/ui_flow.md) and `CraftRegime`
-  (docs/regimes.md) migrations exist precisely to kill boolean/state sprawl —
+  `GameContext` sub-state (docs/gameplay/ui_flow.md) and `CraftRegime`
+  (docs/simulation/regimes.md) migrations exist precisely to kill boolean/state sprawl —
   new modes and regime consumers go through them, and completing their
   remaining phases outranks new features.
 - **Delete dead code on contact.** The removed bake pipeline's remains and any
@@ -46,14 +46,14 @@ natural support for any N instances. The plan lives in
 ## Secondary focus: graphics fidelity
 
 The active sprint is pushing toward MSFS/KSP2-tier visuals. The full plan is in
-`docs/graphics_fidelity.md` (restructured 2026-06-30 around a full architecture
+`docs/roadmap/graphics_fidelity.md` (restructured 2026-06-30 around a full architecture
 review). The doc is now organised around two ideas, not a flat task list:
 
 - **The one-world principle** — Thalos is one physical world; *every* surface
   (terrain, terrain detail, vegetation, rocks, **crafts, gear, buildings, pads,
   tanks, runway**, water) must obey the same light, cast into and receive from the
   same shadows, occlude each other, and recede into the same air. A surface that
-  opts out reads as a pasted-on cut-out. See `docs/graphics_fidelity.md` §2.3.
+  opts out reads as a pasted-on cut-out. See `docs/roadmap/graphics_fidelity.md` §2.3.
 - **The unification foundation** — the central debt is **two lighting universes**:
   terrain/vegetation/water/rock/impostors shade through the shared
   `thalos::lighting` spine (`shade_surface`/`ThalosSurface`), but **crafts and
@@ -75,7 +75,7 @@ Status of in-flight work (now tracked by substrate in the doc's §4):
   single-cascade mode keeps hull self-shadow in orbit; W12 v1 (CPU horizon march
   dims the sun on objects parked behind terrain). *Next:* screenshot tuning,
   per-fragment horizon term for spine materials, PCSS (W18), cloud shadows (W2).
-  See `docs/shadow_unification_prompt.md` for the full status block.
+  See `docs/reference/shadow_unification_prompt.md` for the full status block.
 - **Landcover + palette / aerial recession / moonlight** ◐ — in `thalos::lighting`
   / `thalos::landcover`; awaiting screenshots. Moonlight converges into F1 (the
   two moon models become one); aerial recession folds inside `shade_surface`.
@@ -137,9 +137,21 @@ convention in `docs/README.md`):
   alternatives, cutting/deferring scope, reversing an approach) — the reasoning
   is otherwise lost to context compaction. Immutable once accepted; supersede,
   don't rewrite.
-- **`docs/incidents/`** — post-mortems for fixed non-obvious bugs (`INC-NNNN`):
-  evidence, hypothesis differential, root cause, prevention, recurrence tells.
-  Written in the same change as the fix (see "Bug fixing" below).
+- **`docs/incidents/`** — post-mortems for fixed non-obvious bugs
+  (`INC-YYYYMMDDTHHMMSSZ-slug`): evidence, hypothesis differential, root cause,
+  prevention, recurrence tells. Written in the same change as the fix (see
+  "Bug fixing" below).
+- **Identifiers are chronological, never sequential.** Every record you mint —
+  ADR, incident, backlog item — is `<KIND>-<YYYYMMDDTHHMMSSZ>-<kebab-slug>`,
+  stamped with the current UTC time (`date -u '+%Y%m%dT%H%M%SZ'`); the filename
+  drops the kind prefix, so lexical order is chronological order. **Never
+  allocate the "next number"** — a shared counter makes parallel branches mint
+  the same ID for unrelated work, and no record directory carries a
+  hand-maintained index to append to. Existing `INC-0001`–`INC-0021` and
+  `BL-1`–`BL-40` are frozen legacy IDs: still valid to cite, never to extend or
+  renumber. Plan-doc IDs (`CL-A`…`CL-G`, `F1`–`F9`, `W`-numbers, `TM`, `C1`) are
+  unaffected — one document owns them. See
+  ADR-20260722T170714Z-one-chronological-identity-rule.
 
 ## Commands
 
@@ -193,7 +205,7 @@ just preview-window       # interactive variant of `just preview`: a window with
 just ui-preview           # headless UI-kit kitchen sink →
                           #   artifacts/visual/latest/ui_preview.png (every thalos_ui token/widget
                           #   over a test scene). Agents iterate on the UI by
-                          #   reading the PNG. See docs/ui.md.
+                          #   reading the PNG. See docs/gameplay/ui.md.
 just ui-preview-window    # interactive kitchen sink (hover/press/typing feel;
                           #   S = screenshot). User-run (opens a window).
 just texgen               # rebuild versioned runtime vegetation atlases offline
@@ -238,7 +250,7 @@ Windows iteration path stays on LLVM. Do not add unstable `-Zthreads`: the
 speedup into a full recovery build (INC-0006). The workspace-local
 `.cargo/config.toml` and `.env.just` are ignored by Git for this purpose. The full policy plus
 Windows fast-incremental and macOS workaround examples live in
-`docs/build_speed.md`.
+`docs/development/build_speed.md`.
 
 **Fast iteration invariants:**
 
@@ -263,7 +275,7 @@ Windows fast-incremental and macOS workaround examples live in
   scripts/check-build-env.sh` names any worktree that is not normalized. sccache
   activation itself is the global `RUSTC_WRAPPER` on Windows (a repo-local
   `.cargo/config.toml` is invisible to worktrees outside the checkout) — see
-  `docs/build_speed.md` §5.0/§5.3.1. On WSL/Linux, create the
+  `docs/development/build_speed.md` §5.0/§5.3.1. On WSL/Linux, create the
   complete worktree set first, run `scripts/setup-build-env.sh --agents N
   --all-worktrees`, source `scripts/sccache-on.sh` in every agent shell, and
   require `bash scripts/check-build-env.sh --parallel` to pass before work begins.
@@ -277,7 +289,7 @@ Windows fast-incremental and macOS workaround examples live in
   for the WSL2 Mesa-D3D12 GL bridge — but note the full renderer currently
   cannot run on GL (missing 16-bit-norm/view-format features); WSL2 without a
   dzn ICD falls back to llvmpipe software Vulkan, where GPU timings are not
-  budget evidence. See docs/build_speed.md §4.
+  budget evidence. See docs/development/build_speed.md §4.
 - Expect the first build after changing compiler flags, profiles, or Bevy/wgpu
   features to take several minutes. That is a one-time graph rebuild, not the
   steady-state iteration time. Avoid changing these inputs casually, because
@@ -325,7 +337,7 @@ compiler into a schema-v1 package with an explicit node/blob manifest,
 artifact identity, validator, and `PackageSurface`; player devices
 never run the producer. The production
 direction is an offline hierarchical-diffusion bakery that emits adaptive,
-versioned cube-sphere terrain packages; see `docs/mira_airless_mvp.md` and
+versioned cube-sphere terrain packages; see `docs/world/mira_airless_mvp.md` and
 ADR-20260720T211046Z-offline-terrain-packages. Player devices stream packages through a `PackageSurface` backing and
 reconstruct only bounded close-range detail. The authored package and the
 disposable runtime tile cache are separate layers. Package-backed and procedural
@@ -496,7 +508,7 @@ readback deliberately favor visual iteration over timing. Use the FPS/trace
 profiling workflow for performance attribution. New debug channels (normals,
 depth, LOD/tile IDs, shadow factor/cascade, material IDs, atmosphere
 transmittance, lighting lobes) extend the typed comparison runner; they do not
-get a parallel camera or orchestration path. Full details: `docs/visual_testing.md`.
+get a parallel camera or orchestration path. Full details: `docs/development/visual_testing.md`.
 
 **Terrain iteration/design is verified by screenshot — always.** Any change to
 terrain generation, landcover/biomes, or surface scatter (trees/grass/rocks)
@@ -697,7 +709,7 @@ persisted selector. **Worth evaluating for the graphics sprint** (new in
 0.19, not yet adopted): **contact shadows** (screen-space, kills close-geometry
 peter-panning — complements our `thalos::shadow` rig), **physically-based SSR**,
 **parallax-corrected cubemaps** (relevant to the F3/F4 IBL work), and the
-vignette/lens-distortion post FX. See `docs/graphics_fidelity.md` before pulling
+vignette/lens-distortion post FX. See `docs/roadmap/graphics_fidelity.md` before pulling
 any of these in — they must obey the one-world / spine rules, not bypass them.
 
 ## Architecture
@@ -728,11 +740,11 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   `physics_local`/Avian, not a claim of being the foundation.) Also hosts the
   native atmospheric-aero force model (`aero`): a whole-body lift/drag +
   stability/damping/control evaluator the game drives force-only in the local
-  bubble — see `docs/aerodynamics.md`. Also hosts `surface_local`: the
+  bubble — see `docs/simulation/aerodynamics.md`. Also hosts `surface_local`: the
   body-fixed Y-up tangent-frame math (anchor + ENU basis, inertial↔SLF
   conversions composed on `body_fixed`, exact gravity/centrifugal/Coriolis,
   re-anchor) the ship local-physics bubble integrates in — see
-  `docs/surface_local.md`.
+  `docs/simulation/surface_local.md`.
 - **`thalos_control`** — pure-Rust fly-by-wire control layer. The single
   command vocabulary every ship-control source speaks (`AttitudeDemand` /
   `ControlDemand` tagged with a `DemandSource` priority), the priority
@@ -748,7 +760,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   while spaceships / vacuum / SAS-off keep the quaternion path unchanged.
   Depends one-way on `physics_canonical`;
   no Bevy. The game-side glue is `thalos_runtime::control_bus`. See
-  `docs/control.md`.
+  `docs/simulation/control.md`.
 - **`thalos_input`** — Bevy enhanced-input contexts, RON binding loader, and per-binary input intent resources
 - **`thalos_ui`** — the **game UI kit** (Bevy): design tokens (palette /
   spacing / type scale, `UiTheme`), the frosted-glass panel surface
@@ -759,7 +771,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   flight HUD's `HudTheme` is a projection of the same tokens. Iterate with
   the kitchen-sink testbed (`just ui-preview` → PNG). Fonts: Inter
   (interface, OFL) + Fira Code (numeric/mono; Δ-strings stay mono by
-  convention). See `docs/ui.md`.
+  convention). See `docs/gameplay/ui.md`.
 - **`thalos_runtime`** — the canonical Bevy composition layer shared by the
   player app and headless capture host; owns gameplay, rendering integration,
   UI, scenarios, and deterministic capture presets.
@@ -784,9 +796,9 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   the same offline boundary.
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
-- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/runtime/game/src/local_physics/mod.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/runtime/game/src/local_physics/mod.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/runtime/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/runtime/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/surface.md`.
+- **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/simulation/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/runtime/game/src/local_physics/mod.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/runtime/game/src/local_physics/mod.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/simulation/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/runtime/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/simulation/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/runtime/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/simulation/surface.md`.
 - **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + regime-scaled projections. Four modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), `ground` (the `thalos_udlod`-backed terrain LOD: `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial` plus the analytic `BodySkyMaterial`/`BodyOceanMaterial` projections, rendered-height patch utilities), and `clouds` (the absorbed MIT `bevy-volumetric-clouds` fork: spherical body-fixed volume march + cloud-local history targets). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render` and top-level `thalos_volumetric_clouds` mechanisms. A backend chooses geometry or cost, never its own lighting/atmosphere/weather authority. Terrestrial clouds obey ADR-20260720T212214Z-one-weather-field-many-cloud-projections: authored `CloudClimate` → one per-body `CloudWeatherField` → near/orbit/shadow projections.
-- **`thalos_udlod`** — Thalos-owned UDLOD terrain renderer at `crates/rendering/udlod/`. It originated from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. It is **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess path is gone. (Upstream's own successor is now a *different repo*, [`planetary_terrain_renderer`](https://github.com/kurtkuehnert/planetary_terrain_renderer) — a useful diff reference for fixes to the Taylor-series precision path.) A 2026-07 optimization pass tailored the subsystem to Thalos; **see `docs/terrain_lod_optimization.md`**, and note these load-bearing rules:
+- **`thalos_udlod`** — Thalos-owned UDLOD terrain renderer at `crates/rendering/udlod/`. It originated from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. It is **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess path is gone. (Upstream's own successor is now a *different repo*, [`planetary_terrain_renderer`](https://github.com/kurtkuehnert/planetary_terrain_renderer) — a useful diff reference for fixes to the Taylor-series precision path.) A 2026-07 optimization pass tailored the subsystem to Thalos; **see `docs/reference/terrain_lod_optimization.md`**, and note these load-bearing rules:
   - **Providers own mip generation.** `TileProvider::request_tile` must return the **full mip chain** (call `AttachmentData::generate_mipmaps` inside the task). The atlas does *not* regenerate mips — that kept per-tile mip filtering on the main thread and made cached payloads useless.
   - **Attachments may differ in resolution.** The GPU atlas sizes each attachment's texture array independently. Height keeps the full grid (it is the geometry, and the only attachment physics reads); albedo/roughness/material bake at half (`TierConfig::detail_texture_size`) — a >2× cut in the game's largest allocation.
   - **Tiles are cached, and the cache key is the contract** (`game::rendering::tile_cache`): memory (survives terrain despawn/respawn) over disk (survives the process) over synthesis. The namespace is a `NamespaceFn` resolved **per request**, not frozen at construction, because the flatten handle is read per tile *pixel* — a pad installed after spawn still changes what later tiles bake. **If you add an input to tile synthesis, fold it into the namespace, and bump `thalos_terrain::GENERATOR_VERSION` when generation output changes** — otherwise a cached run silently renders old terrain. `THALOS_TILE_CACHE=0` disables the disk tier while iterating on generation.
@@ -806,7 +818,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   and pulls no Bevy crate (the no-Bevy CI guard still holds); `thalos_body_render`
   uses the `bevy` feature for the shader-library plugin. It is expected to be
   replaced by diffusion terrain work, not maintained as a generic vendor fork.
-- **`thalos_shipyard`** — parametric ship **construction model** (ECS attach tree, RON blueprints): part components + catalog, resources, blueprint (de)serialization + spawn, attach nodes / surface mounts / KSP linked symmetry, parametric sizing + mass/capacity recompute, stats / staging, and the geometry mesh builders (cockpit / engine / fuselage / gear / wing) shared with the game's flight-craft rendering. It owns *what a craft is*; it does **not** own the interactive editor or any UI. The **editor application** lives with its sole consumer, the game, at `thalos_runtime::shipyard_editor` — a UI-agnostic `core` submodule (`ShipEditorCorePlugin`: `EditorState` command/state hub, placement, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron`) plus the native Bevy-UI front-end (scene + panels). There is no standalone editor binary (the old egui `just shipyard` tool was deleted). Every editor-owned entity carries the `EditorPart` marker (defined in `shipyard_editor::core`) and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/construction.md`.
+- **`thalos_shipyard`** — parametric ship **construction model** (ECS attach tree, RON blueprints): part components + catalog, resources, blueprint (de)serialization + spawn, attach nodes / surface mounts / KSP linked symmetry, parametric sizing + mass/capacity recompute, stats / staging, and the geometry mesh builders (cockpit / engine / fuselage / gear / wing) shared with the game's flight-craft rendering. It owns *what a craft is*; it does **not** own the interactive editor or any UI. The **editor application** lives with its sole consumer, the game, at `thalos_runtime::shipyard_editor` — a UI-agnostic `core` submodule (`ShipEditorCorePlugin`: `EditorState` command/state hub, placement, live mesh rebuilds, tank-resize handle, placement-preview ghost, shrouds, blueprint save/load against `ships/*.ron`) plus the native Bevy-UI front-end (scene + panels). There is no standalone editor binary (the old egui `just shipyard` tool was deleted). Every editor-owned entity carries the `EditorPart` marker (defined in `shipyard_editor::core`) and every core query filters on it; host systems that aggregate the same part components for the *flight* craft (fuel, staging, gear, ship visuals, colliders) must filter `Without<EditorPart>` — that marker is the only thing separating the build world from the flying craft in the same ECS `World`. Resource storage is whitelist-driven from the parts catalog: any part kind can declare `storage` entries for fixed (`units`) or volume-scaled (`units_per_m3`) capacity, and blueprints may only activate resources whitelisted by that part. Omitted blueprint resources mean "use catalog defaults"; explicit resource maps mean the user's selected active pools. Do not restore hard-coded per-resource tank fields such as `methane_l_per_m3` / `lox_l_per_m3`; add real resources (for example `Kerosene`) to `Resource` and catalog storage lists instead. Air intake is ambient capture, not stored oxidizer: engines declare `intake_requirement`, nacelles may provide `builtin_intake`, and separate `Intake` parts can feed future engine-core layouts. See `docs/gameplay/construction.md`.
 
 ### Workspace source layout
 
@@ -822,7 +834,7 @@ capture path, not separate lab applications. `big_space` is vendor;
 until diffusion replaces it; texgen becomes offline.
 
 Headless verification is a first-class product capability, not a simplified
-renderer or a player-facing app. CAP-1–CAP-4 (`docs/capture.md`) extract one
+renderer or a player-facing app. CAP-1–CAP-4 (`docs/development/capture.md`) extract one
 `thalos_runtime` shared by the game app and capture-host tool, a typed capture protocol/runtime, one
 Rust CLI for persistent/cold stills and comparisons, and deterministic frame
 sequence/video capture. Both applications must compose the same plugin graph.
@@ -919,7 +931,7 @@ Key modules:
 
 ### Game crate (`crates/runtime/game/`)
 
-- **Boot, loading, and the start screen** (see `docs/boot.md`).
+- **Boot, loading, and the start screen** (see `docs/gameplay/boot.md`).
   `loading.rs` owns `AppState` (`Loading` → `MainMenu` | `Running`) and the
   **`LoadingTracker`** — a declarative step registry (`begin` registers the
   step set for a load; producers update their step by id; the reveal fires
@@ -982,9 +994,9 @@ Key modules:
   the ship ~1.5 km AGL, low and slow, over the first sufficiently flat
   patch (or the flattest dry fallback). Thalos now has both a *visual*
   atmosphere + volumetric clouds (`terrestrial_atmosphere` in
-  `assets/bodies/thalos.ron`; see `docs/atmosphere.md`) and a *physics*
+  `assets/bodies/thalos.ron`; see `docs/rendering/atmosphere.md`) and a *physics*
   atmosphere (per-body density below the Kármán line; see
-  `docs/aerodynamics.md`), so descents now experience aerodynamic **drag** —
+  `docs/simulation/aerodynamics.md`), so descents now experience aerodynamic **drag** —
   a descending/reentering ship decelerates toward a terminal velocity rather
   than free-falling lunar-style. **`runway`** (alias
   `rwy`) and **`runway-approach`** (aliases `rwy-approach` /
@@ -1114,7 +1126,7 @@ Key modules:
   state, not `EvaMode`.
 - Semantic player input is read from `thalos_input::game::GameInputIntent`.
   Keep raw Bevy input only for cursor positions, picking spatial data, and UI
-  internals. See `docs/input.md`.
+  internals. See `docs/gameplay/input.md`.
 - `solar_system_state` — canonical game-level per-frame source for evaluated
   solar-system state. `SimulationState` owns the long-lived simulation,
   ephemeris, and authored system definition; `SolarSystemState` is refreshed
@@ -1152,7 +1164,7 @@ Key modules:
   surviving destruction/respawn); the HUD SAS button toggles that same
   switch as the `T` key. Throttle still
   rides its own setpoint path (`ThrottleState::commanded`, autopilot
-  override, `ControlLocks`) pending a later fold-in. See `docs/control.md`.
+  override, `ControlLocks`) pending a later fold-in. See `docs/simulation/control.md`.
 - `map_view` — snapshot/projection boundary for map rendering. Copies
   `CraftState`, body states, and `FlightPlan` into `MapSnapshot`; map
   systems consume the snapshot and never mutate canonical simulation
@@ -1167,7 +1179,7 @@ Key modules:
   is the single owner of widget + slot visibility, and `HudPanel` lives on
   the slot container only. This replaced the old single hardcoded
   "TRAJECTORY" panel, which surfaced an orbital plot during atmospheric
-  flight. See `docs/hud_widgets.md`.
+  flight. See `docs/gameplay/hud_widgets.md`.
 - `rendering/` — Every system that turns simulation state into
   rendered geometry. Submodules:
   - `types` — rendering-shared resources (`CameraExposure`,
@@ -1323,7 +1335,7 @@ Key modules:
   `body_render::ground::scatter`'s `ScatterRegion`/`ScatterTreatment`/`classify_scatter`,
   derived from the `StructureRegistry` by `rendering::grass` and honoured by the
   grass tile builder (the seam future base trees/props extend). See
-  `docs/base_building.md` *Ground scatter*.
+  `docs/gameplay/base_building.md` *Ground scatter*.
 - `space_center/` — the **KSP-style Space Center hub**: the god-view overview you
   land in when you press **PLAY** on the start screen. Like the base editor it is
   an **in-world modal mode** (a `sim_clock` pause source, `space_center_closed`
@@ -1464,7 +1476,7 @@ Parametric ship **construction model** (Bevy, no UI). Owns *what a craft is* —
 parts, resources, blueprints, attach tree, sizing/stats/staging, geometry mesh
 builders — not the editor (that's `thalos_runtime::shipyard_editor`, see the Game
 crate section). The full next-gen construction model (planes/ships/stations from
-one Module primitive) is specced in `docs/construction.md`; **Slices 1–2
+one Module primitive) is specced in `docs/gameplay/construction.md`; **Slices 1–2
 (parametric wing, wing-pylon jet nacelle, and scalar intake flow) plus
 visually-actuating control surfaces have landed** — see that doc's §0 for the
 status boundary.
@@ -1507,13 +1519,13 @@ status boundary.
   three-detent flap lever (F extend / R retract) and the B brakes latch
   (wheel brakes + spoilers, KSP-style) — and their authored window geometry
   derives the craft's flap/spoiler ΔCL/ΔCD in `build_ship_aero_config`
-  (`docs/aerodynamics.md` *Flight configuration*). **Per-surface control
+  (`docs/simulation/aerodynamics.md` *Flight configuration*). **Per-surface control
   authority**: the per-axis control coefficients likewise derive from the
   authored aileron/elevator/rudder windows (deflection lift × real moment arm
   about the CoM — `derive_control_coefficients`), so surface sizing and
   placement show up in handling; the *moment structure* stays the whole-body
   stable model — forces are never an emergent per-surface strip sum, which
-  pumps energy (`docs/aerodynamics.md` *Per-surface control authority*).
+  pumps energy (`docs/simulation/aerodynamics.md` *Per-surface control authority*).
   Gear will be its own footprint part. No flight model yet (M6).
 - `Engine` / `AirIntake` — rocket bells remain node-stacked; jet nacelles can
   surface-mount to wings as `WingPylon` mounts with generated pylons. Ambient
@@ -1583,7 +1595,7 @@ reads from. No materials of its own.
   (placement reuses the tile baker's grass-mask gate against the body's
   `HeightSource`) + `GrassMaterial`. Driven per-frame by
   `thalos_runtime::rendering::grass` (runway-style f64 body-fixed anchoring,
-  revision-based rebuilds). See `docs/terrain.md` *Vegetation decoration
+  revision-based rebuilds). See `docs/world/terrain.md` *Vegetation decoration
   layer*.
 - `ground_patch` — `GroundPatchMaterial` / `GroundPatchMaterialPlugin`: a flat,
   sky-model-lit ground plane (the shared `thalos::lighting` dielectric BRDF, not
@@ -1602,7 +1614,7 @@ reads from. No materials of its own.
 - The game-side `rendering::clouds` driver selects the nearest authored cloudy
   body and projects `CloudClimate`/environment state into view uniforms. Near
   composition stays in `BodySkyMaterial`; the first orbit projection is in
-  `SolidPlanetMaterial`. See ADR-20260720T212214Z-one-weather-field-many-cloud-projections and `docs/clouds.md`.
+  `SolidPlanetMaterial`. See ADR-20260720T212214Z-one-weather-field-many-cloud-projections and `docs/rendering/clouds.md`.
 
 `body_render` is the **sole consumer** of the Thalos-owned `thalos_udlod`,
 re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
@@ -1665,7 +1677,7 @@ assets/solar_system.ron + assets/bodies/<body>.ron
   `MapSnapshot` ← `update_map_snapshot`, `CraftStateMirror` ←
   `refresh_craft_state_mirror`, the per-craft `CraftRegimeState` component ←
   `regime::resolve_regime` (the regime decision record every per-frame
-  ownership/warp/prediction consumer reads — see `docs/regimes.md`), and
+  ownership/warp/prediction consumer reads — see `docs/simulation/regimes.md`), and
   `AvianAuthority` ← `compute_avian_authority` (a derived projection of
   that record). Every other system reads. Don't add a second writer; if a
   resource needs to be mutated from elsewhere, route through an accessor on
@@ -1703,7 +1715,7 @@ assets/solar_system.ron + assets/bodies/<body>.ron
 
 Each major system has a unified spec doc. **The map + cross-ref convention
 (`clean §N` = architecture_cleanup.md, `gfx §N` = graphics_fidelity.md,
-`ADR-YYYYMMDDTHHMMSSZ-slug`, `INC-NNNN`) live in `docs/README.md`.** Steering docs —
+`ADR-YYYYMMDDTHHMMSSZ-slug`, `INC-YYYYMMDDTHHMMSSZ-slug`) live in `docs/README.md`.** Steering docs —
 `backlog.md` (the queue), `adr/` (decision log), `incidents/` (post-mortems) —
 are covered in "Steering, decisions & incidents" above.
 

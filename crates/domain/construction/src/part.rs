@@ -237,7 +237,7 @@ pub struct ControlSurface {
 /// host radius (0 → a single centred leg); the leg count derives from it.
 /// `dry_mass` is catalog-derived from strut length, wheel mass, and leg count.
 ///
-/// **Future** (`docs/construction.md` §4.4): the fuselage will recess-morph to
+/// **Future** (`docs/gameplay/construction.md` §4.4): the fuselage will recess-morph to
 /// house the gearbox inside the belly. For now it sits at/below the belly with
 /// no skin deformation.
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -277,7 +277,7 @@ pub struct FuelTank {
     pub dry_mass: f32,
 }
 
-/// A **stationed-loft fuselage** (`docs/construction.md` §4.2): the advanced
+/// A **stationed-loft fuselage** (`docs/gameplay/construction.md` §4.2): the advanced
 /// airframe body that replaces a straight tank-cylinder + cone tailcone with
 /// one continuous, upswept superellipse loft. Parameterised by high-level
 /// airliner numbers; [`crate::fuselage_mesh`] generates the cross-section
@@ -290,7 +290,7 @@ pub struct FuelTank {
 /// is node-stacked under another (`sizing::propagate_node_sizes`), and every
 /// other extent scales with it so the authored proportions are preserved.
 ///
-/// **Future** (`docs/construction.md` §5): a wet/role-filled fuselage carries
+/// **Future** (`docs/gameplay/construction.md` §5): a wet/role-filled fuselage carries
 /// fuel/crew/cargo in its integrated volume; today the airliner body is
 /// structure-only (empty storage whitelist) and fuel lives in the wet wings.
 #[derive(Component, Debug, Clone, PartialEq)]
@@ -359,7 +359,7 @@ pub struct Engine {
     /// Design point the nozzle is sized for. Sets the expansion ratio, and with
     /// it the exit pressure — which is what decides whether the exhaust is over-
     /// or underexpanded at a given altitude. Read by the plume renderer
-    /// (`docs/plume.md`) to shape the exhaust from the pad to vacuum.
+    /// (`docs/rendering/plume.md`) to shape the exhaust from the pad to vacuum.
     pub optimized_for: EngineOptimization,
     pub requires_atmosphere: bool,
     pub intake_requirement: Option<IntakeRequirement>,
@@ -381,7 +381,7 @@ pub struct Engine {
     /// Peak thrust-vector deflection (degrees) from the nose axis; `0` = fixed
     /// bell (no gimbal). Aggregated into `ShipParameters::gimbal_torque_full`
     /// (thrust × sin(range) × CoM arm) so a gimballed engine steers the craft
-    /// in pitch/yaw under power. See `docs/aerodynamics.md` *Thrust vectoring*.
+    /// in pitch/yaw under power. See `docs/simulation/aerodynamics.md` *Thrust vectoring*.
     pub gimbal_range_deg: f32,
 }
 

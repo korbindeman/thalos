@@ -58,7 +58,7 @@ jobs:
       - name: Avian is named only by the backend-seam executor layer
         shell: bash
         run: |
-          # Backend seam (docs/physics.md): the Avian dependency — re-exported as
+          # Backend seam (docs/simulation/physics.md): the Avian dependency — re-exported as
           # `thalos_physics_local::avian` — may only be NAMED by the executor
           # layer. Everything else reads canonical state / the `CraftRegime`
           # record / the Avian-free `LocalCraftKinematics` readout. Keeping this
@@ -72,7 +72,7 @@ jobs:
           allow='crates/simulation/physics_local/|crates/runtime/game/src/local_physics/|crates/runtime/game/src/aero\.rs|crates/runtime/game/src/regime\.rs|crates/runtime/game/src/player_controller\.rs|crates/runtime/game/src/debug\.rs'
           offenders="$(grep -rnE 'avian3d|avian::' crates --include='*.rs' | grep -vE "$allow" || true)"
           if [ -n "$offenders" ]; then
-            echo "::error::Avian named outside the backend-seam allowlist (docs/physics.md):"
+            echo "::error::Avian named outside the backend-seam allowlist (docs/simulation/physics.md):"
             echo "$offenders"
             exit 1
           fi

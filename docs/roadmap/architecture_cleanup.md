@@ -86,7 +86,7 @@ single-instance assumption in this doc.
 
 ### 2.3 Mode/state machinery
 
-`GameContext` (docs/ui_flow.md) Phase 1 (shadow) and Phase 2 (flip consumers:
+`GameContext` (docs/gameplay/ui_flow.md) Phase 1 (shadow) and Phase 2 (flip consumers:
 sim-clock, SimStage gates, the single camera authority
 `view::apply_active_camera`, HUD) have landed. **Phase 3 (invert ownership) is
 no longer blocked** — the base-editor WIP that stalled it now compiles
@@ -325,7 +325,7 @@ or rotate the camera, then repeat to confirm the updated pose stays fixed too.
 ### G. UI kit consolidation — LANDED 2026-07-05 ☑ (game-UNVERIFIED)
 
 The "duplicated menu-button builders" finding, solved structurally: a new
-**`thalos_ui`** crate (see `docs/ui.md`) owns design tokens, a frosted-glass
+**`thalos_ui`** crate (see `docs/gameplay/ui.md`) owns design tokens, a frosted-glass
 panel material (+ scene-copy backdrop pass), and the whole widget library.
 Deleted on contact: the game's `ui_widgets.rs`, the shipyard editor's private
 `ui/widgets.rs`, and four per-screen `update_button_visuals` clones. Every

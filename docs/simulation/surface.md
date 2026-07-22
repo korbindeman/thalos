@@ -4,7 +4,7 @@
 > *ship* contact bubble formerly described in the "Landing & impact
 > destruction" part of this doc has been **replaced** by a **surface-local
 > tangent frame** with a **solid** ground collider (terrain heightfield /
-> runway cuboid) and gear-as-sole-ground-contact — see `docs/surface_local.md`
+> runway cuboid) and gear-as-sole-ground-contact — see `docs/simulation/surface_local.md`
 > (§10 for what shipped). The runway is now a terrain-anchored *structure*
 > (`crates/runtime/game/src/structures.rs`). **EVA (the on-foot part below, §§1–7)
 > is unchanged** — it deliberately stayed on its body-centered kinematic
@@ -76,10 +76,10 @@ suppression); a separate pass will redesign landed-ship mechanics.
 
 ### 2.1 Walking system — `crates/runtime/game/src/player_controller.rs`
 
-`walk_eva_on_terrain` ([player_controller.rs:239](crates/runtime/game/src/player_controller.rs:239))
+`walk_eva_on_terrain` ([player_controller.rs:239](../../crates/runtime/game/src/player_controller.rs#L239))
 owns the EVA capsule's position directly. The body is a kinematic
 Avian rigid body with `CustomPositionIntegration` + rotation locked
-([local_physics.rs:406](crates/runtime/game/src/local_physics.rs:406)); the
+([local_physics.rs:406](../../crates/runtime/game/src/local_physics/mod.rs)); the
 walking system writes `Position`, `Rotation`, `LinearVelocity`, and
 zeroes `AngularVelocity` each frame.
 
@@ -93,9 +93,9 @@ Per-frame loop:
    in real time so warp doesn't speed it up.
 3. Convert the stepped direction to body-fixed and query
    `rendered_height_m(surface, dynamic_state, dir, tile_lod_m=0.5)`
-   ([player_controller.rs:318](crates/runtime/game/src/player_controller.rs:318)).
+   ([player_controller.rs:318](../../crates/runtime/game/src/player_controller.rs#L318)).
 4. Glue altitude to `body.radius + terrain_h + half_height +
-   foot_clearance` ([player_controller.rs:324](crates/runtime/game/src/player_controller.rs:324)).
+   foot_clearance` ([player_controller.rs:324](../../crates/runtime/game/src/player_controller.rs#L324)).
 5. Write `LinearVelocity = surface_velocity + walking_velocity` so the
    canonical readback reports correct ground velocity.
 
@@ -103,42 +103,42 @@ There is no gravity force, no airborne ballistic phase, no contact
 resolution. The system is "kinematic terrain follower." A jump or
 cliff fall would teleport instantly — explicitly called out as a
 known limitation in the doc comment
-([player_controller.rs:233–238](crates/runtime/game/src/player_controller.rs:233)).
+([player_controller.rs:233–238](../../crates/runtime/game/src/player_controller.rs#L233)).
 
-### 2.2 Local-physics authority — `crates/runtime/game/src/local_physics.rs`
+### 2.2 Local-physics authority — `../../crates/runtime/game/src/local_physics/mod.rs`
 
-Three-way `AvianRole` enum ([local_physics.rs:98](crates/runtime/game/src/local_physics.rs:98)):
+Three-way `AvianRole` enum ([local_physics.rs:98](../../crates/runtime/game/src/local_physics/mod.rs)):
 `Paused` (warp or BodyFixed), `AttitudeOnly` (1× coast, Kepler owns
 translation), `Full` (1× thrust or terrain contact). `avian_role_from_inputs`
-([local_physics.rs:189](crates/runtime/game/src/local_physics.rs:189)) is the
+([local_physics.rs:189](../../crates/runtime/game/src/local_physics/mod.rs)) is the
 pure predicate.
 
 For EVA, every local-physics force/snap system either short-circuits
 or goes through harmlessly:
 
 - `snap_avian_from_canonical` early-returns for `VesselKind::Eva`
-  ([local_physics.rs:714](crates/runtime/game/src/local_physics.rs:714)).
+  ([local_physics.rs:714](../../crates/runtime/game/src/local_physics/mod.rs)).
 - `apply_local_forces` early-returns for `VesselKind::Eva`
-  ([local_physics.rs:984](crates/runtime/game/src/local_physics.rs:984)).
+  ([local_physics.rs:984](../../crates/runtime/game/src/local_physics/mod.rs)).
 - `readback_local_craft` *always* mirrors Avian → canonical for EVA
-  ([local_physics.rs:1135](crates/runtime/game/src/local_physics.rs:1135));
+  ([local_physics.rs:1135](../../crates/runtime/game/src/local_physics/mod.rs));
   for ships it gates on `owns_translation`.
 
 The EVA capsule's `Collider` is removed at spawn
-([local_physics.rs:408](crates/runtime/game/src/local_physics.rs:408)) so
+([local_physics.rs:408](../../crates/runtime/game/src/local_physics/mod.rs)) so
 Avian's contact graph never finds it. This was an explicit fix for
 an earlier sliding bug
-([local_physics.rs:381–386](crates/runtime/game/src/local_physics.rs:381)).
+([local_physics.rs:381–386](../../crates/runtime/game/src/local_physics/mod.rs)).
 
 EVA never enters `AuthorityMode::BodyFixed`. The capsule is spawned
 in body-centered inertial coordinates and stays there; `BodyFixed`
 is reserved for ships that collapsed after `stable_contact` in
-`collapse_or_constrain_warp` ([local_physics.rs:1251](crates/runtime/game/src/local_physics.rs:1251)).
+`collapse_or_constrain_warp` ([local_physics.rs:1251](../../crates/runtime/game/src/local_physics/mod.rs)).
 
-### 2.3 Height query — `crates/domain/terrain_render/src/pipeline.rs`
+### 2.3 Height query — `../../crates/rendering/render/src/ground/pipeline.rs`
 
 `rendered_height_m(surface, dynamic_state, dir, tile_lod_m)`
-([pipeline.rs:500](crates/domain/terrain_render/src/pipeline.rs:500)) is the
+([pipeline.rs:500](../../crates/rendering/render/src/ground/pipeline.rs)) is the
 single CPU-side "what does UDLOD draw here?" entry point. Three
 stages:
 
@@ -146,30 +146,30 @@ stages:
 2. Dynamic overlays (ice caps, aeolian bedforms).
 3. LOD-adaptive procedural detail: 3-D fBm noise + 2-D erosion filter,
    octave count chosen by `detail_plan_for_lod(tile_lod_m)`
-   ([pipeline.rs:150](crates/domain/terrain_render/src/pipeline.rs:150)).
+   ([pipeline.rs:150](../../crates/rendering/render/src/ground/pipeline.rs)).
 
 The renderer's `PipelineTileProvider::request_tile`
-([pipeline.rs:210](crates/domain/terrain_render/src/pipeline.rs:210)) calls
+([pipeline.rs:210](../../crates/rendering/render/src/ground/pipeline.rs)) calls
 the same evaluation function (`compute_tile_pixels` →
 `evaluate_pixel`) and bakes the result into the UDLOD attachment
 atlas. Per-tile `tile_lod_m` comes from
 `tile_lod_m(body, coord, size, border)`
-([pipeline.rs:712](crates/domain/terrain_render/src/pipeline.rs:712)):
+([pipeline.rs:712](../../crates/rendering/render/src/ground/pipeline.rs)):
 `body.radius * face_radians / inner_texels`. At Thalos
 (radius ≈ 3186 km, `LOD_COUNT=16`, 512² tiles, border 2) the deepest
 LOD reaches `tile_lod_m ≈ 0.15 m`.
 
 The player query passes `tile_lod_m=0.5` directly
-([player_controller.rs:37](crates/runtime/game/src/player_controller.rs:37)).
+([player_controller.rs:37](../../crates/runtime/game/src/player_controller.rs#L37)).
 The terrain collider patch passes `tile_lod_m = vertex_spacing`
-([rendered_height.rs:108](crates/domain/terrain_render/src/rendered_height.rs:108)).
+([rendered_height.rs:108](../../crates/rendering/render/src/ground/rendered_height.rs)).
 A render tile is only forced to produce the *same* heights as the
 player query when the renderer's chosen `tile_lod_m` matches the
 player's 0.5.
 
 ### 2.4 Trajectory rendering — `crates/runtime/game/src/flight_plan_view/`
 
-`render_trajectory` ([render.rs:35](crates/runtime/game/src/flight_plan_view/render.rs:35))
+`render_trajectory` ([render.rs:35](../../crates/runtime/game/src/flight_plan_view/render.rs#L35))
 draws the predicted flight plan unconditionally whenever
 `MapSnapshot::flight_plan` exists. It does not inspect
 `MapSnapshot::crafts[0].authority`, so a landed or walking craft
@@ -179,10 +179,10 @@ predicted before authority transitioned).
 ### 2.5 Ground LOD swap — `crates/runtime/game/src/rendering/ground_terrain.rs`
 
 The impostor → UDLOD terrain handoff fires at `4 × radius` camera
-distance ([ground_terrain.rs:125](crates/runtime/game/src/rendering/ground_terrain.rs:125)).
+distance ([ground_terrain.rs:125](../../crates/runtime/game/src/rendering/ground_terrain.rs#L125)).
 Each body's UDLOD `TerrainConfig` has `LOD_COUNT=16` with 512²
-tiles ([ground_terrain.rs:50–56](crates/runtime/game/src/rendering/ground_terrain.rs:50)),
-atlas capacity 256 tiles ([ground_terrain.rs:64](crates/runtime/game/src/rendering/ground_terrain.rs:64)).
+tiles ([ground_terrain.rs:50–56](../../crates/runtime/game/src/rendering/ground_terrain.rs#L50)),
+atlas capacity 256 tiles ([ground_terrain.rs:64](../../crates/runtime/game/src/rendering/ground_terrain.rs#L64)).
 
 ## 3. Diagnosed issues
 
@@ -200,7 +200,7 @@ camera-tilt + self-shadow).
 query and the resident UDLOD tile.
 
 - Player query at `tile_lod_m=0.5` engages the full 5-octave detail
-  cascade ([pipeline.rs:162](crates/domain/terrain_render/src/pipeline.rs:162)
+  cascade ([pipeline.rs:162](../../crates/rendering/render/src/ground/pipeline.rs)
   via `detail_plan_for_lod`).
 - The rendered tile at the player's location uses whatever LOD UDLOD
   has loaded. If the resident tile is at a coarser LOD (small
@@ -267,7 +267,7 @@ LinearVelocity is zeroed between walk writes: solver overwrite.
 landed player.
 
 **Root cause**: `render_trajectory`
-([render.rs:35](crates/runtime/game/src/flight_plan_view/render.rs:35)) has
+([render.rs:35](../../crates/runtime/game/src/flight_plan_view/render.rs#L35)) has
 no authority gate. The fix is a single conditional: skip when
 `snapshot.crafts[0].authority` is `BodyFixed`.
 
@@ -286,11 +286,11 @@ in.
 
 - `AuthorityMode::BodyFixed` exists and is honoured: warp at
   BodyFixed forces `AvianRole::Paused`
-  ([local_physics.rs:199](crates/runtime/game/src/local_physics.rs:199)),
+  ([local_physics.rs:199](../../crates/runtime/game/src/local_physics/mod.rs)),
   preventing Avian from numerically integrating the body's
   rotation under a large `dt`.
 - `collapse_to_body_fixed` transitions ships after stable contact
-  ([local_physics.rs:1251](crates/runtime/game/src/local_physics.rs:1251)).
+  ([local_physics.rs:1251](../../crates/runtime/game/src/local_physics/mod.rs)).
 - EVA bypasses all of this: the walking system writes inertial
   Position directly, canonical state mirrors it via `readback_local_craft`,
   authority stays `OnRails`.
@@ -303,7 +303,7 @@ correctly for free. See §4.2.
 ### 3.5 Terrain reads as uniform yellow
 
 **Not a physics bug — authoring.** The CPU color cascade
-([pipeline.rs:603](crates/domain/terrain_render/src/pipeline.rs:603)) at low
+([pipeline.rs:603](../../crates/rendering/render/src/ground/pipeline.rs)) at low
 flat ground (`h ≈ sea_level + 0`, normal_y ≈ 1) collapses to a mix
 of `SAND_COLOR (0.80, 0.70, 0.60)` and `GRASS_COLOR2 (0.40, 0.50,
 0.20)` — exactly the yellow we see. This is the
@@ -378,10 +378,10 @@ gains `HeightSourceRegistry: SecondaryMap<BodyId, Arc<dyn HeightSource>>`
 mirroring the existing `TerrainSurfaceRegistry` shape. Call sites
 to migrate:
 
-- `walk_eva_on_terrain` ([player_controller.rs:318](crates/runtime/game/src/player_controller.rs:318))
-- `agl_above_rendered_surface` ([local_physics.rs:251](crates/runtime/game/src/local_physics.rs:251))
-- `build_rendered_terrain_patch` ([rendered_height.rs:97](crates/domain/terrain_render/src/rendered_height.rs:97))
-- `spawn_player_avian_body`'s EVA spawn altitude ([local_physics.rs:327](crates/runtime/game/src/local_physics.rs:327))
+- `walk_eva_on_terrain` ([player_controller.rs:318](../../crates/runtime/game/src/player_controller.rs#L318))
+- `agl_above_rendered_surface` ([local_physics.rs:251](../../crates/runtime/game/src/local_physics/mod.rs))
+- `build_rendered_terrain_patch` ([rendered_height.rs:97](../../crates/rendering/render/src/ground/rendered_height.rs))
+- `spawn_player_avian_body`'s EVA spawn altitude ([local_physics.rs:327](../../crates/runtime/game/src/local_physics/mod.rs))
 
 **GPU-readback overhead** (answering the cost question): the dominant
 cost of `GpuAtlasMirrorHeightSource` is the one-time texel download
@@ -436,7 +436,7 @@ we ship the refactor on a guess and the user reports the same bug.
 
 When `MapSnapshot::crafts[0].authority` is `BodyFixed`:
 
-- `render_trajectory` ([render.rs:35](crates/runtime/game/src/flight_plan_view/render.rs:35))
+- `render_trajectory` ([render.rs:35](../../crates/runtime/game/src/flight_plan_view/render.rs#L35))
   returns early before drawing the orbital line.
 - Map view replaces the orbital track with a **surface marker** at
   the body-fixed lat/lon, plus a **ground track** trail of where the
@@ -480,7 +480,7 @@ investigations that must complete and report before the corresponding
    game`, capture `PipelineTileProvider tile lod=… tile_lod_m=…` log
    for tiles UDLOD requests at EVA camera distance. Decision tree:
    - If `tile_lod_m` stays coarse (> 1 m) → fix `TerrainViewConfig`
-     in [ground_terrain.rs:188](crates/runtime/game/src/rendering/ground_terrain.rs:188);
+     in [ground_terrain.rs:188](../../crates/runtime/game/src/rendering/ground_terrain.rs#L188);
      UDLOD's LOD-error metric isn't accounting for sub-metre camera
      distance.
    - If `tile_lod_m` reaches 0.5 m only after a delay → async-bake
@@ -503,7 +503,7 @@ investigations that must complete and report before the corresponding
      resolved `right`/`forward` vectors and compare against expected
      camera basis.
 3. **[build]** Add the §4.3 trajectory gate (BodyFixed → skip
-   render). One conditional in [render.rs:42](crates/runtime/game/src/flight_plan_view/render.rs:42).
+   render). One conditional in [render.rs:42](../../crates/runtime/game/src/flight_plan_view/render.rs#L42).
    Lands even before EVA enters BodyFixed — ships in BodyFixed
    already benefit.
 
@@ -523,18 +523,18 @@ investigations that must complete and report before the corresponding
    heading; extend `AuthorityMode::BodyFixed` if it doesn't already
    own it; register for `Reflect`.
 7. **[build]** Replace the EVA spawn path in
-   `spawn_player_avian_body` ([local_physics.rs:312–350](crates/runtime/game/src/local_physics.rs:312))
+   `spawn_player_avian_body` ([local_physics.rs:312–350](../../crates/runtime/game/src/local_physics/mod.rs))
    with a `BodyFixed`-mode install: canonical authority transitions
    straight to BodyFixed, no inertial state install. The Avian
    capsule is still spawned (so the rendering / camera-focus path
    has an entity to track) but its Position is snapped from canonical
    each frame by the existing `Paused`-mode snap.
 8. **[build]** Rewrite `walk_eva_on_terrain`
-   ([player_controller.rs:239](crates/runtime/game/src/player_controller.rs:239))
+   ([player_controller.rs:239](../../crates/runtime/game/src/player_controller.rs#L239))
    to mutate `BodyFixedPose` instead of inertial Position. Height
    query is unchanged (still via the HeightSource registry).
 9. **[build]** Remove the `is_eva` early-return special case from
-   `readback_local_craft` ([local_physics.rs:1115](crates/runtime/game/src/local_physics.rs:1115));
+   `readback_local_craft` ([local_physics.rs:1115](../../crates/runtime/game/src/local_physics/mod.rs));
    it's no longer needed because EVA owns canonical state directly
    through pose mutation.
 
@@ -616,27 +616,27 @@ likely OOM under parallel release builds. Findings below are from
 static traces of the cited code paths.
 
 **Item 1 — LOD selection (§3.1 / §3.6).**
-[pipeline.rs:720](crates/domain/terrain_render/src/pipeline.rs:720) clamps
+[pipeline.rs:720](../../crates/rendering/render/src/ground/pipeline.rs) clamps
 `tile_lod_m = body.radius * face_radians / inner_texels` to a **1 m
 minimum** via `.max(1.0)`. On Thalos the natural value at LOD 15 is
 0.30 m, so every requested tile bakes at `tile_lod_m ≥ 1.0` — the
 §3.1 hypothesis ("LOD 15 → `tile_lod_m=0.15`") doesn't hold against
 the current code. The detail cascade then caps at
 `MAX_DETAIL_OCTAVES=5`
-([pipeline.rs:89](crates/domain/terrain_render/src/pipeline.rs:89)) for any
+([pipeline.rs:89](../../crates/rendering/render/src/ground/pipeline.rs)) for any
 `tile_lod_m ≤ 25 m`; on Thalos that's LOD ≥ 9 (natural ≈ 19 m). So
 the player query (`tile_lod_m=0.5`, full 5-octave cascade) and any
 rendered tile at LOD ≥ 9 produce **identical** detail heights. For
 the player to sit above the ground from a cascade-depth mismatch, the
 resident tile must be at **LOD ≤ 8** — async lag of ≥ 7 levels below
 the LOD 15 that
-[tile_tree.rs:307](crates/rendering/udlod/src/terrain_data/tile_tree.rs:307)
+[tile_tree.rs:307](../../crates/rendering/udlod/src/terrain_data/tile_tree.rs#L307)
 requests at ~6 m view (`load_distance/2^lod = 7.965 Mm/2^15 ≈ 243
 m`). None of the §5 item 1 branches matches cleanly; closest is (b)
 "async-bake prioritisation," but the lag needed is several levels,
 not "delay to 0.5 m." A possibility §3.1 doesn't enumerate:
 sample_base_with_dynamic's `dynamic_lod = log2(tile_lod_m)`
-([pipeline.rs:510](crates/domain/terrain_render/src/pipeline.rs:510)) is
+([pipeline.rs:510](../../crates/rendering/render/src/ground/pipeline.rs)) is
 `−1.0` for the player vs `0.0` for the renderer, so the base cubemap
 mip level differs even when the detail cascade matches — could
 contribute a sub-metre offset. **Status**: live observation still
@@ -657,7 +657,7 @@ becomes `pos.0 += 0 + (old_com − new_com)`, and
 the CoM term ≈ 0. Avian cannot move the EVA capsule.
 
 (b) *System-order race.* `walk_eva_on_terrain`
-([player_controller.rs:62](crates/runtime/game/src/player_controller.rs:62))
+([player_controller.rs:62](../../crates/runtime/game/src/player_controller.rs#L62))
 is the **only** writer to Position matching `With<PlayerControllerBody>`.
 Every other Position writer in the local-physics chain
 (`snap_avian_from_canonical:714`, `apply_local_forces:984`,
@@ -670,7 +670,7 @@ walk. No second writer → no race.
 (c) *Camera-vs-input frame mismatch.* Camera runs in
 `SimStage::Camera` (after Physics + Sync), so walk reads the
 previous-frame Transform. Projection in `movement_direction`
-([player_controller.rs:398](crates/runtime/game/src/player_controller.rs:398))
+([player_controller.rs:398](../../crates/runtime/game/src/player_controller.rs#L398))
 removes the radial component from `(rotation * NEG_Z)` and
 normalises — no obvious drift mode that produces a snap-back to the
 original spot.
@@ -683,7 +683,7 @@ can't decide, for the live follow-up:
 
 - `body_state.angular_velocity` frame for the `surface_velocity = ω
   × position` term
-  ([player_controller.rs:301](crates/runtime/game/src/player_controller.rs:301))
+  ([player_controller.rs:301](../../crates/runtime/game/src/player_controller.rs#L301))
   — at Thalos equator ~232 m/s, so an inertial-vs-body-fixed
   mismatch would dominate per-frame motion.
 - Camera `Transform.rotation` source frame under BigSpace floating
@@ -715,23 +715,23 @@ Fix shape: the player's CPU height query now reads the resident
 construction. Implementation:
 
 - `TileTree::best_resident_atlas_lod(world_position, model)` returns
-  the resident ancestor LOD ([crates/rendering/udlod/src/terrain_data/tile_tree.rs](crates/rendering/udlod/src/terrain_data/tile_tree.rs)).
+  the resident ancestor LOD ([crates/rendering/udlod/src/terrain_data/tile_tree.rs](../../crates/rendering/udlod/src/terrain_data/tile_tree.rs)).
 - `TileAtlas::model()` / `lod_count()` / `attachment_configs()`
   expose the geometry that the renderer-side `tile_lod_m` formula
   needs, plus `TerrainModel::scale()` is now `pub` so callers can
   multiply through to metres-per-texel without re-deriving the
-  cube-sphere math ([crates/rendering/udlod/src/terrain_data/tile_atlas.rs](crates/rendering/udlod/src/terrain_data/tile_atlas.rs),
-  [crates/rendering/udlod/src/math/terrain_model.rs](crates/rendering/udlod/src/math/terrain_model.rs)).
+  cube-sphere math ([crates/rendering/udlod/src/terrain_data/tile_atlas.rs](../../crates/rendering/udlod/src/terrain_data/tile_atlas.rs),
+  [crates/rendering/udlod/src/math/terrain_model.rs](../../crates/rendering/udlod/src/math/terrain_model.rs)).
 - `thalos_terrain_render::renderer_tile_lod_m_at(atlas, tree,
   world_pos)` packages "what tile_lod_m does the renderer use here?"
   into a single call so consumers don't repeat the LOD →
-  metres-per-texel arithmetic ([crates/domain/terrain_render/src/pipeline.rs](crates/domain/terrain_render/src/pipeline.rs)).
+  metres-per-texel arithmetic ([../../crates/rendering/render/src/ground/pipeline.rs](../../crates/rendering/render/src/ground/pipeline.rs)).
 - Three consumers route through it: `walk_eva_on_terrain`
-  ([crates/runtime/game/src/player_controller.rs](crates/runtime/game/src/player_controller.rs)),
+  ([crates/runtime/game/src/player_controller.rs](../../crates/runtime/game/src/player_controller.rs)),
   the EVA branch of `spawn_player_avian_body`
-  ([crates/runtime/game/src/local_physics.rs](crates/runtime/game/src/local_physics.rs)),
+  ([../../crates/runtime/game/src/local_physics/mod.rs](../../crates/runtime/game/src/local_physics/mod.rs)),
   and the GND-altitude readout
-  ([crates/runtime/game/src/hud/orbital_panel.rs](crates/runtime/game/src/hud/orbital_panel.rs)).
+  ([crates/runtime/game/src/hud/orbital_panel.rs](../../crates/runtime/game/src/hud/orbital_panel.rs)).
   All three fall back to `tile_lod_m = 10 000` (procedural detail
   disabled) when no tile is resident yet — the GPU is showing only
   the base cubemap during that warm-up window, so the CPU sample
@@ -863,13 +863,13 @@ terrain patch:
   tanks and decouplers use their native cylinder footprint.
   The same primitive list is stored for the F8 collider outline.
   `build_ship_collider_primitives`
-  ([local_physics.rs:1688](crates/runtime/game/src/local_physics.rs:1688)),
+  ([local_physics.rs:1688](../../crates/runtime/game/src/local_physics/mod.rs)),
   spawned by `spawn_local_craft_body`
-  ([lib.rs:284](crates/simulation/physics_local/src/lib.rs:284)).
+  ([lib.rs:284](../../crates/simulation/physics_local/src/lib.rs#L284)).
 - `attach_terrain_patch_when_close`
-  ([local_physics.rs:592](crates/runtime/game/src/local_physics.rs:592)) spawns
+  ([local_physics.rs:592](../../crates/runtime/game/src/local_physics/mod.rs)) spawns
   a `RigidBody::Kinematic` trimesh patch (`spawn_terrain_collider_patch`,
-  [lib.rs:236](crates/simulation/physics_local/src/lib.rs:236)) only when AGL is
+  [lib.rs:236](../../crates/simulation/physics_local/src/lib.rs#L236)) only when AGL is
   below `handoff_agl_m` (20 km) **and** `WarpLimits` says 1x is the
   highest legal warp level. Manually switching to 1x above that surface
   warp-lock zone does not build the terrain collider, and any already
@@ -883,7 +883,7 @@ terrain patch:
 - Avian's contact solver runs only when Avian *owns translation*, i.e.
   `AvianRole::Full` — throttle active **or** terrain patch attached
   (`avian_role_from_inputs`,
-  [local_physics.rs:234](crates/runtime/game/src/local_physics.rs:234)). The
+  [local_physics.rs:234](../../crates/runtime/game/src/local_physics/mod.rs)). The
   patch's mere existence inside the AGL band is the "contact is
   physically possible here" signal.
 
@@ -913,7 +913,7 @@ Secondary contributors (not the headline):
 
 - The patch is coarse: `patch_resolution = 65`,
   `patch_half_extent_m = 4096`
-  ([lib.rs](crates/simulation/physics_local/src/lib.rs)). Sub-patch relief isn't in
+  ([lib.rs](../../crates/simulation/physics_local/src/lib.rs)). Sub-patch relief isn't in
   the collider.
 - A known collider-vs-rendered-surface gap exists between the coarse
   collider patch and the GPU-rendered surface.
@@ -937,27 +937,27 @@ Secondary contributors (not the headline):
 
 #### 2.3 There is no structural-integrity model
 
-`CraftState` ([canonical.rs:166](crates/simulation/physics_canonical/src/canonical.rs:166)),
+`CraftState` ([canonical.rs:166](../../crates/simulation/physics_canonical/src/canonical.rs#L166)),
 `MassState`, and `ShipParameters`
-([types.rs:57](crates/simulation/physics_canonical/src/types.rs:57)) carry no
+([types.rs:57](../../crates/simulation/physics_canonical/src/types.rs#L57)) carry no
 health/integrity/tolerance of any kind. The ship collider sets no
 `Restitution` (Avian default 0, so it is not a bounce). A hard impact
 resolves as an ordinary offset contact impulse on a tall thin stack →
 it tumbles, and because nothing can destroy it, it survives and spins.
 
-`docs/simulation.md` already *specifies* the intended hook —
+`docs/simulation/simulation.md` already *specifies* the intended hook —
 `SimEvent::Impact { craft, body, epoch, speed_m_s }`
-([simulation.md:1262](docs/simulation.md:1262)) — but no `SimEvent`
+([simulation.md:1262](simulation.md#L1262)) — but no `SimEvent`
 pipeline is implemented yet.
 
 #### 2.4 Gentle landing already works
 
 `collapse_or_constrain_warp`
-([local_physics.rs:1315](crates/runtime/game/src/local_physics.rs:1315)) tracks
+([local_physics.rs:1315](../../crates/runtime/game/src/local_physics/mod.rs)) tracks
 stable contact and collapses to `AuthorityMode::BodyFixed` after 2.0 s
 of continuous contact under 0.5 m/s linear / 0.05 rad/s angular with
 throttle zero (`stable_contact_reached`,
-[lib.rs:336](crates/simulation/physics_local/src/lib.rs:336)). So the *landed*
+[lib.rs:336](../../crates/simulation/physics_local/src/lib.rs#L336)). So the *landed*
 end-state is real; the missing pieces are surviving the descent
 (§2.2) and a consequence for not surviving it (§2.3).
 
@@ -975,7 +975,7 @@ the `OnRails`/`AttitudeOnly` coast above the 20 km handoff, where Kepler advance
 the canonical state once per render frame.)
 
 `update_player_ship_world_position`
-([ship_view.rs](crates/runtime/game/src/ship_view.rs)) hides this by advancing the
+([ship_view.rs](../../crates/runtime/game/src/ship_view.rs)) hides this by advancing the
 *rendered* root position by the body-relative velocity across
 `Time<Fixed>::overstep()` whenever `AvianAuthority::owns_translation()`. Only the
 relative (descent) component is extrapolated: the heliocentric orbital velocity
@@ -1074,7 +1074,7 @@ On destruction (per the chosen first-slice behaviour — lock + mark, no
 explosion FX yet):
 
 - **Control is locked.** `apply_local_forces`
-  ([local_physics.rs:1000](crates/runtime/game/src/local_physics.rs:1000))
+  ([local_physics.rs:1000](../../crates/runtime/game/src/local_physics/mod.rs))
   applies gravity only (no thrust, zero reaction-wheel torque) and the
   input systems (`handle_attitude_controls`, the throttle gate)
   short-circuit, so SAS, autopilot, and the throttle readout all go
@@ -1113,19 +1113,19 @@ destroyed, so the picker only ever opens on a wrecked ship.
 
 The first slice's collider was a tangent-grid trimesh resampled at a
 fixed ~64 m spacing over an 8 km patch
-([rendered_height.rs](crates/domain/terrain_render/src/rendered_height.rs)).
+([rendered_height.rs](../../crates/rendering/render/src/ground/rendered_height.rs)).
 Even though it reads the *same* height source EVA does, the 64 m facets
 cut across the sub-meter rendered relief — tenting *above* dips
 ("invisible mountains" you crash into) and slicing *under* peaks. EVA
 never shows this because it samples the height source per-frame at the
 capsule's exact direction and clamps to it, with no interpolation
-([player_controller.rs:271](crates/runtime/game/src/player_controller.rs:271)).
+([player_controller.rs:271](../../crates/runtime/game/src/player_controller.rs#L271)).
 
 The fix builds the collider **from the resident GPU atlas tiles the
 renderer meshes from**, so it matches the drawn surface by
 construction. `HeightSource::build_collider_patch` — overridden by
 `GpuAtlasMirrorHeightSource`
-([height_source.rs](crates/domain/terrain_render/src/height_source.rs)) — finds
+([height_source.rs](../../crates/rendering/render/src/ground/height_source.rs)) — finds
 the finest resident tile under the ship and emits one collider vertex
 per height texel at the tile's native resolution, each placed at the
 exact cube-sphere position the renderer uses:
@@ -1204,7 +1204,7 @@ direct canonical state change for now, not an emitted event).
 - `ShipParameters::impact_tolerance_m_s` — crash speed threshold.
   Start forgiving (~12 m/s) and tighten.
 - Descent spawn profiles live in
-  [`crates/runtime/game/src/spawn.rs`](crates/runtime/game/src/spawn.rs). `just game
+  [`crates/runtime/game/src/spawn.rs`](../../crates/runtime/game/src/spawn.rs). `just game
   landing` starts ~25 km AGL over daylight dry land so the player sees
   the on-rails-to-local-physics handoff. `just game final` (aliases
   `final-approach`, `final_approach`, `approach`) starts ~1.5 km AGL,
@@ -1267,7 +1267,7 @@ the floor. In the body-fixed frame the craft and the ground are both
 ~stationary (0–taxi speed), so the contact solver is stable. (Grounded EVA
 already worked this way; ships now match.)
 
-Implementation (`crates/runtime/game/src/local_physics.rs`):
+Implementation (`../../crates/runtime/game/src/local_physics/mod.rs`):
 
 - **Conversion seam branches on `VesselKind`.** `inertial_to_ship_frame` /
   `ship_frame_to_inertial` (wrapping `thalos_physics_canonical::body_fixed`)
@@ -1292,7 +1292,7 @@ Implementation (`crates/runtime/game/src/local_physics.rs`):
 
 A craft *without* landing gear — a lander or rocket resting on its belly —
 gets its tangential ground friction from `apply_surface_friction`
-([`crates/runtime/game/src/local_physics.rs`](crates/runtime/game/src/local_physics.rs)),
+([`../../crates/runtime/game/src/local_physics/mod.rs`](../../crates/runtime/game/src/local_physics/mod.rs)),
 which runs right **after** `terrain_floor_backstop` and just **before**
 `readback_local_craft` in the local-physics chain. The backstop only ever
 removes the *into-surface* (radial) velocity component; before this system
@@ -1332,7 +1332,7 @@ Landing gear are real wheels you can roll and taxi on, not cosmetic
 struts. The model is **raycast suspension** on the single craft rigid
 body — no physical wheel colliders or joints (those are unstable at
 planet scale). It lives in
-[`crates/runtime/game/src/local_physics.rs`](crates/runtime/game/src/local_physics.rs)
+[`../../crates/runtime/game/src/local_physics/mod.rs`](../../crates/runtime/game/src/local_physics/mod.rs)
 as `apply_landing_gear_forces`, running in the local-physics chain right
 **after** `apply_local_forces`, so wheel forces add on top of the gravity
 + thrust + reaction-wheel torque already written into the craft's

@@ -1,6 +1,6 @@
 //! Per-frame force application: gravity/thrust accumulators and fly-by-wire torque.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;
@@ -77,7 +77,7 @@ pub(crate) fn apply_local_forces(
     let params = *sim.simulation.ship_params();
     // A destroyed craft is inert debris: gravity still acts (so it falls and
     // settles), but thrust and reaction-wheel torque are cut. See
-    // `docs/surface.md`.
+    // `docs/simulation/surface.md`.
     let destroyed = sim.simulation.is_destroyed();
 
     // Thrust-vectoring (engine gimbal) authority available this frame: the

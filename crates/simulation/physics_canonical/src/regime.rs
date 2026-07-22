@@ -1,5 +1,5 @@
 //! Per-craft regime classification — the pure core of the `CraftRegime`
-//! resolver (`docs/regimes.md`, Phase A2).
+//! resolver (`docs/simulation/regimes.md`, Phase A2).
 //!
 //! **Shadow mode.** The game-side resolver (`thalos_runtime::regime`) computes
 //! this record alongside the legacy machinery (`AvianRole` /
@@ -13,7 +13,7 @@
 //! Pure Rust, no Bevy, unit-tested. The game-side shim gathers
 //! [`RegimeInputs`] from the ECS; everything here is plain data in, plain
 //! data out. Naming says **Backend**, not Avian — the local rigid-body
-//! engine is a swappable executor detail (`docs/regimes.md` §4).
+//! engine is a swappable executor detail (`docs/simulation/regimes.md` §4).
 
 use crate::canonical::AuthorityMode;
 
@@ -121,7 +121,7 @@ pub enum PredictionDisplay {
     Hide(HideReason),
 }
 
-/// The per-frame regime decision record (`docs/regimes.md` §3). Sole writer:
+/// The per-frame regime decision record (`docs/simulation/regimes.md` §3). Sole writer:
 /// the game-side resolver. Downstream systems become executors of this in
 /// Phase A3; in A2 it is shadow-only.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -196,7 +196,7 @@ pub struct WalkingInputs {
 }
 
 /// Everything the classification reads, as plain data. Snapshot semantics
-/// (`docs/regimes.md` §3.2): physics-derived signals (contacts,
+/// (`docs/simulation/regimes.md` §3.2): physics-derived signals (contacts,
 /// weight-on-wheels, collider presence, speeds) are **previous-frame**;
 /// command inputs (warp, throttle) are **current-frame**.
 #[derive(Debug, Clone, PartialEq)]

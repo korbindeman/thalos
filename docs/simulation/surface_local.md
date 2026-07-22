@@ -14,7 +14,7 @@ the terrain heightfield, and the physics step is still **fixed-timestep**
 original design narrative; read §10 for what actually shipped.
 
 Supersedes the body-centered-inertial *ship* contact bubble formerly
-described in `docs/surface.md` ("Landing & impact destruction"). The
+described in `docs/simulation/surface.md` ("Landing & impact destruction"). The
 prior design premise — that ships needed migrating *to* a body-fixed
 frame — was already partly true in the code: ships integrated in a
 planet-centered body-fixed rotating frame with exact gravity/centrifugal/

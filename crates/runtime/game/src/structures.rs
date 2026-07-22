@@ -14,8 +14,8 @@
 //! building is a data entry plus its own visuals, not a bespoke plugin.
 //!
 //! Scope note: this is the *terrain-anchoring* layer only — the full
-//! part/loadout construction model is specced for M6 in `docs/construction.md`
-//! and intentionally not built here. See `docs/surface_local.md` §6.
+//! part/loadout construction model is specced for M6 in `docs/gameplay/construction.md`
+//! and intentionally not built here. See `docs/simulation/surface_local.md` §6.
 
 use std::collections::HashMap;
 

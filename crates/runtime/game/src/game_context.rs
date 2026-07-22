@@ -4,7 +4,7 @@
 //! the sub-state that says *which mode you are in* while running: flying, in the
 //! space-center hub, the VAB, or the base editor. It replaces the loose bag of
 //! cross-referencing `.open` booleans (`SpaceCenter`/`ShipyardEditor`/
-//! `BaseEditor`) as the source of truth. See `docs/ui_flow.md` for the full
+//! `BaseEditor`) as the source of truth. See `docs/gameplay/ui_flow.md` for the full
 //! model, the per-context camera/HUD/pause authority, and the migration phases.
 //!
 //! **Migration status: Phase 3 (ownership inverted).** `GameContext` is now the
@@ -15,7 +15,7 @@
 //! is their sole writer — so every `.open` *reader* (input gating, each modal's
 //! `apply_open_state`, run conditions) keeps working untouched. Because a state
 //! change set in `Update` applies at the next `StateTransition`, entering a mode
-//! still carries a **one-frame lag**. Mirrors `docs/regimes.md` A2→A3.
+//! still carries a **one-frame lag**. Mirrors `docs/simulation/regimes.md` A2→A3.
 
 use bevy::prelude::*;
 
@@ -43,7 +43,7 @@ pub enum GameContext {
     Vab,
     /// The in-world surface base editor — a god-view overlay.
     BaseEditor,
-    // TrackingStation — deferred: the ship-less map. See `docs/ui_flow.md`.
+    // TrackingStation — deferred: the ship-less map. See `docs/gameplay/ui_flow.md`.
 }
 
 /// The return stack for in-`Running` mode navigation. Entering a context pushes
@@ -51,7 +51,7 @@ pub enum GameContext {
 /// stack means "at the session root" — the caller decides what that means (open
 /// the pause menu, or leave to the main menu). Replaces the old `return_to_menu`
 /// / `ReturnToSpaceCenter` bools + the `Local<bool>` edge latches. See
-/// `docs/ui_flow.md` *Return-stack*.
+/// `docs/gameplay/ui_flow.md` *Return-stack*.
 #[derive(Resource, Default)]
 pub struct ContextHistory(pub Vec<GameContext>);
 

@@ -50,7 +50,7 @@ impl Stage for Differentiate {
         let age_darken = 1.0 - 0.1 * (builder.body_age_gyr / 4.5);
 
         // Pick per-material gray values based on dominant composition. Each
-        // branch targets the ranges documented in docs/procedural_mira.md §4.
+        // branch targets the ranges documented in docs/world/mira_airless_mvp.md §4.
         // `fresh_ejecta` is keyed off fresh-highland since that's the
         // subsurface material being excavated. Linear albedo, not sRGB.
         let (fresh_ejecta, highland_mature, mare_mature) = if comp.ice > 0.5 {

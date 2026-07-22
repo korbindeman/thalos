@@ -26,7 +26,7 @@ use crate::types::DetailNoiseParams;
 ///
 /// fBm biome stacks were removed: standard fractional brownian motion reads
 /// as eroded terrestrial terrain, never as a crater-saturated airless body.
-/// See docs/gen/procedural_mira.md §6 for the rationale.
+/// See docs/world/mira_airless_mvp.md §6 for the rationale.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Regolith {
     /// Typical depth of small-crater texture in meters (detail shader).

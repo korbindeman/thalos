@@ -1,9 +1,9 @@
 # Terrain generation (legacy / archived)
 
 > **Archived 2026-06.** This is the generation ("feature compiler") chapter
-> and v2 backlog extracted from the old unified `docs/terrain.md`. It
+> and v2 backlog extracted from the old unified `docs/world/terrain.md`. It
 > describes a **superseded** generation design. Generation is now treated as a
-> black box behind the tile contract; see [`../terrain.md`](../terrain.md) for
+> black box behind the tile contract; see [`../terrain.md`](../world/terrain.md) for
 > the current consumer-side contract and [`README.md`](README.md) for why this
 > was archived. Kept as reference for building the new tile-producing
 > generator — do not treat as live design.
@@ -30,7 +30,7 @@ wavelength/amplitude intent.
 
 - Atmospheric scattering, ocean rendering, gas-giant impostors, sun
   rendering. Separate subsystems even if they ultimately render
-  alongside terrain. See [atmosphere.md](atmosphere.md).
+  alongside terrain. See [atmosphere.md](../rendering/atmosphere.md).
 - Asset streaming for non-terrain content.
 - Rover wheels and high-fidelity surface interaction. The M5 first
   slice has only an aggregate landing collider patch for Thalos.
@@ -765,7 +765,7 @@ requires:
   oceanic moons. Volcanic island arcs from tidal heating,
   hydrothermal circulation, photosynthetic shelf ecosystems. Read
   from orbit as a softer, milkier ocean world (atmospheric optics
-  handled in [atmosphere.md](atmosphere.md)).
+  handled in [atmosphere.md](../rendering/atmosphere.md)).
 
 Existing archetypes (`AirlessImpactMoon` for Mira,
 `ColdDesertFormerlyWet` for Vaelen) get re-evaluated against the

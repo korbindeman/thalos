@@ -79,7 +79,7 @@ impl Plugin for GameLocalPhysicsPlugin {
                     // applying `CraftRegimeState::expected_authority`. It
                     // replaced `manage_authority`,
                     // `release_landed_ship_on_throttle`, and
-                    // `collapse_or_constrain_warp` (see `docs/regimes.md`
+                    // `collapse_or_constrain_warp` (see `docs/simulation/regimes.md`
                     // and `crate::regime::apply_regime_authority`).
                     crate::regime::apply_regime_authority,
                     sync_avian_time,
@@ -112,7 +112,7 @@ impl Plugin for GameLocalPhysicsPlugin {
                     sync_structure_collider_pose,
                     // Last: snapshot the post-re-anchor craft SLF state into the
                     // Avian-free `LocalCraftKinematics` readout for next frame's
-                    // non-executor readers (control bus). See `docs/physics.md`.
+                    // non-executor readers (control bus). See `docs/simulation/physics.md`.
                     publish_local_craft_kinematics,
                 )
                     .chain()
@@ -165,7 +165,7 @@ pub enum AvianRole {
 
 /// Per-frame Avian role + previous-frame role for edge detection.
 ///
-/// Since the A3 port (`docs/regimes.md`) this is a **projection of the
+/// Since the A3 port (`docs/simulation/regimes.md`) this is a **projection of the
 /// per-craft `CraftRegime` record**: [`compute_avian_authority`] derives the
 /// role from the record's owner/clock fields (the classification itself
 /// lives in the unit-tested `thalos_physics_canonical::regime` resolver),
@@ -235,7 +235,7 @@ pub struct AvianHandoffDiagnostics {
 }
 
 /// Project the per-craft `CraftRegime` record onto [`AvianAuthority`]
-/// (A3 port #2, `docs/regimes.md`).
+/// (A3 port #2, `docs/simulation/regimes.md`).
 ///
 /// The role *classification* lives in the resolver
 /// (`thalos_physics_canonical::regime::resolve` — warp/BodyFixed →
@@ -331,7 +331,7 @@ fn agl_above_rendered_surface(
     Some((position_body.length() - radius, dir, position_body))
 }
 
-// Submodules of the local-physics layer (Phase B split; see docs/regimes.md).
+// Submodules of the local-physics layer (Phase B split; see docs/simulation/regimes.md).
 mod colliders;
 mod forces;
 mod frames;

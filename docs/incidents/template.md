@@ -1,6 +1,6 @@
-# INC-NNNN: <short title>
+# INC-YYYYMMDDTHHMMSSZ-short-title: <short title>
 
-- **Status:** Investigating | Fixed | Recurred (see INC-XXXX)
+- **Status:** Investigating | Fixed | Recurred (see INC-YYYYMMDDTHHMMSSZ-short-title)
 - **Date:** YYYY-MM-DD (observed) / YYYY-MM-DD (fixed)
 - **Severity:** crash / hang / visual / behavioral / data-loss / perf
 - **Surface:** which scenario or mode it shows in (`just game hub`, runway boot, map view, …)

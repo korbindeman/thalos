@@ -171,7 +171,7 @@
             storage: [],
             reactants: [],
         )),
-        // Stationed-loft fuselage (`docs/construction.md` §4.2): the advanced
+        // Stationed-loft fuselage (`docs/gameplay/construction.md` §4.2): the advanced
         // airframe body. Same stainless skin and diameter propagation as a
         // structural tank, but a single continuous superellipse loft — barrel +
         // curved, upswept tailcone in one mesh — instead of a cylinder + cone

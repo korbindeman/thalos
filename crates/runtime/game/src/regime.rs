@@ -1,5 +1,5 @@
 //! The `CraftRegime` resolver, the authority executor, and the drift
-//! checker (`docs/regimes.md` Phases A2–A3).
+//! checker (`docs/simulation/regimes.md` Phases A2–A3).
 //!
 //! [`resolve_regime`] is the **sole writer** of the per-craft
 //! [`CraftRegimeState`] component: it gathers [`RegimeInputs`] from the ECS
@@ -19,7 +19,7 @@
 //! resolver; [`check_regime_drift`] remains as end-of-frame sanity checks
 //! plus the Reflect-registered record snapshot in [`RegimeDriftDiagnostics`].
 //!
-//! Input snapshot semantics (`docs/regimes.md` §3.2): physics-derived
+//! Input snapshot semantics (`docs/simulation/regimes.md` §3.2): physics-derived
 //! signals (contacts, weight-on-wheels, collider presence, speeds) are
 //! previous-frame; command inputs (warp, throttle) are current-frame. The
 //! legacy systems compute their predicates mid-chain from this frame's
@@ -277,7 +277,7 @@ pub(crate) fn legacy_avian_role(regime: &CraftRegime) -> AvianRole {
 /// Pre-port behavior parity was established by the A2 shadow phase: ~51k
 /// drift-checked frames across five scenarios with zero steady mismatches
 /// between `expected_authority` and the legacy writers' end-of-frame
-/// authority (see `docs/regimes.md`).
+/// authority (see `docs/simulation/regimes.md`).
 pub(crate) fn apply_regime_authority(
     active: Res<ActiveLocalBubble>,
     mut sim: ResMut<SimulationState>,

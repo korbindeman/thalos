@@ -1,7 +1,7 @@
 # Mira airless terrain MVP
 
-**Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](adr/0008-offline-terrain-packages.md) ·
-**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](backlog.md)
+**Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](../adr/20260720T211046Z-offline-terrain-packages.md) ·
+**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](../backlog.md)
 
 ### Landed compatibility vertical slice
 

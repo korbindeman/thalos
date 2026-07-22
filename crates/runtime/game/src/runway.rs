@@ -401,7 +401,7 @@ impl Plugin for RunwayPlugin {
         // The runway slab collider is posed each frame by the executor's
         // generic `sync_structure_collider_pose` (scheduled by
         // `local_physics`), so no runway-local pose system is needed — see
-        // `docs/physics.md` (backend seam).
+        // `docs/simulation/physics.md` (backend seam).
     }
 }
 
@@ -1797,7 +1797,7 @@ const RUNWAY_SLAB_HALF_THICKNESS_M: f64 = 50.0;
 /// recovery launched the craft off its gear). Posed each frame from the active
 /// surface-local frame by [`sync_runway_collider_pose`] (the spawn-time pose is
 /// a placeholder — the bubble may not exist yet during the loading-screen
-/// install). See `docs/surface_local.md` §3.
+/// install). See `docs/simulation/surface_local.md` §3.
 fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_state: &BodyState) {
     let half_along = frame.half_length_m + RUNWAY_PAD_MARGIN_M;
     let half_across = frame.half_width_m + RUNWAY_PAD_MARGIN_M;
@@ -1815,7 +1815,7 @@ fn spawn_runway_collider(commands: &mut Commands, frame: &RunwayFrame, _body_sta
         + frame.center_dir * (RUNWAY_ASPHALT_LIFT_M - RUNWAY_SLAB_HALF_THICKNESS_M);
     // Full side lengths; local axes (X = across, Y = up, Z = along) match
     // `basis_body_quat`. The executor owns the Avian body and its per-frame SLF
-    // pose (`sync_structure_collider_pose`) — see `docs/physics.md` (backend
+    // pose (`sync_structure_collider_pose`) — see `docs/simulation/physics.md` (backend
     // seam). This replaced the bespoke `RunwayCollider` + `sync_runway_collider_pose`.
     spawn_structure_collider(
         commands,
@@ -1955,7 +1955,7 @@ pub(crate) fn craft_extent_below(
 /// curvature gap the old spherical reference produced.
 ///
 /// Authority is analytic `BodyFixed` — the proper "landed" state (a frozen
-/// surface-local pose, per `docs/surface_local.md` §4), held by
+/// surface-local pose, per `docs/simulation/surface_local.md` §4), held by
 /// [`crate::local_physics::snap_avian_from_canonical`] without integration so it
 /// can't drift while the terrain streams in behind the loading screen. The
 /// pilot leaves it the moment they advance the throttle:

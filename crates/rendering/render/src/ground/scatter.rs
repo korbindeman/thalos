@@ -997,7 +997,7 @@ fn woody_terrain_factor(layer: VegLayer, sample: &PlacementSample, slope_limit: 
 
 /// Biome suitability for **woody** plants (trees / shrubs) in `[0, 1]`, folding
 /// in the macro landcover the ground already paints so the woody layers stop
-/// ignoring climate (the scatter/biome coupling docs/terrain_macro.md §4,
+/// ignoring climate (the scatter/biome coupling docs/world/terrain_macro.md §4,
 /// TM-P2r, calls for). Two terms, both mirroring the ground's `vegetation_color`
 /// transfer, so trees appear where the terrain reads forest / grass and vanish
 /// where it reads desert / tundra — one world:

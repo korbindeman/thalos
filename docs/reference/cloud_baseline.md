@@ -1,7 +1,7 @@
 # CLOUD-0 baseline and probe guide (2026-07-20)
 
 This is the measured baseline for the planet-scale cloud program in
-`docs/clouds.md`. It records the current renderer before its ownership,
+`docs/rendering/clouds.md`. It records the current renderer before its ownership,
 targets, density, lighting, or orbital representation are replaced. The
 headless probes are intended to survive those replacements so later phases can
 compare like-for-like views and budgets.
@@ -200,7 +200,7 @@ Every moving-view pixel now performs a fresh march; coherent body-fixed history
 may stabilize that current result but never replaces it. The final 1920×1080
 Baseline capture is visually aligned with dense history (raw→production MAE
 1.74/255, RMS 3.00/255) with **2.73 ms moving-frame p95**, inside the 3.5 ms
-budget. See [INC-0016](incidents/0016-cloud-sparse-history-motion-smear.md).
+budget. See [INC-0016](../incidents/0016-cloud-sparse-history-motion-smear.md).
 
 CLOUD-3 retains typed stratus/cumulus/storm profiles, multi-domain 64³
 base/detail noise, boundary erosion, and continuous weather sampling. The first
@@ -209,7 +209,7 @@ step stretching, and weather/base-top/broad-occupancy leaps. Matched A/B showed
 that the heuristic leaps posterized shallow rays into stable horizontal strata,
 while the other additions left the hierarchy-free density softer than the last
 organic checkpoint. That path was removed rather than tuned around
-([INC-0011](incidents/0011-cloud-hierarchy-resume-strata.md)). The corrected
+([INC-0011](../incidents/0011-cloud-hierarchy-resume-strata.md)). The corrected
 range path fades only sub-pixel fine erosion from 10–22 km and reuses the 21.6
 km macro modulation once per short ray; neither changes sample positions. Any
 future empty-space leap requires a true max-density bound over the skipped
@@ -264,7 +264,7 @@ collapsed it back into the smooth slab. All implementation changes were
 reverted. Rejected evidence is retained under
 `artifacts/visual/runs/bl-33/step-6a/` through `step-6h/`; the accepted baseline
 remains `step-4/`. See
-[ADR-20260722T111036Z](adr/20260722T111036Z-far-atlas-cannot-project-the-periodic-near-tile.md).
+[ADR-20260722T111036Z](../adr/20260722T111036Z-far-atlas-cannot-project-the-periodic-near-tile.md).
 
 The follow-up weather-phase interpretation was also bounded and rejected as a
 far producer. Continuous coverage/base/top phase offsets on the broad and
@@ -276,7 +276,7 @@ does not remove its repeat frequency. The atlas code/allocation was reverted;
 the weather fallback rollback differs from the step-4 planet frame by only
 0.020/255 MAE and reports the original 71.16 MiB allocation. Evidence:
 `step-8a/` and `step-8-rollback/`. See
-[ADR-20260722T135123Z](adr/20260722T135123Z-weather-phase-warp-does-not-make-a-periodic-cloud-basis-aperiodic.md).
+[ADR-20260722T135123Z](../adr/20260722T135123Z-weather-phase-warp-does-not-make-a-periodic-cloud-basis-aperiodic.md).
 
 A controlled incommensurate-domain follow-up then separated producer repeat
 from reconstruction. The second 3-D domain passed local runway/cruise gates;
@@ -287,7 +287,7 @@ small Cartesian 3-D tile: CLOUD-6 must derive its global moments from a
 surface-parameterized density field shared back into the near volume. The
 second near fetch and all atlas plumbing were reverted. Evidence is retained
 under `step-10a/` and `step-10b/`; see
-[ADR-20260722T141000Z](adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md).
+[ADR-20260722T141000Z](../adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md).
 
 ## Interactive regression checklist
 

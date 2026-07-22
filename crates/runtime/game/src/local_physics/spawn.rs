@@ -1,6 +1,6 @@
 //! Bubble lifecycle: player body spawn, SOI rebase, debug drops, EVA surface placement.
 //!
-//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/regimes.md`).
+//! Split out of the former monolithic `local_physics.rs` (Phase B, `docs/simulation/regimes.md`).
 
 #[allow(unused_imports)]
 use super::*;
@@ -28,7 +28,7 @@ use crate::view::ViewMode;
 /// Spawn the player's Avian rigid body the first time the simulation is
 /// ready to host it. Ships live in the **surface-local frame** (a body-fixed
 /// tangent frame anchored under the craft, Y-up, small coordinates — see
-/// `docs/surface_local.md`); gravity plus the rotating-frame terms come from
+/// `docs/simulation/surface_local.md`); gravity plus the rotating-frame terms come from
 /// `surface_local_acceleration`, and ground colliders are static in the
 /// frame. The EVA capsule still lives in body-centered inertial coordinates
 /// until its SLF fold-in.
@@ -230,7 +230,7 @@ pub(crate) fn spawn_player_avian_body(
                 // ground so it can't fight the raycast suspension (which flung
                 // the craft on its gear). The gear raycast is a SpatialQuery,
                 // unaffected by these layers; crash detection switches to the
-                // weight-on-wheels signal. See `docs/surface_local.md`.
+                // weight-on-wheels signal. See `docs/simulation/surface_local.md`.
                 commands.entity(entity).insert((
                     WheelSet { wheels },
                     thalos_physics_local::wheeled_craft_collision_layers(),

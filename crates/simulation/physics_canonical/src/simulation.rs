@@ -513,7 +513,7 @@ pub struct Simulation {
     /// gates thrust, torque, and input on [`Self::is_destroyed`]. Transient
     /// (not part of `CraftState`) because there is no save/load yet and it
     /// would otherwise ripple through every `CraftState` constructor. See
-    /// `docs/surface.md`.
+    /// `docs/simulation/surface.md`.
     hull_destroyed: bool,
     /// Surface-relative approach speed (m/s) of the impact that destroyed
     /// the craft, for the HUD readout / log. Meaningless unless

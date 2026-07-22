@@ -93,6 +93,6 @@ samples into visible horizontal strata.
   from a correlated proxy or an estimated profile boundary.
 - Performance work that changes march positions requires matched grazing-angle
   cruise and runway captures, not only timing and top-down images.
-- `docs/clouds.md` records the conservative-skip invariant.
+- `docs/rendering/clouds.md` records the conservative-skip invariant.
 - A recurrence presents as stable shelves or contours that survive temporal-off
   and lighting A/B tests but disappear when nonuniform ray advances are removed.
