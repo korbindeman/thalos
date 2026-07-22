@@ -171,6 +171,14 @@ just screenshot latest      # replay the live 3-D perspective last saved with F8
 just screenshot mira-orbit   # headless cratered-horizon verification
 just screenshot mira-surface # headless close regolith/Hapke verification
 just screenshot mira-eva     # canonical EVA-site horizon/LOD verification
+just screenshot mira-disc     # reference framing 1/3: near-full disc, sun behind
+                              #   the camera — the ALBEDO-province probe (at
+                              #   ~3 km/px every height band is sub-pixel)
+just screenshot mira-approach # reference framing 2/3: oblique orbital under
+                              #   grazing light, horizon in frame — where the
+                              #   learned macro height bands (S0–S2) read
+just screenshot mira-rim      # reference framing 3/3: low oblique across a
+                              #   landmark crater rim — the close-band probe
 just compare spaceport-aerial ssao       # off/on/raw multi-test of the AO path
 just screenshot-cold ocean    # clean-process/full-warm-up verification
 just compare-cold spaceport-aerial ssao # isolated acceptance matrix
@@ -500,7 +508,11 @@ round-tripping through the user:
   `spaceport-aerial` / `hub` for the base and the wet-belt look, or
   `ocean` for open-water material work, `mira-orbit` / `mira-surface` for
   package/Hapke work, or `mira-eva` for the canonical eye-level spawn and
-  horizon/LOD coverage. If no preset frames it,
+  horizon/LOD coverage. For Mira *visual-target* work use the reference-matched
+  trio instead — `mira-disc` (albedo provinces), `mira-approach` (macro height
+  under grazing light), `mira-rim` (close band); they pin distinct solar
+  geometries so relief and albedo are judged separately rather than confounded.
+  If no preset frames it,
   add one (`ScreenshotPreset`) rather than skipping the check.
 - `just preview` — isolated procedural assets (a tree/rock/grass mesh).
 

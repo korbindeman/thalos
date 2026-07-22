@@ -532,6 +532,32 @@ pub enum ScreenshotPreset {
     /// terrain regressions reproducible without depending on the separate
     /// landmark-crater framing used by [`Self::MiraSurface`].
     MiraEva,
+    /// **Reference framing 1 of 3** — the whole body as a near-full disc from
+    /// deep orbit, sun behind the camera.
+    ///
+    /// At this range every learned height band sits below one pixel, so the
+    /// image is carried by **albedo province structure**: mare/highland
+    /// contrast, fresh-crater ejecta, and ray systems. That makes this the
+    /// verification probe for material-province work
+    /// (ADR-20260722T084154Z), *not* for the height cascade — relief
+    /// contributes only near the limb and terminator.
+    MiraDisc,
+    /// **Reference framing 2 of 3** — oblique orbital approach under grazing
+    /// light, horizon in frame.
+    ///
+    /// Long rim shadows and basin rings make this the framing where the
+    /// ~0.5–32 km bands of the learned cascade (S0–S2) actually read, coupled
+    /// to the shadow and Hapke response. The regime where a bad macro
+    /// heightfield is most obvious.
+    MiraApproach,
+    /// **Reference framing 3 of 3** — low oblique across a landmark crater's
+    /// rim: terraced walls, central peak, and floor at ~10–100 m detail.
+    ///
+    /// The close-band probe for `Rclient` reconstruction and the S3/S4
+    /// wavelengths. Sits nearer and far more obliquely than
+    /// [`Self::MiraSurface`], which surveys regolith from a steeper survey
+    /// altitude rather than reading rim structure against the sky.
+    MiraRim,
     /// Low flight over the real runway, aimed through the lower sky so broken
     /// cumulus and its relationship to the ground are both visible.
     CloudRunway,
@@ -614,10 +640,66 @@ impl CloudCaptureQuality {
     }
 }
 
+/// Which half of the frame the unlit terrain must fall on.
+///
+/// Sun-relative framings are otherwise mirror-ambiguous: rotating the boom by
+/// `+θ` and `-θ` about the site's vertical produces the same lighting *character*
+/// but puts the terminator on opposite sides. Naming the dark side resolves that
+/// without hand-tuning an absolute azimuth per site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum FrameSide {
+    Left,
+    Right,
+}
+
+/// A resolved capture focus plus the feature scale a framing may want to key
+/// off. Solar geometry is not carried here — pose functions derive the sun from
+/// `SolarSystemState`, so there is one source for it.
+struct CaptureFocus {
+    hub: HubContext,
+    /// Radius of the landmark crater the airless site search locked onto, when
+    /// it found one. Lets a framing scale its boom to the actual feature rather
+    /// than hard-coding a distance that only suits one crater size.
+    landmark_radius_m: Option<f64>,
+}
+
+impl From<HubContext> for CaptureFocus {
+    fn from(hub: HubContext) -> Self {
+        Self {
+            hub,
+            landmark_radius_m: None,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 enum ScreenshotFraming {
     /// Original focus-orbit framing used by the base/hub regression shots.
     GodView,
+    /// `GodView` with the boom azimuth measured **from the sun** rather than
+    /// from local east, and the terminator pinned to a chosen side of frame.
+    ///
+    /// Absolute azimuth is not reproducible lighting: the site search picks the
+    /// site, so where the sun ends up in frame is incidental. Measuring from the
+    /// sun's horizontal bearing makes the lighting character the authored
+    /// quantity — which is the whole point of the Mira reference framings.
+    SunRelativeGodView {
+        /// Boom bearing measured from the sun's horizontal direction at the
+        /// site. `180°` puts the sun behind the camera (flat, fully lit); `90°`
+        /// is cross-lit; small angles look into the sun.
+        sun_azimuth_deg: f32,
+        dark_side: FrameSide,
+    },
+    /// The whole body as a disc, viewed at a chosen **phase angle** from the
+    /// sun, rolled so the terminator runs vertically.
+    ///
+    /// Aims at the body centre rather than a surface point, so the disc is
+    /// centred regardless of which site the search picked. `phase_deg = 0` is
+    /// full; `90` is exactly half-lit.
+    BodyDisc {
+        phase_deg: f32,
+        dark_side: FrameSide,
+    },
     /// Camera at an exact AGL, looking relative to the local horizon. A
     /// `site_sun_elevation_deg` chooses a reproducible point on the globe whose
     /// local sun has that elevation; `None` keeps the real spaceport site.
@@ -646,6 +728,9 @@ impl ScreenshotPreset {
             Self::MiraOrbit => "mira-orbit",
             Self::MiraSurface => "mira-surface",
             Self::MiraEva => "mira-eva",
+            Self::MiraDisc => "mira-disc",
+            Self::MiraApproach => "mira-approach",
+            Self::MiraRim => "mira-rim",
             Self::CloudRunway => "cloud-runway",
             Self::CloudMotion => "cloud-motion",
             Self::CloudCruise => "cloud-cruise",
@@ -677,6 +762,9 @@ impl ScreenshotPreset {
             "mira" | "mira-orbit" | "mira_orbit" => Self::MiraOrbit,
             "mira-surface" | "mira_surface" | "regolith" => Self::MiraSurface,
             "mira-eva" | "mira_eva" | "regolith-eva" => Self::MiraEva,
+            "mira-disc" | "mira_disc" | "mira-full" | "mira-globe" => Self::MiraDisc,
+            "mira-approach" | "mira_approach" | "mira-oblique" | "mira-limb" => Self::MiraApproach,
+            "mira-rim" | "mira_rim" | "mira-crater" | "crater-rim" => Self::MiraRim,
             "cloud-runway" | "cloud_runway" | "clouds-runway" => Self::CloudRunway,
             "cloud-motion" | "cloud_motion" | "clouds-motion" => Self::CloudMotion,
             "cloud-cruise" | "cloud_cruise" | "clouds-cruise" | "cloud-deck" => Self::CloudCruise,
@@ -712,7 +800,11 @@ impl ScreenshotPreset {
             // desert site (the craft stays in orbit, irrelevant to the framing).
             Self::DryBelt | Self::Ocean | Self::OceanSlopes => SpawnSituation::ShipOrbit,
             Self::EarthReference => SpawnSituation::Runway,
-            Self::MiraOrbit | Self::MiraSurface => SpawnSituation::ShipOrbit,
+            Self::MiraOrbit
+            | Self::MiraSurface
+            | Self::MiraDisc
+            | Self::MiraApproach
+            | Self::MiraRim => SpawnSituation::ShipOrbit,
             Self::MiraEva => SpawnSituation::Eva,
             Self::CloudCruise
             | Self::CloudInterior
@@ -728,7 +820,12 @@ impl ScreenshotPreset {
             // The loaded handoff overrides this placeholder through
             // `ScreenshotConfig::target_body_name`.
             Self::LatestPerspective => "Thalos",
-            Self::MiraOrbit | Self::MiraSurface | Self::MiraEva => "Mira",
+            Self::MiraOrbit
+            | Self::MiraSurface
+            | Self::MiraEva
+            | Self::MiraDisc
+            | Self::MiraApproach
+            | Self::MiraRim => "Mira",
             _ => "Thalos",
         }
     }
@@ -1143,6 +1240,101 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            Self::MiraDisc => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/mira_disc.png"),
+                width: 1920,
+                height: 1080,
+                // Unused by `BodyDisc`, which derives its whole pose from the
+                // sun and the body centre.
+                azimuth_deg: 0.0,
+                elevation_deg: 0.0,
+                // Geometry, not taste: measured from the surface, so the camera
+                // sits at r = 869 km + 1,900 km = 2,769 km from centre. Angular
+                // radius asin(869/2769) = 18.3° against the 22.5° half-FOV puts
+                // the disc at ~81% of frame height. Also stays inside the
+                // 4×radius impostor swap, so this frames the real ground LOD
+                // rather than the billboard.
+                distance_m: 1_900_000.0,
+                // Coarse LOD at this range, but the cache still cold-misses on a
+                // new package key.
+                warmup_frames: 720,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("mira_disc.jsonl"),
+                // Exactly half-lit with the terminator running vertically down
+                // frame centre, unlit half to the left.
+                framing: ScreenshotFraming::BodyDisc {
+                    phase_deg: 90.0,
+                    dark_side: FrameSide::Left,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::MiraApproach => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/mira_approach.png"),
+                width: 1920,
+                height: 1080,
+                // Bearing is sun-relative (see `framing`), so this is unused.
+                azimuth_deg: 0.0,
+                // Shallow boom → camera ~183 km up and ~385 km downrange of the
+                // focus. The look direction lands ~3° below the horizon, so the
+                // limb crosses just above frame centre and the lit surface fills
+                // the lower ~2/3 — the reference approach composition.
+                elevation_deg: 16.0,
+                distance_m: 400_000.0,
+                warmup_frames: 900,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("mira_approach.jsonl"),
+                // Cross-lit at 70° off the sun bearing: grazing enough for long
+                // rim shadows, with the terrain falling into darkness on the
+                // left of frame.
+                framing: ScreenshotFraming::SunRelativeGodView {
+                    sun_azimuth_deg: 70.0,
+                    dark_side: FrameSide::Left,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::MiraRim => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/mira_rim.png"),
+                width: 1920,
+                height: 1080,
+                // Bearing is sun-relative (see `framing`), so this is unused.
+                azimuth_deg: 0.0,
+                // Lower and closer than the 14°/40 km first cut, which framed
+                // open plain: 8° puts the eye ~4.2 km over the focus at 30 km
+                // out, so the far wall rises against the sky the way an oblique
+                // orbital crater view reads, instead of being flattened into a
+                // survey plan view. Still clears Mira's ±5.3 km relief because
+                // the boom starts from the crater floor, not a ridge.
+                elevation_deg: 8.0,
+                distance_m: 30_000.0,
+                // Closest of the three framings, so the heaviest cold package
+                // probe — matches `MiraSurface`'s measured convergence.
+                warmup_frames: 1_200,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("mira_rim.jsonl"),
+                // Look *across* the crater with the sun low and off to one
+                // side, so the near rim shadows the floor and the far terraces
+                // catch the light — the reference crater-rim read.
+                framing: ScreenshotFraming::SunRelativeGodView {
+                    sun_azimuth_deg: 55.0,
+                    dark_side: FrameSide::Left,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
         }
     }
 }
@@ -1516,8 +1708,9 @@ struct ScreenshotDriver {
     dry_site_dir: Option<DVec3>,
     /// Cached deep-water direction for the low-sun open-ocean preset.
     ocean_site_dir: Option<DVec3>,
-    /// Cached rugged, obliquely lit Mira site for both airless presets.
-    airless_site_dir: Option<DVec3>,
+    /// Cached Mira survey site for the airless presets: body-fixed direction
+    /// plus the landmark crater radius when the search locked onto one.
+    airless_site: Option<(DVec3, Option<f64>)>,
 }
 
 pub struct HeadlessScreenshotPlugin {
@@ -1973,31 +2166,59 @@ fn drive_headless_screenshot(
             &height_sources,
             homeworld.0,
             &mut driver.dry_site_dir,
-        ),
+        ).map(CaptureFocus::from),
         ScreenshotPreset::Ocean | ScreenshotPreset::OceanSlopes => ocean_site_context(
             &sim,
             &solar,
             &height_sources,
             homeworld.0,
             &mut driver.ocean_site_dir,
-        ),
-        ScreenshotPreset::MiraOrbit | ScreenshotPreset::MiraSurface => daylight_surface_context(
+        ).map(CaptureFocus::from),
+        ScreenshotPreset::MiraOrbit
+        | ScreenshotPreset::MiraSurface
+        | ScreenshotPreset::MiraDisc
+        | ScreenshotPreset::MiraApproach
+        | ScreenshotPreset::MiraRim => daylight_surface_context(
             &sim,
             &solar,
             &height_sources,
             homeworld.0,
             &surfaces,
-            &mut driver.airless_site_dir,
+            &mut driver.airless_site,
+            match cfg.preset {
+                // The disc aims at the body centre, so the site only decides
+                // which face turns toward the camera — keep it well lit.
+                ScreenshotPreset::MiraDisc => AirlessSunGeometry::SubSolar,
+                // Grazing light for long rim shadows across the macro bands.
+                // The 90 km bracket showed `Oblique` washes relief out flat at
+                // survey range, so the rim probe joins the approach here.
+                ScreenshotPreset::MiraApproach | ScreenshotPreset::MiraRim => {
+                    AirlessSunGeometry::Grazing
+                }
+                _ => AirlessSunGeometry::Oblique,
+            },
+            match cfg.preset {
+                // The rim framing must *contain* a crater, so it needs the
+                // biggest one available rather than the registry's typical
+                // ~10 km pick, which is too small to read as a rim from low.
+                ScreenshotPreset::MiraRim => LandmarkChoice::Largest,
+                _ => LandmarkChoice::Typical,
+            },
         ),
         ScreenshotPreset::MiraEva => {
-            eva_surface_context(&sim, &solar, &height_sources, homeworld.0)
+            eva_surface_context(&sim, &solar, &height_sources, homeworld.0).map(CaptureFocus::from)
         }
         _ => match cfg.framing {
+            // The sun-relative and disc framings are only reachable from the
+            // airless presets above, which resolve their own site; a non-Mira
+            // preset adopting one still gets a sane focus here.
             ScreenshotFraming::GodView
+            | ScreenshotFraming::SunRelativeGodView { .. }
+            | ScreenshotFraming::BodyDisc { .. }
             | ScreenshotFraming::LocalCloud {
                 site_sun_elevation_deg: None,
                 ..
-            } => hub_context(&sim, &solar, &height_sources, &registry, homeworld.0),
+            } => hub_context(&sim, &solar, &height_sources, &registry, homeworld.0).map(CaptureFocus::from),
             ScreenshotFraming::LocalCloud {
                 site_sun_elevation_deg: Some(sun_elevation_deg),
                 ..
@@ -2007,7 +2228,7 @@ fn drive_headless_screenshot(
                 &height_sources,
                 homeworld.0,
                 sun_elevation_deg,
-            ),
+            ).map(CaptureFocus::from),
         },
     };
     let Some(ctx) = ctx else {
@@ -2040,9 +2261,9 @@ fn drive_headless_screenshot(
             return;
         }
     } else if pose_cfg.preset == ScreenshotPreset::MiraEva {
-        pose_eva_camera(pose_cfg, &ctx, root, &mut transform, &mut cell);
+        pose_eva_camera(pose_cfg, &ctx.hub, root, &mut transform, &mut cell);
     } else {
-        pose_camera(pose_cfg, &ctx, &solar, root, &mut transform, &mut cell);
+        pose_camera(pose_cfg, &ctx, &sim, &solar, root, &mut transform, &mut cell);
     }
 
     if driver.captured {
@@ -2253,8 +2474,10 @@ fn daylight_surface_context(
     height_sources: &HeightSourceRegistry,
     body_id: BodyId,
     surfaces: &BodySurfaceRegistry,
-    cached_dir: &mut Option<DVec3>,
-) -> Option<HubContext> {
+    cached_site: &mut Option<(DVec3, Option<f64>)>,
+    geometry: AirlessSunGeometry,
+    choice: LandmarkChoice,
+) -> Option<CaptureFocus> {
     let states = solar.states.as_deref()?;
     let body_state = states.get(body_id)?;
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
@@ -2266,21 +2489,23 @@ fn daylight_surface_context(
         sun_inertial
     };
     let sun_body = (body_state.orientation.inverse() * sun_world).normalize();
-    let dir_body = match *cached_dir {
-        Some(dir) => dir,
+    let (dir_body, landmark_radius_m) = match *cached_site {
+        Some(site) => site,
         None => {
-            let dir = find_rugged_airless_site(
+            let site = find_rugged_airless_site(
                 hs.as_ref(),
                 sun_body,
                 surfaces.airless_landmarks(body_id),
+                geometry,
+                choice,
             );
-            let incidence_deg = dir.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
+            let incidence_deg = site.0.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
             info!(
                 target: "thalos::screenshot",
-                "airless survey site: solar incidence {incidence_deg:.0}°"
+                "airless survey site: solar incidence {incidence_deg:.0}° ({geometry:?})"
             );
-            *cached_dir = Some(dir);
-            dir
+            *cached_site = Some(site);
+            site
         }
     };
     let up_world = (body_state.orientation * dir_body).normalize();
@@ -2288,11 +2513,14 @@ fn daylight_surface_context(
         .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
         .unwrap_or(0.0) as f64;
     let surface_r = radius_m + height_m;
-    Some(HubContext {
-        body_id,
-        center_world: body_state.position + up_world * surface_r,
-        up_world,
-        pad_r: surface_r,
+    Some(CaptureFocus {
+        hub: HubContext {
+            body_id,
+            center_world: body_state.position + up_world * surface_r,
+            up_world,
+            pad_r: surface_r,
+        },
+        landmark_radius_m,
     })
 }
 
@@ -2336,21 +2564,77 @@ fn eva_surface_context(
 /// Find a visibly structured airless site while keeping the sun oblique enough
 /// for relief and Hapke backscatter to read. Candidates use a Fibonacci sphere;
 /// each is scored by the elevation range of a ~25 km neighborhood.
+/// What solar geometry an airless capture wants at its focus site.
+///
+/// The Mira reference framings differ mainly in **where the sun is**, because
+/// that decides what carries the image: a near-full disc needs the sun behind
+/// the camera so albedo provinces read, while an oblique approach needs grazing
+/// light so rim shadows do. Expressed as an acceptance band on
+/// `dot(site_dir, sun_dir)` — `1.0` is sub-solar, `0.0` is the terminator.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AirlessSunGeometry {
+    /// Sun near-overhead (≲26° incidence). Flat, shadow-poor light in which
+    /// relief nearly vanishes and albedo province structure dominates.
+    SubSolar,
+    /// 41–72° incidence — clearly lit, but far enough from noon to reveal
+    /// crater walls and exercise Hapke's angular response.
+    Oblique,
+    /// 72–85° incidence. Grazing light: long rim shadows, maximum relief
+    /// legibility, and the regime where terrain self-shadowing shows.
+    Grazing,
+}
+
+impl AirlessSunGeometry {
+    /// Acceptance band on `dot(site_dir, sun_dir)`.
+    ///
+    /// Kept away from `dot ≈ 0` even for [`Self::Grazing`]: at the terminator
+    /// itself the site is too dark to verify anything.
+    fn light_band(self) -> std::ops::RangeInclusive<f64> {
+        match self {
+            Self::SubSolar => 0.90..=1.0,
+            Self::Oblique => 0.30..=0.75,
+            Self::Grazing => 0.09..=0.31,
+        }
+    }
+}
+
+/// How the airless site search picks among landmark craters inside the lighting
+/// band.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum LandmarkChoice {
+    /// First acceptable landmark in registry order. The registry sorts toward
+    /// ~10 km radius, so this yields a typical mid-size crater — what the
+    /// existing survey probes are calibrated against.
+    Typical,
+    /// Largest acceptable landmark. Required by framings that must *contain* a
+    /// crater rather than survey terrain near one.
+    Largest,
+}
+
 fn find_rugged_airless_site(
     source: &dyn HeightSource,
     sun_dir: DVec3,
     landmarks: &[(DVec3, f32)],
-) -> DVec3 {
-    if let Some((dir, radius_m)) = landmarks
-        .iter()
-        .find(|(dir, _)| (0.30..=0.75).contains(&dir.dot(sun_dir)))
-    {
+    geometry: AirlessSunGeometry,
+    choice: LandmarkChoice,
+) -> (DVec3, Option<f64>) {
+    let band = geometry.light_band();
+    let in_band = || {
+        landmarks
+            .iter()
+            .filter(|(dir, _)| band.contains(&dir.dot(sun_dir)))
+    };
+    let landmark = match choice {
+        LandmarkChoice::Typical => in_band().next(),
+        LandmarkChoice::Largest => in_band().max_by(|a, b| a.1.total_cmp(&b.1)),
+    };
+    if let Some((dir, radius_m)) = landmark {
         info!(
             target: "thalos::screenshot",
-            "airless landmark crater: radius {:.1} km",
+            "airless landmark crater: radius {:.1} km ({choice:?})",
             radius_m / 1000.0
         );
-        return *dir;
+        return (*dir, Some(*radius_m as f64));
     }
 
     const CANDIDATES: usize = 768;
@@ -2365,10 +2649,7 @@ fn find_rugged_airless_site(
         let radius = (1.0 - y * y).sqrt();
         let theta = GOLDEN_ANGLE * i as f64;
         let dir = DVec3::new(radius * theta.cos(), y, radius * theta.sin());
-        let light = dir.dot(sun_dir);
-        // 41–72° incidence: clearly lit, but far enough from noon to reveal
-        // crater walls and exercise Hapke's angular response.
-        if !(0.30..=0.75).contains(&light) {
+        if !band.contains(&dir.dot(sun_dir)) {
             continue;
         }
 
@@ -2397,7 +2678,7 @@ fn find_rugged_airless_site(
             best = dir;
         }
     }
-    best
+    (best, None)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -2488,6 +2769,20 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
         ScreenshotFraming::GodView => format!(
             "{{\"kind\":\"god_view\",\"azimuth_deg\":{:.4},\"elevation_deg\":{:.4},\"distance_m\":{:.3}}}",
             cfg.azimuth_deg, cfg.elevation_deg, cfg.distance_m
+        ),
+        ScreenshotFraming::SunRelativeGodView {
+            sun_azimuth_deg,
+            dark_side,
+        } => format!(
+            "{{\"kind\":\"sun_relative_god_view\",\"sun_azimuth_deg\":{sun_azimuth_deg:.4},\"dark_side\":\"{dark_side:?}\",\"elevation_deg\":{:.4},\"distance_m\":{:.3}}}",
+            cfg.elevation_deg, cfg.distance_m
+        ),
+        ScreenshotFraming::BodyDisc {
+            phase_deg,
+            dark_side,
+        } => format!(
+            "{{\"kind\":\"body_disc\",\"phase_deg\":{phase_deg:.4},\"dark_side\":\"{dark_side:?}\",\"distance_m\":{:.3}}}",
+            cfg.distance_m
         ),
         ScreenshotFraming::LocalCloud {
             camera_altitude_m,
@@ -2651,18 +2946,48 @@ fn write_cloud_probe_report(
 
 /// Dispatch to the preset's god-view or local-horizon pose. Detail systems
 /// (scatter, shadows) follow the camera via `rendering::view_anchor`.
+/// Unit world direction from `body` toward the sun.
+///
+/// Bodies orbit the origin-centred star, so the direction home from the body is
+/// the sun direction. One definition, shared by every sun-relative framing.
+fn sun_direction_world(solar: &SolarSystemState, body_id: BodyId) -> Option<DVec3> {
+    let position = solar.states.as_deref()?.get(body_id)?.position;
+    (-position).try_normalize()
+}
+
 fn pose_camera(
     cfg: &ScreenshotConfig,
-    ctx: &HubContext,
+    focus: &CaptureFocus,
+    sim: &SimulationState,
     solar: &SolarSystemState,
     root: &Grid,
     transform: &mut Transform,
     cell: &mut CellCoord,
 ) {
+    let ctx = &focus.hub;
     match cfg.framing {
         ScreenshotFraming::GodView => {
             pose_god_view_camera(cfg, ctx, root, transform, cell);
         }
+        ScreenshotFraming::SunRelativeGodView {
+            sun_azimuth_deg,
+            dark_side,
+        } => pose_sun_relative_god_view(
+            cfg,
+            focus,
+            solar,
+            root,
+            transform,
+            cell,
+            sun_azimuth_deg,
+            dark_side,
+        ),
+        ScreenshotFraming::BodyDisc {
+            phase_deg,
+            dark_side,
+        } => pose_body_disc_camera(
+            cfg, ctx, sim, solar, root, transform, cell, phase_deg, dark_side,
+        ),
         ScreenshotFraming::LocalCloud {
             camera_altitude_m,
             look_elevation_deg,
@@ -2721,6 +3046,186 @@ fn pose_god_view_camera(
     *cell = next_cell;
     *transform =
         Transform::from_translation(local).looking_to(to_focus.as_vec3(), look_up.as_vec3());
+}
+
+/// Screen-space right vector for a camera looking along `forward` with `up`.
+///
+/// Bevy cameras look down local `-Z` with `+X` right and `+Y` up, so
+/// `right = forward × up` in the right-handed basis `looking_to` builds.
+fn screen_right(forward: DVec3, up: DVec3) -> DVec3 {
+    forward.cross(up).normalize_or_zero()
+}
+
+/// `GodView`, but the boom bearing is measured from the sun and the terminator
+/// is pinned to a requested side of frame.
+///
+/// The mirror ambiguity (see [`FrameSide`]) is resolved by evaluating both
+/// bearings and keeping the one that lands the sun on the opposite side from the
+/// requested dark half — never by nudging an absolute azimuth, which would only
+/// hold for one site.
+#[allow(clippy::too_many_arguments)]
+fn pose_sun_relative_god_view(
+    cfg: &ScreenshotConfig,
+    focus: &CaptureFocus,
+    solar: &SolarSystemState,
+    root: &Grid,
+    transform: &mut Transform,
+    cell: &mut CellCoord,
+    sun_azimuth_deg: f32,
+    dark_side: FrameSide,
+) {
+    let ctx = &focus.hub;
+    let up = ctx.up_world;
+    let Some(sun_world) = sun_direction_world(solar, ctx.body_id) else {
+        // No solar state yet — fall back rather than pose from a zero vector.
+        pose_god_view_camera(cfg, ctx, root, transform, cell);
+        return;
+    };
+
+    // Sun bearing projected onto the site's horizon. Degenerate only with the
+    // sun exactly overhead, where every bearing is equivalent anyway.
+    let sun_horizon = (sun_world - up * sun_world.dot(up)).try_normalize().unwrap_or_else(|| {
+        let seed = if up.dot(DVec3::Y).abs() < 0.99 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        seed.cross(up).normalize()
+    });
+    let sun_perp = up.cross(sun_horizon).normalize();
+
+    let az = (sun_azimuth_deg as f64).to_radians();
+    let elev = (cfg.elevation_deg as f64).to_radians();
+
+    // The two mirror-image bearings about the sun/up plane. Both give identical
+    // lighting character; they differ only in which side of frame goes dark.
+    let mut chosen = None;
+    for sign in [1.0_f64, -1.0] {
+        let horiz = sun_horizon * az.cos() + sun_perp * (az.sin() * sign);
+        let offset_dir = horiz * elev.cos() + up * elev.sin();
+        let camera_world = ctx.center_world + offset_dir * cfg.distance_m;
+        let forward = (ctx.center_world - camera_world).normalize();
+        let look_up = if forward.dot(up).abs() > 0.99 { sun_perp } else { up };
+        let right = screen_right(forward, look_up);
+        let sun_on_right = sun_world.dot(right) > 0.0;
+        // Dark half is opposite the sun.
+        let matches_request = match dark_side {
+            FrameSide::Left => sun_on_right,
+            FrameSide::Right => !sun_on_right,
+        };
+        if matches_request || chosen.is_none() {
+            chosen = Some((camera_world, forward, look_up));
+            if matches_request {
+                break;
+            }
+        }
+    }
+
+    let Some((camera_world, forward, look_up)) = chosen else {
+        return;
+    };
+    let (next_cell, local) = root.translation_to_grid(camera_world);
+    *cell = next_cell;
+    *transform =
+        Transform::from_translation(local).looking_to(forward.as_vec3(), look_up.as_vec3());
+}
+
+/// Frame the whole body as a disc at a chosen phase angle, rolled so the
+/// terminator runs vertically.
+///
+/// Aims at the body centre, so the disc is centred no matter which site the
+/// search picked. The camera's up axis is the sun-rotation axis, which puts the
+/// sun in the screen-horizontal plane — that is what makes the terminator
+/// vertical rather than an arbitrary diagonal.
+#[allow(clippy::too_many_arguments)]
+fn pose_body_disc_camera(
+    cfg: &ScreenshotConfig,
+    ctx: &HubContext,
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    root: &Grid,
+    transform: &mut Transform,
+    cell: &mut CellCoord,
+    phase_deg: f32,
+    dark_side: FrameSide,
+) {
+    let Some(states) = solar.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(ctx.body_id) else {
+        return;
+    };
+    let center = body_state.position;
+    let Some(sun_world) = sun_direction_world(solar, ctx.body_id) else {
+        return;
+    };
+
+    // Which hemisphere to present.
+    //
+    // The phase angle fixes how *much* of the disc is lit but not *which* face
+    // turns toward the camera, and the two are independent — so left free, the
+    // framing lands on whatever hemisphere the site search happened to pick. For
+    // a tidally locked moon the interesting one is the near side: that is where
+    // the authored mare provinces live (`procellarum`'s near-side half-angle),
+    // and a mare-poor far side is exactly why an earlier disc capture read as a
+    // near-uniform grey ball. Aim at the parent when there is one.
+    let face_target = sim
+        .system
+        .bodies
+        .get(ctx.body_id)
+        .and_then(|body| body.parent)
+        .and_then(|parent| states.get(parent))
+        .and_then(|parent| (parent.position - center).try_normalize());
+
+    let phase = (phase_deg as f64).to_radians();
+
+    // Camera direction on the phase cone about the sun. With a face target we
+    // take the point on that cone closest to it — decompose the target into its
+    // sun-parallel and perpendicular parts and rebuild at exactly `phase`, which
+    // maximises how much of the wanted face is visible without giving up the
+    // requested lighting. Without one, any perpendicular seed will do.
+    let perp_seed = face_target
+        .map(|target| target - sun_world * target.dot(sun_world))
+        .and_then(|perp| perp.try_normalize())
+        .unwrap_or_else(|| {
+            let spin_axis = (body_state.orientation * DVec3::Y).normalize_or_zero();
+            sun_world
+                .cross(spin_axis)
+                .cross(sun_world)
+                .try_normalize()
+                .unwrap_or_else(|| sun_world.cross(DVec3::X).cross(sun_world).normalize())
+        });
+
+    // `distance_m` is measured from the surface, matching every other framing.
+    let range = ctx.pad_r + cfg.distance_m;
+
+    // View direction is fixed by the face target and the phase — flipping the
+    // perpendicular instead would swing the camera to the *other* hemisphere and
+    // throw the face away.
+    let cam_dir = (sun_world * phase.cos() + perp_seed * phase.sin()).normalize();
+    let camera_world = center + cam_dir * range;
+    let forward = (center - camera_world).normalize();
+
+    // Which side goes dark is a roll choice, not a position one. The up axis must
+    // stay ⊥ to both sun and view (that is what keeps the terminator vertical),
+    // which leaves exactly two options 180° apart; they mirror the frame.
+    //
+    // Flipping the *perpendicular* cannot do this: it flips the derived axis too,
+    // so `right` comes out identical and both candidates land the sun on the same
+    // side — which silently ignored the request until a capture showed it.
+    let Some(axis_seed) = sun_world.cross(cam_dir).try_normalize() else {
+        return;
+    };
+    let sun_on_right = sun_world.dot(screen_right(forward, axis_seed)) > 0.0;
+    let want_sun_on_right = matches!(dark_side, FrameSide::Left);
+    let axis = if sun_on_right == want_sun_on_right {
+        axis_seed
+    } else {
+        -axis_seed
+    };
+    let (next_cell, local) = root.translation_to_grid(camera_world);
+    *cell = next_cell;
+    *transform = Transform::from_translation(local).looking_to(forward.as_vec3(), axis.as_vec3());
 }
 
 /// Put the screenshot camera at EVA eye height and look along the local

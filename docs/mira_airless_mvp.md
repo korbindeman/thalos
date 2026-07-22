@@ -21,7 +21,12 @@ The playable MVP deliberately lands before the trained diffusion producer:
   a rebake cannot reuse stale reconstructed tiles;
 - `just game mira` / `just game mira-eva` parameterise the existing spawn path,
   and `mira-orbit` / `mira-surface` / `mira-eva` headless captures provide
-  stable orbit, landmark-regolith, and canonical eye-level probes;
+  stable orbit, landmark-regolith, and canonical eye-level probes. The
+  reference-matched framings `mira-disc` / `mira-approach` / `mira-rim` were
+  added 2026-07-22 alongside them (see `mira_learned_terrain_roadmap.md`
+  §"Visual targets"): they target the three visual goals rather than a
+  regression surface, and each pins a distinct solar geometry, so relief and
+  albedo can be judged separately instead of confounded in one frame;
 - airless archetypes select the shared Hapke regolith path and suppress
   terrestrial vegetation/grass. Close detail is reconstructed deterministically
   by the existing client tile synthesis and cached on device.
@@ -287,6 +292,13 @@ Use overlapping inference windows with shared noise and intermediate-path
 fusion. Generation order must not affect output. Produce low-pass elevation and
 Laplacian residual channels at explicit physical resolutions.
 
+The cascade's output contract is **height only**. Albedo and material provinces
+are an authored/procedural field conditioned on the same seed and normalized
+parameter vector, layered over the learned height rather than emitted by the
+model — see ADR-20260722T084154Z-airless-material-provinces-authored. That ADR
+also records why: at the orbital full-disc framing, albedo province structure
+carries the image and every learned height band falls below one pixel.
+
 The minimum proof is a coarse-to-fine 2D U-Net cascade trained on 256–512 px
 tangent patches. A practical starting ladder is:
 
@@ -489,6 +501,17 @@ per-node codec selection. Start with a 4096-face fixed Mira seed and emit
 whole-body maps,
 face/corner seam probes, crater/SFD statistics, package-size composition, and
 rate-distortion curves.
+
+The schema must gain an explicit **material/province node kind** before the first
+whole-sphere campaign. `PackageBlobKind::StaticSurfaceV1` is the compatibility
+substrate this slice replaces, and it is what carries Mira's albedo today; the
+diffusion producer emits no material channel, so replacing the substrate without
+that node kind renders the body grey. See
+ADR-20260722T084154Z-airless-material-provinces-authored.
+
+Cross-face tangent-window scheduling is the same problem MultiDiffusion-style
+overlapping-window fusion solves on unbounded domains; see the InfiniteDiffusion
+notes in `mira_learned_terrain_roadmap.md` for the reference treatment.
 
 **Exit:** the package reconstructs within its declared error at every retained
 level; seam belts remain within one quantisation step; flat mare demonstrably

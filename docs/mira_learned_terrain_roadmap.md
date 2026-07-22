@@ -30,6 +30,81 @@ Mira is complete when one fixed authored seed:
 An attractive hillshade is a milestone, not completion. A technically valid
 package that does not look compelling is also not completion.
 
+## Visual targets
+
+Three reference framings define "done looks right" (user-supplied 2026-07-22:
+an orbital far-side full disc, an oblique low-sun approach with the primary in
+frame, and a low-angle crater rim with terraced walls and a central peak).
+
+They are **not one problem at three zoom levels**. Each is dominated by a
+different mechanism, and the dominant mechanism is not always the learned
+cascade:
+
+| Framing | Preset | Scale | Dominated by | Owned by |
+|---|---|---|---|---|
+| **Orbital full disc** | `mira-disc` | ~3 km/px; body fills frame | **Albedo province structure** — mare darkness, highland brightness, fresh-crater ejecta, ray systems. Every learned height band is below one pixel; relief contributes only at the limb and terminator | material provinces (ADR-20260722T084154Z) + Hapke/exposure |
+| **Oblique low-sun approach** | `mira-approach` | ~0.5–32 km wavelengths visible | **Macro height × grazing light** — rim shadows, basin rings, degradation states | S0–S2 of the learned cascade (L2/L3) + shadow/Hapke rendering |
+| **Close crater rim** | `mira-rim` | ~10–100 m | terraced walls, central peaks, talus, boulder fields | S3/S4 + `Rclient` (L4) |
+
+A disc framing has **two** independent degrees of freedom, and both must be
+authored or the shot is left to chance: the phase angle fixes *how much* of the
+disc is lit, while the face target fixes *which hemisphere* turns toward the
+camera. `mira-disc` aims at the parent body, so a tidally locked moon presents
+its near side — where the authored mare provinces live. Left free, the framing
+took whatever hemisphere the site search happened to pick, and a mare-poor far
+side is why the first disc capture read as a near-uniform grey ball with the
+authored `procellarum` basin nowhere in frame.
+
+The three presets differ in **solar geometry** as much as in distance, because
+that is what decides which mechanism carries each image. `AirlessSunGeometry`
+(`screenshot.rs`) makes that explicit as an acceptance band on
+`dot(site_dir, sun_dir)`: `SubSolar` (≲26° incidence — flat light, albedo reads)
+for the disc, `Grazing` (72–85° — long rim shadows) for the approach, and
+`Oblique` (41–72°) for the rim, which is the band the authored landmark craters
+occupy and where a crater floor and central peak stay lit instead of drowning in
+shadow.
+
+Two consequences follow, and both are recorded as decisions rather than left
+implicit:
+
+1. The full-disc framing is a **materials problem**. Mira's albedo comes from the
+   compatibility producer today and the diffusion producer emits height only —
+   resolved by ADR-20260722T084154Z (authored/procedural provinces over learned
+   height). Ray systems are not modelled at all yet and are scoped work.
+2. Visual risk is therefore **not** concentrated where the ladder assumes.
+   ADR-20260722T084155Z runs a bounded hero-visual slice — reference-matched
+   capture framings, airless render calibration, and a single-face 4096 hero bake
+   on the v5b checkpoint — in parallel with L2 gate closure, against the existing
+   package. It retires renderer risk early; it does not advance any milestone.
+
+### External reference: InfiniteDiffusion
+
+[InfiniteDiffusion / terrain-diffusion](https://xandergos.github.io/terrain-diffusion/)
+is loose inspiration, reviewed 2026-07-22. Three techniques transfer and are
+adopted as design input:
+
+- **Compact Laplacian elevation encoding**, which stabilizes training across a
+  very large elevation dynamic range. Our stored package pyramid (§3's
+  `B0 + B1 + B2`) is spiritually similar, but the *training* representation is
+  not — worth evaluating as a normalization change in the L2/L3 contract.
+- **Hierarchical cascade coupling planetary context to local detail** —
+  independent confirmation of the S0–S4 ladder in `mira_airless_mvp.md` §6.
+- **MultiDiffusion-style overlapping-window fusion with lazy evaluation**, the
+  mature form of what MIRA-2 calls cross-face tangent windows and overgenerated
+  seam consensus. Directly informs that scheduling work.
+
+Its headline property — stateless generation indexed by `(seed, coordinate)` with
+O(1) random access, reported at "9× faster than orbital velocity on a consumer
+GPU" — **conflicts with ADR-20260720T211046Z (offline terrain packages), and does
+not reopen it.** That decision does not rest on runtime throughput alone: Thalos
+needs deterministic **CPU** height through `SurfaceQuery` for colliders, EVA
+contact, and impact, which a GPU diffusion stack cannot serve cheaply, and a
+package additionally fixes the body so it does not change under the player. What
+this reference does change is that the runtime-cost leg of that argument is now
+weaker than when it was written; if the collision-parity leg is ever solved
+independently, the fork is worth revisiting on its merits rather than by
+inheritance.
+
 ## Baseline at roadmap start
 
 - MIRA-0 package/runtime tracer is complete and visually verified.
@@ -172,6 +247,30 @@ Future Thunder campaigns use manual `tnr scp` ingress/egress; the agent handles
 only the control plane.
 
 ## Immediate execution queue
+
+Since 2026-07-22 this runs as **two concurrent tracks** (ADR-20260722T084155Z).
+Track A is the learned cascade on its unchanged ladder; Track B retires renderer
+and materials risk against the package we already have. Track B advances no
+milestone — it informs tuning and can only report.
+
+### Track B — hero visual slice (parallel, does not gate Track A)
+
+- **B0.** Rebuild the stale Mira package (`just bake Mira`); the checked-in key
+  `4fed789a18a2ddda` is stale against expected `84094ad51a76cb37` and blocks every
+  capture. Prerequisite for everything below.
+- **B1.** Add deterministic capture presets matching the three reference framings
+  (orbital disc, oblique low-sun approach, close rim) so visual claims are made
+  against fixed geometry.
+- **B2.** Airless render calibration at those framings: Hapke parameters,
+  opposition surge, mare/highland albedo split, exposure and terminator response.
+- **B3.** Ray systems — the authored province vocabulary covers mare/highland and
+  fresh/mature but has no ballistic ejecta pattern, which the full-disc framing
+  needs.
+- **B4.** Single-face 4096 hero bake on the v5b checkpoint: real learned terrain
+  in-game at production resolution, one face, no seam machinery. A throwaway
+  integration artifact — not a shippable package.
+
+### Track A — learned cascade (ladder order unchanged)
 
 1. ~~Local 4070 Ti CUDA baseline~~ — **done 2026-07-21**
    (`mira_l2_kaguya_cuda_velocity_v4_local`: 69.0 examples/s, fingerprint
