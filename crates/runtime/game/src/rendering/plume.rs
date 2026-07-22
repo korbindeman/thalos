@@ -1,24 +1,38 @@
-//! Rocket-engine exhaust plumes — the immediate nozzle plume as a data-driven,
-//! pressure-responsive billboard effect (design: the Thalos plume system,
-//! `docs/plume.md`). This is Phase 1: one mesh-based emissive layer per liquid
-//! engine, driven from a typed [`PlumeSignals`] boundary, with propellant-family
-//! presets and a pressure-ratio → shape response. Secondary particles, distortion,
-//! clustered lights, and the solid-motor cloud path are later phases.
+//! Rocket-engine exhaust plumes — a data-driven, pressure-responsive renderer
+//! (design: `docs/plume.md`), driven from a typed [`PlumeSignals`] boundary.
 //!
-//! Pipeline (mirrors the design doc's flow):
+//! The plume is modelled as an axisymmetric emitting gas column whose *shape* is
+//! set by the nozzle/ambient pressure ratio and whose *brightness follows from
+//! that shape* rather than from an authored fade curve:
+//!
+//! ```text
+//!   R(s) = R0·lip + tan(theta)·s      free expansion off the nozzle lip
+//!   rho  ∝ (R0/R)²                    mass conservation along the column
+//!   T    ∝ (R0/R)^(2(gamma-1))        adiabatic (expansion) cooling
+//!   T   ×= exp(-e·s/R0)               entrainment cooling (atmosphere only)
+//!   S    = exp(-W·(1/T − 1))          visible-band emission, Wien side
+//!   L    = S · (1 − exp(−rho·chord))  emission through an absorbing column
+//! ```
+//!
+//! That one law spans the whole flight envelope with no regime switch. In vacuum
+//! the column cools by expanding and the exponential emission term collapses, so
+//! the cone dissolves on its own; at sea level it barely expands, so entrainment
+//! of ambient air is what cools it, and it reads as a dense, shock-celled,
+//! afterburning column. This module resolves the parameters; `plume.wgsl`
+//! renders the same model. See `docs/plume.md`, and INC-0019 before repurposing
+//! any packed lane of [`PlumeParams`].
+//!
+//! Pipeline:
 //!
 //! 1. [`update_plume_signals`] reads each firing [`Engine`]'s runtime state
 //!    ([`EngineThrust`] + [`ThrottleState`]) plus the craft's local ambient
 //!    pressure and publishes a compact, render-facing [`PlumeSignals`] on the
 //!    engine entity (the single typed boundary — visual code never reaches back
 //!    into gameplay components). A [`PlumeDebugOverride`] resource can drive the
-//!    signals directly for authoring / headless capture (frozen controller
-//!    values, the doc's authoring workflow).
+//!    signals directly for authoring / headless capture.
 //! 2. [`update_plume_visuals`] resolves those signals through the propellant
-//!    preset + pressure-response curves into [`PlumeParams`] (the flat uniform the
+//!    preset + the pressure response into [`PlumeParams`] (the flat uniform the
 //!    shader renders) and toggles plume visibility.
-//!
-//! The look itself lives in `assets/shaders/plume.wgsl`.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
@@ -32,15 +46,25 @@ use bevy::render::render_resource::{
 };
 
 use thalos_physics_canonical::canonical::Epoch;
-use thalos_shipyard::{Engine, EngineActivation, EngineGeometry, EngineThrust, ReactantRatio, Resource};
+use thalos_shipyard::{
+    Engine, EngineActivation, EngineGeometry, EngineOptimization, EngineThrust, ReactantRatio,
+    Resource,
+};
 
 use crate::SimStage;
 use crate::rendering::SimulationState;
 use crate::shipyard_editor::core::EditorPart;
 
+/// Bounds on `p_exit / p_ambient`. The low end is a deeply overexpanded nozzle in
+/// dense air; the high end stands in for a true vacuum, where the ratio is
+/// unbounded but the *look* has long since saturated.
+const PRESSURE_RATIO_MIN: f32 = 0.015;
+const PRESSURE_RATIO_MAX: f32 = 64.0;
+
 /// Shared unit-quad plume mesh handle. The quad lives in plume-local space
 /// (x = lateral in [-1, 1], y = axial in [0, 1], 0 at the nozzle exit); the
-/// vertex shader rebuilds it as a camera-facing, axis-locked billboard.
+/// vertex shader rebuilds it as a camera-facing, axis-locked billboard whose
+/// width tracks the analytic sheath radius.
 #[derive(Resource)]
 struct PlumeMesh(Handle<Mesh>);
 
@@ -72,10 +96,11 @@ fn insert_plume_mesh(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
 }
 
 /// A subdivided unit quad, x ∈ [-1, 1] (lateral), y ∈ [0, 1] (axial, 0 = exit).
-/// Positions are normalized; the vertex shader scales and orients them. A few
-/// axial rows keep the (cheap) linear interpolation of the profile smooth.
+/// Positions are normalized; the vertex shader scales and orients them. The row
+/// count sets how finely the strip follows the (curved, shock-modulated)
+/// envelope, so it needs to resolve several shock cells.
 fn plume_billboard_mesh() -> Mesh {
-    const ROWS: usize = 24;
+    const ROWS: usize = 96;
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity((ROWS + 1) * 2);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity((ROWS + 1) * 2);
     let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((ROWS + 1) * 2);
@@ -123,7 +148,7 @@ pub struct PlumeSignals {
     pub ambient_pressure_pa: f32,
     /// Nozzle-exit / ambient pressure ratio `r = p_exit / p_ambient`. `>1`
     /// underexpanded (toward vacuum), `<1` overexpanded (dense atmosphere),
-    /// `≈1` perfectly expanded. Large sentinel in a true vacuum.
+    /// `≈1` perfectly expanded. Saturates at [`PRESSURE_RATIO_MAX`] in vacuum.
     pub pressure_ratio: f32,
 }
 
@@ -139,7 +164,7 @@ impl Default for PlumeSignals {
 }
 
 /// Authoring / capture override. When any field is `Some`, [`update_plume_signals`]
-/// uses it instead of live engine state — the doc's "scrub with frozen controller
+/// uses it instead of live engine state — the "scrub with frozen controller
 /// values" workflow, and how the headless `plume` screenshot preset lights an
 /// engine without fighting the fuel/warp gating.
 #[derive(Resource, Debug, Clone, Copy, Default)]
@@ -153,9 +178,8 @@ pub struct PlumeDebugOverride {
 // Propellant families
 // ---------------------------------------------------------------------------
 
-/// Visual propellant family — the starting colour/opacity defaults an engine
-/// profile then tunes. Derived from the engine's reactants (the doc's "propellant
-/// preset supplies a visual family").
+/// Visual propellant family — the starting palette an engine profile then tunes.
+/// Derived from the engine's reactants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropellantFamily {
     Methalox,
@@ -180,52 +204,68 @@ impl PropellantFamily {
         }
     }
 
-    /// `(core, mid, edge)` linear-RGB palette, HDR core intensity, and base
-    /// opacity. Starting points — iterated by screenshot.
-    fn palette(self) -> Palette {
+    /// Linear-RGB palette + radiance/opacity scales. The expanded-plume and
+    /// sheath colours come in a *pair*: what the exhaust looks like on its own
+    /// (vacuum), and what it looks like once entrained air afterburns the
+    /// fuel-rich products (atmosphere). [`resolve_params`] blends between them on
+    /// ambient pressure — which is why one methalox preset reads blue-violet in
+    /// orbit and orange-white on the pad.
+    fn visuals(self) -> Visuals {
         match self {
-            // Pale blue-white core, blue plume, blue-violet sheath.
-            Self::Methalox => Palette {
-                core: Vec3::new(0.72, 0.84, 1.0),
-                mid: Vec3::new(0.30, 0.52, 1.0),
-                edge: Vec3::new(0.24, 0.28, 0.72),
-                intensity: 24.0,
-                density: 0.85,
+            // White-hot at the throat, pale blue-violet expanding in vacuum,
+            // bright orange once it afterburns at sea level.
+            Self::Methalox => Visuals {
+                hot: Vec3::new(1.00, 0.94, 0.86),
+                mid_vacuum: Vec3::new(0.44, 0.60, 1.05),
+                mid_air: Vec3::new(1.00, 0.62, 0.25),
+                sheath_vacuum: Vec3::new(0.34, 0.30, 0.95),
+                sheath_air: Vec3::new(1.00, 0.38, 0.10),
+                radiance: 5.5,
+                opacity: 1.0,
             },
-            // Warm white core, orange plume, sooty amber sheath.
-            Self::Kerolox => Palette {
-                core: Vec3::new(1.0, 0.86, 0.58),
-                mid: Vec3::new(1.0, 0.48, 0.16),
-                edge: Vec3::new(0.55, 0.20, 0.06),
-                intensity: 19.0,
-                density: 1.05,
+            // Sooty: already orange in vacuum, and the sheath goes dark and
+            // smoky rather than bright.
+            Self::Kerolox => Visuals {
+                hot: Vec3::new(1.00, 0.90, 0.72),
+                mid_vacuum: Vec3::new(1.00, 0.72, 0.42),
+                mid_air: Vec3::new(1.00, 0.55, 0.18),
+                sheath_vacuum: Vec3::new(0.70, 0.38, 0.16),
+                sheath_air: Vec3::new(0.85, 0.28, 0.06),
+                radiance: 5.0,
+                opacity: 1.25,
             },
-            // Faint blue-white, near-invisible — legibility comes from the core
-            // glow, not a saturated flame.
-            Self::Hydrolox => Palette {
-                core: Vec3::new(0.72, 0.80, 1.0),
-                mid: Vec3::new(0.42, 0.50, 0.92),
-                edge: Vec3::new(0.36, 0.40, 0.70),
-                intensity: 13.0,
-                density: 0.50,
+            // Nearly transparent — legibility comes from the core glow and the
+            // shock nodes, not a saturated flame.
+            Self::Hydrolox => Visuals {
+                hot: Vec3::new(0.92, 0.95, 1.00),
+                mid_vacuum: Vec3::new(0.55, 0.68, 1.00),
+                mid_air: Vec3::new(0.78, 0.82, 1.00),
+                sheath_vacuum: Vec3::new(0.40, 0.46, 0.85),
+                sheath_air: Vec3::new(0.62, 0.60, 0.90),
+                radiance: 3.3,
+                opacity: 0.42,
             },
-            Self::Generic => Palette {
-                core: Vec3::new(0.95, 0.85, 0.75),
-                mid: Vec3::new(0.85, 0.55, 0.40),
-                edge: Vec3::new(0.45, 0.30, 0.28),
-                intensity: 15.0,
-                density: 0.75,
+            Self::Generic => Visuals {
+                hot: Vec3::new(0.98, 0.92, 0.84),
+                mid_vacuum: Vec3::new(0.85, 0.66, 0.55),
+                mid_air: Vec3::new(0.95, 0.60, 0.32),
+                sheath_vacuum: Vec3::new(0.48, 0.36, 0.38),
+                sheath_air: Vec3::new(0.72, 0.36, 0.20),
+                radiance: 4.3,
+                opacity: 0.80,
             },
         }
     }
 }
 
-struct Palette {
-    core: Vec3,
-    mid: Vec3,
-    edge: Vec3,
-    intensity: f32,
-    density: f32,
+struct Visuals {
+    hot: Vec3,
+    mid_vacuum: Vec3,
+    mid_air: Vec3,
+    sheath_vacuum: Vec3,
+    sheath_air: Vec3,
+    radiance: f32,
+    opacity: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -236,30 +276,36 @@ struct Palette {
 /// Packed as vec4s so the std140 layout matches `plume.wgsl` unambiguously.
 #[derive(Clone, Copy, ShaderType, Debug)]
 pub struct PlumeParams {
-    /// rgb = hot core colour, a = HDR emission scale.
+    /// rgb = hot core colour, a = HDR radiance scale.
     pub core_color: Vec4,
-    /// rgb = mid plume colour, a = nozzle exit radius (m).
+    /// rgb = expanded-plume colour, a = nozzle exit radius R0 (m).
     pub mid_color: Vec4,
-    /// rgb = cool sheath / tip colour, a = billboard half-width R_max (m).
+    /// rgb = shear-layer colour, a = visible axial length L (m).
     pub edge_color: Vec4,
-    /// x = visible axial length (m), y = radial expansion factor,
-    /// z = shock-cell count, w = shock-cell contrast.
+    /// x = lip radius scale, y = tan(core half-angle),
+    /// z = shear-layer spread rate, w = adiabatic exponent `2(γ−1)`.
     pub shape: Vec4,
-    /// x = axial core decay, y = shock fade, z = edge softness, w = throttle.
-    pub response: Vec4,
-    /// x = time (s), y = seed, z = ignition, w = density scale.
+    /// x = core opacity κ, y = sheath opacity κ,
+    /// z = shock-cell wavenumber (rad/m), w = shock strength 0..1.
+    pub shock: Vec4,
+    /// x = shock decay length (m), y = afterburn 0..1,
+    /// z = turbulence amplitude, w = throttle.
+    pub mixing: Vec4,
+    /// x = time (s), y = seed, z = ignition, w = entrainment cooling rate
+    /// (per nozzle radius of axial distance; 0 in vacuum).
     pub anim: Vec4,
 }
 
 impl Default for PlumeParams {
     fn default() -> Self {
         Self {
-            core_color: Vec4::new(0.72, 0.84, 1.0, 24.0),
-            mid_color: Vec4::new(0.30, 0.52, 1.0, 1.0),
-            edge_color: Vec4::new(0.24, 0.28, 0.72, 1.2),
-            shape: Vec4::new(8.0, 1.4, 5.0, 1.0),
-            response: Vec4::new(2.6, 4.0, 0.45, 0.0),
-            anim: Vec4::new(0.0, 0.0, 0.0, 0.85),
+            core_color: Vec4::new(1.0, 0.94, 0.86, 30.0),
+            mid_color: Vec4::new(0.44, 0.60, 1.05, 1.0),
+            edge_color: Vec4::new(0.34, 0.30, 0.95, 30.0),
+            shape: Vec4::new(1.0, 0.13, 0.04, 0.4),
+            shock: Vec4::new(2.4, 0.5, 0.0, 0.0),
+            mixing: Vec4::new(1.0, 0.0, 0.25, 0.0),
+            anim: Vec4::new(0.0, 0.0, 0.0, 0.0),
         }
     }
 }
@@ -302,7 +348,7 @@ impl Material for PlumeMaterial {
 }
 
 /// Marker + wiring on the plume child entity: which engine it belongs to, its
-/// material, nozzle radius, and propellant family.
+/// material, nozzle geometry, design point, and propellant family.
 #[derive(Component)]
 pub struct PlumeVisual {
     engine: Entity,
@@ -310,6 +356,7 @@ pub struct PlumeVisual {
     nozzle_radius_m: f32,
     family: PropellantFamily,
 }
+
 
 // ---------------------------------------------------------------------------
 // Systems
@@ -373,7 +420,12 @@ fn update_plume_signals(
     sim: Res<SimulationState>,
     over: Res<PlumeDebugOverride>,
     mut engines: Query<
-        (&Engine, Option<&EngineActivation>, &EngineThrust, &mut PlumeSignals),
+        (
+            &Engine,
+            Option<&EngineActivation>,
+            &EngineThrust,
+            &mut PlumeSignals,
+        ),
         Without<EditorPart>,
     >,
 ) {
@@ -412,7 +464,7 @@ fn update_plume_signals(
         sig.throttle = throttle;
         sig.ignition = ignition;
         sig.ambient_pressure_pa = ambient;
-        sig.pressure_ratio = pressure_ratio(engine, ambient);
+        sig.pressure_ratio = pressure_ratio(engine, throttle, ambient);
     }
 }
 
@@ -444,7 +496,15 @@ fn update_plume_visuals(
         let Some(mut mat) = materials.get_mut(&visual.material) else {
             continue;
         };
-        mat.params = resolve_params(sig, visual.nozzle_radius_m, visual.family, elapsed, seed_of(visual.engine));
+        let params = resolve_params(
+            sig,
+            visual.nozzle_radius_m,
+            visual.family,
+            elapsed,
+            seed_of(visual.engine),
+        );
+        mat.params = params;
+
     }
 }
 
@@ -452,9 +512,15 @@ fn update_plume_visuals(
 // Curve evaluation (signals + preset -> uniform)
 // ---------------------------------------------------------------------------
 
-/// The "curve evaluator": map [`PlumeSignals`] + propellant preset into the flat
-/// [`PlumeParams`] the shader renders. Pressure response is authored over
-/// `log2(pressure_ratio)` since the ratio spans orders of magnitude.
+/// Radius growth (in units of the nozzle exit radius) at which the column has
+/// expanded far enough that its emission has fallen out of sight. Sets the
+/// expansion-limited plume length, so the billboard is exactly as long as the
+/// visible plume instead of ending on an authored taper.
+const VISIBLE_RADIUS_GROWTH: f32 = 8.0;
+
+/// Map [`PlumeSignals`] + propellant preset into the flat [`PlumeParams`] the
+/// shader renders. Pressure response is authored over `log2(pressure_ratio)`
+/// since the ratio spans orders of magnitude.
 fn resolve_params(
     sig: &PlumeSignals,
     nozzle_radius_m: f32,
@@ -462,37 +528,79 @@ fn resolve_params(
     time: f32,
     seed: f32,
 ) -> PlumeParams {
-    let pal = family.palette();
+    let vis = family.visuals();
+    let r0 = nozzle_radius_m.max(0.01);
+    let pa = sig.ambient_pressure_pa.max(0.0);
+    let ratio = sig
+        .pressure_ratio
+        .clamp(PRESSURE_RATIO_MIN, PRESSURE_RATIO_MAX);
 
-    // Compressed pressure coordinate: 0 at perfect expansion, negative dense /
-    // overexpanded (sea level), positive toward vacuum.
-    let lr = sig.pressure_ratio.clamp(0.03125, 64.0).log2();
-    // 0 (dense atmosphere) → 1 (vacuum), the master expansion lever.
-    let vac = smoothstep(-1.0, 4.0, lr);
+    // Compressed pressure coordinate: 0 at perfect expansion, negative
+    // overexpanded (dense air), positive underexpanded (toward vacuum).
+    let u = ratio.log2();
+    // Master lever: 0 = sea-level dense, 1 = free vacuum expansion.
+    let vac = smoothstep(-0.5, 4.5, u);
+    // How much ambient gas there is to shock against and to entrain.
+    let atmo = smoothstep(600.0, 30_000.0, pa);
+    let afterburn = smoothstep(3_000.0, 45_000.0, pa);
 
-    let expansion = lerp(1.15, 3.4, vac);
-    let length_factor = lerp(6.5, 16.0, vac);
-    let core_decay = lerp(3.4, 1.7, vac);
-    let edge_softness = lerp(0.35, 0.62, vac);
+    // -- geometry --------------------------------------------------------
+    // Overexpanded flow turns *inward* at the lip and forms a compressed waist.
+    let overexpanded = smoothstep(0.0, -2.5, u);
+    let lip = lerp(1.0, 0.74, overexpanded);
+    // Half-angle of the *luminous* core — much narrower than the rarefied outer
+    // flow, which is invisible.
+    let tan_theta = lerp(0.020, 0.190, vac);
+    // Turbulent shear-layer growth: strong entrainment in atmosphere, almost
+    // none in vacuum (there is nothing to entrain).
+    let spread = lerp(0.155, 0.040, vac);
+    // Adiabatic exponent 2(γ−1) for γ ≈ 1.2 combustion products.
+    let gamma_exp = 0.40;
 
-    // Shock diamonds need back-pressure: gate on real ambient pressure and fade
-    // as the plume goes underexpanded.
-    let atmo_gate = smoothstep(1_500.0, 25_000.0, sig.ambient_pressure_pa);
-    let cell_contrast = (1.0 - smoothstep(0.0, 3.0, lr.max(0.0))) * atmo_gate;
-    let cell_count = lerp(3.0, 7.0, cell_contrast);
+    // -- shock cells -----------------------------------------------------
+    // Diamonds need back-pressure and a mismatched nozzle; they wash out once
+    // the flow is so underexpanded that the shocks leave the luminous core.
+    let mismatch = u.abs();
+    let shock_strength =
+        atmo * smoothstep(0.12, 0.65, mismatch) * (1.0 - smoothstep(3.5, 7.0, mismatch));
+    // First-cell length scales with the square root of the pressure mismatch.
+    let q = ratio.max(1.0 / ratio).clamp(1.0, 40.0);
+    let cell_len_m = (r0 * (0.6 + 0.35 * q.sqrt())).clamp(1.0 * r0, 3.0 * r0);
+    let shock_k = std::f32::consts::TAU / cell_len_m;
+    let shock_decay_m = cell_len_m * 3.2;
 
-    // Ignition shortens/dims the plume during the transient.
-    let ignition = sig.ignition.clamp(0.0, 1.0);
-    let length_m = nozzle_radius_m * length_factor * lerp(0.35, 1.0, ignition);
-    let max_radius_m = nozzle_radius_m * expansion * 1.18;
+    // -- length ----------------------------------------------------------
+    // Expansion-limited: where the column has widened past visibility.
+    let len_expansion = r0 * (VISIBLE_RADIUS_GROWTH - lip) / tan_theta.max(1e-4);
+    // Mixing-limited: in atmosphere, entrainment tears the jet apart after a few
+    // tens of diameters however slowly it expands. Vacuum has nothing to mix with.
+    let len_mixing = r0 * lerp(26.0, 400.0, vac);
+    // Throttle sets chamber pressure and with it how far the column carries.
+    let length_m =
+        len_expansion.min(len_mixing) * lerp(0.45, 1.0, sig.ignition) * lerp(0.7, 1.0, sig.throttle);
+
+    // -- colour ----------------------------------------------------------
+    let mid = vis.mid_vacuum.lerp(vis.mid_air, afterburn);
+    let sheath = vis.sheath_vacuum.lerp(vis.sheath_air, afterburn);
+
+    // -- opacity / turbulence --------------------------------------------
+    let kappa_core = 2.4 * vis.opacity;
+    let kappa_sheath = 0.55 * vis.opacity;
+    let turbulence = lerp(0.22, 0.80, atmo);
+    // Entrainment cooling: the sea-level counterpart to expansion cooling. A
+    // dense-air jet mixes with ambient air and cools along its length even
+    // though it barely widens; in vacuum there is nothing to entrain, so this is
+    // zero and expansion is the only mechanism.
+    let entrainment = lerp(0.0, 0.016, atmo);
 
     PlumeParams {
-        core_color: pal.core.extend(pal.intensity),
-        mid_color: pal.mid.extend(nozzle_radius_m),
-        edge_color: pal.edge.extend(max_radius_m),
-        shape: Vec4::new(length_m, expansion, cell_count, cell_contrast),
-        response: Vec4::new(core_decay, 4.0, edge_softness, sig.throttle),
-        anim: Vec4::new(time, seed, ignition, pal.density),
+        core_color: vis.hot.extend(vis.radiance),
+        mid_color: mid.extend(r0),
+        edge_color: sheath.extend(length_m),
+        shape: Vec4::new(lip, tan_theta, spread, gamma_exp),
+        shock: Vec4::new(kappa_core, kappa_sheath, shock_k, shock_strength),
+        mixing: Vec4::new(shock_decay_m, afterburn, turbulence, sig.throttle),
+        anim: Vec4::new(time, seed, sig.ignition.clamp(0.0, 1.0), entrainment),
     }
 }
 
@@ -521,17 +629,27 @@ fn craft_ambient_pressure_pa(sim: &SimulationState) -> f64 {
         .pressure_pa
 }
 
-/// `r = p_exit / p_ambient`. Nozzle-exit pressure is approximated from the
-/// engine's design point (a first-slice constant until the propulsion layer
-/// exposes a real `p_exit`); a true vacuum yields a large sentinel ratio.
-fn pressure_ratio(_engine: &Engine, ambient_pressure_pa: f32) -> f32 {
-    // Design exit pressure ~ 45 kPa: overexpanded near sea level (visible shock
-    // diamonds), strongly underexpanded (broad, feathered) toward vacuum.
-    const DESIGN_EXIT_PRESSURE_PA: f32 = 45_000.0;
+/// Design nozzle-exit pressure (Pa) for an engine. Exit pressure is set by the
+/// nozzle area ratio, which the catalog expresses as a design point: a sea-level
+/// bell is a low-expansion nozzle that stays near ambient on the pad, a vacuum
+/// bell expands much further and is badly overexpanded down low.
+fn design_exit_pressure_pa(engine: &Engine) -> f32 {
+    match engine.optimized_for {
+        EngineOptimization::Atmosphere => 55_000.0,
+        EngineOptimization::Balanced => 25_000.0,
+        EngineOptimization::Vacuum => 7_000.0,
+    }
+}
+
+/// `r = p_exit / p_ambient`. Chamber pressure tracks throttle and exit pressure
+/// with it, so a throttled-down engine near the pad is *more* overexpanded —
+/// shorter, with a harder shock train — which is the real behaviour.
+fn pressure_ratio(engine: &Engine, throttle: f32, ambient_pressure_pa: f32) -> f32 {
+    let p_exit = design_exit_pressure_pa(engine) * lerp(0.35, 1.0, throttle);
     if ambient_pressure_pa <= 1.0 {
-        64.0
+        PRESSURE_RATIO_MAX
     } else {
-        (DESIGN_EXIT_PRESSURE_PA / ambient_pressure_pa).clamp(0.03125, 64.0)
+        (p_exit / ambient_pressure_pa).clamp(PRESSURE_RATIO_MIN, PRESSURE_RATIO_MAX)
     }
 }
 

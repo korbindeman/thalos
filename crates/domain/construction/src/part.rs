@@ -1,4 +1,6 @@
-use crate::catalog::{EngineGeometry, IntakeCapture, IntakeRequirement, PodGeometry};
+use crate::catalog::{
+    EngineGeometry, EngineOptimization, IntakeCapture, IntakeRequirement, PodGeometry,
+};
 use crate::resource::Resource;
 use bevy::prelude::*;
 
@@ -354,6 +356,11 @@ pub struct ReactantRatio {
 pub struct Engine {
     pub model: String,
     pub geometry: EngineGeometry,
+    /// Design point the nozzle is sized for. Sets the expansion ratio, and with
+    /// it the exit pressure — which is what decides whether the exhaust is over-
+    /// or underexpanded at a given altitude. Read by the plume renderer
+    /// (`docs/plume.md`) to shape the exhaust from the pad to vacuum.
+    pub optimized_for: EngineOptimization,
     pub requires_atmosphere: bool,
     pub intake_requirement: Option<IntakeRequirement>,
     pub builtin_intake: Option<IntakeCapture>,

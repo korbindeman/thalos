@@ -11,6 +11,12 @@ is **built** and the seams the later phases extend.
 
 ## Status
 
+**Phase 2 (built, 2026-07-22).** The emission model is now *physical*: shape and
+brightness come from one thermodynamic chain rather than two independent authored
+fade curves, so the pad → orbit envelope is covered with no regime switch. See
+*The emission model* below. Screenshot-verified at vacuum / 18 kPa / sea level;
+live throttle and ignition transients are still unverified (user play session).
+
 **Phase 1 (built).** One mesh-based emissive plume per liquid rocket-bell engine,
 driven from a typed signal boundary, with propellant-family presets and a
 pressure-ratio → shape response. Replaces the old placeholder engine-mesh tint
@@ -18,10 +24,15 @@ pressure-ratio → shape response. Replaces the old placeholder engine-mesh tint
 had migrated to `ShadowedStandardMaterial`).
 
 Not yet built (later phases, in design-note order): secondary GPU particles
-(sparks/ice/wisps), heat-haze distortion, clustered engine lights, ground
-interaction (dust/steam), jet-nacelle afterburners, and the solid-motor
-`CloudEmissionProfile` path into the volumetric cloud system. Per-engine `p_exit`
-is still approximated by a design constant (see *Pressure response*).
+(sparks/ice/wisps), heat-haze distortion, engine lights, ground interaction
+(dust/steam), jet-nacelle afterburners, and the solid-motor
+`CloudEmissionProfile` path into the volumetric cloud system.
+
+> **Engine lights are not a `PointLight`.** Bevy's clustered forward lighting is
+> degenerate at the flight camera's 0.5 m → 1e11 m depth range, so a `PointLight`
+> on a craft contributes *exactly zero* at any intensity — measured, see
+> INC-0020. The plume light has to be an analytic term in the lighting spine
+> alongside sun/moonlight (BL-40). Do not re-attempt the `PointLight` route.
 
 Verify: `just screenshot plume` (agent-servable). Live feel (throttle sweeps,
 startup/shutdown transients, in-flight pressure sweep on a real ascent) is a user
@@ -65,6 +76,49 @@ Engine sim (EngineThrust + ThrottleState)   local atmosphere (ambient pressure)
   own resolved params. `AlphaMode::Add` (Bevy renders this as
   premultiplied-alpha blending; the shader emits premultiplied colour with alpha
   0 for a pure-additive glow the post-stack bloom haloes).
+
+## The emission model
+
+The plume is an axisymmetric emitting gas column. Its brightness is **derived
+from its shape**, not authored alongside it:
+
+```
+R(s)  = R0·lip + tan(theta)·s   free expansion off the nozzle lip, × barrel(s)
+rho   ∝ (R0/R)²                 mass conservation along the column
+T     ∝ (R0/R)^(2(gamma-1))     adiabatic (expansion) cooling
+T    ×= exp(-e·s/R0)            entrainment cooling (atmosphere only)
+S     = exp(-W·(1/T - 1))       visible-band emission (Wien side)
+tau   ∝ rho · chord             optical depth across the line of sight
+L     = S · (1 - exp(-tau))     emission through an absorbing column
+```
+
+Three properties of this chain are load-bearing, and each replaced an authored
+hack that had a visible failure mode:
+
+- **Two cooling mechanisms, one law.** Expansion cooling dominates in vacuum;
+  entrainment cooling dominates at sea level, where the column barely widens at
+  all. With only the former, a sea-level plume stays uniformly incandescent for
+  its whole length and reads as a featureless white sausage.
+- **Wien-side emission, not grey-body `T⁴`.** A plume radiates in the visible
+  from the Wien side of the Planck curve, where output collapses exponentially
+  in `1/T`. A polynomial falloff leaves the plume still bright where the
+  geometry ends, producing a **hard lit disc at the tip**; the exponential dies
+  on its own, so the mesh can simply stop.
+- **Emission through an absorbing column, not a coverage mask.** `1 - exp(-tau)`
+  saturates the dense near-nozzle core to a flat blinding white (the sea-level
+  look) while the thin outer plume stays translucent and feathers to nothing at
+  the silhouette, with no edge mask.
+
+The visible length falls out of the same model: `VISIBLE_RADIUS_GROWTH` is the
+expansion factor at which emission has died, so the billboard is exactly as long
+as the visible plume. At sea level a separate mixing-limited length caps it,
+because entrainment destroys the jet after a few tens of diameters however
+slowly it expands.
+
+**Packed-uniform warning.** `PlumeParams` addresses unrelated scalars
+positionally (`anim.w`, `shock.z`, …). Repurposing a lane is a rename, not an
+edit: audit every reader on both sides first. Getting this wrong erased the
+vacuum plume entirely — see INC-0019.
 
 ## The billboard + volumetric fragment
 
@@ -111,10 +165,16 @@ pressure (no diamonds in vacuum) and fades as the plume goes underexpanded.
 Raw altitude is deliberately **not** an input — the same altitude has different
 pressure on different worlds, and the system must work across the Pyros system.
 
-`p_exit` is currently a first-slice design constant (~45 kPa: overexpanded and
-shock-celled near sea level, strongly underexpanded toward vacuum). Threading a
-real per-engine exit pressure / nozzle design from the propulsion + catalog layer
-(`EngineOptimization`) is the natural next refinement.
+`p_exit` comes from the engine's authored design point —
+`Engine::optimized_for` (`EngineOptimization`), threaded onto the component from
+the catalog: `Atmosphere` 55 kPa, `Balanced` 25 kPa, `Vacuum` 7 kPa. Exit
+pressure scales with throttle (chamber pressure does), so a throttled-down
+engine near the pad is *more* overexpanded — shorter, with a harder shock train.
+
+A vacuum-optimised bell fired at sea level is therefore strongly overexpanded and
+shows a pronounced waist and shock train, while a sea-level bell at the same
+altitude runs nearly perfectly expanded — from the same code, differing only by
+the authored design point.
 
 ## Screenshot preset
 

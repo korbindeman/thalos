@@ -278,7 +278,7 @@ fn finish_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::EngineGeometry;
+    use crate::catalog::{EngineGeometry, EngineOptimization};
     use crate::part::ReactantRatio;
     use crate::resource::Resource;
 
@@ -286,6 +286,7 @@ mod tests {
         Engine {
             model: "test".into(),
             geometry: EngineGeometry::JetNacelle,
+            optimized_for: EngineOptimization::default(),
             requires_atmosphere: true,
             intake_requirement: None,
             builtin_intake: None,

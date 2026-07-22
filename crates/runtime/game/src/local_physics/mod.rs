@@ -569,6 +569,7 @@ mod tests {
         let engine = Engine {
             model: "test".to_string(),
             geometry: EngineGeometry::RocketBell,
+            optimized_for: Default::default(),
             requires_atmosphere: false,
             intake_requirement: None,
             builtin_intake: None,

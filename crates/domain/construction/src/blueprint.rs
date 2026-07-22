@@ -390,6 +390,7 @@ fn insert_part(
                 Engine {
                     model: e.display_name.clone(),
                     geometry: e.geometry,
+                    optimized_for: e.optimized_for,
                     requires_atmosphere: e.requires_atmosphere,
                     intake_requirement: e.intake_requirement,
                     builtin_intake: e.builtin_intake,
@@ -780,7 +781,7 @@ mod tests {
     fn meridian_sample_loads_with_wings() {
         let cat = PartCatalog::load_from_str(include_str!("../../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/meridian.ron"))
+        let bp = ShipBlueprint::from_ron(include_str!("../../../../ships/meridian.ron"))
             .expect("parse meridian.ron");
         // inline cockpit + main wing ×2 + tailplane ×2 + fin + nacelle ×4 +
         // nose gear + main gear = 12 surface mounts (everything rides the loft).
@@ -857,7 +858,7 @@ mod tests {
     fn meridian_carries_wing_fuel() {
         let cat = PartCatalog::load_from_str(include_str!("../../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/meridian.ron"))
+        let bp = ShipBlueprint::from_ron(include_str!("../../../../ships/meridian.ron"))
             .expect("parse meridian.ron");
         let s = bp.stats(&cat).expect("aircraft stats");
         let kero = s
@@ -884,7 +885,7 @@ mod tests {
 
         let cat = PartCatalog::load_from_str(include_str!("../../../../assets/parts.ron"))
             .expect("parse parts.ron");
-        let bp = ShipBlueprint::from_ron(include_str!("../../../ships/atlas.ron"))
+        let bp = ShipBlueprint::from_ron(include_str!("../../../../ships/atlas.ron"))
             .expect("parse atlas.ron");
         let s = bp.stats(&cat).expect("atlas stats");
 

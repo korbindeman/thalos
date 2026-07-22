@@ -1040,9 +1040,13 @@ impl ScreenshotPreset {
                 out: PathBuf::from("artifacts/visual/latest/plume.png"),
                 width: 1920,
                 height: 1080,
-                azimuth_deg: 55.0,
-                elevation_deg: 6.0,
-                distance_m: 42.0,
+                // Framed against black sky, not the sunlit planet: the plume is
+                // an *additive* emitter, so a bright backdrop washes out exactly
+                // the colour and shock structure this probe exists to check.
+                // Distance fits the longer sea-level column in frame.
+                azimuth_deg: 235.0,
+                elevation_deg: 8.0,
+                distance_m: 70.0,
                 // Orbit scenario builds fast; the plume just needs the ship + a
                 // few frames for the ignition transient to settle to full.
                 warmup_frames: 90,
