@@ -47,8 +47,8 @@ pub use self::composite::CloudCompositeMaterial;
 pub use self::compute::CameraMatrices;
 pub use self::config::CloudsConfig;
 pub use self::images::{
-    CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, cloud_target_memory,
-    cloud_target_memory_for, cloud_weather_image,
+    CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS,
+    cloud_target_memory, cloud_target_memory_for, cloud_weather_image,
 };
 
 use self::compute::CloudsComputePlugin;

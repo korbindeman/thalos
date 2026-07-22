@@ -36,17 +36,25 @@ half = "2"
 # default graph lets game/screenshot/preview reuse one Bevy/wgpu dylib. Enable
 # `gpu-counters` only for a THALOS_MEM_DIAG investigation.
 wgpu = { version = "29", default-features = false, features = ["counters"], optional = true }
+# The top-level `bevy` crate does not re-export bevy_render's `gles` feature,
+# and Bevy 0.19 ships native Linux builds Vulkan-only by default. The WSL2
+# headless capture path needs wgpu's GL backend compiled in, so both dev lanes
+# pull it through this optional direct dependency. Player/release builds are
+# unchanged. The dependency KEY must not be `bevy_render`: Bevy's derive-macro
+# manifest lookup (`ShaderType` etc.) would then emit `bevy_render::…` paths
+# that only resolve when the optional feature is on.
+bevy_render_gl_backend = { package = "bevy_render", version = "0.19", default-features = false, features = ["gles"], optional = true }
 
 [features]
 # Normal renderer-development fingerprint shared by the interactive launcher,
 # cold capture, and visual labs. The persistent hotpatch lane below is the one
 # intentional static-renderer exception.
-dev-renderer = ["bevy/dynamic_linking"]
+dev-renderer = ["bevy/dynamic_linking", "dep:bevy_render_gl_backend"]
 # Agent-facing persistent renderer loop. `embedded_watcher` includes Bevy's
 # normal file watcher, so both `assets/shaders/*` and crate-embedded WGSL are
 # reloaded in the running capture process. Hotpatching stays dev-only and is
 # driven by the Dioxus `dx serve --hot-patch` launcher.
-dev-iteration = ["bevy/hotpatching", "bevy/embedded_watcher"]
+dev-iteration = ["bevy/hotpatching", "bevy/embedded_watcher", "dep:bevy_render_gl_backend"]
 # Profiling. Enable one at a time. Chrome produces trace-*.json in cwd;
 # Tracy streams to a running Tracy client over localhost.
 profile-chrome = ["bevy/trace_chrome"]

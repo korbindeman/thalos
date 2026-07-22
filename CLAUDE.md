@@ -258,7 +258,12 @@ Windows fast-incremental and macOS workaround examples live in
   dynamic for interactive/cold tools, static `dev-iteration` for the persistent
   capture server. Adding any other mixture forces another full graph. In particular, wgpu's diagnostic
   `counters` feature is intentionally opt-in as `thalos_game/gpu-counters`; do
-  not enable it in the default dependency graph.
+  not enable it in the default dependency graph. Both dev lanes also compile
+  wgpu's GL backend (`bevy_render/gles` via `crates/runtime/game/Cargo.toml`)
+  for the WSL2 Mesa-D3D12 GL bridge — but note the full renderer currently
+  cannot run on GL (missing 16-bit-norm/view-format features); WSL2 without a
+  dzn ICD falls back to llvmpipe software Vulkan, where GPU timings are not
+  budget evidence. See docs/build_speed.md §4.
 - Expect the first build after changing compiler flags, profiles, or Bevy/wgpu
   features to take several minutes. That is a one-time graph rebuild, not the
   steady-state iteration time. Avoid changing these inputs casually, because
@@ -647,6 +652,14 @@ any broad part query. Also: 0.19 validates `Res<T>` at **fetch time** and panics
 if absent, so a `RenderStartup` system reading a resource another `RenderStartup`
 system creates must `.after()` it (udlod pins
 `init_terrain_render_pipeline::<M>.after(bevy::pbr::init_mesh_pipeline_view_layouts)`).
+
+**`Image::new` cannot carry mip chains.** Its size debug-assert compares
+`data.len()` against the level-0 volume only, ignoring `mip_level_count` — so
+building a mip-mapped image (e.g. the cloud weather cube) via `Image::new`
+panics in dev builds ("Pixel data, size and format have to match"). Use
+`Image::new_uninit`, set `texture_descriptor.mip_level_count`, then assign
+`image.data`. Layout is `TextureDataOrder::LayerMajor` (layer0[mip0..], …),
+matching Bevy's default upload.
 
 **Text moved cosmic-text → Parley.** `TextFont.font` is a `FontSource` (not
 `Handle<Font>`; `.into()` a handle or name a family), `font_size` is

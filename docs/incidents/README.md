@@ -44,3 +44,5 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0014](0014-density-and-lut-units-erased-bevy-sunset.md) | Density and LUT-unit adapters erased the Bevy sunset | visual | 2026-07-21 |
 | [0015](0015-live-atmosphere-backend-switch-crash.md) | Live atmosphere-backend switching escaped the isolated comparison boundary | crash | 2026-07-21 |
 | [0016](0016-cloud-sparse-history-motion-smear.md) | Sparse cloud history smeared during camera motion | visual | 2026-07-21 |
+| [0017](0017-dx-host-asset-root-double-relative.md) | dx-launched capture host resolved assets outside the workspace | crash | 2026-07-22 |
+| [0018](0018-weather-cube-mip-chain-image-new-assert.md) | Mip-mapped weather cube crashed the capture host via `Image::new`'s level-0-only size assert | crash | 2026-07-22 |

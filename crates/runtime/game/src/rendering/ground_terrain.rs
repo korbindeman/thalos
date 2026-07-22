@@ -1409,6 +1409,17 @@ pub(super) fn update_body_terrain_atmosphere(
                 ocean_crosswind_basis,
                 tile_lookup,
                 tile_atlas_uv,
+                cloud_march: if Some(i) == cloud_io.1.0 {
+                    cloud_io
+                        .0
+                        .as_ref()
+                        .map(|cfg| {
+                            Vec4::new(cfg.clouds_raymarch_steps_count as f32, 0.0, 0.0, 0.0)
+                        })
+                        .unwrap_or(Vec4::ZERO)
+                } else {
+                    Vec4::ZERO
+                },
             },
         );
     }

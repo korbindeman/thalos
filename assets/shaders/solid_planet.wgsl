@@ -29,6 +29,7 @@
     orbital_cloud_shade,
     sample_weather_soft,
     orbital_cloud_normal_body,
+    WEATHER_TEXEL_ANGLE,
 }
 
 const PI: f32 = 3.14159265358979323846;
@@ -244,6 +245,15 @@ fn fragment(in: VertexOutput) -> FragOutput {
     var surface_albedo = params.albedo.xyz;
     var is_water = false;
     let n_body = rotate_quat(params.orientation, normal);
+    // Footprint mip for weather-cube consumers (uniform flow: computed before
+    // any cloud branch). One disc pixel spans several weather texels at full
+    // planet range; sampling level 0 there aliased the mesoscale coverage
+    // into ring/speckle moiré.
+    let weather_lod = clamp(
+        log2(max(length(fwidth(n_body)) / WEATHER_TEXEL_ANGLE, 1.0)),
+        0.0,
+        5.0,
+    );
     if params.albedo.w >= 0.5 {
         let cube = textureSampleLevel(albedo_cube_tex, albedo_cube_sampler, n_body, 0.0);
         surface_albedo = cube.rgb;
@@ -308,7 +318,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
         let sun_body = rotate_quat(params.orientation, sun_dir);
         let shadow_n = normalize(n_body + sun_body * 0.07);
         let shadow_col = weather_column_from_texel(
-            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, shadow_n),
+            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, shadow_n, weather_lod),
         );
         let day_shadow = smoothstep(-0.05, 0.25, dot(normal, sun_dir));
         let shadow_op = clamp(1.0 - exp(-shadow_col.optical_depth * shadow_col.optical_depth), 0.0, 1.0);
@@ -319,7 +329,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
         var cloud_n_body = n_body;
         var cloud_normal_ws = normal;
         let probe = weather_column_from_texel(
-            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, n_body),
+            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, n_body, weather_lod),
         );
         if probe.opacity > 1.0e-3 {
             let cloud_r = params.radius + orbital_cloud_altitude(probe, params.atmosphere);
@@ -339,14 +349,22 @@ fn fragment(in: VertexOutput) -> FragOutput {
             cloud_weather_tex,
             cloud_weather_sampler,
             cloud_n_body,
+            weather_lod,
         );
         let column = weather_column_from_texel(weather);
         if column.opacity > 1.0e-3 {
-            let cloud_n_body_lit = orbital_cloud_normal_body(
+            // Moment normal from a coarser mip (the stencil widens with lod)
+            // and relaxed 0.25 toward the sphere normal — matching the cloud
+            // composite's far-range relaxation, so both orbital projections
+            // shade the same columns identically and full-rate near-Nyquist
+            // finite differences can't collapse n_dot_l at single texels.
+            let cloud_n_raw = orbital_cloud_normal_body(
                 cloud_weather_tex,
                 cloud_weather_sampler,
                 cloud_n_body,
+                weather_lod + 1.5,
             );
+            let cloud_n_body_lit = normalize(mix(cloud_n_body, cloud_n_raw, 0.25));
             // Perturbed body-fixed normal → render-space for lighting.
             // rotate_quat is body_from_world style for directions into body frame;
             // invert by conjugating the orientation quaternion.

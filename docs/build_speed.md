@@ -184,9 +184,21 @@ device**, but **no X server / no `xvfb`** (there is no window).
   `mesa-vulkan-drivers` (Debian/Ubuntu) and select it with
   `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json`, or force the
   GL backend via `THALOS_WGPU_BACKEND=gl`.
-- **WSL2:** WSLg exposes the host GPU (`/dev/dxg` → Mesa). Real-GPU Vulkan
-  usually works out of the box; lavapipe is the fallback. Either way the
-  screenshot tool needs no display server.
+- **WSL2:** WSLg exposes the host GPU (`/dev/dxg` → Mesa). Distros that ship
+  Mesa's `dzn` Vulkan-on-D3D12 ICD get real-GPU Vulkan; Ubuntu 24.04 does
+  **not** (only `lvp`/llvmpipe software Vulkan). The Mesa D3D12 **GL** bridge
+  does reach the host GPU, and both dev lanes compile wgpu's GL backend for it
+  (optional direct `bevy_render = { features = ["gles"] }` in
+  `crates/runtime/game/Cargo.toml`, 2026-07-22 — the top-level `bevy` crate
+  does not re-export that feature), **but the full renderer cannot run on GL**:
+  the terrain height/albedo atlas needs `TEXTURE_FORMAT_16BIT_NORM` and the
+  `VIEW_FORMATS` downlevel flag, which wgpu-GL does not expose (verified
+  2026-07-22, `Device::create_texture 'height_attachment'` validation errors).
+  On such distros use **llvmpipe software Vulkan** (`THALOS_WGPU_BACKEND=vulkan`
+  with only the `lvp` ICD installed): conformant and visually correct, slow
+  frames, and **GPU-time budget numbers are meaningless there** — measure
+  budgets on the native/RTX side. Player/release builds keep the default
+  backend set.
 
 `THALOS_WGPU_BACKEND` (`auto|dx12|vulkan|metal|gl`) selects the backend without
 touching source — see tooling.md.

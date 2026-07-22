@@ -92,6 +92,11 @@ pub struct BodySkyExtra {
     /// w = `max_height` (m) — the UNORM16 decode range, mirroring
     /// `thalos_udlod::attachments::decode_height_m`.
     pub tile_atlas_uv: Vec4,
+    /// Near-volume march-reach contract for the cloud composite's partition of
+    /// unity: x = configured view raymarch step count (f32), so the composite
+    /// can reproduce the marcher's per-ray reach analytically and hand every
+    /// texel beyond it to the weather-column orbital estimator. y/z/w spare.
+    pub cloud_march: Vec4,
 }
 
 impl Default for BodySkyExtra {
@@ -112,6 +117,7 @@ impl Default for BodySkyExtra {
             ocean_crosswind_basis: Vec4::ZERO,
             tile_lookup: Vec4::ZERO,
             tile_atlas_uv: Vec4::ZERO,
+            cloud_march: Vec4::ZERO,
         }
     }
 }

@@ -229,7 +229,7 @@ pub(super) fn spawn_bodies(
     // 1×1 coast/bathymetry cube fallback for no-ocean bodies' `BodySky`
     // (their `ocean.y` gate means it is never sampled).
     let blank_coast = images.add(blank_coast_cube());
-    let blank_weather = images.add(cloud_weather_image(vec![0; 4 * 6], 1));
+    let blank_weather = images.add(cloud_weather_image(vec![0; 4 * 6], 1, 1));
     // One deterministic broadband slope field serves every ocean body. It is
     // body-fixed only through each shader's local coordinates; sharing the GPU
     // allocation does not synchronize phase because bodies have independent
@@ -289,7 +289,11 @@ pub(super) fn spawn_bodies(
             .and_then(|atmosphere| atmosphere.clouds.as_ref())
         {
             let field = CloudWeatherField::from_climate(climate);
-            let image = images.add(cloud_weather_image(field.rgba8_bytes(), field.face_size));
+            let image = images.add(cloud_weather_image(
+                field.rgba8_mip_chain(),
+                field.face_size,
+                CloudWeatherField::MIP_LEVELS,
+            ));
             solar.install_cloud_weather(body.id, field);
             image
         } else {

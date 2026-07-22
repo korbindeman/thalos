@@ -94,7 +94,39 @@ impl CloudWeatherField {
                 for x in 0..face_size {
                     let u = (x as f32 + 0.5) / face_size as f32;
                     let dir = face_uv_to_dir(face, u, v).normalize();
-                    let band = latitude_band_profile(dir.y.asin());
+                    // Meteorological banding is a *bias*, not a paint ring:
+                    // warp the latitude the profile reads (so band edges
+                    // meander like jet streams) and gate its strength with a
+                    // continental-scale field (so bands appear as broken
+                    // segments, not complete rings). The straight gaussian
+                    // rings previously survived the far projection's coverage
+                    // threshold as conspicuous synthetic stripes.
+                    let band_warp =
+                        0.55 * (fbm3(dir * 3.1 + Vec3::new(7.0, -3.0, 11.0), climate.seed ^ 0xBA9D, 3) - 0.5);
+                    let band_gate = (0.35
+                        + 1.30 * fbm3(dir * 2.1 + Vec3::new(-2.0, 9.0, 5.0), climate.seed ^ 0x6A7E, 3))
+                    .clamp(0.0, 1.0);
+                    let band = latitude_band_profile(dir.y.asin() + band_warp) * band_gate;
+                    // Zonally-elongated ridge field: fronts. Compressing the
+                    // noise domain in latitude while stretching it in
+                    // longitude makes features read as elongated frontal
+                    // bands; the ridge transform sharpens them into lines of
+                    // enhanced coverage. The ridge domain must be warped by an
+                    // independent field: un-warped ridged value noise draws
+                    // closed contours around every lattice extremum, which the
+                    // far projection rendered as bullseye rings across the
+                    // whole disc. Squaring keeps only the strong crests.
+                    let front_warp =
+                        fbm3(dir * 1.9 + Vec3::new(-6.0, 2.0, 14.0), climate.seed ^ 0x11AB, 2) - 0.5;
+                    let frontal_raw = fbm3(
+                        Vec3::new(dir.x * 2.2, dir.y * 7.5, dir.z * 2.2)
+                            + Vec3::new(3.0, -8.0, 1.0)
+                            + Vec3::splat(1.6 * front_warp),
+                        climate.seed ^ 0xF407,
+                        3,
+                    );
+                    let ridge = 1.0 - (2.0 * frontal_raw - 1.0).abs();
+                    let frontal = ridge * ridge;
                     let regional = fbm3(dir * 2.5, climate.seed, 4);
                     // Coverage needs two meteorological scales. The synoptic
                     // component establishes planetary bands and fronts while
@@ -120,9 +152,10 @@ impl CloudWeatherField {
                     let coverage = (climate.coverage
                         + climate.band_strength * band
                         + climate.variation
-                            * (0.70 * (regional - 0.5)
+                            * (0.62 * (regional - 0.5)
                                 + 0.43 * (mesoscale - 0.5)
-                                + 0.32 * (cellular - 0.5)))
+                                + 0.32 * (cellular - 0.5)
+                                + 0.22 * (frontal - 0.35)))
                         .clamp(0.0, 1.0);
 
                     // Kind changes at synoptic/mesoscale rather than one type
@@ -177,8 +210,52 @@ impl CloudWeatherField {
         }
     }
 
-    pub fn rgba8_bytes(&self) -> Vec<u8> {
-        self.texels.iter().flatten().copied().collect()
+    /// Number of mip levels the weather cube carries (256 → 8 px faces).
+    /// Far projections select a level from their projected footprint; without
+    /// this chain the mesoscale/cellular coverage aliases into ring/speckle
+    /// moiré at disc scale.
+    pub const MIP_LEVELS: u32 = 6;
+
+    /// Full RGBA8 cube payload with a box-filtered mip chain, laid out
+    /// layer-major (face0[mip0..], face1[mip0..], …) to match wgpu's
+    /// `TextureDataOrder::LayerMajor` default used by Bevy's image uploads.
+    pub fn rgba8_mip_chain(&self) -> Vec<u8> {
+        let size = self.face_size as usize;
+        let face_texels = size * size;
+        let mut out = Vec::new();
+        for face in 0..6 {
+            let base = &self.texels[face * face_texels..(face + 1) * face_texels];
+            let mut level: Vec<[u8; 4]> = base.to_vec();
+            let mut level_size = size;
+            out.extend(level.iter().flatten());
+            for _ in 1..Self::MIP_LEVELS {
+                let next_size = (level_size / 2).max(1);
+                let mut next = Vec::with_capacity(next_size * next_size);
+                for y in 0..next_size {
+                    for x in 0..next_size {
+                        let mut acc = [0u32; 4];
+                        for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                            let sy = (y * 2 + dy).min(level_size - 1);
+                            let sx = (x * 2 + dx).min(level_size - 1);
+                            let t = level[sy * level_size + sx];
+                            for c in 0..4 {
+                                acc[c] += u32::from(t[c]);
+                            }
+                        }
+                        next.push([
+                            (acc[0] / 4) as u8,
+                            (acc[1] / 4) as u8,
+                            (acc[2] / 4) as u8,
+                            (acc[3] / 4) as u8,
+                        ]);
+                    }
+                }
+                out.extend(next.iter().flatten());
+                level = next;
+                level_size = next_size;
+            }
+        }
+        out
     }
 }
 

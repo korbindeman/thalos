@@ -70,8 +70,12 @@ const EDGE_SOFTNESS: f32 = 0.055;
 /// CLOUD-4 keeps this below the pre-coupling 0.48 so stacked volume samples
 /// and the orbital disc no longer clip to pure white before air-mass tinting.
 const SUN_FLUX_SCALE: f32 = 0.36;
-const AMBIENT_TOP_SCALE: f32 = 0.038;
-const AMBIENT_BOTTOM_SCALE: f32 = 0.014;
+/// Sky-ambient fill. Raised for the CLOUD-4 lighting completion: with the
+/// former ~10:1 sun:ambient ratio, anything the (now multi-octave) shadow
+/// term attenuated fell to near-black and shaded cores read charcoal instead
+/// of soft blue-grey. These also feed the marcher's airlight veil estimate.
+const AMBIENT_TOP_SCALE: f32 = 0.085;
+const AMBIENT_BOTTOM_SCALE: f32 = 0.042;
 
 /// Which body the volumetric cloud raymarch is currently rendered for — the
 /// authored cloudy body the camera is closest to, or `None` when no such body
@@ -198,12 +202,14 @@ fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
     config.clouds_detail_strength = DETAIL_STRENGTH;
     config.clouds_base_edge_softness = EDGE_SOFTNESS;
     config.clouds_bottom_softness = BOTTOM_SOFTNESS;
-    // One lobe-scale directional probe gives a stable lee-side cue. Three
-    // exponentially spaced taps exposed the typed vertical profile as nested
-    // horizontal bands; a resolved light volume belongs to CLOUD-4.
-    config.clouds_shadow_raymarch_steps_count = 1;
-    config.clouds_shadow_raymarch_step_size = 900.0;
-    config.clouds_shadow_raymarch_step_multiply = 2.5;
+    // Filtered multi-tap sun depth (CLOUD-4). The old single unfiltered probe
+    // keyed the whole direct term on ~55 m erosion noise (cellular charcoal
+    // mottling); the historical banding of fixed multi-tap ladders is handled
+    // in-shader by sampling only the smooth broad mass and jittering the tap
+    // ladder per pixel (`volumetric_sun_depth`).
+    config.clouds_shadow_raymarch_steps_count = 3;
+    config.clouds_shadow_raymarch_step_size = 700.0;
+    config.clouds_shadow_raymarch_step_multiply = 2.0;
 }
 
 /// Per-frame: pick the active cloud body, build its body-fixed frame from the
@@ -379,10 +385,12 @@ fn drive_clouds(
     let sun_mu = local_up.dot(sun_body);
     let day_t = ((sun_mu + 0.04) / 0.28).clamp(0.0, 1.0);
     let day_blend = day_t * day_t * (3.0 - 2.0 * day_t);
-    // Slightly cooler noon white and a warmer horizon than the pre-CLOUD-4
-    // path — matches the analytic β_R in the volume shader.
-    let sun_chromaticity = Vec3::new(1.0, 0.38, 0.10).lerp(Vec3::new(1.0, 0.96, 0.90), day_blend);
-    let horizon_transmittance = 0.55 + 0.45 * day_blend;
+    // Low-sun reddening is owned by the shader's per-sample air-mass
+    // transmittance (`atmosphere_sun_transmittance`); this CPU chromaticity
+    // only nudges the baseline. The former deep-amber floor stacked ON TOP of
+    // that per-sample term, double-reddening every low-sun cloud into mud.
+    let sun_chromaticity = Vec3::new(1.0, 0.84, 0.72).lerp(Vec3::new(1.0, 0.97, 0.93), day_blend);
+    let horizon_transmittance = 0.85 + 0.15 * day_blend;
     // Albedo is applied once here; the volume does not re-multiply climate
     // albedo, so keep it a touch under 1.0 to leave headroom for phase peaks.
     let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
@@ -433,6 +441,6 @@ fn sync_cloud_weather_map(
     let Some(mut image) = images.get_mut(&weather.handle) else {
         return;
     };
-    image.data = Some(field.rgba8_bytes());
+    image.data = Some(field.rgba8_mip_chain());
     *last = Some((body_id, field.version));
 }

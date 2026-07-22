@@ -48,6 +48,7 @@ struct SkyAtmosExtra {
     ocean_crosswind_basis:     vec4<f32>,  // xyz = body-local crosswind tangent
     tile_lookup:               vec4<f32>,  // x = height-tile lookup enable, y = lod_count, z = tree_size, w = attachment-0 center size (texels/tile edge)
     tile_atlas_uv:             vec4<f32>,  // x = atlas-UV scale (center/texture), y = offset (border/texture), z = height min (m), w = height max (m)
+    cloud_march:               vec4<f32>,  // x = cloud view raymarch step count (composite partition contract); yzw spare
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 

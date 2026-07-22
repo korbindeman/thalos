@@ -9118,6 +9118,7 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "bevy",
+ "bevy_render",
  "big_space",
  "half",
  "image",

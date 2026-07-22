@@ -1,7 +1,8 @@
 # Planet-scale volumetric clouds
 
-**Status:** active program, 2026-07-21. CLOUD-0 through CLOUD-3 are complete;
-CLOUD-4 and CLOUD-6 have first slices in progress.
+**Status:** active program, 2026-07-22. CLOUD-0 through CLOUD-3 are complete;
+CLOUD-4 and CLOUD-6 have second slices landed and headless-verified (see the
+2026-07-22 checkpoint below).
 This document is the strategy and technical plan;
 [backlog.md](backlog.md) is the execution queue, while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
@@ -449,6 +450,52 @@ Completed reconstruction and corrected density/range slice on `codex/cloud-0`:
   has landed; it retains the explicit foreground/background media split.
   CLOUD-6 retains the offline orbital atlas and
   reduced-detail limb volume.
+
+### CLOUD-4/6 second slices (2026-07-22)
+
+Landed together and verified across the five headless cloud presets
+(planet / limb / sunset / cruise / runway, llvmpipe software Vulkan — visual
+evidence only, no timing claims):
+
+- **Lighting completion (CLOUD-4).** The single unfiltered shadow probe became
+  a filtered multi-tap sun optical depth: taps sample only the smooth typed
+  broad mass (`detail_weight = 0` — probing ~55 m erosion keyed the direct term
+  on cellular noise and read as soot), the tap ladder is jittered per pixel
+  (fixed ladders banded into strata; the near march's temporal pass absorbs
+  jitter), and τ drives **per-octave** multi-scatter attenuation
+  (`MS_OCTAVE_WEIGHTS`/`_EXTINCTION`) so deep shade keeps wide-lobe fill
+  instead of multiplying toward charcoal. Powder away-darkening restrained
+  (0.85 → 0.35). CPU sun chromaticity no longer duplicates the per-sample
+  air-mass reddening. **Foreground airlight is restored analytically** in both
+  estimators (the composite draws clouds over fully-integrated sky, so cloud
+  opacity was deleting the air in front of the cloud — the "dirty distant
+  deck"): the near march adds `airlight_radiance · (1 − T_view)`, the far
+  overlay the matching analytic-β veil. Residual: replace the analytic β
+  estimates with the shared Thalos sky/transmittance LUT.
+- **Far estimator (CLOUD-6).** The weather cube now carries a 6-level box mip
+  chain (`CloudWeatherField::rgba8_mip_chain`; built via `Image::new_uninit`
+  because `Image::new`'s size assert is mip-unaware — INC-0018), and all far
+  consumers fetch footprint-filtered (`sample_weather_soft(lod)` replaced the
+  5-tap cross; the moment-normal stencil widens with lod). The composite's
+  22–85 km altitude gate is replaced by a 6-sample **weather-column band
+  march** over the ray's shell slab, in partition-of-unity with the near
+  march: `march_reach` mirrors `get_ray`'s per-ray reach (keep the two in
+  lockstep) and the marcher's old distance haze-out became an entry-distance
+  hand-off, so far clouds are replaced, not deleted. The band march's vertical
+  profile is an **analytic per-segment height-overlap integral** — its
+  jittered point-sampled predecessor speckled the far disc with white-noise
+  holes, because this material pass has no temporal accumulation to absorb
+  per-pixel jitter (sheet dark-fleck fraction 1.30% → 0.82% after the
+  integral, worst near-black minima eliminated). `weather_cloud_opacity` is
+  recalibrated as an areal fraction against the near volume's formation gate;
+  chords combine strongest-column + damped stacking, not independent slabs.
+  Producer: band latitudes warped and gated (broken segments, not paint
+  rings), zonally-elongated warped frontal ridges.
+- **Known remaining weaknesses** (recorded as the CLOUD-6 residual): the far
+  field at grazing regimes (limb probe, cruise horizon) still tends toward a
+  slab with soft box-mip squares at coarse lod — the reduced-detail limb
+  volume is the intended fix; the offline OD/normal atlas and the in-motion
+  surface↔orbit handoff check (user, live session) remain open.
 
 ### Program acceptance matrix
 

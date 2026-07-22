@@ -46,15 +46,31 @@ const WORLEY_RESOLUTION_F32 = 64.0;
 // moiré/crosshatch pattern. Long near-tangent segments stay at CLOUD_STEP_M,
 // capped at MAX_RAY_STEPS, with a distance haze-out so the bounded reach reads
 // as natural aerial perspective rather than a hard edge.
-const CLOUD_STEP_M = 500.0;       // coarsest step (long horizon segments)
+const CLOUD_STEP_M = 500.0;       // coarsest near-field step (long horizon segments)
 const MIN_STEP_M = 65.0;          // finest step (short band crossings)
 const TARGET_BAND_STEPS = 42.0;   // target samples across one band crossing
 const MAX_RAY_STEPS_CAP = 128u;   // compile-time safety cap; config selects ≤ this
-const MAX_CLOUD_DIST = 50000.0;   // metres; orbital projection owns farther clouds
-const CLOUD_FADE_START = 36000.0; // metres; begin atmospheric horizon fade
+const MAX_CLOUD_DIST = 50000.0;   // metres; the march's cost-bounded reach
+// The march owns only this near region: with ≤128 steps it cannot sample the
+// 1–4 km base features across a 100+ km limb chord without moiré (verified
+// 2026-07-22 — a distance-stretched step aliased the whole disc into a dot
+// grid), and from orbit the 8 km noise-tile period itself reads as a repeating
+// dot lattice. Rays ENTERING the shell beyond ENTRY_FADE dissolve out of the
+// near estimator entirely; the composite's reduced weather-column band march
+// owns them (partition of unity, see cloud_composite.wgsl — keep these
+// windows in lockstep with `march_reach` there). Unlike the pre-CLOUD-6
+// haze-out these clouds are replaced, not deleted.
+const ENTRY_FADE_START = 36000.0;
+const ENTRY_FADE_END = 50000.0;
 const DETAIL_NEAR_M = 10000.0;
 const DETAIL_FAR_M = 22000.0;
 const CAMERA_CUT_DELTA = 0.05;
+// Airlight restoration: in-scattered air between the camera and each cloud
+// sample. The composite draws clouds OVER the already-integrated sky, which
+// attenuates the foreground airlight by cloud opacity; re-adding it here keeps
+// distant clouds behind a natural blue/warm veil instead of a soot-brown
+// extinction-only tint (the "dirty distant deck" failure).
+const AIRLIGHT_GAIN = 1.35;
 
 struct Config {
     clouds_base_shape_scale_m: f32,
@@ -200,6 +216,7 @@ fn get_cloud_map_density(
     weather: vec4f,
     detail_weight: f32,
     macro_noise: f32,
+    formation: f32,
 ) -> f32 {
     let cov = clamp(weather.r * config.clouds_coverage, 0.0, 1.0);
     let local_base = clamp(weather.b, 0.0, 0.92);
@@ -225,7 +242,13 @@ fn get_cloud_map_density(
 
     // Coverage is a formation threshold, not an opacity multiplier: lowering
     // it opens clear sky between otherwise equally dense cloud masses.
-    let threshold = mix(0.58, 0.30, cov) + (0.5 - macro_noise) * 0.07;
+    // `formation` (the ~10–20 km octave of the per-ray macro fetch) swings the
+    // threshold between cloud-cluster interiors and clear lanes, so lobes
+    // gather into weather-system-scale bodies of varied size instead of one
+    // even field of same-scale puffs.
+    let threshold = mix(0.58, 0.30, cov)
+        + (0.5 - macro_noise) * 0.07
+        + (0.5 - formation) * 0.17;
     let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
     var mass = shape - threshold - vertical_narrow;
 
@@ -250,7 +273,10 @@ fn get_cloud_map_density(
     // solid cores for deep self-shadow while cutting cauliflower detail into
     // silhouettes. Detail moves slowly in a decorrelated domain.
     let boil = vec3f(0.0, config.wind_displacement.y, config.wind_displacement.z);
-    let edge = 1.0 - smoothstep(0.04, 0.18, mass);
+    // Wide, gentle erosion falloff: a narrow 0.04–0.18 window drew its outer
+    // iso-contour as visible "fingerprint" rings inside big lobes once the
+    // softer CLOUD-4 lighting stopped hiding them.
+    let edge = 1.0 - smoothstep(0.02, 0.34, mass);
     if (edge * detail_weight > 1.0e-3) {
         let detail = cloud_volume(
             rotated_domain(pos + boil) + vec3f(270.0, -610.0, 130.0),
@@ -271,27 +297,42 @@ fn get_normalized_height(pos: vec3f) -> f32 {
     return (length(pos) - (config.planet_radius + config.clouds_bottom_height)) / clouds_height;
 }
 
-// Sparse directional shadow through the broad mass plus fine boundary erosion.
-// Fine erosion breaks the typed profile into natural billows; one stable
-// lobe-scale probe supplies the lee-side cue until CLOUD-4 owns a resolved
-// light-volume representation.
-fn volumetric_shadow(origin: vec3f, weather: vec4f, macro_noise: f32) -> f32 {
+// Directional sun optical depth through the FILTERED density field.
+// Two properties are load-bearing:
+// - `detail_weight = 0`: the probe samples only the smooth typed broad mass.
+//   Probing the fine erosion field keyed every sample's whole direct term on
+//   ~55 m noise, which rendered as dirty cellular charcoal patches across
+//   sunlit lobes (the acceptance-bar "soot" failure).
+// - The tap ladder is jittered per pixel: fixed exponential tap distances
+//   through the typed vertical profile previously banded into nested strata
+//   (see `init_cloud_appearance`); decorrelating the ladder start converts
+//   that into benign noise the temporal accumulation removes.
+// Returns optical depth τ ≥ 0 so multi-scatter octaves can each apply their
+// own attenuation `exp(-τ · c_i)` without a per-sample log.
+fn volumetric_sun_depth(
+    origin: vec3f,
+    weather: vec4f,
+    macro_noise: f32,
+    formation: f32,
+    jitter: f32,
+) -> f32 {
     var ray_step_size = config.clouds_shadow_raymarch_step_size;
-    var distance_along_ray = ray_step_size * 0.5;
-    var transmittance = 1.0;
+    var distance_along_ray = ray_step_size * (0.25 + 0.5 * jitter);
+    var optical_depth = 0.0;
 
     for (var step: u32 = 0; step < config.clouds_shadow_raymarch_steps_count; step++) {
         let pos = origin + config.sun_dir.xyz * distance_along_ray;
         let normalized_height = get_normalized_height(pos);
-        if (normalized_height > 1.0) { return transmittance; };
+        if (normalized_height > 1.0) { return optical_depth; };
 
-        let density = get_cloud_map_density(pos, normalized_height, weather, 1.0, macro_noise);
-        transmittance *= exp(-density * ray_step_size);
+        let density =
+            get_cloud_map_density(pos, normalized_height, weather, 0.0, macro_noise, formation);
+        optical_depth += density * ray_step_size;
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
         distance_along_ray += ray_step_size;
     }
 
-    return transmittance;
+    return optical_depth;
 }
 
 fn henyey_greenstein(ray_dot_sun: f32, g: f32) -> f32 {
@@ -353,11 +394,13 @@ fn atmosphere_view_transmittance(sample_pos: vec3f, camera_pos: vec3f) -> vec3f 
     return exp(-tau);
 }
 
-/// Dual-lobe phase with two cheaper multi-scatter octaves (HZD/Nubis-style).
-/// Returns a dimensionless lobe already scaled near 1/(4π) peak units.
-fn multi_scatter_phase(cos_theta: f32, g_fwd: f32, g_bwd: f32, lerp_g: f32) -> f32 {
-    var sum = 0.0;
-    var weight = 1.0;
+/// Per-octave dual-lobe phase values (Nubis/Frostbite multi-scatter octaves).
+/// Evaluated ONCE PER RAY; per sample each octave is attenuated by its own
+/// `exp(-τ_sun · c_i)`, so deep shade retains soft wide-lobe fill from the
+/// later octaves instead of multiplying the whole direct term toward black
+/// (the old `0.04 + 0.96 · shadow` fill collapsed shaded cores to charcoal).
+fn multi_scatter_lobes(cos_theta: f32, g_fwd: f32, g_bwd: f32, lerp_g: f32) -> vec3f {
+    var lobes = vec3f(0.0);
     var gf = g_fwd;
     var gb = g_bwd;
     for (var i = 0; i < 3; i++) {
@@ -366,25 +409,33 @@ fn multi_scatter_phase(cos_theta: f32, g_fwd: f32, g_bwd: f32, lerp_g: f32) -> f
             henyey_greenstein(cos_theta, gb),
             lerp_g,
         );
-        sum += weight * lobe;
-        weight *= 0.5;
+        // HG omits 1/(4π); normalize into scene units and bound the forward peak.
+        lobes[i] = min(lobe * 0.07957747, 2.2);
         gf *= 0.5;
         gb *= 0.5;
     }
-    // HG omits 1/(4π); keep a mild isotropic MS floor so deep shade isn't black.
-    return 0.18 + 0.82 * min(sum * 0.07957747, 2.2);
+    return lobes;
 }
 
+// Octave energy weights and shadow-attenuation exponents. Energy drops per
+// octave; attenuation drops faster so multiple scattering "leaks around"
+// occluders (Wrenninge/Nubis approximation). Keep the higher octaves modest:
+// at (1.0, 0.52, 0.26) deep shade retained ~40% of lit energy and lobes went
+// flat cotton with no readable sun side.
+const MS_OCTAVE_WEIGHTS = vec3f(1.0, 0.34, 0.13);
+const MS_OCTAVE_EXTINCTION = vec3f(1.0, 0.25, 0.06);
+
 /// Silver-lining / powder: thin edges facing the light brighten; the same thin
-/// path looking *away* from the light darkens (HZD powder).
+/// path looking *away* from the light darkens (HZD powder). Restrained: the
+/// former 0.85 away-darkening painted every anti-sun lobe near-black and read
+/// as dirt rather than shading.
 fn powder_term(density_fraction: f32, cos_theta: f32) -> f32 {
     let d = clamp(density_fraction, 0.0, 1.0);
-    // HZD-style powder: thin paths darken when not looking into the light.
     let powder = 1.0 - exp(-d * 2.0);
     // cos_theta = ray·(-sun): +1 looking toward the sun (silver lining).
     let toward_sun = clamp(cos_theta, 0.0, 1.0);
     let away = clamp(-cos_theta, 0.0, 1.0);
-    return mix(1.0, powder, away * 0.85) * (1.0 + toward_sun * d * 0.35);
+    return mix(1.0, powder, away * 0.35) * (1.0 + toward_sun * d * 0.35);
 }
 
 fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray {
@@ -458,7 +509,9 @@ fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray
 fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> RaymarchResult {
     let ray = get_ray(ray_origin, ray_dir, max_dist, jitter);
 
-    if (ray.start > max_dist) {
+    // Shell entered beyond the near estimator's ownership: the composite's
+    // band march owns the whole ray; skip the volume work entirely.
+    if (ray.start > min(max_dist, ENTRY_FADE_END)) {
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
 
@@ -472,17 +525,21 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
     // The anti-tiling modulation has a ~21.6 km period. Sampling it once per
-    // ≤50 km view segment preserves a smoothly varying per-pixel system bias
-    // without paying a second trilinear volume fetch at every 200–500 m step.
-    let macro_noise = cloud_volume(
+    // view segment preserves a smoothly varying per-pixel system bias without
+    // paying a second trilinear volume fetch at every 200–500 m step. The same
+    // fetch's perlin channel doubles as the weather-system `formation` field
+    // (cluster gate in `get_cloud_map_density`) at zero extra cost.
+    let macro_sample = cloud_volume(
         mid + vec3f(-7300.0, 2100.0, 4900.0),
         max(config.clouds_base_shape_scale_m, 500.0) * 2.7,
-    ).a;
+    );
+    let macro_noise = macro_sample.a;
+    let formation = macro_sample.r;
 
-    // CLOUD-4: multi-scatter dual-lobe phase (shared for the whole ray).
-    // cosθ = view·sun_incoming with sun_incoming = -sun_dir (dir toward sun).
+    // CLOUD-4: multi-scatter dual-lobe phase octaves (shared for the whole
+    // ray). cosθ = view·sun_incoming with sun_incoming = -sun_dir.
     let ray_dot_sun = dot(ray_dir, -config.sun_dir.xyz);
-    let scattering = multi_scatter_phase(
+    let ms_lobes = multi_scatter_lobes(
         ray_dot_sun,
         config.forward_scattering_g,
         config.backward_scattering_g,
@@ -490,6 +547,9 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     );
     var ambient_bottom = config.clouds_ambient_color_bottom.rgb;
     var ambient_top = config.clouds_ambient_color_top.rgb;
+    // Airlight radiance estimate for the veil between camera and cloud —
+    // chroma comes from (1 − T_view), magnitude from the sky-ambient scale.
+    let airlight_radiance = (ambient_bottom + ambient_top) * (0.5 * AIRLIGHT_GAIN);
     var dir_length = ray.dir_length;
     var dist = max_dist;
     var scattered_light = vec3f(0.0, 0.0, 0.0);
@@ -502,7 +562,9 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     // last third of the marched reach instead.
     let ray_step_limit = clamp(config.clouds_raymarch_steps_count, 1u, MAX_RAY_STEPS_CAP);
     let march_span = f32(ray_step_limit) * ray.step_distance;
-    let reach_fade_begin = ray.start + 0.65 * march_span;
+    // Wide dissolve (half the span) so the far estimator's smoother texture
+    // fades in over kilometres instead of appearing at a visible seam line.
+    let reach_fade_begin = ray.start + 0.50 * march_span;
     let reach_end = ray.start + march_span;
 
     for (var step: u32 = 0u; step < ray_step_limit; step++) {
@@ -519,6 +581,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 weather,
                 detail_weight,
                 macro_noise,
+                formation,
             )
             * (1.0 - smoothstep(reach_fade_begin, reach_end, dir_length));
 
@@ -537,29 +600,34 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 0.0,
                 1.0,
             );
-            // Cloud self-shadow (sun march) + atmosphere sun air-mass + powder.
-            let sun_visibility = volumetric_shadow(world_position, weather, macro_noise);
+            // Filtered sun optical depth (smooth broad mass only, jittered tap
+            // ladder) drives per-octave multi-scatter attenuation.
+            let tau_sun =
+                volumetric_sun_depth(world_position, weather, macro_noise, formation, jitter);
             let sun_T = atmosphere_sun_transmittance(world_position);
             let powder = powder_term(density_fraction, ray_dot_sun);
-            let multiple_scatter_fill = 0.04 + 0.96 * sun_visibility;
+            let octave_shadow = vec3f(
+                exp(-tau_sun * MS_OCTAVE_EXTINCTION.x),
+                exp(-tau_sun * MS_OCTAVE_EXTINCTION.y),
+                exp(-tau_sun * MS_OCTAVE_EXTINCTION.z),
+            );
+            let scattering = dot(MS_OCTAVE_WEIGHTS * ms_lobes, octave_shadow)
+                / (MS_OCTAVE_WEIGHTS.x + MS_OCTAVE_WEIGHTS.y + MS_OCTAVE_WEIGHTS.z);
             let direct = config.sun_color.rgb
                 * sun_T
                 * scattering
-                * multiple_scatter_fill
                 * powder;
-            // Lift ambient slightly in deep shade so cores stay legible under
-            // low sun_T without re-whitening the sunlit sheet.
-            let amb = ambient_light * (0.65 + 0.35 * (1.0 - sun_visibility));
+            let amb = ambient_light;
 
             // Frostbite energy-conserving step, then sample→camera air so
-            // in-scatter is pre-attenuated before the BodySky composite.
+            // in-scatter is pre-attenuated before the BodySky composite, plus
+            // the airlight the cloud's opacity occludes out of the composite.
             let S = clouds_density_sampled * (amb + direct);
             let delta_transmittance = exp(-clouds_density_sampled * ray.step_distance);
+            let view_T = atmosphere_view_transmittance(world_position, ray_origin);
             var integrated_scattering = S * (1.0 - delta_transmittance) / clouds_density_sampled;
-            integrated_scattering *= atmosphere_view_transmittance(
-                world_position,
-                ray_origin,
-            );
+            integrated_scattering = integrated_scattering * view_T
+                + airlight_radiance * (vec3f(1.0) - view_T) * (1.0 - delta_transmittance);
 
             scattered_light += transmittance * integrated_scattering;
             transmittance *= delta_transmittance;
@@ -570,13 +638,13 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         dir_length += ray.step_distance;
     }
 
-    // Distance haze-out: clouds whose entry is past CLOUD_FADE_START dissolve
-    // toward fully transparent by the cap, so the bounded reach reads as aerial
-    // perspective instead of a hard cut (and the streak-prone near-tangent rays
-    // at the very horizon contribute nothing).
-    let dist_fade = 1.0 - smoothstep(CLOUD_FADE_START, MAX_CLOUD_DIST, ray.start);
-    transmittance = mix(1.0, transmittance, dist_fade);
-    scattered_light *= dist_fade;
+    // Entry-distance dissolve: rays that only meet the shell far away hand
+    // the whole interval to the composite's band march (which fades in over
+    // the same window). Unlike the pre-CLOUD-6 haze-out, this replaces the
+    // clouds with the far estimator rather than deleting them.
+    let entry_fade = 1.0 - smoothstep(ENTRY_FADE_START, ENTRY_FADE_END, ray.start);
+    transmittance = mix(1.0, transmittance, entry_fade);
+    scattered_light *= entry_fade;
 
     // Soft energy peak: per-channel Reinhard against a modest white point so
     // stacked phase peaks no longer blow the composite to a white sheet.

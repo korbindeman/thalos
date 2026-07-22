@@ -491,7 +491,18 @@ impl AppBuilder {
                 ..default()
             })
             .set(AssetPlugin {
-                file_path: "../../assets".to_string(),
+                // Under `cargo run` Bevy resolves this against
+                // CARGO_MANIFEST_DIR (apps/game or tools/capture_host, both
+                // two levels below the workspace). The dx-launched capture
+                // host has no manifest dir at runtime; its client sets
+                // BEVY_ASSET_ROOT to the workspace root, which Bevy prepends
+                // verbatim — so the relative hop must collapse to "assets"
+                // there or every asset resolves outside the workspace.
+                file_path: if std::env::var_os("BEVY_ASSET_ROOT").is_some() {
+                    "assets".to_string()
+                } else {
+                    "../../assets".to_string()
+                },
                 ..default()
             })
             .set(bevy::log::LogPlugin {

@@ -547,10 +547,15 @@ fn atmosphere_jitter(coord: vec2<f32>) -> f32 {
 /// weather cells. Shape comes from the continuous coverage field rather than
 /// the categorical type channel, which is reserved for vertical structure.
 fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
-    // Close to the CLOUD-1 formation gate (sparse broken systems, open water)
-    // with a slightly softer upper knee so soft neighborhood filtering does
-    // not erase cell edges into hard cubemap squares.
-    return smoothstep(0.55, 0.73, raw_coverage * 1.22);
+    // AREAL-FRACTION semantics, calibrated against the NEAR volume's
+    // formation gate: this is the fraction of the texel's area the marcher
+    // would actually fill with cloud (its 3-D shape field exceeding
+    // `mix(0.58, 0.30, cov·1.25)`), NOT a solid-slab opacity. Far consumers
+    // must treat it as coverage — a band march that compounds it as
+    // independent opaque segments turns a 46%-coverage planet into solid
+    // overcast; the old 0.55–0.73 gate under-filled the far layer instead.
+    // Both directions break "one weather, two estimators".
+    return smoothstep(0.45, 0.80, raw_coverage * 1.22);
 }
 
 /// Column moments derived from the canonical weather cubemap (RGBA =
@@ -561,7 +566,9 @@ fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
 struct WeatherColumn {
     opacity: f32,
     optical_depth: f32,
-    /// Local deck mid as a fraction of the authored shell (0 = base altitude).
+    /// Local deck base as a fraction of the authored shell (0 = base altitude).
+    base_frac: f32,
+    /// Local deck mid as a fraction of the authored shell.
     mid_frac: f32,
     /// Local top fraction — limb silhouette / parallax shell.
     top_frac: f32,
@@ -590,6 +597,7 @@ fn weather_column_from_texel(weather: vec4<f32>) -> WeatherColumn {
     return WeatherColumn(
         opacity,
         optical_depth,
+        local_base,
         mix(local_base, local_top, 0.55),
         local_top,
         storm_w,
@@ -601,9 +609,12 @@ fn weather_column_from_texel(weather: vec4<f32>) -> WeatherColumn {
 fn orbital_cloud_altitude(column: WeatherColumn, layers: AtmosphereBlock) -> f32 {
     let base_alt = max(layers.cloud_shape.x, 0.0);
     let thickness = max(layers.cloud_shape.y, 0.0);
-    // Bias toward local top so the limb silhouette reads taller decks rather
-    // than a single mid-slab extrusion.
-    let frac = mix(column.mid_frac, column.top_frac, 0.35 + 0.45 * column.stormness);
+    // Density-weighted representative height: most of a column's optical mass
+    // sits near its mid, so parallax anchors there, with only storm towers
+    // pulled toward their tops. The old 0.35–0.80 top bias floated the whole
+    // far layer near the shell ceiling — a thin detached skin far above the
+    // volume the near march actually renders.
+    let frac = mix(column.mid_frac, column.top_frac, 0.10 + 0.25 * column.stormness);
     return base_alt + frac * thickness;
 }
 
@@ -639,31 +650,22 @@ fn orbital_cloud_shade(
     return vec2<f32>(radiance_scale, opacity);
 }
 
-/// Soft weather fetch that averages a small body-fixed cross. Linear cube
-/// filtering alone still leaves 256² face seams reading as square patches at
-/// the limb; this cheap neighborhood kills the worst faceting without a second
-/// atlas bake.
+/// Footprint-filtered weather fetch. The cube carries a box mip chain
+/// (WEATHER_MIP_LEVELS); callers pass the mip level matching their projected
+/// footprint (0 = full 256² resolution). The floor of 0.75 keeps a little
+/// trilinear softening even close-up, which also removes the 256² face-square
+/// faceting the old 5-tap cross existed to hide.
 fn sample_weather_soft(
     weather_tex: texture_cube<f32>,
     weather_sampler: sampler,
     n: vec3<f32>,
+    lod: f32,
 ) -> vec4<f32> {
-    var t = cross(n, vec3<f32>(0.0, 1.0, 0.0));
-    if (dot(t, t) < 1.0e-8) {
-        t = cross(n, vec3<f32>(1.0, 0.0, 0.0));
-    }
-    t = normalize(t);
-    let b = cross(n, t);
-    // Small cross only — enough to break 256² face squares, not so wide that
-    // mesoscale cells average into a grey veil.
-    let e = 0.0022;
-    let c0 = textureSampleLevel(weather_tex, weather_sampler, n, 0.0);
-    let c1 = textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * t), 0.0);
-    let c2 = textureSampleLevel(weather_tex, weather_sampler, normalize(n - e * t), 0.0);
-    let c3 = textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * b), 0.0);
-    let c4 = textureSampleLevel(weather_tex, weather_sampler, normalize(n - e * b), 0.0);
-    return (c0 * 4.0 + c1 + c2 + c3 + c4) * (1.0 / 8.0);
+    return textureSampleLevel(weather_tex, weather_sampler, n, max(lod, 0.75));
 }
+
+/// Angular size of one level-0 weather texel (π/2 face over 256 texels).
+const WEATHER_TEXEL_ANGLE: f32 = 0.006136;
 
 /// Height-moment normal for orbital cloud lighting: finite difference of the
 /// local top/coverage field in the body-fixed tangent plane. Gives soft relief
@@ -672,6 +674,7 @@ fn orbital_cloud_normal_body(
     weather_tex: texture_cube<f32>,
     weather_sampler: sampler,
     n: vec3<f32>,
+    lod: f32,
 ) -> vec3<f32> {
     var t = cross(n, vec3<f32>(0.0, 1.0, 0.0));
     if (dot(t, t) < 1.0e-8) {
@@ -679,15 +682,17 @@ fn orbital_cloud_normal_body(
     }
     t = normalize(t);
     let b = cross(n, t);
-    let e = 0.0045;
+    // Stencil widens with the sampled mip so the derived relief stays at the
+    // resolved feature scale instead of amplifying sub-footprint texel noise.
+    let e = 0.0045 * (1.0 + 0.8 * lod);
     let h = weather_column_from_texel(
-        textureSampleLevel(weather_tex, weather_sampler, n, 0.0),
+        textureSampleLevel(weather_tex, weather_sampler, n, lod),
     );
     let h_t = weather_column_from_texel(
-        textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * t), 0.0),
+        textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * t), lod),
     );
     let h_b = weather_column_from_texel(
-        textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * b), 0.0),
+        textureSampleLevel(weather_tex, weather_sampler, normalize(n + e * b), lod),
     );
     // Relief from both optical mass and local top so tall cells cast self-
     // shadow even when coverage is uniform.

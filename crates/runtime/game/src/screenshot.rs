@@ -594,8 +594,10 @@ impl CloudCaptureQuality {
 
     fn shadow_steps(self) -> u32 {
         match self {
-            Self::Low | Self::Baseline | Self::High => 1,
-            Self::Reference => 4,
+            Self::Low => 2,
+            Self::Baseline => 3,
+            Self::High => 4,
+            Self::Reference => 6,
         }
     }
 

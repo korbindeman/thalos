@@ -148,7 +148,10 @@ fn capture(
         overrides,
     };
     write_json_atomic(&diagnostic_path(REQUEST_FILE), &request)?;
-    let deadline = Instant::now() + Duration::from_secs(300);
+    // Software-Vulkan (llvmpipe) fallback boxes render warmup at seconds per
+    // frame, so the response wait must cover a full preset warmup there; a
+    // hardware run answers long before either limit.
+    let deadline = Instant::now() + Duration::from_secs(capture_timeout_secs());
     while Instant::now() < deadline {
         if let Some(response) = read_json::<CaptureResponse>(&diagnostic_path(RESPONSE_FILE))
             && response.id == request.id
@@ -367,6 +370,13 @@ fn expected_size() -> Option<(u32, u32)> {
     let raw = env::var("THALOS_SCREENSHOT_SIZE").ok()?;
     let (width, height) = raw.split_once(['x', 'X', '*'])?;
     Some((width.trim().parse().ok()?, height.trim().parse().ok()?))
+}
+
+fn capture_timeout_secs() -> u64 {
+    env::var("THALOS_CAPTURE_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(1800)
 }
 
 fn workspace_root() -> PathBuf {

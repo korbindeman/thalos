@@ -24,6 +24,10 @@ pub const VOLUME_SIZE: u32 = 64;
 /// runtime field must use the same face size.
 pub const WEATHER_FACE_SIZE: u32 = 256;
 
+/// Mip levels carried by the weather cube (256 → 8 px). Must match the
+/// producer's chain (`CloudWeatherField::MIP_LEVELS` game-side).
+pub const WEATHER_MIP_LEVELS: u32 = 6;
+
 /// Persistent GPU allocation owned by the current cloud renderer. CLOUD-0
 /// publishes this alongside timings so later low-resolution/format work has an
 /// exact memory baseline instead of an estimate copied into documentation.
@@ -163,8 +167,9 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
     // Clear by default: authored `None` is authoritative and the game only
     // uploads a field for a body with `CloudClimate`.
     let weather_image = cloud_weather_image(
-        vec![0; (WEATHER_FACE_SIZE * WEATHER_FACE_SIZE * 6 * 4) as usize],
+        vec![0; 6 * cube_layer_mip_bytes(WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS)],
         WEATHER_FACE_SIZE,
+        WEATHER_MIP_LEVELS,
     );
 
     CloudImages {
@@ -181,22 +186,41 @@ pub const fn cloud_target_memory() -> CloudTargetMemory {
     cloud_target_memory_for(RENDER_WIDTH, RENDER_HEIGHT)
 }
 
+/// Byte length of one cube layer's full mip chain for `face_size`/`mips`.
+fn cube_layer_mip_bytes(face_size: u32, mips: u32) -> usize {
+    let mut total = 0usize;
+    let mut size = face_size as usize;
+    for _ in 0..mips {
+        total += size * size * 4;
+        size = (size / 2).max(1);
+    }
+    total
+}
+
 /// Build the filterable cubemap image used by both near-volume weather and the
-/// orbital cloud-cover projection. `rgba` is face-major in cubemap face order.
-pub fn cloud_weather_image(rgba: Vec<u8>, face_size: u32) -> Image {
-    let expected = (face_size * face_size * 6 * 4) as usize;
+/// orbital cloud-cover projection. `rgba` is layer-major with `mips` levels
+/// per face (face0[mip0..], face1[mip0..], …); far projections rely on the
+/// chain for footprint filtering (disc/limb views alias into ring moiré on a
+/// single-level cube).
+pub fn cloud_weather_image(rgba: Vec<u8>, face_size: u32, mips: u32) -> Image {
+    let expected = 6 * cube_layer_mip_bytes(face_size, mips);
     assert_eq!(rgba.len(), expected, "cloud weather RGBA8 cube byte count");
-    let mut image = Image::new(
+    // `Image::new`'s size debug-assert compares data length against the
+    // level-0 volume only, so the mip chain must be attached after the
+    // descriptor declares its mip count (our assert above is the mip-aware
+    // equivalent).
+    let mut image = Image::new_uninit(
         Extent3d {
             width: face_size,
             height: face_size,
             depth_or_array_layers: 6,
         },
         TextureDimension::D2,
-        rgba,
         TextureFormat::Rgba8Unorm,
         RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
+    image.texture_descriptor.mip_level_count = mips;
+    image.data = Some(rgba);
     image.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
     image.texture_view_descriptor = Some(TextureViewDescriptor {
         dimension: Some(TextureViewDimension::Cube),
