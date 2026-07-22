@@ -23,11 +23,13 @@
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
-use bevy::mesh::{Indices, PrimitiveTopology};
-use bevy::pbr::{Material, MaterialPlugin};
+use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+};
 
 use thalos_physics_canonical::canonical::Epoch;
 use thalos_shipyard::{Engine, EngineActivation, EngineGeometry, EngineThrust, ReactantRatio, Resource};
@@ -282,6 +284,20 @@ impl Material for PlumeMaterial {
     fn alpha_mode(&self) -> AlphaMode {
         // src.rgb * src.a + dst — the classic additive HDR plume.
         AlphaMode::Add
+    }
+
+    fn specialize(
+        _pipeline: &MaterialPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        _key: MaterialPipelineKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        // The cylindrical billboard rebuilds the strip in the vertex shader.
+        // Mesh winding was authored in local XY and does not reliably face the
+        // camera after the axis-lock rotation, so default back-face culling
+        // drops the whole plume. Disable culling (same pattern as rings).
+        descriptor.primitive.cull_mode = None;
+        Ok(())
     }
 }
 
