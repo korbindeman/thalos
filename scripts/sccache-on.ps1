@@ -25,7 +25,28 @@ $worktreeRoots = @(
 if ($worktreeRoots.Count -eq 0) { $worktreeRoots = @($repoRoot) }
 $env:SCCACHE_BASEDIRS = [string]::Join(';', $worktreeRoots)
 
+$wrapperLine = Select-String -LiteralPath $cargoConfig -Pattern '^rustc-wrapper\s*=\s*"([^"]+)"' |
+    Select-Object -First 1
+$sccacheExe = if ($wrapperLine -and $wrapperLine.Matches.Count -gt 0) {
+    $wrapperLine.Matches[0].Groups[1].Value
+} else {
+    (Get-Command sccache -ErrorAction SilentlyContinue).Source
+}
+if (-not $sccacheExe -or -not (Test-Path -LiteralPath $sccacheExe)) {
+    Write-Error 'configured sccache executable is missing — rerun scripts\setup-build-env.ps1.'
+    return
+}
+& $sccacheExe --show-stats *> $null
+if ($LASTEXITCODE -ne 0) {
+    & $sccacheExe --start-server *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error 'sccache server did not start.'
+        return
+    }
+}
+
 Write-Host "parallel cache mode ON  (CARGO_INCREMENTAL=0)"
 Write-Host "  SCCACHE_DIR=$($env:SCCACHE_DIR)  SCCACHE_CACHE_SIZE=$($env:SCCACHE_CACHE_SIZE)"
 Write-Host "  SCCACHE_BASEDIRS=$($env:SCCACHE_BASEDIRS)"
-Write-Host "  stats: sccache --show-stats   |   return to iterate mode: Remove-Item Env:CARGO_INCREMENTAL"
+Write-Host "  stats: & '$sccacheExe' --show-stats"
+Write-Host "  return to iterate mode: Remove-Item Env:CARGO_INCREMENTAL"

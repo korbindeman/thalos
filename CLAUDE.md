@@ -252,8 +252,11 @@ Windows fast-incremental and macOS workaround examples live in
   directories. They share sccache, not Cargo output directories. Size each
   Cargo process with `scripts/setup-build-env.sh --agents N` or
   `scripts/setup-build-env.ps1 -AgentSlots N`; no two simultaneous Cargo
-  processes may write to the same target directory. Run the setup script once
-  inside each worktree that does not already inherit a generated local config.
+  processes may write to the same target directory. On WSL/Linux, create the
+  complete worktree set first, run `scripts/setup-build-env.sh --agents N
+  --all-worktrees`, source `scripts/sccache-on.sh` in every agent shell, and
+  require `bash scripts/check-build-env.sh --parallel` to pass before work begins.
+  WSL repositories live on the Linux filesystem, never under `/mnt/c`.
 - Keep each intentional renderer lane on its one Bevy/wgpu feature fingerprint:
   dynamic for interactive/cold tools, static `dev-iteration` for the persistent
   capture server. Adding any other mixture forces another full graph. In particular, wgpu's diagnostic

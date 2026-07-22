@@ -61,7 +61,8 @@ reuses) one static `thalos_capture_host` renderer through Dioxus/Subsecond, with
 restarting the world. Bevy watches normal asset shaders and WGSL registered via
 `embedded_asset!`, so both shader forms reload in the same process. `just compare`
 sends its variants to that exact process. The first use requires the one-time
-developer install `cargo binstall dioxus-cli`; the repository controller then
+developer install `cargo binstall dioxus-cli@0.7.9` (the setup script provisions
+this pinned version); the repository controller then
 starts `dx serve --hot-patch` automatically.
 
 Useful lifecycle commands:
@@ -188,6 +189,10 @@ setup, Windows Defender exclusions, headless-Vulkan requirements, and the
 vs. a Linux cloud box) — is [build_speed.md](build_speed.md). Run
 `scripts/setup-build-env.sh` (Linux/macOS/WSL) or `scripts/setup-build-env.ps1`
 (Windows) to install the tools and write the local, gitignored config.
+For WSL/Linux parallel boxes, create all worktrees first, run the shell setup
+with `--agents <N> --all-worktrees`, source `scripts/sccache-on.sh` in every
+agent shell, and require `bash scripts/check-build-env.sh --parallel` to pass before
+the agent starts compiling or capturing.
 
 Invariants that still bind here (detailed in build_speed.md):
 

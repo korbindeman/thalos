@@ -31,6 +31,8 @@ If you do nothing else:
   `scripts/setup-build-env.ps1` (Windows). They install the linker + sccache and
   write a local config with the fast linker, sccache wrapper, and a per-process
   Cargo job budget. Pass `--agents N` / `-AgentSlots N` for expected concurrency.
+  On WSL/Linux agent boxes, create all worktrees first and add
+  `--all-worktrees`, then validate with `bash scripts/check-build-env.sh --parallel`.
 - **For parallel agents / a cloud box / fresh worktrees:** give every agent a
   separate worktree/`target/`, share one sccache, and set
   `CARGO_INCREMENTAL=0`. sccache turns a cold Bevy dep-graph build from
@@ -233,6 +235,11 @@ sccache passes those invocations through uncached.
 - **Windows:** `scoop install sccache` or `winget install Mozilla.sccache` — or
   `cargo install sccache --locked`.
 
+Thalos requires **sccache 0.14.0 or newer** because that release introduced
+multi-root `SCCACHE_BASEDIRS`. The setup scripts verify this instead of trusting
+an older distribution package that accepts the wrapper configuration but cannot
+normalize all agent worktrees.
+
 The setup scripts do this for you.
 
 ### 5.3 Enter the cold/parallel regime
@@ -246,7 +253,8 @@ Helper toggles are provided: `source scripts/sccache-on.sh` (bash) /
 dot-source `scripts/sccache-on.ps1` (PowerShell). They also set
 `SCCACHE_BASEDIRS` to the complete set reported by `git worktree list`, so each
 checkout root is stripped and identical relative source/target paths hash
-consistently. Unset only `CARGO_INCREMENTAL` to return to the normal iterate
+consistently. They also start the local server if a hosted runner reaped the
+daemon created during provisioning. Unset only `CARGO_INCREMENTAL` to return to the normal iterate
 regime. Because base directories are server configuration, provision worktrees
 before starting parallel builds and restart sccache after the set changes.
 
@@ -263,9 +271,15 @@ the second worktree/branch/checkout, which should be mostly hits.
 For **multiple agents on one box**, a single local `SCCACHE_DIR` is already
 shared across all their worktrees — that's the main win. To share across
 *machines* (a fleet, or CI + dev), point sccache at a backend instead of the
-local dir: S3 (`SCCACHE_BUCKET`), GCS, Redis, or memcached. Keep the local dir
-for a single box; reach for a remote backend only when a second machine needs
-the same cache.
+local dir: S3 (`SCCACHE_BUCKET`), GCS, Redis, or memcached. Backend credentials
+belong in the box/agent launcher environment, never in `.cargo/config.toml`.
+
+WSL2 and a remote Linux box can reuse entries when they have the same Rust host
+target, pinned toolchain, features, and compiler flags; `SCCACHE_BASEDIRS`
+normalizes their different checkout roots. Native Windows and Linux cannot
+reuse compiled entries even if they use the same remote store. A shared store
+is safe across targets—the keys remain separate—but do not expect cross-target
+hits.
 
 ---
 
@@ -307,9 +321,13 @@ because iteration is headless. Setup:
 2. **Keep the project on the Linux filesystem** — clone into `~/thalos`, **not**
    `/mnt/c/...`. Building across the `/mnt/c` 9p mount is drastically slower and
    erases most of the gains. This is the #1 WSL mistake.
-3. Run `scripts/setup-build-env.sh` — it writes the Linux `.cargo/config.toml`
-   (mold via clang) and installs sccache.
-4. Headless rendering: WSLg usually gives real-GPU Vulkan; lavapipe is the
+3. Create the complete worktree set, then run
+   `scripts/setup-build-env.sh --agents <N> --all-worktrees`. It writes
+   host-specific Linux Cargo config (mold via clang), installs sccache plus the
+   `just`/`dx` agent commands, and refreshes the cache server once.
+4. In each agent launcher, `source scripts/sccache-on.sh`, then run
+   `bash scripts/check-build-env.sh --parallel` before accepting work.
+5. Headless rendering: WSLg usually gives real-GPU Vulkan; lavapipe is the
    fallback (§4).
 
 You can share one Windows checkout by cloning the repo separately inside WSL, or
@@ -338,10 +356,10 @@ the box has a GPU, lavapipe otherwise.
 # .cargo/config.toml
 [build]
 jobs = 8
-rustc-wrapper = "sccache"
+rustc-wrapper = "/absolute/path/to/sccache"
 
-[target.x86_64-unknown-linux-gnu]
-linker = "clang"
+[target.<rustc-host-triple>]
+linker = "/absolute/path/to/clang"
 rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 
 ```
@@ -352,6 +370,11 @@ export CARGO_INCREMENTAL=0
 export SCCACHE_DIR=/var/cache/sccache        # shared across all agents/worktrees on this box
 export SCCACHE_CACHE_SIZE=100G
 ```
+
+Create that shared directory once with ownership/permissions for the single OS
+account that launches the agents; otherwise keep the default
+`$HOME/.cache/sccache`. Separate OS users require deliberate shared-group
+permissions or a remote backend.
 
 Provision: `clang`, `mold`, `just`, `sccache`, the GPU Vulkan driver (or
 `mesa-vulkan-drivers` for lavapipe), and rustup (the repository selects the pinned stable release). Size the box
@@ -400,12 +423,11 @@ description points at (headless agents, screenshot-driven).
 - **Each agent gets its own git worktree** (`git worktree add`) with its **own
   `target/`** — so they don't serialize on the single target lock (§3.6). The
   Agent tool's `isolation: "worktree"` fits this directly.
-- Each worktree runs the setup script once if it does not inherit a generated
-  `.cargo/config.toml`. This is cheap after the linker/cache are installed and
-  ensures that the same job budget and cache store apply everywhere.
-- Create the full worktree set before launching agents, regenerate local config,
-  then restart the sccache server once. The setup scripts discover every current
-  worktree root; adding one after the server starts requires the same refresh.
+- Create the full worktree set before launching agents, then run
+  `scripts/setup-build-env.sh --agents <N> --all-worktrees` once from the
+  coordinating checkout. It writes the same machine-local config into every
+  root and restarts sccache with the complete normalization set. If a worktree
+  is added later, rerun that command before assigning it work.
 - **All worktrees share one sccache** (`SCCACHE_DIR` on the box). The first
   worktree populates the cache building Bevy; every subsequent worktree links
   the dep graph from cache in seconds. This is what makes N parallel agents
@@ -417,12 +439,17 @@ description points at (headless agents, screenshot-driven).
   usually the ceiling. Oversubscribing thrashes and is slower than a lower cap.
 - **Dynamic linking** still applies per-worktree for the renderer entry points.
 
-Loop, per agent:
+Provision once from the coordinating checkout:
 ```
 git worktree add ../wt-<task>      # isolated checkout + target dir
+scripts/setup-build-env.sh --agents <N> --all-worktrees
+```
+
+Then, per agent:
+```
 cd ../wt-<task>
-scripts/setup-build-env.sh --agents <N> # once per worktree; PowerShell equivalent on Windows
 source scripts/sccache-on.sh       # or dot-source the PowerShell helper
+bash scripts/check-build-env.sh --parallel
 cargo check -p <crate>             # sccache-backed; deps are cache hits
 just screenshot <preset>           # linked artifact; Bevy from cache
 read PNG → iterate → hand back diff

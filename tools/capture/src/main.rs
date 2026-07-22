@@ -186,7 +186,7 @@ fn ensure_server(preset: &str) -> Result<CaptureServerState, String> {
 
 fn start_server(preset: &str) -> Result<CaptureServerState, String> {
     Command::new("dx").arg("--version").output().map_err(|_| {
-        "Dioxus CLI (`dx`) is not installed; run `cargo binstall dioxus-cli` once".to_owned()
+        "Dioxus CLI (`dx`) is not installed; run `cargo binstall dioxus-cli@0.7.9` once".to_owned()
     })?;
     stop_server(true)?;
     fs::create_dir_all(diagnostics_dir()).map_err(|error| error.to_string())?;
