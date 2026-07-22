@@ -63,7 +63,7 @@ use crate::rendering::{SimulationState, SolarSystemState};
 use crate::space_center::{HubContext, hub_context};
 use crate::spawn::{Homeworld, SpawnSituation};
 use crate::structures::StructureRegistry;
-use crate::terrain_registry::BodySurfaceRegistry;
+use crate::terrain_registry::{AirlessLandmark, BodySurfaceRegistry};
 
 const SAVED_PERSPECTIVE_SCHEMA: &str = "thalos.saved-perspective.v1";
 const SAVED_PERSPECTIVE_FILENAME: &str = "latest_perspective.json";
@@ -2214,7 +2214,7 @@ fn drive_headless_screenshot(
                 // The rim framing must *contain* a crater, so it needs the
                 // biggest one available rather than the registry's typical
                 // ~10 km pick, which is too small to read as a rim from low.
-                ScreenshotPreset::MiraRim => LandmarkChoice::Largest,
+                ScreenshotPreset::MiraRim => LandmarkChoice::MostLegible,
                 _ => LandmarkChoice::Typical,
             },
         ),
@@ -2619,15 +2619,17 @@ enum LandmarkChoice {
     /// ~10 km radius, so this yields a typical mid-size crater — what the
     /// existing survey probes are calibrated against.
     Typical,
-    /// Largest acceptable landmark. Required by framings that must *contain* a
-    /// crater rather than survey terrain near one.
-    Largest,
+    /// The landmark with the most *surviving relief*. Required by framings that
+    /// must contain a crater rather than survey terrain near one. Ranked on
+    /// rendered depth rather than radius, because the widest feature on an old
+    /// body is routinely one that degradation has flattened.
+    MostLegible,
 }
 
 fn find_rugged_airless_site(
     source: &dyn HeightSource,
     sun_dir: DVec3,
-    landmarks: &[(DVec3, f32)],
+    landmarks: &[AirlessLandmark],
     geometry: AirlessSunGeometry,
     choice: LandmarkChoice,
 ) -> (DVec3, Option<f64>) {
@@ -2635,19 +2637,20 @@ fn find_rugged_airless_site(
     let in_band = || {
         landmarks
             .iter()
-            .filter(|(dir, _)| band.contains(&dir.dot(sun_dir)))
+            .filter(|landmark| band.contains(&landmark.dir.dot(sun_dir)))
     };
     let landmark = match choice {
         LandmarkChoice::Typical => in_band().next(),
-        LandmarkChoice::Largest => in_band().max_by(|a, b| a.1.total_cmp(&b.1)),
+        LandmarkChoice::MostLegible => in_band().max_by(|a, b| a.relief_m.total_cmp(&b.relief_m)),
     };
-    if let Some((dir, radius_m)) = landmark {
+    if let Some(landmark) = landmark {
         info!(
             target: "thalos::screenshot",
-            "airless landmark crater: radius {:.1} km ({choice:?})",
-            radius_m / 1000.0
+            "airless landmark crater: radius {:.1} km, relief {:.0} m ({choice:?})",
+            landmark.radius_m / 1000.0,
+            landmark.relief_m,
         );
-        return (*dir, Some(*radius_m as f64));
+        return (landmark.dir, Some(f64::from(landmark.radius_m)));
     }
 
     const CANDIDATES: usize = 768;

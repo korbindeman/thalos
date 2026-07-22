@@ -49,31 +49,50 @@ pub(crate) fn morphology_for_radius(radius_m: f32) -> Morphology {
 /// to crater floor; rim height is measured from pre-impact terrain to rim crest.
 pub(crate) fn crater_dimensions(radius_m: f32) -> (f32, f32) {
     let d_km = radius_m * 2.0 / 1000.0; // diameter in km
+
+    // Simple bowl: Pike (1977) d/D ≈ 0.196, h_rim/D = 0.036.
+    let simple = (radius_m * 0.392, radius_m * 0.072);
+
+    // Complex: Pike (1977) d = 1.044 D^0.301 km, h_rim = 0.236 D^0.399 km.
+    //
+    // The depth coefficient was previously 196, i.e. the *simple* crater's
+    // d/D = 0.196 pasted into the complex formula while keeping the complex
+    // exponent. That made every large crater ~5x too shallow: a 51 km crater
+    // came out 642 m deep (d/D 1.6%) instead of 3.4 km, and at survey range a
+    // sub-degree dip reads as flat ground, not a crater. The rim coefficient
+    // beside it was always in the right units, which is what made the mismatch
+    // visible. Checked against Copernicus (D 93 km): 4.09 km here vs ~3.8 km
+    // measured.
+    let complex = (1044.0 * d_km.powf(0.301), 236.0 * d_km.powf(0.399));
+
+    // Peak-ring and multi-ring continue the corrected complex trend rather than
+    // the old undersized one; coefficients are chosen for continuity at each
+    // morphology boundary (D = 137 km and D = 300 km), so the population has no
+    // depth step where the classification changes.
+    let peak_ring = (1342.0 * d_km.powf(0.25), 200.0 * d_km.powf(0.38));
+    let multi_ring = (1785.0 * d_km.powf(0.20), 160.0 * d_km.powf(0.35));
+
     match morphology_for_radius(radius_m) {
-        Morphology::Simple => {
-            // Pike (1977): d/D ≈ 0.196, h_rim/D = 0.036
-            (radius_m * 0.392, radius_m * 0.072)
-        }
+        Morphology::Simple => simple,
         Morphology::Complex => {
-            // Pike (1977): d = 0.196 D^0.301 km, h_rim = 0.236 D^0.399 km
-            let depth_m = 196.0 * d_km.powf(0.301);
-            let rim_m = 236.0 * d_km.powf(0.399);
-            (depth_m, rim_m)
+            // Blend out of the simple fit across the transition. Extending
+            // d/D = 0.196 all the way to SIMPLE_MAX would put a 30 km crater at
+            // 5.9 km deep — unphysically deep — while the complex fit starts at
+            // 2.9 km, so a hard switch leaves a 2x cliff in the size
+            // distribution. Real morphometry crosses over gradually.
+            let t = smoothstep_range(SIMPLE_MAX, SIMPLE_MAX * TRANSITION_SPAN, radius_m);
+            (
+                simple.0 + (complex.0 - simple.0) * t,
+                simple.1 + (complex.1 - simple.1) * t,
+            )
         }
-        Morphology::PeakRing => {
-            // Extrapolated Pike trend, d/D ≈ 0.03-0.04
-            let depth_m = 140.0 * d_km.powf(0.25);
-            let rim_m = 200.0 * d_km.powf(0.38);
-            (depth_m, rim_m)
-        }
-        Morphology::MultiRing => {
-            // Very shallow; isostatic relaxation dominates
-            let depth_m = 100.0 * d_km.powf(0.20);
-            let rim_m = 160.0 * d_km.powf(0.35);
-            (depth_m, rim_m)
-        }
+        Morphology::PeakRing => peak_ring,
+        Morphology::MultiRing => multi_ring,
     }
 }
+
+/// How far past [`SIMPLE_MAX`] the simple→complex depth blend runs.
+const TRANSITION_SPAN: f32 = 1.8;
 
 /// Hermite smoothstep: 3t^2 - 2t^3 on [0, 1], used inside profile zones.
 #[inline]

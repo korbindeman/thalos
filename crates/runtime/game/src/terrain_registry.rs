@@ -59,7 +59,7 @@ impl GpuHeightMirrorRegistry {
 pub struct BodySurfaceRegistry {
     surfaces: HashMap<BodyId, Arc<dyn SurfaceQuery>>,
     fingerprints: HashMap<BodyId, u64>,
-    airless_landmarks: HashMap<BodyId, Vec<(DVec3, f32)>>,
+    airless_landmarks: HashMap<BodyId, Vec<AirlessLandmark>>,
 }
 
 impl BodySurfaceRegistry {
@@ -129,7 +129,7 @@ impl BodySurfaceRegistry {
     /// Mid-sized baked crater centres, ordered by usefulness for a close
     /// surface survey. This is package metadata for diagnostics/cinematics;
     /// terrain consumers still depend only on `SurfaceQuery`.
-    pub fn airless_landmarks(&self, body: BodyId) -> &[(DVec3, f32)] {
+    pub fn airless_landmarks(&self, body: BodyId) -> &[AirlessLandmark] {
         self.airless_landmarks
             .get(&body)
             .map(Vec::as_slice)
@@ -170,7 +170,7 @@ const LANDMARK_BUDGET: usize = 256;
 /// Duplicates between the halves are harmless and deliberately not filtered:
 /// "first in band" and "largest in band" both give the same answer with or
 /// without them.
-fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<(DVec3, f32)> {
+fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<AirlessLandmark> {
     const RADIUS_BAND_M: std::ops::RangeInclusive<f32> = 4_000.0..=30_000.0;
     let half = LANDMARK_BUDGET / 2;
 
@@ -199,8 +199,28 @@ fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<(DVec3, f32)> {
     typical
         .into_iter()
         .chain(legible)
-        .map(|crater| (crater.center.as_dvec3().normalize(), crater.radius_m))
+        .map(|crater| AirlessLandmark {
+            dir: crater.center.as_dvec3().normalize(),
+            radius_m: crater.radius_m,
+            relief_m: crater.depth_m
+                * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr),
+        })
         .collect()
+}
+
+/// One crater a cinematic framing may lock onto.
+///
+/// Carries `relief_m` because radius alone is the wrong thing to rank by: an
+/// ancient basin can be the widest feature on the body while `degradation_factor`
+/// has relaxed it to almost flat ground, so "pick the largest" frames an empty
+/// plain. `relief_m` is the depth that actually survives to the surface, which is
+/// what decides whether a crater *reads* as one. Framing distance still scales
+/// off `radius_m` — that is the feature's true extent.
+#[derive(Clone, Copy, Debug)]
+pub struct AirlessLandmark {
+    pub dir: DVec3,
+    pub radius_m: f32,
+    pub relief_m: f32,
 }
 
 fn terrain_context(body: &BodyDefinition) -> TerrainCompileContext {
