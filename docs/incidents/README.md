@@ -46,3 +46,4 @@ Historical incidents migrated from auto-memory keep their original dates.
 | [0016](0016-cloud-sparse-history-motion-smear.md) | Sparse cloud history smeared during camera motion | visual | 2026-07-21 |
 | [0017](0017-dx-host-asset-root-double-relative.md) | dx-launched capture host resolved assets outside the workspace | crash | 2026-07-22 |
 | [0018](0018-weather-cube-mip-chain-image-new-assert.md) | Mip-mapped weather cube crashed the capture host via `Image::new`'s level-0-only size assert | crash | 2026-07-22 |
+| [0019](0019-terrain-trainer-large-canvas-selected-small-reference.md) | Terrain trainer selected a patch smaller than its validation canvas | crash | 2026-07-21 |

@@ -1,15 +1,23 @@
 #![recursion_limit = "256"]
 
-#[cfg(all(feature = "cpu", feature = "gpu"))]
-compile_error!("select exactly one of the cpu or gpu features");
-#[cfg(not(any(feature = "cpu", feature = "gpu")))]
-compile_error!("select one of the cpu or gpu features");
+#[cfg(any(
+    all(feature = "cpu", feature = "gpu"),
+    all(feature = "cpu", feature = "cuda"),
+    all(feature = "gpu", feature = "cuda")
+))]
+compile_error!("select exactly one of the cpu, gpu, or cuda features");
+#[cfg(not(any(feature = "cpu", feature = "gpu", feature = "cuda")))]
+compile_error!("select one of the cpu, gpu, or cuda features");
 
+mod catalog;
 mod config;
 mod dem;
 mod grid;
 mod output;
 mod pyramid;
+mod real;
+mod sample;
+mod sphere;
 mod synthetic;
 mod train;
 mod validate;
@@ -25,7 +33,7 @@ struct CorpusEntry {
     index: usize,
     seed: u64,
     split: &'static str,
-    parameters: synthetic::Parameters,
+    parameters: sample::Parameters,
     height_rms_m: f32,
     slope_rms: f32,
 }
@@ -40,8 +48,21 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut args = std::env::args().skip(1);
     let command = args.next().unwrap_or_else(|| "smoke".into());
+    if command == "backend-info" {
+        println!("{}", train::backend_report());
+        return Ok(());
+    }
     if command == "prepare-dem" || command == "prepare-sldem" {
         return prepare_dem(args.collect(), command == "prepare-sldem");
+    }
+    if command == "discover-kaguya" {
+        return discover_kaguya(args.collect());
+    }
+    if command == "materialize-kaguya" {
+        return materialize_kaguya(args.collect());
+    }
+    if command == "sphere-preview" {
+        return sphere_preview(args.collect());
     }
     let flag = args.next().unwrap_or_else(|| "--config".into());
     if flag != "--config" {
@@ -62,8 +83,105 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             );
         }
         "smoke" => smoke(&config)?,
-        _ => return Err(format!("unknown command {command:?}; expected prepare or smoke").into()),
+        "evaluate" => evaluate(&config)?,
+        _ => {
+            return Err(format!(
+                "unknown command {command:?}; expected prepare, smoke, or evaluate"
+            )
+            .into());
+        }
     }
+    Ok(())
+}
+
+fn discover_kaguya(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !arguments.len().is_multiple_of(2) {
+        return Err("discover-kaguya options must be --name value pairs".into());
+    }
+    let options: std::collections::HashMap<_, _> = arguments
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+    let required = |name: &str| -> Result<&str, Box<dyn std::error::Error>> {
+        options
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("missing discover-kaguya option {name}").into())
+    };
+    let options = catalog::Options {
+        raw_dir: required("--raw-dir")?.into(),
+        processed_dir: required("--processed-dir")?.into(),
+        manifest: required("--manifest")?.into(),
+        per_region: required("--per-region")?.parse()?,
+    };
+    let count = catalog::discover_and_prepare(&options)?;
+    println!("discovered, pinned, and prepared {count} Kaguya DTMs");
+    Ok(())
+}
+
+fn materialize_kaguya(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !arguments.len().is_multiple_of(2) {
+        return Err("materialize-kaguya options must be --name value pairs".into());
+    }
+    let options: std::collections::HashMap<_, _> = arguments
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+    let required = |name: &str| -> Result<&str, Box<dyn std::error::Error>> {
+        options
+            .get(name)
+            .copied()
+            .ok_or_else(|| format!("missing materialize-kaguya option {name}").into())
+    };
+    let options = catalog::Options {
+        raw_dir: required("--raw-dir")?.into(),
+        processed_dir: required("--processed-dir")?.into(),
+        manifest: required("--manifest")?.into(),
+        per_region: 1,
+    };
+    let count = catalog::materialize(&options)?;
+    println!("materialized {count} frozen Kaguya DTMs");
+    Ok(())
+}
+
+fn sphere_preview(arguments: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+    if !arguments.len().is_multiple_of(2) {
+        return Err("sphere-preview options must be --name value pairs".into());
+    }
+    let options: std::collections::HashMap<_, _> = arguments
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| (pair[0].as_str(), pair[1].as_str()))
+        .collect();
+    let config_path = PathBuf::from(
+        *options
+            .get("--config")
+            .ok_or("missing sphere-preview option --config")?,
+    );
+    let config = Config::load(&config_path)?;
+    let sphere_options = sphere::SphereOptions {
+        assets_dir: options
+            .get("--assets")
+            .map_or_else(|| PathBuf::from("assets"), PathBuf::from),
+        body: options.get("--body").unwrap_or(&"Mira").to_string(),
+        face_size: options
+            .get("--face-size")
+            .map_or(Ok(512), |value| value.parse())?,
+        out_dir: options.get("--out").map(PathBuf::from),
+    };
+    let (model, device) = train::load_inference_model(&config, &config.run.output_dir)?;
+    let schedule = thalos_terrain_learned::DiffusionSchedule::linear(
+        config.diffusion.timesteps,
+        config.diffusion.beta_start,
+        config.diffusion.beta_end,
+    )?;
+    let out_dir = sphere::run(&model, &config, &schedule, &device, &sphere_options)?;
+    println!("sphere preview complete: {}", out_dir.display());
     Ok(())
 }
 
@@ -114,26 +232,32 @@ fn prepare_dem(
     Ok(())
 }
 
-fn prepare(config: &Config) -> Result<Vec<synthetic::Sample>, Box<dyn std::error::Error>> {
+fn prepare(config: &Config) -> Result<Vec<sample::Sample>, Box<dyn std::error::Error>> {
     std::fs::create_dir_all(&config.run.data_dir)?;
-    let validation_count = ((config.data.sample_count as f32 * config.data.validation_fraction)
-        .ceil() as usize)
-        .max(1);
+    let validation_count = if config.data.sample_count == 0 {
+        0
+    } else {
+        ((config.data.sample_count as f32 * config.data.validation_fraction).ceil() as usize).max(1)
+    };
     let training_count = config.data.sample_count - validation_count;
     let mut samples = Vec::with_capacity(config.data.sample_count);
     let mut entries = Vec::with_capacity(config.data.sample_count);
     for index in 0..config.data.sample_count {
         let seed = splitmix64(config.run.seed.wrapping_add(index as u64));
-        let sample = synthetic::generate(&config.data, seed);
         let split = if index < training_count {
-            "train"
+            sample::Split::Train
         } else {
-            "validation"
+            sample::Split::Validation
         };
+        let sample = synthetic::generate(&config.data, seed, split);
         entries.push(CorpusEntry {
             index,
             seed,
-            split,
+            split: match split {
+                sample::Split::Train => "train",
+                sample::Split::Validation => "validation",
+                sample::Split::Holdout => "holdout",
+            },
             parameters: sample.parameters.clone(),
             height_rms_m: sample.height.rms(),
             slope_rms: sample.height.slope_rms(config.data.metres_per_pixel),
@@ -144,6 +268,7 @@ fn prepare(config: &Config) -> Result<Vec<synthetic::Sample>, Box<dyn std::error
         )?;
         samples.push(sample);
     }
+    samples.extend(real::load(&config.data)?);
     std::fs::write(
         config.run.data_dir.join("index.json"),
         serde_json::to_vec_pretty(&entries)?,
@@ -191,18 +316,37 @@ fn smoke(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn evaluate(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
+    let samples = prepare(config)?;
+    let report = train::evaluate(config, &samples, &config.run.output_dir)?;
+    println!(
+        "MIRA evaluation complete: {:.3} m RMS, spectrum slope {:.3}, outputs {}",
+        report.reconstruction_rms_m,
+        report.generated_metrics.radial_power_slope,
+        config.run.output_dir.display()
+    );
+    Ok(())
+}
+
 fn model_card(config: &Config, report: &train::TrainingReport) -> String {
     format!(
-        "# {}\n\nExperimental MIRA-1 S3 airless residual denoiser. Not accepted for package production.\n\n- Framework: Burn {} ({})\n- Seed: {}\n- Samples: {} synthetic; pinned lunar teachers are prepared but not yet mixed into this run\n- Patch: {} px at {} m/px\n- Diffusion: {} linear-beta steps, {} deterministic DDIM sample steps\n- Training: {} epochs, {} batches; resumed from epoch {}\n- Noise-prediction MSE: {:.6} → {:.6}\n- Runtime: {:.3} s\n- EMA decay: {:.5}\n- EMA tensor SHA-256: `{}`\n- Raw tensor SHA-256: `{}`\n- Overlap windows: {}, disagreement RMS {:.6} m\n- Repeat determinism max delta: {:.9} m\n- Tensor contract: 8 input channels, one S3 noise channel\n- Limitations: real-data mixing, spectral/slope/SFD acceptance, and campaign-scale quality remain open.\n- Intended use: offline patch proof only\n",
+        "# {}\n\nExperimental MIRA-1 S3 airless residual denoiser. Not accepted for package production.\n\n- Framework: Burn {} ({})\n- Seed: {}\n- Samples: {} train / {} validation; {} synthetic / {} real\n- Source IDs: {}\n- Patch: {} px at {} m/px nominal scale\n- Diffusion: {} linear-beta steps, {} deterministic DDIM sample steps\n- Prediction target: {}\n- Decoder upsampling: {}\n- Time conditioning: {}\n- Training: {} epochs, {} batches; resumed from epoch {}\n- Prediction-target MSE: {:.6} → {:.6}\n- Runtime: {:.3} s\n- EMA decay: {:.5}\n- EMA tensor SHA-256: `{}`\n- Raw tensor SHA-256: `{}`\n- Overlap windows: {}, disagreement RMS {:.6} m\n- Repeat determinism max delta: {:.9} m\n- Tensor contract: 11 input channels, one S3 prediction channel\n- Limitations: spectral/slope/SFD acceptance and campaign-scale quality remain open.\n- Intended use: offline patch proof only\n",
         config.run.name,
         report.burn_version,
         report.backend,
         config.run.seed,
-        config.data.sample_count,
+        report.training_samples,
+        report.validation_samples,
+        report.synthetic_samples,
+        report.real_samples,
+        report.source_ids.join(", "),
         config.data.patch_size,
         config.data.metres_per_pixel,
         config.diffusion.timesteps,
         report.validation.sample_steps,
+        report.prediction.as_str(),
+        report.upsampling.as_str(),
+        report.time_conditioning.as_str(),
         report.epochs,
         report.batches,
         report.resumed_from_epoch,

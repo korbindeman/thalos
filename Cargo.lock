@@ -9187,6 +9187,7 @@ name = "thalos_terrain_train"
 version = "0.1.0"
 dependencies = [
  "burn",
+ "glam 0.32.1",
  "image",
  "rand 0.10.1",
  "rand_chacha 0.10.0",
@@ -9194,9 +9195,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "thalos_terrain",
  "thalos_terrain_learned",
+ "thalos_world",
  "tiff",
  "toml 0.9.12+spec-1.1.0",
+ "ureq",
 ]
 
 [[package]]

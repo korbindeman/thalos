@@ -1,7 +1,8 @@
 # Mira airless terrain MVP
 
-**Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](adr/0008-offline-terrain-packages.md) ·
-**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](backlog.md)
+**Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](adr/20260720T211046Z-offline-terrain-packages.md) ·
+**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](backlog.md) · **Completion
+program:** [mira_learned_terrain_roadmap.md](mira_learned_terrain_roadmap.md)
 
 ### Landed compatibility vertical slice
 
@@ -447,6 +448,29 @@ final loss `0.9612839`, EMA hash
 `f982b142fc91b904a7103b72acb7a0b6fe9dcd6af8dbdf7dc0dd3127054c47ff`,
 and raw hash
 `41858e5b929da18af031f148065c0d68617fec987c09fc1528d40e946be943e6`.
+
+The first expanded CUDA campaign (`mira_l2_kaguya_cuda_v3`) corrected the
+diffusion terminal state to alpha-bar 2.14e-5 but retained epsilon prediction.
+It converged to 0.0095 training loss in 328.79 s on an RTX A6000, yet the held
+Copernicus gallery regressed to 104.93 m RMS and diagonal high-frequency noise.
+A 25→100-step sampling differential did not remove the artifact. Instrumenting
+the shared sampler showed the terminal epsilon→clean conversion exploding to
+70.1 RMS normalized clean height and driving 9.0% of the final field into the
+output clamp. The shared `thalos_terrain_learned` contract therefore now
+supports velocity prediction for both training targets and DDIM reconstruction;
+checkpoint metadata prevents resuming under the wrong objective. The controlled
+v4 changed only that target and completed 2,280 A6000 batches in 291.15 s. It
+reduced held Copernicus error from v3's 104.93 m to 26.67 m RMS and restored
+recognisable morphology, validating the terminal-SNR diagnosis. The inspected
+output still has dense worm-like high-frequency texture, its spectrum slope is
+−2.83 versus the target's −3.68, and it does not beat v2's 24.77 m RMS, so L2
+remains open. The next controlled local-CUDA diagnostics isolate transposed-
+convolution upsampling and timestep encoding; more epochs are not justified.
+
+MIRA-1 pilots now default to the persistent local RTX 4070 Ti. Cloud is reserved
+for measured VRAM overflow or batched frozen campaigns, with user-run `tnr scp`
+ingress/egress and agent-managed control-plane work, per
+ADR-20260721T020849Z-local-cuda-first-mira-campaigns.
 
 SLDEM distribution-rights confirmation for derived-weight release, combined
 campaign training, spectral/slope/SFD validation, and GPU VRAM/timing remain

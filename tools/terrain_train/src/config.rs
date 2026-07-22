@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
+use thalos_terrain_learned::{DiffusionPrediction, TimeConditioning, Upsampling};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
@@ -30,12 +31,28 @@ pub struct Data {
     pub mare_fraction: [f32; 2],
     pub gardening: [f32; 2],
     pub rim_sharpness: [f32; 2],
+    #[serde(default)]
+    pub real_sources: Vec<RealSource>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct RealSource {
+    pub index: PathBuf,
+    pub limit: Option<usize>,
+    pub crater_density: f32,
+    pub mare_fraction: f32,
+    pub gardening: f32,
+    pub rim_sharpness: f32,
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Model {
     pub base_channels: usize,
     pub condition_dim: usize,
+    #[serde(default)]
+    pub upsampling: Upsampling,
+    #[serde(default)]
+    pub time_conditioning: TimeConditioning,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -44,6 +61,8 @@ pub struct Diffusion {
     pub sample_steps: usize,
     pub beta_start: f32,
     pub beta_end: f32,
+    #[serde(default)]
+    pub prediction: DiffusionPrediction,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -70,6 +89,9 @@ pub struct Validation {
     pub canvas_width: usize,
     pub canvas_height: usize,
     pub stride: usize,
+    #[serde(default)]
+    pub use_first_training_sample: bool,
+    pub reference_source_id: Option<String>,
 }
 
 impl Config {
@@ -83,6 +105,9 @@ impl Config {
             .unwrap_or_else(|| Path::new("."));
         config.run.output_dir = base.join(&config.run.output_dir);
         config.run.data_dir = base.join(&config.run.data_dir);
+        for source in &mut config.data.real_sources {
+            source.index = base.join(&source.index);
+        }
         config.validate()?;
         Ok(config)
     }
@@ -91,11 +116,26 @@ impl Config {
         if self.data.patch_size < 16 || !self.data.patch_size.is_multiple_of(8) {
             return Err("patch_size must be at least 16 and divisible by 8".into());
         }
-        if self.data.sample_count < 2 {
-            return Err("sample_count must be at least 2".into());
+        if self.data.sample_count == 1 {
+            return Err("sample_count must be zero or at least two".into());
+        }
+        if self.data.sample_count == 0 && self.data.real_sources.is_empty() {
+            return Err("a zero-sized synthetic corpus requires real_sources".into());
+        }
+        if self.data.metres_per_pixel <= 0.0 {
+            return Err("metres_per_pixel must be positive".into());
         }
         if !(0.0..0.5).contains(&self.data.validation_fraction) {
             return Err("validation_fraction must be in [0, 0.5)".into());
+        }
+        for source in &self.data.real_sources {
+            if !source.index.ends_with("index.json") {
+                return Err(format!(
+                    "real-data source must name a prepared index.json: {}",
+                    source.index.display()
+                )
+                .into());
+            }
         }
         if self.model.condition_dim != 4 {
             return Err("MIRA-1 conditioning contract currently requires condition_dim = 4".into());
