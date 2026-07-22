@@ -40,8 +40,16 @@ fn linear_to_srgb_u8(c: f32) -> u8 {
 }
 
 /// Bake an `Rgba8UnormSrgb` cube: continents (surface albedo) + oceans (water
-/// colour where `height < 0`). `resolution` is the per-face edge in texels.
-pub fn bake_impostor_albedo_cube(surface: &dyn SurfaceQuery, resolution: u32) -> Image {
+/// colour where `height < sea_level_m`). `resolution` is the per-face edge in
+/// texels. `sea_level_m` is the body's authored hydrosphere datum
+/// (`TerrainConfig::ocean_sea_level_m`); pass `None` for airless bodies so no
+/// texel is ever classified as water — signed heights around the reference
+/// radius must not paint a dry world half ocean.
+pub fn bake_impostor_albedo_cube(
+    surface: &dyn SurfaceQuery,
+    resolution: u32,
+    sea_level_m: Option<f32>,
+) -> Image {
     let res = resolution.max(4) as usize;
     let radius = surface.radius_m().max(1.0);
     // One texel spans ~ this arc on the sphere; feed it as the LOD so the bake
@@ -61,9 +69,10 @@ pub fn bake_impostor_albedo_cube(surface: &dyn SurfaceQuery, resolution: u32) ->
                     let u = (x as f32 + 0.5) / res as f32;
                     let dir = face_uv_to_dir(face, u, v).normalize();
                     let s = surface.sample(dir, lod_m);
-                    let is_water = s.height_m < 0.0;
+                    let is_water = sea_level_m.is_some_and(|level| s.height_m < level);
                     let col = if is_water {
-                        let t = (-s.height_m / OCEAN_DEPTH_SCALE_M).clamp(0.0, 1.0);
+                        let depth = sea_level_m.unwrap_or(0.0) - s.height_m;
+                        let t = (depth / OCEAN_DEPTH_SCALE_M).clamp(0.0, 1.0);
                         OCEAN_SHALLOW.lerp(OCEAN_DEEP, t)
                     } else {
                         s.albedo_linear

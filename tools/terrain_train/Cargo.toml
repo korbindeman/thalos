@@ -8,9 +8,11 @@ edition.workspace = true
 default = ["cpu"]
 cpu = ["burn/flex"]
 gpu = ["burn/wgpu"]
+cuda = ["burn/cuda"]
 
 [dependencies]
 burn = { workspace = true, features = ["std", "autodiff", "store"] }
+glam = "0.32"
 image = { version = "0.25.8", default-features = false, features = ["png"] }
 rand = "0.10"
 rand_chacha = "0.10"
@@ -18,6 +20,9 @@ safetensors = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+thalos_terrain = { path = "../../crates/domain/terrain" }
 thalos_terrain_learned = { path = "../../crates/offline/terrain_learned" }
+thalos_world = { path = "../../crates/domain/world" }
 tiff = "0.11"
 toml = "0.9"
+ureq = { version = "2.12", features = ["json"] }

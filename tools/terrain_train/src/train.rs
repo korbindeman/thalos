@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 use std::{collections::BTreeMap, io};
 
 use burn::backend::Autodiff;
+#[cfg(feature = "cuda")]
+use burn::backend::Cuda;
 #[cfg(feature = "cpu")]
 use burn::backend::Flex;
 #[cfg(feature = "gpu")]
@@ -22,17 +24,25 @@ use safetensors::SafeTensors;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thalos_terrain_learned::{
-    AirlessDenoiser, AirlessDenoiserConfig, CONDITION_CHANNELS, DiffusionSchedule,
+    AirlessDenoiser, AirlessDenoiserConfig, CONDITION_CHANNELS, DiffusionPrediction,
+    DiffusionSchedule, TimeConditioning, Upsampling,
 };
 
-use crate::{config::Config, pyramid, synthetic::Sample};
+use crate::{
+    config::Config,
+    pyramid,
+    sample::{Sample, Split},
+};
 
 #[cfg(feature = "cpu")]
 type BaseBackend = Flex;
 #[cfg(feature = "gpu")]
 type BaseBackend = Wgpu;
+#[cfg(feature = "cuda")]
+type BaseBackend = Cuda;
 type TrainBackend = Autodiff<BaseBackend>;
 type TrainDevice = <TrainBackend as BackendTypes>::Device;
+type InferenceDevice = <BaseBackend as BackendTypes>::Device;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct TrainingReport {
@@ -45,10 +55,20 @@ pub struct TrainingReport {
     pub elapsed_seconds: f64,
     pub target_scale_metres: f32,
     pub coarse_scale_metres: f32,
+    pub schedule_terminal_alpha_bar: f32,
+    pub schedule_terminal_signal_to_noise: f32,
+    pub prediction: DiffusionPrediction,
+    pub upsampling: Upsampling,
+    pub time_conditioning: TimeConditioning,
     pub requested_device: String,
     pub requested_ema_decay: f32,
     pub resumed_from_epoch: usize,
     pub configured_workers: usize,
+    pub training_samples: usize,
+    pub validation_samples: usize,
+    pub synthetic_samples: usize,
+    pub real_samples: usize,
+    pub source_ids: Vec<String>,
     pub model_tensor_sha256: String,
     pub raw_model_tensor_sha256: String,
     pub validation: crate::validate::ValidationReport,
@@ -67,6 +87,12 @@ struct CheckpointState {
     final_loss: f32,
     target_scale_metres: f32,
     coarse_scale_metres: f32,
+    #[serde(default)]
+    prediction: DiffusionPrediction,
+    #[serde(default)]
+    upsampling: Upsampling,
+    #[serde(default)]
+    time_conditioning: TimeConditioning,
     parameter_ids: BTreeMap<String, String>,
 }
 
@@ -81,11 +107,9 @@ pub fn run(
     samples: &[Sample],
     output_dir: &Path,
 ) -> Result<TrainingReport, Box<dyn std::error::Error>> {
-    let validation_count =
-        ((samples.len() as f32 * config.data.validation_fraction).ceil() as usize).max(1);
-    let training_count = samples.len() - validation_count;
-    let prepared: Vec<_> = samples[..training_count]
+    let prepared: Vec<_> = samples
         .iter()
+        .filter(|sample| sample.provenance.split == Split::Train)
         .map(|sample| {
             let pyramid = pyramid::build(&sample.height);
             Prepared {
@@ -95,6 +119,15 @@ pub fn run(
             }
         })
         .collect();
+    if prepared.is_empty() {
+        return Err("training corpus contains no train samples".into());
+    }
+    let mut source_ids: Vec<_> = samples
+        .iter()
+        .map(|sample| sample.provenance.source_id.clone())
+        .collect();
+    source_ids.sort();
+    source_ids.dedup();
     let target_scale = prepared
         .iter()
         .map(|item| item.target.max_abs())
@@ -108,6 +141,8 @@ pub fn run(
     TrainBackend::seed(&device, config.run.seed);
     let mut model: AirlessDenoiser<TrainBackend> = AirlessDenoiserConfig::new()
         .with_hidden_channels(config.model.base_channels)
+        .with_upsampling(config.model.upsampling)
+        .with_time_conditioning(config.model.time_conditioning)
         .init(&device);
     let mut optimizer = AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(
@@ -216,7 +251,7 @@ pub fn run(
                 output_dir.join("checkpoint_optimizer"),
             )?;
             let state = CheckpointState {
-                schema_version: 1,
+                schema_version: 3,
                 run_name: config.run.name.clone(),
                 seed: config.run.seed,
                 patch_size: config.data.patch_size,
@@ -227,6 +262,9 @@ pub fn run(
                 final_loss: losses.last().copied().unwrap_or(f32::NAN),
                 target_scale_metres: target_scale,
                 coarse_scale_metres: coarse_scale,
+                prediction: config.diffusion.prediction,
+                upsampling: config.model.upsampling,
+                time_conditioning: config.model.time_conditioning,
                 parameter_ids: parameter_ids(&model)?,
             };
             std::fs::write(&checkpoint_state_path, serde_json::to_vec_pretty(&state)?)?;
@@ -241,6 +279,7 @@ pub fn run(
         target_scale,
         coarse_scale,
         &device,
+        validation_reference(config, samples)?,
     );
     crate::output::save_height_u16(
         &output_dir.join("validation_height.png"),
@@ -252,6 +291,23 @@ pub fn run(
         config.validation.canvas_width,
         config.validation.canvas_height,
     )?;
+    crate::output::save_contact_sheet(
+        &output_dir.join("validation_comparison.png"),
+        &[
+            ("target", &validation.target_height),
+            ("coarse", &validation.coarse_height),
+            ("generated", &validation.generated_height),
+            ("error", &validation.error_height),
+        ],
+    )?;
+    for (name, grid) in [
+        ("target", &validation.target_height),
+        ("coarse", &validation.coarse_height),
+        ("generated", &validation.generated_height),
+        ("error", &validation.error_height),
+    ] {
+        crate::output::save_hillshade(&output_dir.join(format!("validation_{name}.png")), grid)?;
+    }
     save_model(
         &inference_model,
         &output_dir.join("model.safetensors"),
@@ -276,14 +332,141 @@ pub fn run(
         elapsed_seconds: duration_seconds(started.elapsed()),
         target_scale_metres: target_scale,
         coarse_scale_metres: coarse_scale,
+        schedule_terminal_alpha_bar: schedule.terminal_alpha_bar(),
+        schedule_terminal_signal_to_noise: schedule.terminal_signal_to_noise(),
+        prediction: config.diffusion.prediction,
+        upsampling: config.model.upsampling,
+        time_conditioning: config.model.time_conditioning,
         requested_device: config.train.device.clone(),
         requested_ema_decay: config.train.ema_decay,
         resumed_from_epoch: start_epoch,
         configured_workers: config.train.num_workers,
+        training_samples: samples
+            .iter()
+            .filter(|sample| sample.provenance.split == Split::Train)
+            .count(),
+        validation_samples: samples
+            .iter()
+            .filter(|sample| sample.provenance.split == Split::Validation)
+            .count(),
+        synthetic_samples: samples
+            .iter()
+            .filter(|sample| sample.provenance.synthetic)
+            .count(),
+        real_samples: samples
+            .iter()
+            .filter(|sample| !sample.provenance.synthetic)
+            .count(),
+        source_ids,
         model_tensor_sha256,
         raw_model_tensor_sha256,
         validation: validation.report,
     })
+}
+
+pub fn evaluate(
+    config: &Config,
+    samples: &[Sample],
+    output_dir: &Path,
+) -> Result<crate::validate::ValidationReport, Box<dyn std::error::Error>> {
+    let prepared: Vec<_> = samples
+        .iter()
+        .filter(|sample| sample.provenance.split == Split::Train)
+        .map(|sample| {
+            let pyramid = pyramid::build(&sample.height);
+            (
+                pyramid.full_resolution_bands[3].clone(),
+                pyramid.coarse_for_s3,
+            )
+        })
+        .collect();
+    if prepared.is_empty() {
+        return Err("evaluation corpus contains no train samples".into());
+    }
+    let target_scale = prepared
+        .iter()
+        .map(|item| item.0.max_abs())
+        .fold(1.0f32, f32::max);
+    let coarse_scale = prepared
+        .iter()
+        .map(|item| item.1.max_abs())
+        .fold(1.0f32, f32::max);
+    let device: InferenceDevice = Default::default();
+    BaseBackend::seed(&device, config.run.seed);
+    let mut model: AirlessDenoiser<BaseBackend> = AirlessDenoiserConfig::new()
+        .with_hidden_channels(config.model.base_channels)
+        .with_upsampling(config.model.upsampling)
+        .with_time_conditioning(config.model.time_conditioning)
+        .init(&device);
+    let mut store = SafetensorsStore::from_file(output_dir.join("model.safetensors"));
+    ensure_loaded(model.load_from(&mut store)?, "evaluation model")?;
+    let schedule = DiffusionSchedule::linear(
+        config.diffusion.timesteps,
+        config.diffusion.beta_start,
+        config.diffusion.beta_end,
+    )?;
+    let reference = validation_reference(config, samples)?;
+    let validation = crate::validate::run(
+        &model,
+        config,
+        &schedule,
+        target_scale,
+        coarse_scale,
+        &device,
+        reference,
+    );
+    crate::output::save_contact_sheet(
+        &output_dir.join("validation_comparison.png"),
+        &[
+            ("target", &validation.target_height),
+            ("coarse", &validation.coarse_height),
+            ("generated", &validation.generated_height),
+            ("error", &validation.error_height),
+        ],
+    )?;
+    std::fs::write(
+        output_dir.join("evaluation_report.json"),
+        serde_json::to_vec_pretty(&validation.report)?,
+    )?;
+    Ok(validation.report)
+}
+
+/// Load the exported EMA inference model from a completed run directory.
+pub fn load_inference_model(
+    config: &Config,
+    run_dir: &Path,
+) -> Result<(AirlessDenoiser<BaseBackend>, InferenceDevice), Box<dyn std::error::Error>> {
+    let device: InferenceDevice = Default::default();
+    BaseBackend::seed(&device, config.run.seed);
+    let mut model: AirlessDenoiser<BaseBackend> = AirlessDenoiserConfig::new()
+        .with_hidden_channels(config.model.base_channels)
+        .with_upsampling(config.model.upsampling)
+        .with_time_conditioning(config.model.time_conditioning)
+        .init(&device);
+    let mut store = SafetensorsStore::from_file(run_dir.join("model.safetensors"));
+    ensure_loaded(model.load_from(&mut store)?, "sphere-preview model")?;
+    Ok((model, device))
+}
+
+fn validation_reference<'a>(
+    config: &Config,
+    samples: &'a [Sample],
+) -> Result<Option<&'a Sample>, Box<dyn std::error::Error>> {
+    if let Some(source_id) = &config.validation.reference_source_id {
+        let sample = samples
+            .iter()
+            .find(|sample| &sample.provenance.source_id == source_id)
+            .ok_or_else(|| format!("validation reference source {source_id:?} was not loaded"))?;
+        Ok(Some(sample))
+    } else if config.validation.use_first_training_sample {
+        let sample = samples
+            .iter()
+            .find(|sample| sample.provenance.split == Split::Train)
+            .ok_or("validation requested the first training sample, but none was loaded")?;
+        Ok(Some(sample))
+    } else {
+        Ok(None)
+    }
 }
 
 fn ensure_loaded(
@@ -303,13 +486,16 @@ fn validate_checkpoint(
     target_scale: f32,
     coarse_scale: f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let compatible = state.schema_version == 1
+    let compatible = state.schema_version == 3
         && state.run_name == config.run.name
         && state.seed == config.run.seed
         && state.patch_size == config.data.patch_size
         && state.hidden_channels == config.model.base_channels
         && state.target_scale_metres.to_bits() == target_scale.to_bits()
         && state.coarse_scale_metres.to_bits() == coarse_scale.to_bits()
+        && state.prediction == config.diffusion.prediction
+        && state.upsampling == config.model.upsampling
+        && state.time_conditioning == config.model.time_conditioning
         && state.completed_epochs <= config.train.epochs;
     if compatible {
         Ok(())
@@ -420,7 +606,7 @@ fn batch_tensors(
                     3,
                     pixel,
                     area,
-                    prepared.sample.parameters.gardening,
+                    prepared.sample.parameters.mare_fraction,
                 );
                 set_channel(
                     &mut input,
@@ -428,7 +614,7 @@ fn batch_tensors(
                     4,
                     pixel,
                     area,
-                    prepared.sample.mare_mask.values[pixel],
+                    prepared.sample.parameters.gardening,
                 );
                 set_channel(
                     &mut input,
@@ -436,7 +622,7 @@ fn batch_tensors(
                     5,
                     pixel,
                     area,
-                    x as f32 / (size - 1) as f32 * 2.0 - 1.0,
+                    prepared.sample.parameters.rim_sharpness / 2.0,
                 );
                 set_channel(
                     &mut input,
@@ -444,7 +630,7 @@ fn batch_tensors(
                     6,
                     pixel,
                     area,
-                    y as f32 / (size - 1) as f32 * 2.0 - 1.0,
+                    prepared.sample.mare_mask.values[pixel],
                 );
                 set_channel(
                     &mut input,
@@ -452,9 +638,38 @@ fn batch_tensors(
                     7,
                     pixel,
                     area,
+                    prepared.sample.scale_condition(),
+                );
+                set_channel(
+                    &mut input,
+                    batch_index,
+                    8,
+                    pixel,
+                    area,
+                    x as f32 / (size - 1) as f32 * 2.0 - 1.0,
+                );
+                set_channel(
+                    &mut input,
+                    batch_index,
+                    9,
+                    pixel,
+                    area,
+                    y as f32 / (size - 1) as f32 * 2.0 - 1.0,
+                );
+                set_channel(
+                    &mut input,
+                    batch_index,
+                    10,
+                    pixel,
+                    area,
                     step as f32 / (schedule.len() - 1) as f32,
                 );
-                expected[batch_index * area + pixel] = noise;
+                expected[batch_index * area + pixel] = config.diffusion.prediction.training_target(
+                    clean_scale,
+                    noise_scale,
+                    clean,
+                    noise,
+                );
             }
         }
     }
@@ -501,6 +716,15 @@ fn backend_name() -> &'static str {
     {
         "burn-wgpu-autodiff"
     }
+    #[cfg(feature = "cuda")]
+    {
+        "burn-cuda-autodiff"
+    }
+}
+
+pub fn backend_report() -> String {
+    let device: TrainDevice = Default::default();
+    format!("{} ({})", backend_name(), BaseBackend::name(&device))
 }
 
 fn canonical_safetensors_hash(path: &Path) -> Result<String, Box<dyn std::error::Error>> {

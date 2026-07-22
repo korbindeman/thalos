@@ -1,0 +1,42 @@
+[run]
+name = "mira_l1_overfit_v0"
+seed = 1004
+output_dir = "../../terrain_runs/mira_l1_overfit_v0"
+data_dir = "../../terrain_data/synthetic/mira_l1_overfit_v0"
+
+[data]
+sample_count = 2
+patch_size = 64
+metres_per_pixel = 250.0
+validation_fraction = 0.0
+crater_density = [18.0, 18.0]
+mare_fraction = [0.25, 0.25]
+gardening = [0.25, 0.25]
+rim_sharpness = [1.25, 1.25]
+
+[model]
+base_channels = 48
+condition_dim = 4
+
+[diffusion]
+timesteps = 100
+sample_steps = 25
+beta_start = 0.0001
+beta_end = 0.02
+
+[train]
+epochs = 500
+batch_size = 1
+learning_rate = 0.001
+ema_decay = 0.99
+gradient_clip = 1.0
+num_workers = 0
+device = "auto"
+resume = false
+checkpoint_every_epochs = 50
+
+[validation]
+canvas_width = 64
+canvas_height = 64
+stride = 32
+use_first_training_sample = true

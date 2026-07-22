@@ -1,7 +1,8 @@
 # Mira airless terrain MVP
 
 **Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](../adr/20260720T211046Z-offline-terrain-packages.md) ·
-**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](../backlog.md)
+**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](../backlog.md) · **Completion
+program:** [mira_learned_terrain.md](../roadmap/mira_learned_terrain.md)
 
 ### Landed compatibility vertical slice
 
@@ -20,7 +21,12 @@ The playable MVP deliberately lands before the trained diffusion producer:
   a rebake cannot reuse stale reconstructed tiles;
 - `just game mira` / `just game mira-eva` parameterise the existing spawn path,
   and `mira-orbit` / `mira-surface` / `mira-eva` headless captures provide
-  stable orbit, landmark-regolith, and canonical eye-level probes;
+  stable orbit, landmark-regolith, and canonical eye-level probes. The
+  reference-matched framings `mira-disc` / `mira-approach` / `mira-rim` were
+  added 2026-07-22 alongside them (see `roadmap/mira_learned_terrain.md`
+  §"Visual targets"): they target the three visual goals rather than a
+  regression surface, and each pins a distinct solar geometry, so relief and
+  albedo can be judged separately instead of confounded in one frame;
 - airless archetypes select the shared Hapke regolith path and suppress
   terrestrial vegetation/grass. Close detail is reconstructed deterministically
   by the existing client tile synthesis and cached on device.
@@ -286,6 +292,13 @@ Use overlapping inference windows with shared noise and intermediate-path
 fusion. Generation order must not affect output. Produce low-pass elevation and
 Laplacian residual channels at explicit physical resolutions.
 
+The cascade's output contract is **height only**. Albedo and material provinces
+are an authored/procedural field conditioned on the same seed and normalized
+parameter vector, layered over the learned height rather than emitted by the
+model — see ADR-20260722T084154Z-airless-material-provinces-authored. That ADR
+also records why: at the orbital full-disc framing, albedo province structure
+carries the image and every learned height band falls below one pixel.
+
 The minimum proof is a coarse-to-fine 2D U-Net cascade trained on 256–512 px
 tangent patches. A practical starting ladder is:
 
@@ -448,6 +461,29 @@ final loss `0.9612839`, EMA hash
 and raw hash
 `41858e5b929da18af031f148065c0d68617fec987c09fc1528d40e946be943e6`.
 
+The first expanded CUDA campaign (`mira_l2_kaguya_cuda_v3`) corrected the
+diffusion terminal state to alpha-bar 2.14e-5 but retained epsilon prediction.
+It converged to 0.0095 training loss in 328.79 s on an RTX A6000, yet the held
+Copernicus gallery regressed to 104.93 m RMS and diagonal high-frequency noise.
+A 25→100-step sampling differential did not remove the artifact. Instrumenting
+the shared sampler showed the terminal epsilon→clean conversion exploding to
+70.1 RMS normalized clean height and driving 9.0% of the final field into the
+output clamp. The shared `thalos_terrain_learned` contract therefore now
+supports velocity prediction for both training targets and DDIM reconstruction;
+checkpoint metadata prevents resuming under the wrong objective. The controlled
+v4 changed only that target and completed 2,280 A6000 batches in 291.15 s. It
+reduced held Copernicus error from v3's 104.93 m to 26.67 m RMS and restored
+recognisable morphology, validating the terminal-SNR diagnosis. The inspected
+output still has dense worm-like high-frequency texture, its spectrum slope is
+−2.83 versus the target's −3.68, and it does not beat v2's 24.77 m RMS, so L2
+remains open. The next controlled local-CUDA diagnostics isolate transposed-
+convolution upsampling and timestep encoding; more epochs are not justified.
+
+MIRA-1 pilots now default to the persistent local RTX 4070 Ti. Cloud is reserved
+for measured VRAM overflow or batched frozen campaigns, with user-run `tnr scp`
+ingress/egress and agent-managed control-plane work, per
+ADR-20260721T020849Z-local-cuda-first-mira-campaigns.
+
 SLDEM distribution-rights confirmation for derived-weight release, combined
 campaign training, spectral/slope/SFD validation, and GPU VRAM/timing remain
 open.
@@ -465,6 +501,17 @@ per-node codec selection. Start with a 4096-face fixed Mira seed and emit
 whole-body maps,
 face/corner seam probes, crater/SFD statistics, package-size composition, and
 rate-distortion curves.
+
+The schema must gain an explicit **material/province node kind** before the first
+whole-sphere campaign. `PackageBlobKind::StaticSurfaceV1` is the compatibility
+substrate this slice replaces, and it is what carries Mira's albedo today; the
+diffusion producer emits no material channel, so replacing the substrate without
+that node kind renders the body grey. See
+ADR-20260722T084154Z-airless-material-provinces-authored.
+
+Cross-face tangent-window scheduling is the same problem MultiDiffusion-style
+overlapping-window fusion solves on unbounded domains; see the InfiniteDiffusion
+notes in `roadmap/mira_learned_terrain.md` for the reference treatment.
 
 **Exit:** the package reconstructs within its declared error at every retained
 level; seam belts remain within one quantisation step; flat mare demonstrably

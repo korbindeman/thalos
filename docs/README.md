@@ -25,6 +25,7 @@ Active strategy and sequencing, not implementation detail.
 
 - [Architecture cleanup](roadmap/architecture_cleanup.md) — primary consolidation sprint.
 - [Graphics fidelity](roadmap/graphics_fidelity.md) — one-world rendering strategy and F1–F9 foundation.
+- [Mira learned terrain](roadmap/mira_learned_terrain.md) — L1–L6 milestones, visual gates, dataset growth, compute ledger, evidence.
 
 ### [Gameplay systems](gameplay/)
 

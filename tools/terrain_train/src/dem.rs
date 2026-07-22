@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tiff::decoder::{Decoder, DecodingResult};
 
@@ -33,7 +33,7 @@ pub struct SldemStripOptions {
     pub crop_x: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 struct PatchRecord {
     file: String,
     source_id: String,
@@ -143,7 +143,14 @@ fn prepare_raster(
     }
 
     std::fs::create_dir_all(&options.output)?;
-    let mut records = Vec::new();
+    let index_path = options.output.join("index.json");
+    let mut records: Vec<PatchRecord> = if index_path.exists() {
+        serde_json::from_slice(&std::fs::read(&index_path)?)?
+    } else {
+        Vec::new()
+    };
+    records.retain(|record| record.source_id != options.source_id);
+    let existing_count = records.len();
     let mut preview = None;
     for origin_y in origins(raster.height, options.patch_size, options.stride) {
         for origin_x in origins(raster.width, options.patch_size, options.stride) {
@@ -172,10 +179,7 @@ fn prepare_raster(
             });
         }
     }
-    std::fs::write(
-        options.output.join("index.json"),
-        serde_json::to_vec_pretty(&records)?,
-    )?;
+    std::fs::write(&index_path, serde_json::to_vec_pretty(&records)?)?;
     if let Some(values) = preview {
         crate::output::save_contact_sheet(
             &options.output.join("preview.png"),
@@ -188,7 +192,7 @@ fn prepare_raster(
             )],
         )?;
     }
-    Ok(records.len())
+    Ok(records.len() - existing_count)
 }
 
 fn read_float_tiff(path: &Path) -> Result<Raster, Box<dyn std::error::Error>> {

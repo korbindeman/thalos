@@ -209,6 +209,132 @@ fn print_runtime_height_profile(static_surface: thalos_terrain::StaticSurfaceDat
     profile(2_000, 1, 1);
     profile(30_000, 10, 8);
 
+    // --- Sub-texel aliasing audit (BL-33) -------------------------------------
+    //
+    // The runtime compositor stamps every crater below the bake threshold at
+    // full amplitude no matter how coarsely the surface is being sampled, so a
+    // crater narrower than a tile texel is point-sampled at an arbitrary phase
+    // instead of averaging out. That is invisible to the adjacent-delta profiles
+    // above — a point function has no discontinuity — but it is exactly what a
+    // renderer sees when it bakes one height per texel.
+    //
+    // Measure it directly: point-sample at texel spacing (what the tile baker
+    // does) against the box mean of the same span at 1 m (what a band-limited
+    // field would give). The residual *is* the aliasing energy, in metres.
+    let alias_audit = |texel_m: i32, span_texels: i32, direction_count: i32| {
+        let mut residuals: Vec<f32> = Vec::new();
+        let mut peak_box_range = 0.0f32;
+        for direction_index in 0..direction_count {
+            let azimuth =
+                std::f64::consts::TAU * f64::from(direction_index) / f64::from(direction_count);
+            let along = tangent * azimuth.cos() + bitangent * azimuth.sin();
+            let at = |offset_m: f64, lod_m: f32| {
+                let dir = (center + along * (offset_m / radius_m)).normalize();
+                surface_height_m(&surface, &state, dir, lod_m)
+            };
+            for texel_index in 0..span_texels {
+                let start_m = f64::from(texel_index * texel_m);
+                // What the tile bake stores for this texel.
+                let point = at(start_m + f64::from(texel_m) * 0.5, texel_m as f32);
+                // What the texel actually covers, sampled well above Nyquist.
+                let sub_samples = (texel_m.min(512)).max(8);
+                let mut sum = 0.0f64;
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                for sub in 0..sub_samples {
+                    let t = (f64::from(sub) + 0.5) / f64::from(sub_samples);
+                    let h = at(start_m + f64::from(texel_m) * t, 1.0);
+                    sum += f64::from(h);
+                    lo = lo.min(h);
+                    hi = hi.max(h);
+                }
+                let box_mean = (sum / f64::from(sub_samples)) as f32;
+                residuals.push((point - box_mean).abs());
+                peak_box_range = peak_box_range.max(hi - lo);
+            }
+        }
+        residuals.sort_by(f32::total_cmp);
+        let percentile = |fraction: f32| {
+            residuals[((residuals.len() - 1) as f32 * fraction).round() as usize]
+        };
+        let rms = (residuals.iter().map(|r| f64::from(*r * *r)).sum::<f64>()
+            / residuals.len() as f64)
+            .sqrt();
+        println!(
+            "  alias audit @ {:>5} m texel: |point-box| rms {:>7.3} m, p50/p90/max {:>6.3}/{:>7.3}/{:>8.3} m; peak within-texel relief {:>8.3} m",
+            texel_m,
+            rms,
+            percentile(0.50),
+            percentile(0.90),
+            percentile(1.0),
+            peak_box_range,
+        );
+    };
+    for texel_m in [25, 100, 400, 1_600] {
+        alias_audit(texel_m, 96, 4);
+    }
+
+    // --- Landmark/height agreement (MIRA-V5) ----------------------------------
+    //
+    // Cinematic framings pick a crater out of `static_surface.craters` and point
+    // the camera at it. That metadata is only useful if the *height field*
+    // actually has a bowl there. Profile across the highest-legibility landmark
+    // and report its measured depth against what the record claims — a flat
+    // profile means the two layers disagree and no camera angle will fix it.
+    let craters = &surface.static_surface.craters;
+    let legibility = |crater: &thalos_terrain::Crater| {
+        crater.radius_m * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr)
+    };
+    let landmark = craters
+        .iter()
+        .filter(|crater| (4_000.0..=30_000.0).contains(&crater.radius_m))
+        .max_by(|a, b| legibility(a).total_cmp(&legibility(b)));
+    if let Some(crater) = landmark {
+        let center_dir = crater.center.as_dvec3().normalize();
+        let reference = if center_dir.y.abs() > 0.99 {
+            DVec3::X
+        } else {
+            DVec3::Y
+        };
+        let across = reference.cross(center_dir).normalize();
+        let radius = f64::from(crater.radius_m);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let mut rim = f32::NEG_INFINITY;
+        let mut floor = f32::INFINITY;
+        // Sample out to 2 radii so both the bowl and the raised rim are covered.
+        let samples = 129;
+        for i in 0..samples {
+            let t = (f64::from(i) / f64::from(samples - 1)) * 2.0 - 1.0;
+            let offset_m = t * radius * 2.0;
+            let dir = (center_dir + across * (offset_m / radius_m)).normalize();
+            let h = surface_height_m(&surface, &state, dir, 50.0);
+            lo = lo.min(h);
+            hi = hi.max(h);
+            if t.abs() < 0.25 {
+                floor = floor.min(h);
+            }
+            if (t.abs() - 1.0).abs() < 0.15 {
+                rim = rim.max(h);
+            }
+        }
+        println!(
+            "  landmark crater: r {:.1} km, age {:.2} Gyr, retained {:.3}; record depth {:.1} m / rim {:.1} m",
+            crater.radius_m / 1000.0,
+            crater.age_gyr,
+            thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr),
+            crater.depth_m,
+            crater.rim_height_m,
+        );
+        println!(
+            "  measured across it: span {:.1} m (min {:.1} / max {:.1}), rim-to-floor {:.1} m",
+            hi - lo,
+            lo,
+            hi,
+            rim - floor,
+        );
+    }
+
     // Audit the canonical screenshot boom independently of its azimuth. A
     // focus on a crater floor can put a low-elevation orbit camera inside the
     // surrounding wall even though the focus sample itself is exact.

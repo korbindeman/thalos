@@ -1,0 +1,58 @@
+[run]
+name = "mira_l1_kaguya_unet_overfit_v1"
+seed = 1004
+output_dir = "../../terrain_runs/mira_l1_kaguya_unet_overfit_v1"
+data_dir = "../../terrain_data/synthetic/mira_l1_kaguya_unet_overfit_v1"
+
+[data]
+sample_count = 0
+patch_size = 64
+metres_per_pixel = 160.0
+validation_fraction = 0.0
+crater_density = [18.0, 18.0]
+mare_fraction = [0.25, 0.25]
+gardening = [0.25, 0.25]
+rim_sharpness = [1.25, 1.25]
+
+[[data.real_sources]]
+index = "../../terrain_data/processed/kaguya_s3/train/index.json"
+limit = 1
+crater_density = 20.0
+mare_fraction = 0.25
+gardening = 0.35
+rim_sharpness = 1.0
+
+[[data.real_sources]]
+index = "../../terrain_data/processed/kaguya_s3/validation/index.json"
+limit = 1
+crater_density = 20.0
+mare_fraction = 0.1
+gardening = 0.25
+rim_sharpness = 1.2
+
+[model]
+base_channels = 32
+condition_dim = 4
+
+[diffusion]
+timesteps = 100
+sample_steps = 25
+beta_start = 0.0001
+beta_end = 0.02
+
+[train]
+epochs = 500
+batch_size = 1
+learning_rate = 0.001
+ema_decay = 0.99
+gradient_clip = 1.0
+num_workers = 0
+device = "auto"
+resume = false
+checkpoint_every_epochs = 50
+
+[validation]
+canvas_width = 64
+canvas_height = 64
+stride = 32
+reference_source_id = "kaguya_mare_contact_train"

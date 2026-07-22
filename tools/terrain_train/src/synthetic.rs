@@ -1,28 +1,14 @@
 use std::f32::consts::TAU;
 
+use crate::{
+    config::Data,
+    grid::Grid,
+    sample::{Parameters, Provenance, Sample, Split},
+};
 use rand::{RngExt, SeedableRng};
 use rand_chacha::ChaCha8Rng;
-use serde::Serialize;
 
-use crate::{config::Data, grid::Grid};
-
-#[derive(Clone, Debug, Serialize)]
-pub struct Parameters {
-    pub crater_density: f32,
-    pub mare_fraction: f32,
-    pub gardening: f32,
-    pub rim_sharpness: f32,
-    pub crater_count: usize,
-}
-
-#[derive(Clone, Debug)]
-pub struct Sample {
-    pub height: Grid,
-    pub mare_mask: Grid,
-    pub parameters: Parameters,
-}
-
-pub fn generate(data: &Data, seed: u64) -> Sample {
+pub fn generate(data: &Data, seed: u64, split: Split) -> Sample {
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
     let crater_density = range(&mut rng, data.crater_density);
     let mare_fraction = range(&mut rng, data.mare_fraction);
@@ -59,6 +45,12 @@ pub fn generate(data: &Data, seed: u64) -> Sample {
             gardening,
             rim_sharpness,
             crater_count,
+        },
+        provenance: Provenance {
+            source_id: format!("synthetic-v1-{seed:016x}"),
+            split,
+            metres_per_pixel: data.metres_per_pixel,
+            synthetic: true,
         },
     }
 }

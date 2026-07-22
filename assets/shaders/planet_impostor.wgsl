@@ -1900,6 +1900,9 @@ fn fragment(in: VertexOutput) -> FragOutput {
         surface_roughness,
         shading_normal,
         normal,
+        // The impostor's only geometry is the sphere, so the micro-facet headroom
+        // references the same normal as visibility.
+        normal,
         view_dir,
         hit,
         sun_dir_ws,

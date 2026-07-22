@@ -59,7 +59,7 @@ impl GpuHeightMirrorRegistry {
 pub struct BodySurfaceRegistry {
     surfaces: HashMap<BodyId, Arc<dyn SurfaceQuery>>,
     fingerprints: HashMap<BodyId, u64>,
-    airless_landmarks: HashMap<BodyId, Vec<(DVec3, f32)>>,
+    airless_landmarks: HashMap<BodyId, Vec<AirlessLandmark>>,
 }
 
 impl BodySurfaceRegistry {
@@ -86,19 +86,9 @@ impl BodySurfaceRegistry {
                         )
                     })?;
                     let package_fingerprint = package.manifest.artifact_fingerprint();
-                    let mut landmarks = package
-                        .static_surface
-                        .craters
-                        .iter()
-                        .filter(|crater| {
-                            crater.age_gyr <= 1.0 && (4_000.0..=30_000.0).contains(&crater.radius_m)
-                        })
-                        .map(|crater| (crater.center.as_dvec3().normalize(), crater.radius_m))
-                        .collect::<Vec<_>>();
-                    landmarks
-                        .sort_by(|a, b| (a.1 - 10_000.0).abs().total_cmp(&(b.1 - 10_000.0).abs()));
-                    landmarks.truncate(256);
-                    registry.airless_landmarks.insert(body.id, landmarks);
+                    registry
+                        .airless_landmarks
+                        .insert(body.id, airless_landmarks(&package.static_surface.craters));
                     let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
                         .map_err(|error| format!("{} dynamic terrain: {error}", body.name))?;
                     let tectonics =
@@ -139,7 +129,7 @@ impl BodySurfaceRegistry {
     /// Mid-sized baked crater centres, ordered by usefulness for a close
     /// surface survey. This is package metadata for diagnostics/cinematics;
     /// terrain consumers still depend only on `SurfaceQuery`.
-    pub fn airless_landmarks(&self, body: BodyId) -> &[(DVec3, f32)] {
+    pub fn airless_landmarks(&self, body: BodyId) -> &[AirlessLandmark] {
         self.airless_landmarks
             .get(&body)
             .map(Vec::as_slice)
@@ -151,6 +141,86 @@ impl BodySurfaceRegistry {
             .iter()
             .map(|(body, surface)| (*body, Arc::clone(surface)))
     }
+}
+
+/// Total landmarks retained per airless body.
+const LANDMARK_BUDGET: usize = 256;
+
+/// Pick the landmark craters cinematic framings may lock onto.
+///
+/// Two sets, concatenated, because two different questions get asked of this
+/// list and one ordering cannot answer both:
+///
+/// - **Typical (first half).** Young (`age <= 1 Gyr`) craters nearest ~10 km,
+///   which is what a survey framing wants: sharp rims, unambiguous morphology.
+///   Callers taking the first acceptable landmark keep exactly the prior
+///   behaviour, so the existing probes are unaffected.
+/// - **Most legible (second half).** Ranked by `radius x degradation_factor` —
+///   big *and* still sharp. A framing that must *contain* a crater rather than
+///   survey near one needs these, and they were previously unreachable twice
+///   over: the `age <= 1 Gyr` gate excludes big craters almost by construction
+///   (large basins are ancient — Mira authors `crater_age_bias: 2.6` against
+///   only `forced_young_count: 8`), and the surviving list was then truncated
+///   around 10 km, so "largest" returned a 6 km crater on a body with 30 km
+///   ones. Ranking on raw radius instead overcorrects: it returns the *oldest*
+///   basins, which `degradation_factor` has relaxed and infilled to nearly flat
+///   ground, and the framing lands on an empty plain again. Size must be
+///   weighted by surviving relief, using the renderer's own model.
+///
+/// Duplicates between the halves are harmless and deliberately not filtered:
+/// "first in band" and "largest in band" both give the same answer with or
+/// without them.
+fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<AirlessLandmark> {
+    const RADIUS_BAND_M: std::ops::RangeInclusive<f32> = 4_000.0..=30_000.0;
+    let half = LANDMARK_BUDGET / 2;
+
+    let in_band = || {
+        craters
+            .iter()
+            .filter(|crater| RADIUS_BAND_M.contains(&crater.radius_m))
+    };
+
+    let mut typical: Vec<&thalos_terrain::Crater> =
+        in_band().filter(|crater| crater.age_gyr <= 1.0).collect();
+    typical.sort_by(|a, b| {
+        (a.radius_m - 10_000.0)
+            .abs()
+            .total_cmp(&(b.radius_m - 10_000.0).abs())
+    });
+    typical.truncate(half);
+
+    let legibility = |crater: &thalos_terrain::Crater| {
+        crater.radius_m * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr)
+    };
+    let mut legible: Vec<&thalos_terrain::Crater> = in_band().collect();
+    legible.sort_by(|a, b| legibility(b).total_cmp(&legibility(a)));
+    legible.truncate(half);
+
+    typical
+        .into_iter()
+        .chain(legible)
+        .map(|crater| AirlessLandmark {
+            dir: crater.center.as_dvec3().normalize(),
+            radius_m: crater.radius_m,
+            relief_m: crater.depth_m
+                * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr),
+        })
+        .collect()
+}
+
+/// One crater a cinematic framing may lock onto.
+///
+/// Carries `relief_m` because radius alone is the wrong thing to rank by: an
+/// ancient basin can be the widest feature on the body while `degradation_factor`
+/// has relaxed it to almost flat ground, so "pick the largest" frames an empty
+/// plain. `relief_m` is the depth that actually survives to the surface, which is
+/// what decides whether a crater *reads* as one. Framing distance still scales
+/// off `radius_m` — that is the feature's true extent.
+#[derive(Clone, Copy, Debug)]
+pub struct AirlessLandmark {
+    pub dir: DVec3,
+    pub radius_m: f32,
+    pub relief_m: f32,
 }
 
 fn terrain_context(body: &BodyDefinition) -> TerrainCompileContext {

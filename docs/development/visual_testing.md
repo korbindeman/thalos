@@ -23,6 +23,14 @@ other viewport-dependent inputs while supposedly holding them constant.
   full-warm-up acceptance lanes.
 - `just preview` remains the supplemental isolated-asset path. It does not replace
   the in-context game capture.
+- `cargo run --release -p thalos_terrain_baker -- diagnose <Body>` answers height
+  questions **numerically**, without a renderer in the loop. Alongside the
+  adjacent-sample profiles it runs an **alias audit**: the point sample a tile
+  bake would store for a texel, against the box mean of that same span sampled at
+  1 m. The residual is the unresolved energy in metres. Use it before blaming a
+  speckle/stipple artifact on terrain geometry — on 2026-07-22 it falsified
+  exactly that assumption for BL-33 in one run, where three renderer-side guesses
+  would each have taken a capture cycle to disprove.
 
 `artifacts/visual/latest/` is the curated latest-view surface: every named preset
 owns one stable filename there and overwrites it on the next canonical capture.

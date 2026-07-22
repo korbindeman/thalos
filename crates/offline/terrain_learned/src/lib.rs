@@ -8,5 +8,7 @@
 mod diffusion;
 mod model;
 
-pub use diffusion::{DiffusionSchedule, DiffusionScheduleError};
-pub use model::{AirlessDenoiser, AirlessDenoiserConfig, CONDITION_CHANNELS};
+pub use diffusion::{DiffusionPrediction, DiffusionSchedule, DiffusionScheduleError};
+pub use model::{
+    AirlessDenoiser, AirlessDenoiserConfig, CONDITION_CHANNELS, TimeConditioning, Upsampling,
+};

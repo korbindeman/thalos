@@ -580,7 +580,11 @@ pub(super) fn spawn_bodies(
                 .surfaces
                 .surface(body.id)
                 .expect("terrain body has a canonical surface");
-            let impostor_cube = images.add(bake_impostor_albedo_cube(surface.as_ref(), 256));
+            let impostor_cube = images.add(bake_impostor_albedo_cube(
+                surface.as_ref(),
+                256,
+                body.terrain.ocean_sea_level_m(),
+            ));
             // Map-scale atmosphere optics for the rim glow + on-disc aerial
             // perspective. Airless procedural bodies have no
             // `terrestrial_atmosphere` → vacuum block → the shader early-outs.

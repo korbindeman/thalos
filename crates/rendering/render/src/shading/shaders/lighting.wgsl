@@ -151,15 +151,52 @@ const SCENE_FLUX_SCALE: f32 = 0.5;
 // Tuned empirically to match the lunar regolith comparison shots; the
 // global `SCENE_FLUX_SCALE` constant absorbs the (1 / 4π) normalisation
 // so callers can multiply flux in directly.
-fn hapke_brdf(n_dot_l: f32, n_dot_v: f32, cos_phase: f32, roughness: f32) -> f32 {
+// Map a material's diffuse albedo to Hapke's single-scattering albedo `w`.
+//
+// `w` is the per-particle scattering albedo, not the surface's diffuse colour,
+// and it is always the larger number: a regolith grain scatters far more than
+// the packed surface reflects, because packed grains shadow each other. The
+// scale below puts Mira's authored materials on the values this file's own
+// comment cites for the Moon — mature highland 0.102 → w 0.41, mature mare
+// 0.043 → w 0.17, fresh excavation 0.235 → w 0.94.
+const HAPKE_W_FROM_ALBEDO: f32 = 4.0;
+// Overall gain for the Hapke path. 0.128 reproduced the exposure from when `w`
+// was pinned at 0.45 and the caller multiplied by albedo afterwards, isolating
+// the contrast change; 0.175 then lifts airless surfaces ~0.45 stop, which is
+// the "regolith should read brighter" correction against lunar reference
+// photography. This is the one brightness knob for the Hapke path and it also
+// reaches body impostors, which shade through the same routine. Global scene
+// exposure is a separate concern and stays with GF-CAL.
+const HAPKE_OUTPUT_SCALE: f32 = 0.175;
+
+fn hapke_w_from_albedo(albedo: vec3<f32>) -> vec3<f32> {
+    return clamp(albedo * HAPKE_W_FROM_ALBEDO, vec3<f32>(0.02), vec3<f32>(0.95));
+}
+
+// Per-channel Hapke radiance factor.
+//
+// `w` must be per-channel rather than a scalar times an albedo tint: the
+// multiple-scattering term `H(mu0)H(mu) - 1` grows *superlinearly* with `w`, so
+// a dark material loses multiple scattering much faster than a linear albedo
+// multiply suggests. Collapsing that to one scalar and tinting afterwards is
+// what made mare and highland differ only by their flat albedo ratio, which
+// after tonemapping read as barely-there grey-on-grey instead of the province
+// contrast the surface is authored for.
+fn hapke_brdf_rgb(n_dot_l: f32, n_dot_v: f32, cos_phase: f32, roughness: f32, w: vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(
+        hapke_brdf_w(n_dot_l, n_dot_v, cos_phase, roughness, w.r),
+        hapke_brdf_w(n_dot_l, n_dot_v, cos_phase, roughness, w.g),
+        hapke_brdf_w(n_dot_l, n_dot_v, cos_phase, roughness, w.b),
+    );
+}
+
+// Single-channel Hapke radiance factor. Callers go through
+// [`hapke_brdf_rgb`]; `w` is the material's single-scattering albedo for this
+// channel, never a shared constant (see the note above).
+fn hapke_brdf_w(n_dot_l: f32, n_dot_v: f32, cos_phase: f32, roughness: f32, w: f32) -> f32 {
     let mu0 = max(n_dot_l, 0.0);
     let mu  = max(n_dot_v, 0.0);
     if mu0 <= 0.0 || mu <= 0.0 { return 0.0; }
-
-    // Single-scattering albedo (0..1). Lunar highlands ~0.4, mare ~0.2.
-    // Picked to match the prior visual brightness when combined with the
-    // 2π global scale below.
-    let w: f32 = 0.45;
 
     let cp = clamp(cos_phase, -1.0, 1.0);
     let g  = acos(cp);
@@ -225,6 +262,7 @@ fn shade_hapke_surface(
     roughness: f32,
     shading_normal: vec3<f32>,
     geo_normal: vec3<f32>,
+    relief_normal: vec3<f32>,
     view_dir: vec3<f32>,
     hit_ws: vec3<f32>,
     sun_dir_ws: vec3<f32>,
@@ -232,9 +270,23 @@ fn shade_hapke_surface(
     scene: SceneLighting,
     external_shadow: f32,
 ) -> vec3<f32> {
-    let geo_n_dot_l = dot(geo_normal, sun_dir_ws);
+    // Two different references, deliberately not the same vector.
+    //
+    // Visibility is anchored to the sphere-outward normal: a height-derived
+    // normal can point away from the camera at grazing angles even though the
+    // surface is plainly visible, and anchoring the floor to it turns eye-level
+    // ground black.
+    //
+    // The micro-facet headroom is anchored to *resolved terrain*. Measuring it
+    // against body curvature instead crushed macro relief the height atlas
+    // genuinely resolves: at 83 deg incidence the headroom hits its 0.05 floor,
+    // capping n·l near 0.17, so a crater wall tilted 30 deg sunward (true n·l
+    // ~0.60) shaded 3.5x too dark and craters read as flat patches rather than
+    // bowls with a lit far wall (BL-33).
     let geo_n_dot_v = dot(geo_normal, view_dir);
-    let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, geo_n_dot_l));
+    let relief_n_dot_l = dot(relief_normal, sun_dir_ws);
+    let geo_n_dot_l = relief_n_dot_l;
+    let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, dot(geo_normal, sun_dir_ws)));
     // A height-derived micro-normal can point away from the camera at
     // grazing angles even though the geometric surface is visible. Keep
     // visibility anchored to the geometric normal so terrain does not fall
@@ -249,7 +301,10 @@ fn shade_hapke_surface(
     let sun_n_dot_l_raw = dot(shading_normal, sun_dir_ws);
     let sun_n_dot_l = min(sun_n_dot_l_raw, geo_n_dot_l + headroom);
     let cos_phase_sun = dot(view_dir, sun_dir_ws);
-    var sun_r = hapke_brdf(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun, roughness);
+    // The material enters through `w`, so the reflectance below is already the
+    // surface colour — do not multiply by `albedo` again downstream.
+    let w = hapke_w_from_albedo(albedo);
+    var sun_r = hapke_brdf_rgb(max(sun_n_dot_l, 0.0), n_dot_v, cos_phase_sun, roughness, w);
     sun_r = sun_r * external_shadow;
     sun_r = sun_r * eclipse_factor(scene, hit_ws, sun_dir_ws);
 
@@ -261,13 +316,15 @@ fn shade_hapke_surface(
     if shine.enabled {
         let shine_n_dot_l = dot(shading_normal, shine.dir);
         let shine_cos_phase = dot(view_dir, shine.dir);
-        let shine_r = hapke_brdf(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase, roughness);
+        let shine_r = hapke_brdf_rgb(max(shine_n_dot_l, 0.0), n_dot_v, shine_cos_phase, roughness, w);
         shine_rgb = shine.tint * shine_r * shine.flux;
     }
 
-    let sun_rgb = vec3<f32>(sun_r * sun_flux * SCENE_FLUX_SCALE);
-    let ambient_term = vec3<f32>(scene.ambient_intensity);
-    return albedo * (sun_rgb + shine_rgb + ambient_term);
+    let sun_rgb = sun_r * sun_flux * SCENE_FLUX_SCALE;
+    // Ambient is the one term still keyed to the flat diffuse albedo: it stands
+    // in for fill this BRDF does not model, so it has no `w` to ride.
+    let ambient_term = albedo * scene.ambient_intensity;
+    return (sun_rgb + shine_rgb) * HAPKE_OUTPUT_SCALE + ambient_term;
 }
 
 // ── Surface incident sky lighting (vegetated dielectric path) ─────────────────
@@ -559,6 +616,13 @@ struct ThalosSurface {
     roughness: f32,           // perceptual GGX roughness (caller pre-clamps / AA-widens)
     normal_ws: vec3<f32>,     // shading normal, world render space, unit
     geo_normal_ws: vec3<f32>, // geometric (sphere-outward) normal — terminator anchor
+                              // AND the grazing-view visibility floor: it must
+                              // stay sphere-outward, or terrain goes black at eye
+                              // level (see `shade_hapke_surface`).
+    relief_normal_ws: vec3<f32>, // resolved macro terrain normal (height atlas,
+                              // pre-micro-detail). The reference the micro-facet
+                              // headroom clamp measures against; set equal to
+                              // `geo_normal_ws` when there is no relief source.
     emissive: vec3<f32>,      // self-emission, pre-exposure (engines etc.)
     occlusion: f32,           // [0,1] ambient occlusion applied to ambient terms
     metallic: f32,            // 0 dielectric … 1 metal (reserved; ships)
@@ -619,6 +683,7 @@ fn shade_surface(
             s.roughness,
             s.normal_ws,
             s.geo_normal_ws,
+            s.relief_normal_ws,
             view_dir_ws,
             hit_ws,
             sun_dir_ws,

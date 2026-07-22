@@ -1884,9 +1884,17 @@ fn compile_airless_impact_moon(
     // `LegacyHmf` ridged cascade (which reads as jagged mountains the moon
     // shouldn't have). The feature layer is the macro relief; this is only the
     // soft hummocky texture on top.
+    // Inter-crater regolith is smooth: on a real airless body the craters carry
+    // the relief and the ground between them is gently rolling, not wrinkled.
+    // The previous +-50 m over a 700 m base ran ~14% slopes with octaves down to
+    // ~44 m wavelength, which read as an all-over ripple at every range (this
+    // layer is LOD-invariant) and competed with the craters instead of setting
+    // them off. Correcting the complex-crater depth law made that worse in
+    // relative terms — craters went ~5x deeper, so the noise needed to come down
+    // to match.
     builder.runtime_detail = RuntimeTerrainDetail::AirlessRegolith(AirlessRegolithParams {
-        amplitude_m: 50.0,
-        base_wavelength_m: 700.0,
+        amplitude_m: 15.0,
+        base_wavelength_m: 1_100.0,
         seed: (regolith.seed.detail as u32) ^ 0xA1_E0_F0_07u32 ^ (spec.root_seed as u32),
     });
 

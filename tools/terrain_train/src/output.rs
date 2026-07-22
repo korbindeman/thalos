@@ -16,17 +16,48 @@ pub fn save_height_u16(path: &Path, grid: &Grid) -> Result<(), image::ImageError
 
 pub fn save_contact_sheet(path: &Path, grids: &[(&str, &Grid)]) -> Result<(), image::ImageError> {
     let tile = grids[0].1.size as u32;
-    let mut sheet = RgbImage::new(tile * grids.len() as u32, tile);
+    let display_tile = tile.max(256);
+    let mut sheet = RgbImage::new(display_tile * grids.len() as u32, display_tile);
     for (index, (_, grid)) in grids.iter().enumerate() {
         let rendered = hillshade(grid);
-        for y in 0..tile {
-            for x in 0..tile {
+        let rendered = if display_tile == tile {
+            rendered
+        } else {
+            image::imageops::resize(
+                &rendered,
+                display_tile,
+                display_tile,
+                image::imageops::FilterType::CatmullRom,
+            )
+        };
+        for y in 0..display_tile {
+            for x in 0..display_tile {
                 let value = rendered.get_pixel(x, y)[0];
-                sheet.put_pixel(index as u32 * tile + x, y, Rgb([value, value, value]));
+                sheet.put_pixel(
+                    index as u32 * display_tile + x,
+                    y,
+                    Rgb([value, value, value]),
+                );
             }
         }
     }
     sheet.save(path)
+}
+
+pub fn save_hillshade(path: &Path, grid: &Grid) -> Result<(), image::ImageError> {
+    let rendered = hillshade(grid);
+    let display_size = (grid.size as u32).max(256);
+    if display_size == grid.size as u32 {
+        rendered.save(path)
+    } else {
+        image::imageops::resize(
+            &rendered,
+            display_size,
+            display_size,
+            image::imageops::FilterType::CatmullRom,
+        )
+        .save(path)
+    }
 }
 
 pub fn save_hillshade_region(

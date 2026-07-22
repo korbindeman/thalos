@@ -1,0 +1,360 @@
+{
+  "schema_version": 1,
+  "collection": "kaguya_terrain_camera_usgs_dtms",
+  "split": "train",
+  "target_metres_per_pixel": 40.0,
+  "entries": [
+    {
+      "source_id": "TC2W2B0_01_05925S226E1211__TC1W2B0_01_05925S229E1211",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_05925S226E1211__TC1W2B0_01_05925S229E1211/TC2W2B0_01_05925S226E1211__TC1W2B0_01_05925S229E1211_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_05925S226E1211__TC1W2B0_01_05925S229E1211.tif",
+      "sha256": "6bebc2ca8d2b0538f3476a6d9f011a9d29f31caa159800e7401399d6823c8750",
+      "bytes": 11977112,
+      "bbox_lon_lat": [
+        120.69438313667108,
+        -23.393465680966663,
+        121.60069912488856,
+        -22.105917894598345
+      ],
+      "native_metres_per_pixel": 19.48375,
+      "valid_percent": 99.37,
+      "prepared_patches": 8
+    },
+    {
+      "source_id": "TC2W2B0_01_05926S017E1202__TC1W2B0_01_05926S020E1202",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_05926S017E1202__TC1W2B0_01_05926S020E1202/TC2W2B0_01_05926S017E1202__TC1W2B0_01_05926S020E1202_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_05926S017E1202__TC1W2B0_01_05926S020E1202.tif",
+      "sha256": "131357af4eb392761ab5d76612acb8e4cee7f0feff3d033a78a027d7b8d01f84",
+      "bytes": 10462964,
+      "bbox_lon_lat": [
+        119.80888456922573,
+        -2.434469988711486,
+        120.62229176574964,
+        -1.168981921011319
+      ],
+      "native_metres_per_pixel": 19.003319,
+      "valid_percent": 99.52,
+      "prepared_patches": 8
+    },
+    {
+      "source_id": "TC2W2B0_01_05984S272E0597__TC1W2B0_01_05984S272E0597",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_05984S272E0597__TC1W2B0_01_05984S272E0597/TC2W2B0_01_05984S272E0597__TC1W2B0_01_05984S272E0597_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_05984S272E0597__TC1W2B0_01_05984S272E0597.tif",
+      "sha256": "9fee54bac22e4c2e6d1ccbfd0756bf9c6f0f273f9988ff424fd0edc4d829bafc",
+      "bytes": 10949736,
+      "bbox_lon_lat": [
+        59.09125390845472,
+        -27.96889325225896,
+        60.241516702542654,
+        -26.43530678579647
+      ],
+      "native_metres_per_pixel": 24.94263,
+      "valid_percent": 99.43,
+      "prepared_patches": 10
+    },
+    {
+      "source_id": "TC2W2B0_01_06496S239E2506__TC1W2B0_01_06496S246E2506",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_06496S239E2506__TC1W2B0_01_06496S246E2506/TC2W2B0_01_06496S239E2506__TC1W2B0_01_06496S246E2506_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_06496S239E2506__TC1W2B0_01_06496S246E2506.tif",
+      "sha256": "41038107157b466ea265325428714e408a80161fcef60a3482010d2b21dd2430",
+      "bytes": 10549888,
+      "bbox_lon_lat": [
+        -109.69317392919427,
+        -24.69743717001229,
+        -109.13885466343925,
+        -23.836726422130823
+      ],
+      "native_metres_per_pixel": 12.299266,
+      "valid_percent": 99.77,
+      "prepared_patches": 1
+    },
+    {
+      "source_id": "TC2W2B0_01_06503S549E2431__TC1W2B0_01_06503S557E2431",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_06503S549E2431__TC1W2B0_01_06503S557E2431/TC2W2B0_01_06503S549E2431__TC1W2B0_01_06503S557E2431_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_06503S549E2431__TC1W2B0_01_06503S557E2431.tif",
+      "sha256": "f41d8be1c1e1e4dfbc3cccd237226965a5a05126f937874de111cf969ee44956",
+      "bytes": 11949691,
+      "bbox_lon_lat": [
+        -117.40553896831534,
+        -55.78659875616145,
+        -116.4874851358897,
+        -54.90275667077796
+      ],
+      "native_metres_per_pixel": 14.777599,
+      "valid_percent": 99.47,
+      "prepared_patches": 4
+    },
+    {
+      "source_id": "TC2W2B0_01_06506S492E2399__TC1W2B0_01_06506S500E2399",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_06506S492E2399__TC1W2B0_01_06506S500E2399/TC2W2B0_01_06506S492E2399__TC1W2B0_01_06506S500E2399_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_06506S492E2399__TC1W2B0_01_06506S500E2399.tif",
+      "sha256": "c4406cb4dc4f198941113b6bb64bde627cbf198476fe616923578891d3ec5194",
+      "bytes": 15064027,
+      "bbox_lon_lat": [
+        -120.4867011878195,
+        -50.04465190234232,
+        -119.71991306277218,
+        -49.20189396773003
+      ],
+      "native_metres_per_pixel": 12.756184,
+      "valid_percent": 99.25,
+      "prepared_patches": 5
+    },
+    {
+      "source_id": "TC2W2B0_01_06514S410E2314__TC1W2B0_01_06514S418E2314",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_06514S410E2314__TC1W2B0_01_06514S418E2314/TC2W2B0_01_06514S410E2314__TC1W2B0_01_06514S418E2314_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_06514S410E2314__TC1W2B0_01_06514S418E2314.tif",
+      "sha256": "934c76b2119769eb7fc14b13278794471a39dbccd7afac1211c3a9dfb587669d",
+      "bytes": 13814316,
+      "bbox_lon_lat": [
+        -128.9406498182362,
+        -41.84005054750177,
+        -128.23855755508296,
+        -40.9453376339029
+      ],
+      "native_metres_per_pixel": 13.097637,
+      "valid_percent": 99.54,
+      "prepared_patches": 3
+    },
+    {
+      "source_id": "TC2W2B0_01_06514S496E2313__TC1W2B0_01_06514S504E2313",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_06514S496E2313__TC1W2B0_01_06514S504E2313/TC2W2B0_01_06514S496E2313__TC1W2B0_01_06514S504E2313_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_06514S496E2313__TC1W2B0_01_06514S504E2313.tif",
+      "sha256": "3be8f96d42504504e932629f75da0cc70bfbfe45a02cd3af107a9bb2e2abf421",
+      "bytes": 11397895,
+      "bbox_lon_lat": [
+        -129.09077494691851,
+        -50.43853205576483,
+        -128.24452311435687,
+        -49.522719815246354
+      ],
+      "native_metres_per_pixel": 15.167265,
+      "valid_percent": 99.68,
+      "prepared_patches": 3
+    },
+    {
+      "source_id": "TC2W2B0_01_06636S295E1055__TC1W2B0_01_06636S302E1055",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_06636S295E1055__TC1W2B0_01_06636S302E1055/TC2W2B0_01_06636S295E1055__TC1W2B0_01_06636S302E1055_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_06636S295E1055__TC1W2B0_01_06636S302E1055.tif",
+      "sha256": "5fce8dbf8725ed99f80786acc25d61cab654c48d50b96836f5f0a9ee51a39aa3",
+      "bytes": 11245192,
+      "bbox_lon_lat": [
+        105.13693536581178,
+        -30.314006636731538,
+        105.8016103261873,
+        -29.34496894381655
+      ],
+      "native_metres_per_pixel": 14.567591,
+      "valid_percent": 99.98,
+      "prepared_patches": 4
+    },
+    {
+      "source_id": "TC2W2B0_01_07148N234E3000__TC1W2B0_01_07148N239E3000",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07148N234E3000__TC1W2B0_01_07148N239E3000/TC2W2B0_01_07148N234E3000__TC1W2B0_01_07148N239E3000_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07148N234E3000__TC1W2B0_01_07148N239E3000.tif",
+      "sha256": "f479ea2eb7e5a2300661541c00f9307edf11ca7134252dd518ae2021a4297683",
+      "bytes": 9406803,
+      "bbox_lon_lat": [
+        -60.405645493327995,
+        23.07413327635921,
+        -59.63860616355896,
+        24.20250604732857
+      ],
+      "native_metres_per_pixel": 16.416317,
+      "valid_percent": 99.48,
+      "prepared_patches": 7
+    },
+    {
+      "source_id": "TC2W2B0_01_07148N248E3000__TC1W2B0_01_07148N253E3000",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07148N248E3000__TC1W2B0_01_07148N253E3000/TC2W2B0_01_07148N248E3000__TC1W2B0_01_07148N253E3000_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07148N248E3000__TC1W2B0_01_07148N253E3000.tif",
+      "sha256": "ec85b4a6c68f84279e19fe2b9f541ae5e2faea674f888e8f5395f52b756e8f55",
+      "bytes": 8467819,
+      "bbox_lon_lat": [
+        -60.40221059317281,
+        24.47830780809691,
+        -59.62037347438803,
+        25.614174624479013
+      ],
+      "native_metres_per_pixel": 17.503366,
+      "valid_percent": 99.98,
+      "prepared_patches": 8
+    },
+    {
+      "source_id": "TC2W2B0_01_07148N431E3002__TC1W2B0_01_07148N435E3002",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07148N431E3002__TC1W2B0_01_07148N435E3002/TC2W2B0_01_07148N431E3002__TC1W2B0_01_07148N435E3002_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07148N431E3002__TC1W2B0_01_07148N435E3002.tif",
+      "sha256": "0032bff0682fdffaa3e3cc77bff6a06ec3f3e97c5a1a28d492fad6d2220c56b5",
+      "bytes": 9278899,
+      "bbox_lon_lat": [
+        -60.37253211074551,
+        42.68643765581637,
+        -59.32487076168394,
+        43.88890551794064
+      ],
+      "native_metres_per_pixel": 20.094212,
+      "valid_percent": 99.64,
+      "prepared_patches": 4
+    },
+    {
+      "source_id": "TC2W2B0_01_07148N445E3002__TC1W2B0_01_07148N449E3002",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07148N445E3002__TC1W2B0_01_07148N449E3002/TC2W2B0_01_07148N445E3002__TC1W2B0_01_07148N449E3002_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07148N445E3002__TC1W2B0_01_07148N449E3002.tif",
+      "sha256": "432bfb2893bab0b039b76be04d9f9a537d03405366216855462c67fd56542936",
+      "bytes": 9880593,
+      "bbox_lon_lat": [
+        -60.37127940385693,
+        44.08444738329887,
+        -59.29536241490149,
+        45.28911627505023
+      ],
+      "native_metres_per_pixel": 20.291805,
+      "valid_percent": 99.51,
+      "prepared_patches": 7
+    },
+    {
+      "source_id": "TC2W2B0_01_07202N391E2446__TC1W2B0_01_07202N393E2446",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07202N391E2446__TC1W2B0_01_07202N393E2446/TC2W2B0_01_07202N391E2446__TC1W2B0_01_07202N393E2446_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07202N391E2446__TC1W2B0_01_07202N393E2446.tif",
+      "sha256": "f6eabad8a7b65e6a14dda79e7688e5ac95ee4cf2980e2953d26bd9ceb6c9c87e",
+      "bytes": 12334986,
+      "bbox_lon_lat": [
+        -115.9854196832002,
+        38.51367604507435,
+        -114.85443579937572,
+        39.89054702928394
+      ],
+      "native_metres_per_pixel": 21.788055,
+      "valid_percent": 99.35,
+      "prepared_patches": 6
+    },
+    {
+      "source_id": "TC2W2B0_01_07205N280E2414__TC1W2B0_01_07205N282E2414",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07205N280E2414__TC1W2B0_01_07205N282E2414/TC2W2B0_01_07205N280E2414__TC1W2B0_01_07205N282E2414_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07205N280E2414__TC1W2B0_01_07205N282E2414.tif",
+      "sha256": "40863e36861f321e1a79d8011521f6d76747a123b9615bccf9a0368aca9487af",
+      "bytes": 11175850,
+      "bbox_lon_lat": [
+        -119.09304515810824,
+        27.47649872487368,
+        -118.10361663319966,
+        28.826587387871605
+      ],
+      "native_metres_per_pixel": 20.811659,
+      "valid_percent": 99.58,
+      "prepared_patches": 4
+    },
+    {
+      "source_id": "TC2W2B0_01_07205N294E2414__TC1W2B0_01_07205N296E2414",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07205N294E2414__TC1W2B0_01_07205N296E2414/TC2W2B0_01_07205N294E2414__TC1W2B0_01_07205N296E2414_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07205N294E2414__TC1W2B0_01_07205N296E2414.tif",
+      "sha256": "ad46da100a6f1a06d11d3546d53907fd286738c6248b6d2792099ab4612f1aac",
+      "bytes": 11634054,
+      "bbox_lon_lat": [
+        -119.09326130137116,
+        28.852347742315125,
+        -118.08153491354176,
+        30.210152246715374
+      ],
+      "native_metres_per_pixel": 20.926987,
+      "valid_percent": 99.15,
+      "prepared_patches": 6
+    },
+    {
+      "source_id": "TC2W2B0_01_07319N254E1240__TC1W2B0_01_07319N257E1240",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07319N254E1240__TC1W2B0_01_07319N257E1240/TC2W2B0_01_07319N254E1240__TC1W2B0_01_07319N257E1240_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07319N254E1240__TC1W2B0_01_07319N257E1240.tif",
+      "sha256": "913ac7416703bd46307698af149d5737bf5558841ec04a26577c032ad926f639",
+      "bytes": 11389168,
+      "bbox_lon_lat": [
+        123.52023026151754,
+        24.963084581242622,
+        124.4220216162795,
+        26.225213320979694
+      ],
+      "native_metres_per_pixel": 19.618135,
+      "valid_percent": 99.74,
+      "prepared_patches": 7
+    },
+    {
+      "source_id": "TC2W2B0_01_07319N282E1240__TC1W2B0_01_07319N285E1240",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07319N282E1240__TC1W2B0_01_07319N285E1240/TC2W2B0_01_07319N282E1240__TC1W2B0_01_07319N285E1240_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07319N282E1240__TC1W2B0_01_07319N285E1240.tif",
+      "sha256": "ae3c7f7bd7ed112299dbd4d49a443b7416287c07530419e8a420da95ed9b7f41",
+      "bytes": 11418665,
+      "bbox_lon_lat": [
+        123.53433363400752,
+        27.748849101507275,
+        124.46292550668414,
+        29.017858928962024
+      ],
+      "native_metres_per_pixel": 19.781881,
+      "valid_percent": 99.05,
+      "prepared_patches": 5
+    },
+    {
+      "source_id": "TC2W2B0_01_07375N300E0662__TC1W2B0_01_07375N302E0663",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07375N300E0662__TC1W2B0_01_07375N302E0663/TC2W2B0_01_07375N300E0662__TC1W2B0_01_07375N302E0663_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07375N300E0662__TC1W2B0_01_07375N302E0663.tif",
+      "sha256": "29e779972b5989badedbec132be682464f94710b1024f3a103653cd70848e3ea",
+      "bytes": 10838757,
+      "bbox_lon_lat": [
+        65.69526558646687,
+        29.367013091254467,
+        66.78421168282458,
+        30.82935116352088
+      ],
+      "native_metres_per_pixel": 23.028585,
+      "valid_percent": 99.0,
+      "prepared_patches": 10
+    },
+    {
+      "source_id": "TC2W2B0_01_07376N303E0652__TC1W2B0_01_07376N305E0652",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07376N303E0652__TC1W2B0_01_07376N305E0652/TC2W2B0_01_07376N303E0652__TC1W2B0_01_07376N305E0652_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07376N303E0652__TC1W2B0_01_07376N305E0652.tif",
+      "sha256": "ad37ee96ff4d3162d87c167a15bf59259626d6683bb1cd611c4de4fade986df3",
+      "bytes": 11414417,
+      "bbox_lon_lat": [
+        64.68300214416901,
+        29.673314584297614,
+        65.79586655354098,
+        31.122813116520092
+      ],
+      "native_metres_per_pixel": 23.1103,
+      "valid_percent": 99.29,
+      "prepared_patches": 12
+    },
+    {
+      "source_id": "TC2W2B0_01_07378S549E0625__TC1W2B0_01_07378S558E0625",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07378S549E0625__TC1W2B0_01_07378S558E0625/TC2W2B0_01_07378S549E0625__TC1W2B0_01_07378S558E0625_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07378S549E0625__TC1W2B0_01_07378S558E0625.tif",
+      "sha256": "2b50c1773cd19e62387b7b53daa3285cfdd2a8d7e5f5a9b9ff41e64a8fce8177",
+      "bytes": 3649132,
+      "bbox_lon_lat": [
+        61.81953983244925,
+        -55.67322439861837,
+        63.15328935941912,
+        -55.06240524627175
+      ],
+      "native_metres_per_pixel": 27.297543,
+      "valid_percent": 99.19,
+      "prepared_patches": 2
+    },
+    {
+      "source_id": "TC2W2B0_01_07380S592E0603__TC1W2B0_01_07380S601E0603",
+      "url": "https://astrogeo-ard.s3-us-west-2.amazonaws.com/moon/kaguya/terrain_camera/usgs_dtms/TC2W2B0_01_07380S592E0603__TC1W2B0_01_07380S601E0603/TC2W2B0_01_07380S592E0603__TC1W2B0_01_07380S601E0603_ba-aligned-DEM.tif",
+      "local_path": "terrain_data/raw/kaguya_expanded/TC2W2B0_01_07380S592E0603__TC1W2B0_01_07380S601E0603.tif",
+      "sha256": "4322eaaf1f1e6b5aff8d6ecaa1d8edb08bc96659563aa643c4ebb2a395ecab11",
+      "bytes": 4381459,
+      "bbox_lon_lat": [
+        59.60482289272375,
+        -59.91506396647329,
+        61.064209358487346,
+        -59.27562992153496
+      ],
+      "native_metres_per_pixel": 27.797585,
+      "valid_percent": 99.5,
+      "prepared_patches": 3
+    }
+  ]
+}
