@@ -232,7 +232,15 @@ fn vertex(input: VertexInput) -> VertexOutput {
 // Height is sampled through decode-then-filter RG16 interpolation in
 // thalos_udlod::attachments, so this no longer turns packed-height residual
 // wrap points into contour bands.
-const HEIGHT_NORMAL_WEIGHT: f32 = 0.35;
+//
+// This is *resolved* geometry, not a guess: the height atlas is filtered and
+// mip-mapped, so its normal is as trustworthy as the mesh. It was held at 0.35
+// as a blunt mitigation for the normal aliasing of INC-0009 — which suppressed
+// the signal rather than filtering it, and cost every crater wall two thirds of
+// its true tilt. The real fix (footprint-filtered procedural octaves) has since
+// landed, so the macro normal can be trusted at close to full strength; a small
+// anchor to the sphere remains for the sub-pixel far field.
+const HEIGHT_NORMAL_WEIGHT: f32 = 0.85;
 
 // ── Naturalistic surface grading (Step 0 + Step 1) ────────────────────────
 // Applied to the baked macro albedo in-shader, so it iterates without a
@@ -1543,6 +1551,11 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     surf.albedo = albedo.rgb;
     surf.normal_ws = stable_normal;
     surf.geo_normal_ws = geo_normal;
+    // Resolved macro relief, the reference the micro-facet headroom clamp uses.
+    // Kept separate from `geo_normal_ws`, which must stay sphere-outward for the
+    // grazing-view visibility floor — conflating the two blacked out the whole
+    // eye-level EVA frame.
+    surf.relief_normal_ws = select(height_n, geo_normal, distant_schematic);
     surf.emissive = vec3<f32>(0.0);
     surf.metallic = 0.0;
     surf.translucency = 0.0;

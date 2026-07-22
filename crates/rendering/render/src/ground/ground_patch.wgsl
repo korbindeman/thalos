@@ -127,6 +127,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     s.roughness = 0.93;
     s.normal_ws = normalize(in.world_normal);
     s.geo_normal_ws = up;
+    // Flat patch: no macro relief source, so the headroom clamp references the
+    // same normal (see ThalosSurface).
+    s.relief_normal_ws = up;
     s.emissive = vec3<f32>(0.0);
     s.occlusion = 1.0;
     s.metallic = 0.0;

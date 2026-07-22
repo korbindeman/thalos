@@ -300,6 +300,8 @@ fn fragment(in: VertexOutput) -> FragOutput {
             0.85,
             normal,
             normal,
+            // Billboard sphere only — no resolved relief to reference.
+            normal,
             view_dir,
             hit,
             sun_dir,

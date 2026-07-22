@@ -262,6 +262,7 @@ fn shade_hapke_surface(
     roughness: f32,
     shading_normal: vec3<f32>,
     geo_normal: vec3<f32>,
+    relief_normal: vec3<f32>,
     view_dir: vec3<f32>,
     hit_ws: vec3<f32>,
     sun_dir_ws: vec3<f32>,
@@ -269,9 +270,23 @@ fn shade_hapke_surface(
     scene: SceneLighting,
     external_shadow: f32,
 ) -> vec3<f32> {
-    let geo_n_dot_l = dot(geo_normal, sun_dir_ws);
+    // Two different references, deliberately not the same vector.
+    //
+    // Visibility is anchored to the sphere-outward normal: a height-derived
+    // normal can point away from the camera at grazing angles even though the
+    // surface is plainly visible, and anchoring the floor to it turns eye-level
+    // ground black.
+    //
+    // The micro-facet headroom is anchored to *resolved terrain*. Measuring it
+    // against body curvature instead crushed macro relief the height atlas
+    // genuinely resolves: at 83 deg incidence the headroom hits its 0.05 floor,
+    // capping n·l near 0.17, so a crater wall tilted 30 deg sunward (true n·l
+    // ~0.60) shaded 3.5x too dark and craters read as flat patches rather than
+    // bowls with a lit far wall (BL-33).
     let geo_n_dot_v = dot(geo_normal, view_dir);
-    let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, geo_n_dot_l));
+    let relief_n_dot_l = dot(relief_normal, sun_dir_ws);
+    let geo_n_dot_l = relief_n_dot_l;
+    let headroom = mix(0.05, 0.30, smoothstep(0.15, 0.40, dot(geo_normal, sun_dir_ws)));
     // A height-derived micro-normal can point away from the camera at
     // grazing angles even though the geometric surface is visible. Keep
     // visibility anchored to the geometric normal so terrain does not fall
@@ -601,6 +616,13 @@ struct ThalosSurface {
     roughness: f32,           // perceptual GGX roughness (caller pre-clamps / AA-widens)
     normal_ws: vec3<f32>,     // shading normal, world render space, unit
     geo_normal_ws: vec3<f32>, // geometric (sphere-outward) normal — terminator anchor
+                              // AND the grazing-view visibility floor: it must
+                              // stay sphere-outward, or terrain goes black at eye
+                              // level (see `shade_hapke_surface`).
+    relief_normal_ws: vec3<f32>, // resolved macro terrain normal (height atlas,
+                              // pre-micro-detail). The reference the micro-facet
+                              // headroom clamp measures against; set equal to
+                              // `geo_normal_ws` when there is no relief source.
     emissive: vec3<f32>,      // self-emission, pre-exposure (engines etc.)
     occlusion: f32,           // [0,1] ambient occlusion applied to ambient terms
     metallic: f32,            // 0 dielectric … 1 metal (reserved; ships)
@@ -661,6 +683,7 @@ fn shade_surface(
             s.roughness,
             s.normal_ws,
             s.geo_normal_ws,
+            s.relief_normal_ws,
             view_dir_ws,
             hit_ws,
             sun_dir_ws,
