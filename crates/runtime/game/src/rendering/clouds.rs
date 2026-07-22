@@ -32,7 +32,7 @@ use bevy::transform::TransformSystems;
 
 use thalos_body_render::{
     AU_M, CameraMatrices, CloudCompositeMaterial, CloudDistanceTexture, CloudRenderTexture,
-    CloudWeatherMap, CloudsConfig, LIGHT_AT_1AU, WEATHER_FACE_SIZE,
+    CloudSurfaceDensityMap, CloudWeatherMap, CloudsConfig, LIGHT_AT_1AU, WEATHER_FACE_SIZE,
 };
 use thalos_world::BodyId;
 
@@ -410,6 +410,7 @@ fn sync_cloud_weather_map(
     active: Res<ActiveCloudBody>,
     cache: Res<SolarSystemState>,
     weather: Option<Res<CloudWeatherMap>>,
+    surface_density: Option<Res<CloudSurfaceDensityMap>>,
     mut images: ResMut<Assets<Image>>,
     mut last: Local<Option<(BodyId, u32)>>,
 ) {
@@ -417,6 +418,9 @@ fn sync_cloud_weather_map(
         return;
     };
     let Some(weather) = weather else {
+        return;
+    };
+    let Some(surface_density) = surface_density else {
         return;
     };
     let Some(field) = cache
@@ -438,9 +442,17 @@ fn sync_cloud_weather_map(
     if *last == Some((body_id, field.version)) {
         return;
     }
-    let Some(mut image) = images.get_mut(&weather.handle) else {
-        return;
-    };
-    image.data = Some(field.rgba8_mip_chain());
+    {
+        let Some(mut image) = images.get_mut(&weather.handle) else {
+            return;
+        };
+        image.data = Some(field.rgba8_mip_chain());
+    }
+    {
+        let Some(mut image) = images.get_mut(&surface_density.handle) else {
+            return;
+        };
+        image.data = Some(field.surface_density_rgba8_mip_chain());
+    }
     *last = Some((body_id, field.version));
 }

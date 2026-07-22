@@ -36,7 +36,7 @@
 #import thalos::landcover::{
     moisture_detail, macro_variation, vegetation_color, climate_cold_lift, climate_warmth,
 }
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm, contact_shadow_factor}
 #import bevy_pbr::mesh_view_bindings::view
 
 // Debug overlay: see `BodyTerrainDebug` in `body_material.rs` for the
@@ -122,6 +122,24 @@ fn screen_space_ao(frag_coord: vec2<f32>) -> f32 {
     }
     let uv = frag_coord / max(view.viewport.zw, vec2<f32>(1.0));
     return textureSampleLevel(ao_tex, ao_samp, uv, 0.0).r;
+}
+
+// Full-res screen-space contact shadows (`rendering::contact_shadow`, W18a) —
+// the contact tier the cascades can't resolve. Multiplied into the DIRECT sun
+// gate only; ambient contact occlusion is `screen_space_ao`'s job, and applying
+// both to ambient would double-darken. Bound to the white fallback when unset;
+// `terrain_extras.shadow.gate.z == 0` skips sampling.
+@group(3) @binding(8) var contact_shadow_tex: texture_2d<f32>;
+@group(3) @binding(9) var contact_shadow_samp: sampler;
+
+fn screen_space_contact_shadow(frag_coord: vec2<f32>) -> f32 {
+    return contact_shadow_factor(
+        terrain_extras.shadow,
+        contact_shadow_tex,
+        contact_shadow_samp,
+        frag_coord,
+        view.viewport.zw,
+    );
 }
 
 // ── Analytic pad flatten (vertex stage) ────────────────────────────────────
@@ -1502,7 +1520,13 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
         hit_ws, height_n, terrain_extras.shadow,
         sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
     );
-    let external_shadow = self_shadow * tree_shadow;
+    // Contact tier (W18a): the near-field occlusion cascade 0 is too coarse to
+    // resolve — a gear strut, a trunk base, a building's ground seam. Folds into
+    // the same direct-sun gate; it deliberately does NOT reach `canopy_ambient`
+    // below (that bleed models a canopy blocking the sky, which a sub-metre
+    // contact term does not, and the ambient side is already SSAO's).
+    let contact_shadow = screen_space_contact_shadow(input.clip_position.xy);
+    let external_shadow = self_shadow * tree_shadow * contact_shadow;
 
     // Surface lighting. The shading normal is pulled most of the way toward the
     // relief normal but kept anchored to the geometric normal so steep micro-
@@ -1637,6 +1661,12 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     if terrain_extras.inspection.w >= 1.5 {
         let ao_raw = screen_space_ao(input.clip_position.xy);
         output.color = vec4<f32>(vec3<f32>(ao_raw), albedo.a);
+    }
+    // W18a diagnostic (`THALOS_CONTACT_SHADOW=show`, gate.z = 2): same split —
+    // paint the raw contact term so pass artifacts can be told apart from
+    // application artifacts in one screenshot.
+    if terrain_extras.shadow.gate.z >= 1.5 {
+        output.color = vec4<f32>(vec3<f32>(contact_shadow), albedo.a);
     }
     return output;
 }

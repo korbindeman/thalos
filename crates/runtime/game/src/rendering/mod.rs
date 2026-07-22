@@ -12,6 +12,7 @@
 
 mod body_lod;
 mod clouds;
+pub(crate) mod contact_shadow;
 mod generation;
 mod gpu_grass;
 mod grass;
@@ -106,6 +107,9 @@ impl Plugin for RenderingPlugin {
         app.add_plugins(view_anchor::ViewAnchorPlugin)
             .add_plugins(SceneDepthPlugin)
             .add_plugins(ssao::SsaoPlugin)
+            // Contact tier of the three-tier shadow split
+            // (ADR-20260722T111848Z); reads the same `SceneDepthImage` as SSAO.
+            .add_plugins(contact_shadow::ContactShadowPlugin)
             .add_plugins(sun_shadow::SunShadowPlugin)
             // Must precede the terrain plugins: they spawn terrain (and thus ask
             // for cached providers) and the registry has to exist by then.

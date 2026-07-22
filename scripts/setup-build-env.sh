@@ -35,11 +35,24 @@ while [[ $# -gt 0 ]]; do
 done
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# sccache splits SCCACHE_BASEDIRS with the platform separator. This script only
+# supports Linux/macOS (see the OS guard below), but keep the selection explicit
+# so relaxing that guard cannot silently produce drive-letter-shredded roots.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) path_sep=';' ;;
+  *) path_sep=':' ;;
+esac
+
+# Longest-first: worktrees nest inside the repo root, and a shorter parent
+# matching first would normalize their paths differently than the main checkout,
+# so the two could never share a cache entry.
 worktree_roots=()
 while IFS= read -r root; do worktree_roots+=("$root"); done \
-  < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p')
+  < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p' \
+      | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
 (( ${#worktree_roots[@]} == 0 )) && worktree_roots=("$repo_root")
-scc_basedirs="$(IFS=:; echo "${worktree_roots[*]}")"
+scc_basedirs="$(IFS="$path_sep"; echo "${worktree_roots[*]}")"
 
 # --- platform detection ------------------------------------------------------
 os="$(uname -s)"

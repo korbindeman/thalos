@@ -558,6 +558,45 @@ fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
     return smoothstep(0.45, 0.80, raw_coverage * 1.22);
 }
 
+/// Linearly reconstruct the canonical broad shape signal from four
+/// normalized-height strata (channel centres at 1/8, 3/8, 5/8, 7/8). The
+/// payload is authored in body-direction space and therefore has no Cartesian
+/// planet-scale repeat.
+fn cloud_surface_shape(strata: vec4<f32>, normalized_height: f32) -> f32 {
+    let z = clamp(normalized_height, 0.0, 1.0) * 4.0 - 0.5;
+    if z <= 0.0 { return strata.x; }
+    if z < 1.0 { return mix(strata.x, strata.y, z); }
+    if z < 2.0 { return mix(strata.y, strata.z, z - 1.0); }
+    if z < 3.0 { return mix(strata.z, strata.w, z - 2.0); }
+    return strata.w;
+}
+
+/// Broad surface-space density contract shared by near and far projections.
+/// Coverage, typed height response, and formation threshold are applied by the
+/// CPU producer before its mip chain is built; this function reconstructs that
+/// already-filterable density rather than thresholding a filtered raw signal.
+fn cloud_surface_density(
+    strata: vec4<f32>,
+    normalized_height: f32,
+) -> f32 {
+    return cloud_surface_shape(strata, normalized_height);
+}
+
+/// Footprint-filtered vertical column occupancy reconstructed from the same
+/// four strata. `best + damped remainder` preserves discrete towers without
+/// treating the levels as four independent opaque slabs.
+fn cloud_surface_column_density(
+    strata: vec4<f32>,
+) -> f32 {
+    let d0 = strata.x;
+    let d1 = strata.y;
+    let d2 = strata.z;
+    let d3 = strata.w;
+    let best = max(max(d0, d1), max(d2, d3));
+    let sum = d0 + d1 + d2 + d3;
+    return clamp(best + 0.22 * (sum - best) * (1.0 - best), 0.0, 1.0);
+}
+
 /// Column moments derived from the canonical weather cubemap (RGBA =
 /// coverage, type, base, top). CLOUD-6's first orbital projection uses these
 /// instead of coverage-only surface paint so the far LOD shares height and
@@ -664,8 +703,10 @@ fn sample_weather_soft(
     return textureSampleLevel(weather_tex, weather_sampler, n, max(lod, 0.75));
 }
 
-/// Angular size of one level-0 weather texel (π/2 face over 256 texels).
-const WEATHER_TEXEL_ANGLE: f32 = 0.006136;
+/// Angular size of one level-0 weather/surface texel (π/2 face over 1024
+/// texels). This must track `WEATHER_FACE_SIZE`; retaining the old 256-face
+/// value forced orbital consumers onto mip 0 and aliased surface cells.
+const WEATHER_TEXEL_ANGLE: f32 = 0.001533981;
 
 /// Height-moment normal for orbital cloud lighting: finite difference of the
 /// local top/coverage field in the body-fixed tangent plane. Gives soft relief

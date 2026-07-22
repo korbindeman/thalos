@@ -225,9 +225,13 @@ pub struct ShadowCascadeBlock {
     /// normal-offset from these (stable-CSM W6 — see the bias model note in
     /// `shadow.wgsl`). zw reserved.
     pub params: [Vec4; CASCADE_COUNT],
-    /// x = strength (0 ⇒ skip), y = active cascade count, zw reserved. Named
-    /// `gate` (not `config`) because `body_terrain.wgsl` `#import`s a udlod
-    /// global called `config`, and a matching field name collides in naga_oil.
+    /// x = strength (0 ⇒ skip), y = active cascade count,
+    /// z = **contact-shadow gate** (0 = skip, 1 = apply, 2 = paint raw —
+    /// `ContactShadowConfig::shadow_gate`; W18a's contact tier rides here rather
+    /// than in a per-material flag so it reaches every consumer of the rig
+    /// through the binding they already carry), w reserved. Named `gate` (not
+    /// `config`) because `body_terrain.wgsl` `#import`s a udlod global called
+    /// `config`, and a matching field name collides in naga_oil.
     pub gate: Vec4,
     /// xyz = normalized render-space direction toward the sun (drives the
     /// slope-scaled bias in `sun_shadow_factor_nrm`), w reserved.
@@ -440,6 +444,16 @@ pub struct BodyTerrainMaterial {
     #[texture(6)]
     #[sampler(7)]
     pub ao: Handle<Image>,
+    /// Full-res screen-space contact shadows (`rendering::contact_shadow`'s
+    /// `ContactShadowImage`, R16Float; 1 = fully lit), multiplied into the sun
+    /// shadow factor — graphics W18a, the contact tier of
+    /// ADR-20260722T111848Z-shadows-three-tier-not-virtual-shadow-maps. Default
+    /// handle binds the white fallback (no contact term); the game patches the
+    /// live image on the surface terrain and gates sampling via
+    /// `extras.shadow.gate.z` (0 skips it).
+    #[texture(8)]
+    #[sampler(9)]
+    pub contact_shadow: Handle<Image>,
 }
 
 impl Material for BodyTerrainMaterial {

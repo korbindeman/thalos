@@ -81,6 +81,10 @@ pub struct SolidPlanetMaterial {
     #[texture(5, dimension = "cube")]
     #[sampler(6)]
     pub cloud_weather: Handle<Image>,
+    /// Canonical four-stratum surface-space broad density. It shares the cloud
+    /// weather sampler and version; clear bodies bind the shared zero cube.
+    #[texture(7, dimension = "cube")]
+    pub cloud_surface_density: Handle<Image>,
 }
 
 impl Material for SolidPlanetMaterial {

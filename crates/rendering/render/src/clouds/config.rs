@@ -105,9 +105,9 @@ impl Default for CloudsConfig {
     fn default() -> Self {
         let sun_dir = Vec3::new(-0.7, 0.5, 0.75).normalize();
         Self {
-            // 80 samples let an inside-layer tangent ray integrate 40 km at
-            // the 500 m coarse step before the near-volume distance fade.
-            clouds_raymarch_steps_count: 80,
+            // BL-33 adaptive broad probes make the extra clear-air reach cheap;
+            // 112 × 600 m covers 67.2 km without coarsening full-density steps.
+            clouds_raymarch_steps_count: 112,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
             clouds_bottom_height: 1250.0,

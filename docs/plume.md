@@ -31,7 +31,7 @@ Not yet built (later phases, in design-note order): secondary GPU particles
 > **Engine lights are not a `PointLight`.** Bevy's clustered forward lighting is
 > degenerate at the flight camera's 0.5 m → 1e11 m depth range, so a `PointLight`
 > on a craft contributes *exactly zero* at any intensity — measured, see
-> INC-0020. The plume light has to be an analytic term in the lighting spine
+> INC-0021. The plume light has to be an analytic term in the lighting spine
 > alongside sun/moonlight (BL-40). Do not re-attempt the `PointLight` route.
 
 Verify: `just screenshot plume` (agent-servable). Live feel (throttle sweeps,
@@ -118,7 +118,7 @@ slowly it expands.
 **Packed-uniform warning.** `PlumeParams` addresses unrelated scalars
 positionally (`anim.w`, `shock.z`, …). Repurposing a lane is a rename, not an
 edit: audit every reader on both sides first. Getting this wrong erased the
-vacuum plume entirely — see INC-0019.
+vacuum plume entirely — see INC-0020.
 
 ## The billboard + volumetric fragment
 

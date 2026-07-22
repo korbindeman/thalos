@@ -22,11 +22,11 @@ pub const VOLUME_SIZE: u32 = 64;
 
 /// Per-face resolution of the canonical cubemap weather projection. The game
 /// runtime field must use the same face size.
-pub const WEATHER_FACE_SIZE: u32 = 256;
+pub const WEATHER_FACE_SIZE: u32 = 1024;
 
-/// Mip levels carried by the weather cube (256 → 8 px). Must match the
+/// Mip levels carried by the weather cube (1024 → 8 px). Must match the
 /// producer's chain (`CloudWeatherField::MIP_LEVELS` game-side).
-pub const WEATHER_MIP_LEVELS: u32 = 6;
+pub const WEATHER_MIP_LEVELS: u32 = 8;
 
 /// Persistent GPU allocation owned by the current cloud renderer. CLOUD-0
 /// publishes this alongside timings so later low-resolution/format work has an
@@ -40,6 +40,7 @@ pub struct CloudTargetMemory {
     pub base_atlas_bytes: u64,
     pub worley_bytes: u64,
     pub coverage_bytes: u64,
+    pub surface_density_bytes: u64,
     pub total_bytes: u64,
 }
 
@@ -51,14 +52,16 @@ pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemo
     let history_distance_bytes = distance_bytes;
     let base_atlas_bytes = 0; // CLOUD-3 deleted the extruded 2-D shape atlas.
     let worley_bytes = VOLUME_SIZE as u64 * VOLUME_SIZE as u64 * VOLUME_SIZE as u64 * 16;
-    let coverage_bytes = WEATHER_FACE_SIZE as u64 * WEATHER_FACE_SIZE as u64 * 6 * 4; // RGBA8 cube
+    let coverage_bytes = (6 * cube_layer_mip_bytes(WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS)) as u64;
+    let surface_density_bytes = coverage_bytes;
     let total_bytes = render_bytes
         + distance_bytes
         + history_bytes
         + history_distance_bytes
         + base_atlas_bytes
         + worley_bytes
-        + coverage_bytes;
+        + coverage_bytes
+        + surface_density_bytes;
     CloudTargetMemory {
         render_bytes,
         distance_bytes,
@@ -67,6 +70,7 @@ pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemo
         base_atlas_bytes,
         worley_bytes,
         coverage_bytes,
+        surface_density_bytes,
         total_bytes,
     }
 }
@@ -76,6 +80,7 @@ pub struct CloudImages {
     pub cloud_worley_image: Handle<Image>,
     pub cloud_distance_image: Handle<Image>,
     pub weather_image: Handle<Image>,
+    pub surface_density_image: Handle<Image>,
     pub history_image: Handle<Image>,
     pub history_distance_image: Handle<Image>,
 }
@@ -171,12 +176,18 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
         WEATHER_FACE_SIZE,
         WEATHER_MIP_LEVELS,
     );
+    let surface_density_image = cloud_weather_image(
+        vec![0; 6 * cube_layer_mip_bytes(WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS)],
+        WEATHER_FACE_SIZE,
+        WEATHER_MIP_LEVELS,
+    );
 
     CloudImages {
         cloud_render_image: images.add(cloud_render_image),
         cloud_worley_image: images.add(cloud_worley_image),
         cloud_distance_image: images.add(cloud_distance_image),
         weather_image: images.add(weather_image),
+        surface_density_image: images.add(surface_density_image),
         history_image: images.add(history_image),
         history_distance_image: images.add(history_distance_image),
     }
@@ -187,12 +198,14 @@ pub const fn cloud_target_memory() -> CloudTargetMemory {
 }
 
 /// Byte length of one cube layer's full mip chain for `face_size`/`mips`.
-fn cube_layer_mip_bytes(face_size: u32, mips: u32) -> usize {
+const fn cube_layer_mip_bytes(face_size: u32, mips: u32) -> usize {
     let mut total = 0usize;
     let mut size = face_size as usize;
-    for _ in 0..mips {
+    let mut level = 0;
+    while level < mips {
         total += size * size * 4;
-        size = (size / 2).max(1);
+        size = if size > 1 { size / 2 } else { 1 };
+        level += 1;
     }
     total
 }

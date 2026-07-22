@@ -56,7 +56,8 @@ This is an upgrade, not a greenfield renderer. Preserve these foundations:
   above the layer without a flat-sky assumption.
 - `big_space`-safe camera inputs and planet-fixed noise/weather coordinates.
 - An authored `CloudClimate` and per-body `CloudWeatherField`, projected as a
-  256×256×6 RGBA cubemap carrying coverage/type/base/top.
+  1024×1024×6 RGBA cubemap carrying coverage/type/base/top, plus an
+  8-level footprint-filtering mip chain.
 - Per-pixel cloud hit distance and deterministic composition through one
   fullscreen `CloudCompositeMaterial`, including opaque-scene occlusion and
   independence from the atmosphere material's cloud ownership.
@@ -92,7 +93,9 @@ The current result falls short for structural reasons:
    viewport-relative, with 1-in-9 sparse scheduling outside Reference. The
    worst 1440p High probe (sunset, 1712×960 cloud target) is 2.471 ms mean /
    2.476 ms p95 on the development RTX 4070 Ti, inside the provisional 3.5 ms target;
-   Baseline at 1080p retains 40.66 MiB of persistent cloud textures.
+   Baseline at 1080p retains 71.16 MiB of persistent cloud textures after the
+   BL-33 weather-resolution increase; the cloud pass remains below its timing
+   budget in all five accepted cold probes.
 5. **Visible clouds do not interact with the world.** The terrain, craft,
    structures, atmosphere, and reflection environment do not receive one
    cloud-transmittance field. The impostor's shadow probe is an unrelated
@@ -420,8 +423,11 @@ Completed reconstruction and corrected density/range slice on `codex/cloud-0`:
 - **Typed 3-D density:** stratus/cumulus/storm vertical profiles modulate a
   continuous Perlin/Worley mass field; 450 m boundary erosion cuts readable
   cauliflower detail while preserving solid optical cores.
-- **Safe near→horizon LOD:** only fine boundary erosion fades from 10–22 km,
-  when its authored features become sub-pixel. View-ray cadence remains uniform.
+- **Safe near→horizon LOD:** only fine boundary erosion fades when its authored
+  feature is smaller than the full-density sampling footprint. The corrected
+  BL-33 marcher samples smooth broad mass every 600 m, backs up one interval on
+  a hit, and advances monotonically at 120 m through full density; no weather or
+  profile hint is used as a skip/resume gate.
 - **Low-frequency reuse:** the 21.6 km anti-tiling modulation is evaluated once
   per short view segment and reused by view/shadow density. It remains smooth
   across pixels without a redundant trilinear fetch at every 200–500 m step.
@@ -496,6 +502,101 @@ evidence only, no timing claims):
   slab with soft box-mip squares at coarse lod — the reduced-detail limb
   volume is the intended fix; the offline OD/normal atlas and the in-motion
   surface↔orbit handoff check (user, live session) remain open.
+
+### BL-33 fidelity convergence checkpoint (2026-07-22)
+
+Three independently verified slices landed; the full BL-33 item remains `wip`
+because the far estimator still needs density-derived moments and a
+reduced-detail limb volume.
+
+- **Canonical weather resolution and hierarchy.** Correcting the old scale
+  estimate showed that a 256 face represented about 19.5 km/texel at the
+  centre of a Thalos cube face. The field is now 1024 per face (about
+  4.9 km/texel), with eight RGBA8 mip levels. Mesoscale warp, warped cellular
+  mass, and a second cellular-cut domain add broken fronts and gaps without
+  creating an independent render-side pattern. The complete cube mip chain is
+  33,553,920 bytes; total 1280×720 Baseline cloud allocation is 74,612,224
+  bytes (71.16 MiB).
+- **Adaptive cheap/full-density march.** Clear air evaluates only the smooth,
+  typed broad mass at a 600 m cadence. A meaningful hit backs up one interval
+  and refines at 120 m; four empty fine samples return to coarse mode. A
+  monotonic `refined_until` frontier prevents a coarse hit from revisiting and
+  reintegrating an already refined interval. The full density, lighting, and
+  transmittance integrals always use the 120 m cadence. Fine erosion is filtered
+  by its authored feature size relative to that footprint, not by a hard-coded
+  camera-distance fade.
+- **Rejected bracket.** Pure distance-proportional cadence was tested first.
+  A coarse law reduced the runway contour-extrema metric by about 30% but erased
+  the cruise foreground towers; reach-preserving variants either exposed a
+  circular march frontier or restored the original terracing. No part of that
+  path was retained. The adaptive marcher breaks the reach/detail tradeoff
+  without treating correlated weather/profile hints as conservative bounds.
+- **Bounded reach extension.** Baseline/production now spends 112 adaptive
+  probes instead of 80. At the unchanged 600 m broad cadence this extends
+  clear-air reach from 48.0 to 67.2 km; the shell segment cap and entry handoff
+  moved from 50 to 75 km. The per-ray weather/macro context preserves the old
+  midpoint on short segments but clamps to 25 km beyond shell entry on long
+  segments, so extending range cannot cull a ray from weather sampled hundreds
+  of kilometres downrange. `march_reach` mirrors all three numbers.
+- **Cold evidence.** Relative to the enriched-field checkpoint, runway cloud
+  coverage rose from 13.15% to 16.49% while normalized contour extrema fell
+  19.6% (27.85 → 22.38); cruise coverage stayed stable (11.11% → 10.90%).
+  The final 112-step Baseline GPU means on the development RTX 4070 Ti were
+  1.474 ms runway, 1.004 ms cruise, 0.078 ms planet, 0.081 ms limb, and
+  1.229 ms sunset. A second, fixed-mask reach comparison kept runway extrema
+  stable (9.21 → 9.14 per cloud width) while cruise cloud coverage rose 20.2%;
+  the extra extrema there are newly resolved cells, not recurring runway
+  contour rings. All five
+  cold logs were clean of shader, pipeline, panic, and capture-health failures.
+- **Rejected live far march.** A direct 24-sample far march was wired to the
+  exact generated 3-D basis and shared density shaping, then cold-tested.
+  Across a ~200 km grazing chord its deterministic samples aliased the 8 km
+  periodic basis into severe horizontal combs. The complete experiment was
+  reverted. This confirms the planned far tier must prefilter the density into
+  optical/albedo/normal/height moments; point-sampling more exact density at
+  horizon range is not a substitute for that atlas
+  ([ADR-20260722T102639Z](adr/20260722T102639Z-far-cloud-density-must-be-prefiltered.md)).
+- **Rejected periodic-density atlas.** The next experiment GPU-baked the exact
+  broad-density function into a 512² cubemap, first as OD/height moments and
+  then as four vertical OD strata. Tangent-footprint filters, continuous
+  mean/variance reconstruction, analytic segment overlap, and a 24-sample
+  atlas chord were cold-bracketed. Weak filtering exposed the 8 km periodic
+  near tile as combs and a planet-scale checker/grid; strong filtering removed
+  the grid only by averaging the result back into a smooth slab. Every code
+  path and allocation was reverted; evidence remains in
+  `artifacts/visual/runs/bl-33/step-6a/` through `step-6h/`. CLOUD-6 therefore
+  needs a weather-conditioned, genuinely non-periodic far-density producer
+  before moment/limb reconstruction can be faithful
+  ([ADR-20260722T111036Z](adr/20260722T111036Z-far-atlas-cannot-project-the-periodic-near-tile.md)).
+- **Rejected single-tile phase warp.** Continuous coverage/base/top channels
+  now displace both the broad and 21.6 km formation domains. This local change
+  passed matched runway/cruise gates (runway coverage 20.32%; contour proxy
+  6.22 extrema per 1,000 masked pixels; cruise coverage unchanged at 83.32%).
+  Baking that exact weather-warped density into the same 512² four-stratum
+  atlas still exposed long curved/diagonal comb families on `cloud-planet`:
+  a phase warp bends one tile's repetition but does not remove its frequency.
+  The atlas was fully reverted; evidence is under `step-8a/` and rollback under
+  `step-8-rollback/`.
+  ([ADR-20260722T135123Z](adr/20260722T135123Z-weather-phase-warp-does-not-make-a-periodic-cloud-basis-aperiodic.md)).
+- **Rejected incommensurate Cartesian basis.** A second independently
+  transformed 3-D domain at an incommensurate period passed local runway and
+  cruise coverage gates. Both a context-selected crossfade and a guaranteed
+  35% contribution were then run through the exact same atlas control. The
+  planet comb survived while its distribution changed, proving the spherical
+  shell is cutting coherent Cartesian repeated surfaces into bands. CLOUD-6's
+  next producer is therefore surface-parameterized (body cubemap direction +
+  normalized layer height) and shared back into near density; the local
+  Cartesian volume is not projected over the whole sphere
+  ([ADR-20260722T141000Z](adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md)).
+- **Open residual.** Planet projection is seam-free and preserves broken
+  synoptic systems, but grazing limb/cruise/sunset views still reveal the
+  weather-column estimator as a smooth slab beyond the 67.2 km resolved handoff.
+  Further reach remains gated on either more step budget or a true interval
+  maximum-density bound. The next slice is one density-derived optical-depth/albedo/normal/
+  height-moment atlas shared by planet and limb views, after the shared
+  surface-space density contract exists; it is not another independent
+  weather field. Its density basis must not project the periodic near tile
+  verbatim across the sphere.
 
 ### Program acceptance matrix
 

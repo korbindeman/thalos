@@ -283,21 +283,26 @@ pub(super) fn spawn_bodies(
         // upload its cubemap once for every orbital/body-sky projection. Bodies
         // with `clouds: None` keep the shared clear cube; no renderer invents a
         // default field.
-        let body_weather = if let Some(climate) = body
+        let (body_weather, body_surface_density) = if let Some(climate) = body
             .terrestrial_atmosphere
             .as_ref()
             .and_then(|atmosphere| atmosphere.clouds.as_ref())
         {
             let field = CloudWeatherField::from_climate(climate);
-            let image = images.add(cloud_weather_image(
+            let weather_image = images.add(cloud_weather_image(
                 field.rgba8_mip_chain(),
                 field.face_size,
                 CloudWeatherField::MIP_LEVELS,
             ));
+            let surface_density_image = images.add(cloud_weather_image(
+                field.surface_density_rgba8_mip_chain(),
+                field.face_size,
+                CloudWeatherField::MIP_LEVELS,
+            ));
             solar.install_cloud_weather(body.id, field);
-            image
+            (weather_image, surface_density_image)
         } else {
-            blank_weather.clone()
+            (blank_weather.clone(), blank_weather.clone())
         };
         // Bake the multi-scatter LUT once from the static atmosphere block, and
         // share it across this body's `BodySky` fullscreen pass AND its
@@ -403,6 +408,7 @@ pub(super) fn spawn_bodies(
                 weather: body_weather.clone(),
                 cloud_layer: blank_cloud.clone(),
                 cloud_distance: blank_cloud_dist.clone(),
+                surface_density: body_surface_density.clone(),
             };
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
@@ -599,6 +605,7 @@ pub(super) fn spawn_bodies(
                 albedo_cube: impostor_cube.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_weather: body_weather.clone(),
+                cloud_surface_density: body_surface_density.clone(),
             });
             let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
@@ -611,6 +618,7 @@ pub(super) fn spawn_bodies(
                 albedo_cube: impostor_cube.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_weather: body_weather.clone(),
+                cloud_surface_density: body_surface_density.clone(),
             });
             commands.spawn((
                 Mesh3d(billboard_mesh.clone()),
@@ -819,6 +827,7 @@ pub(super) fn spawn_bodies(
                 albedo_cube: blank_impostor.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_weather: body_weather.clone(),
+                cloud_surface_density: body_surface_density.clone(),
             });
             let ship_mat = solid_planet_materials.add(SolidPlanetMaterial {
                 params: SolidPlanetParams {
@@ -830,6 +839,7 @@ pub(super) fn spawn_bodies(
                 albedo_cube: blank_impostor.clone(),
                 multi_scatter_lut: multi_scatter_lut.clone(),
                 cloud_weather: body_weather.clone(),
+                cloud_surface_density: body_surface_density.clone(),
             });
 
             let body_entity = commands

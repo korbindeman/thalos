@@ -255,7 +255,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // NB: `anim.w` is the entrainment rate (consumed above), *not* a radiance
     // trim — it must not appear here. It multiplied this product until
     // 2026-07-22, which zeroed the whole plume in vacuum (rate 0) and dimmed it
-    // ~60x at sea level. See docs/incidents/0019.
+    // ~60x at sea level. See docs/incidents/0020.
     let gain = plume.core_color.a * plume.anim.z * mix(0.40, 1.0, plume.mixing.w);
 
     var radiance = col_core * src_core * (1.0 - exp(-tau_core))

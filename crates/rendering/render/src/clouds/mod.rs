@@ -80,6 +80,14 @@ pub struct CloudWeatherMap {
     pub handle: Handle<Image>,
 }
 
+/// Handle to the active body's canonical four-stratum surface-density cube.
+/// It is generated and versioned with [`CloudWeatherMap`], not a second weather
+/// authority.
+#[derive(Resource, Clone)]
+pub struct CloudSurfaceDensityMap {
+    pub handle: Handle<Image>,
+}
+
 /// Renders volumetric clouds into [`CloudRenderTexture`] each frame.
 ///
 /// The configuration is the [`CloudsConfig`] resource; the camera basis is the
@@ -157,11 +165,15 @@ fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
     commands.insert_resource(CloudWeatherMap {
         handle: built.weather_image.clone(),
     });
+    commands.insert_resource(CloudSurfaceDensityMap {
+        handle: built.surface_density_image.clone(),
+    });
     commands.insert_resource(CloudsImage {
         cloud_render_image: built.cloud_render_image,
         cloud_worley_image: built.cloud_worley_image,
         cloud_distance_image: built.cloud_distance_image,
         weather_image: built.weather_image,
+        surface_density_image: built.surface_density_image,
         history_image: built.history_image,
         history_distance_image: built.history_distance_image,
     });

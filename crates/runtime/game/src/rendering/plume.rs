@@ -19,7 +19,7 @@
 //! the cone dissolves on its own; at sea level it barely expands, so entrainment
 //! of ambient air is what cools it, and it reads as a dense, shock-celled,
 //! afterburning column. This module resolves the parameters; `plume.wgsl`
-//! renders the same model. See `docs/plume.md`, and INC-0019 before repurposing
+//! renders the same model. See `docs/plume.md`, and INC-0020 before repurposing
 //! any packed lane of [`PlumeParams`].
 //!
 //! Pipeline:

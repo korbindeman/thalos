@@ -54,20 +54,24 @@ impl CloudBandEnvironmentState {
     }
 }
 
-/// Per-face resolution of the canonical cubemap weather field. At Thalos's
-/// radius this is weather-system scale (~60 km/texel near a face centre), not
-/// cloud-shape detail; CLOUD-3 supplies the finer 3-D density basis.
-pub const CLOUD_WEATHER_FACE_SIZE: u32 = 256;
+/// Per-face resolution of the canonical cubemap weather field. A 90° face at
+/// Thalos's 3,186 km radius spans about 5,005 km, so 1024 texels resolve
+/// ~4.9 km at the face centre (the former 256 field was ~19.5 km/texel, not
+/// the stale ~60 km estimate). CLOUD-3 still supplies finer 3-D shape detail.
+pub const CLOUD_WEATHER_FACE_SIZE: u32 = 1024;
 
-/// Mutable, per-body weather authority. Texels are stored face-major in
-/// [`CubemapFace::ALL`] order as RGBA8 = coverage, cloud type, normalized base,
-/// normalized top. Every render projection consumes this field; no projection
-/// owns an independent pattern.
+/// Mutable, per-body weather and broad-density authority. Both cubemap payloads
+/// are stored face-major in [`CubemapFace::ALL`] order. `texels` carries RGBA8
+/// coverage, cloud type, normalized base, and normalized top;
+/// `surface_density_texels` carries the broad body-space shape signal at four
+/// normalized-height strata. Every render projection consumes these together;
+/// no projection owns an independent pattern.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CloudWeatherField {
     pub seed: u64,
     pub face_size: u32,
     pub texels: Vec<[u8; 4]>,
+    pub surface_density_texels: Vec<[u8; 4]>,
     pub coverage_mean: f32,
     pub base_altitude_m: f32,
     pub top_altitude_m: f32,
@@ -81,6 +85,7 @@ impl CloudWeatherField {
     pub fn from_climate(climate: &CloudClimate) -> Self {
         let face_size = CLOUD_WEATHER_FACE_SIZE;
         let mut texels = Vec::with_capacity((face_size * face_size * 6) as usize);
+        let mut surface_density_texels = Vec::with_capacity((face_size * face_size * 6) as usize);
         let mix_sum = climate.type_mix.iter().copied().sum::<f32>();
         let type_mix = if mix_sum > 1.0e-6 {
             climate.type_mix.map(|value| value.max(0.0) / mix_sum)
@@ -101,10 +106,19 @@ impl CloudWeatherField {
                     // segments, not complete rings). The straight gaussian
                     // rings previously survived the far projection's coverage
                     // threshold as conspicuous synthetic stripes.
-                    let band_warp =
-                        0.55 * (fbm3(dir * 3.1 + Vec3::new(7.0, -3.0, 11.0), climate.seed ^ 0xBA9D, 3) - 0.5);
+                    let band_warp = 0.55
+                        * (fbm3(
+                            dir * 3.1 + Vec3::new(7.0, -3.0, 11.0),
+                            climate.seed ^ 0xBA9D,
+                            3,
+                        ) - 0.5);
                     let band_gate = (0.35
-                        + 1.30 * fbm3(dir * 2.1 + Vec3::new(-2.0, 9.0, 5.0), climate.seed ^ 0x6A7E, 3))
+                        + 1.30
+                            * fbm3(
+                                dir * 2.1 + Vec3::new(-2.0, 9.0, 5.0),
+                                climate.seed ^ 0x6A7E,
+                                3,
+                            ))
                     .clamp(0.0, 1.0);
                     let band = latitude_band_profile(dir.y.asin() + band_warp) * band_gate;
                     // Zonally-elongated ridge field: fronts. Compressing the
@@ -116,8 +130,11 @@ impl CloudWeatherField {
                     // closed contours around every lattice extremum, which the
                     // far projection rendered as bullseye rings across the
                     // whole disc. Squaring keeps only the strong crests.
-                    let front_warp =
-                        fbm3(dir * 1.9 + Vec3::new(-6.0, 2.0, 14.0), climate.seed ^ 0x11AB, 2) - 0.5;
+                    let front_warp = fbm3(
+                        dir * 1.9 + Vec3::new(-6.0, 2.0, 14.0),
+                        climate.seed ^ 0x11AB,
+                        2,
+                    ) - 0.5;
                     let frontal_raw = fbm3(
                         Vec3::new(dir.x * 2.2, dir.y * 7.5, dir.z * 2.2)
                             + Vec3::new(3.0, -8.0, 1.0)
@@ -135,16 +152,32 @@ impl CloudWeatherField {
                     // the near volume and to an orbital projection. Cloud type
                     // remains categorical and must not be abused as a shape
                     // mask: doing so produces conspicuous cubemap-sized blocks.
-                    let mesoscale = fbm3(
-                        dir * 32.0 + Vec3::new(-11.0, 23.0, 7.0),
-                        climate.seed ^ 0x5CA1_E5CA,
+                    let mesoscale_warp = fbm3(
+                        dir * 17.0 + Vec3::new(13.0, -4.0, 29.0),
+                        climate.seed ^ 0x5CA1_0A11,
                         3,
+                    ) - 0.5;
+                    let mesoscale = fbm3(
+                        dir * 52.0
+                            + Vec3::new(-11.0, 23.0, 7.0)
+                            + Vec3::splat(2.4 * mesoscale_warp),
+                        climate.seed ^ 0x5CA1_E5CA,
+                        4,
                     );
-                    let cellular = fbm3(
-                        dir * 96.0 + Vec3::new(19.0, -5.0, 37.0),
+                    let cellular_mass = fbm3(
+                        dir * 128.0
+                            + Vec3::new(19.0, -5.0, 37.0)
+                            + Vec3::splat(-3.1 * mesoscale_warp),
                         climate.seed ^ 0xCE11_C10D,
                         3,
                     );
+                    let cellular_cut_raw = fbm3(
+                        dir * 211.0 + Vec3::new(-31.0, 47.0, 5.0),
+                        climate.seed ^ 0xCE11_5EED,
+                        2,
+                    );
+                    let cellular_cut = 1.0 - (2.0 * cellular_cut_raw - 1.0).abs();
+                    let cellular = 0.68 * cellular_mass + 0.32 * cellular_cut;
                     // Cellular weight is slightly higher than the first CLOUD-3
                     // checkpoint so open-sky pockets survive into interior and
                     // runway views, but stays below the level that shattered the
@@ -186,6 +219,51 @@ impl CloudWeatherField {
                         value if value < 0.75 => 0.34 + 0.38 * vertical_noise,
                         _ => 0.78 + 0.20 * vertical_noise,
                     };
+                    // Canonical surface-space broad shape. These fields live on
+                    // the unit direction sphere, so they are seamless across
+                    // cubemap faces and never inherit the near volume's small
+                    // Cartesian repeat. Four correlated strata let towers lean
+                    // and split with height without storing a full 3-D shell.
+                    // Coverage/type/base/top remain separate climate controls;
+                    // shaders apply their shared threshold/profile contract.
+                    let shape_warp = fbm3(
+                        dir * 41.0 + Vec3::new(43.0, -17.0, 9.0),
+                        climate.seed ^ 0x5A11_FACE,
+                        2,
+                    ) - 0.5;
+                    let shape_mass = fbm3(
+                        dir * 128.0 + Vec3::new(-37.0, 61.0, 23.0) + Vec3::splat(7.5 * shape_warp),
+                        climate.seed ^ 0xD315_17A1,
+                        3,
+                    );
+                    let shape_cut_raw = fbm3(
+                        dir * 211.0 + Vec3::new(71.0, -29.0, 53.0) + Vec3::splat(-5.0 * shape_warp),
+                        climate.seed ^ 0xCE11_B0D1,
+                        2,
+                    );
+                    let shape_cut = 1.0 - (2.0 * shape_cut_raw - 1.0).abs();
+                    let surface_shape = [
+                        0.56 * shape_mass + 0.24 * shape_cut + 0.20 * cellular,
+                        0.48 * shape_mass + 0.25 * shape_cut + 0.17 * selector + 0.10 * cellular,
+                        0.39 * shape_mass
+                            + 0.23 * shape_cut
+                            + 0.21 * vertical_noise
+                            + 0.17 * selector,
+                        0.31 * shape_mass
+                            + 0.20 * shape_cut
+                            + 0.28 * vertical_noise
+                            + 0.21 * selector,
+                    ];
+                    let surface_density = [0.125, 0.375, 0.625, 0.875].map(|height| {
+                        cloud_surface_density_cpu(
+                            surface_shape,
+                            height,
+                            coverage,
+                            cloud_type,
+                            base,
+                            top.max(base + 0.02),
+                        )
+                    });
                     let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                     texels.push([
                         encode(coverage),
@@ -193,6 +271,7 @@ impl CloudWeatherField {
                         encode(base),
                         encode(top.max(base + 0.02)),
                     ]);
+                    surface_density_texels.push(surface_density.map(encode));
                 }
             }
         }
@@ -201,6 +280,7 @@ impl CloudWeatherField {
             seed: climate.seed,
             face_size,
             texels,
+            surface_density_texels,
             coverage_mean: climate.coverage.clamp(0.0, 1.0),
             base_altitude_m: climate.base_altitude_m.max(0.0),
             top_altitude_m: (climate.base_altitude_m + climate.thickness_m).max(0.0),
@@ -210,53 +290,125 @@ impl CloudWeatherField {
         }
     }
 
-    /// Number of mip levels the weather cube carries (256 → 8 px faces).
+    /// Number of mip levels the weather cube carries (1024 → 8 px faces).
     /// Far projections select a level from their projected footprint; without
     /// this chain the mesoscale/cellular coverage aliases into ring/speckle
     /// moiré at disc scale.
-    pub const MIP_LEVELS: u32 = 6;
+    pub const MIP_LEVELS: u32 = 8;
 
     /// Full RGBA8 cube payload with a box-filtered mip chain, laid out
     /// layer-major (face0[mip0..], face1[mip0..], …) to match wgpu's
     /// `TextureDataOrder::LayerMajor` default used by Bevy's image uploads.
     pub fn rgba8_mip_chain(&self) -> Vec<u8> {
-        let size = self.face_size as usize;
-        let face_texels = size * size;
-        let mut out = Vec::new();
-        for face in 0..6 {
-            let base = &self.texels[face * face_texels..(face + 1) * face_texels];
-            let mut level: Vec<[u8; 4]> = base.to_vec();
-            let mut level_size = size;
-            out.extend(level.iter().flatten());
-            for _ in 1..Self::MIP_LEVELS {
-                let next_size = (level_size / 2).max(1);
-                let mut next = Vec::with_capacity(next_size * next_size);
-                for y in 0..next_size {
-                    for x in 0..next_size {
-                        let mut acc = [0u32; 4];
-                        for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
-                            let sy = (y * 2 + dy).min(level_size - 1);
-                            let sx = (x * 2 + dx).min(level_size - 1);
-                            let t = level[sy * level_size + sx];
-                            for c in 0..4 {
-                                acc[c] += u32::from(t[c]);
-                            }
-                        }
-                        next.push([
-                            (acc[0] / 4) as u8,
-                            (acc[1] / 4) as u8,
-                            (acc[2] / 4) as u8,
-                            (acc[3] / 4) as u8,
-                        ]);
-                    }
-                }
-                out.extend(next.iter().flatten());
-                level = next;
-                level_size = next_size;
-            }
-        }
-        out
+        rgba8_cube_mip_chain(&self.texels, self.face_size, Self::MIP_LEVELS)
     }
+
+    /// Full four-stratum surface-density cube payload with the same layout and
+    /// mip contract as [`Self::rgba8_mip_chain`].
+    pub fn surface_density_rgba8_mip_chain(&self) -> Vec<u8> {
+        rgba8_cube_mip_chain(
+            &self.surface_density_texels,
+            self.face_size,
+            Self::MIP_LEVELS,
+        )
+    }
+}
+
+fn rgba8_cube_mip_chain(texels: &[[u8; 4]], face_size: u32, mip_levels: u32) -> Vec<u8> {
+    let size = face_size as usize;
+    let face_texels = size * size;
+    assert_eq!(texels.len(), 6 * face_texels, "cloud cubemap texel count");
+    let mut out = Vec::new();
+    for face in 0..6 {
+        let base = &texels[face * face_texels..(face + 1) * face_texels];
+        let mut level: Vec<[u8; 4]> = base.to_vec();
+        let mut level_size = size;
+        out.extend(level.iter().flatten());
+        for _ in 1..mip_levels {
+            let next_size = (level_size / 2).max(1);
+            let mut next = Vec::with_capacity(next_size * next_size);
+            for y in 0..next_size {
+                for x in 0..next_size {
+                    let mut acc = [0u32; 4];
+                    for (dy, dx) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+                        let sy = (y * 2 + dy).min(level_size - 1);
+                        let sx = (x * 2 + dx).min(level_size - 1);
+                        let t = level[sy * level_size + sx];
+                        for c in 0..4 {
+                            acc[c] += u32::from(t[c]);
+                        }
+                    }
+                    next.push([
+                        (acc[0] / 4) as u8,
+                        (acc[1] / 4) as u8,
+                        (acc[2] / 4) as u8,
+                        (acc[3] / 4) as u8,
+                    ]);
+                }
+            }
+            out.extend(next.iter().flatten());
+            level = next;
+            level_size = next_size;
+        }
+    }
+    out
+}
+
+fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
+    let t = ((value - edge0) / (edge1 - edge0).max(f32::EPSILON)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// CPU producer for the canonical four-stratum density payload. Nonlinear
+/// formation/profile response happens before the mip chain is built, so far
+/// footprints average occupied area instead of thresholding an averaged raw
+/// signal into salt-and-pepper cloud pixels.
+fn cloud_surface_density_cpu(
+    surface_shape: [f32; 4],
+    normalized_height: f32,
+    coverage: f32,
+    cloud_type: f32,
+    local_base: f32,
+    local_top: f32,
+) -> f32 {
+    let h = (normalized_height - local_base) / (local_top - local_base).max(0.02);
+    let cov = (coverage * 1.25).clamp(0.0, 1.0);
+    if h <= 0.0 || h >= 1.0 || cov <= 1.0e-3 {
+        return 0.0;
+    }
+
+    let stratus_w = 1.0 - smoothstep(0.18, 0.38, cloud_type);
+    let storm_w = smoothstep(0.72, 0.88, cloud_type);
+    let cumulus_w = (1.0 - stratus_w - storm_w).max(0.0);
+    let threshold = 0.58 + (0.30 - 0.58) * cov;
+    let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
+
+    let z = normalized_height.clamp(0.0, 1.0) * 4.0 - 0.5;
+    let shape = if z <= 0.0 {
+        surface_shape[0]
+    } else if z < 1.0 {
+        surface_shape[0] + (surface_shape[1] - surface_shape[0]) * z
+    } else if z < 2.0 {
+        surface_shape[1] + (surface_shape[2] - surface_shape[1]) * (z - 1.0)
+    } else if z < 3.0 {
+        surface_shape[2] + (surface_shape[3] - surface_shape[2]) * (z - 2.0)
+    } else {
+        surface_shape[3]
+    };
+    let mut mass = shape - threshold - vertical_narrow;
+    let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
+    mass = mass.max((shape - (threshold - 0.06)) * anvil_profile * storm_w);
+
+    let bottom_softness = 0.16;
+    let stratus_profile =
+        smoothstep(0.0, bottom_softness * 0.45, h) * (1.0 - smoothstep(0.72, 1.0, h));
+    let cumulus_profile =
+        smoothstep(0.0, bottom_softness * 0.75, h) * (1.0 - smoothstep(0.70, 1.0, h));
+    let storm_profile =
+        smoothstep(0.0, bottom_softness * 0.35, h) * (1.0 - smoothstep(0.88, 1.0, h));
+    let vertical_profile =
+        stratus_profile * stratus_w + cumulus_profile * cumulus_w + storm_profile * storm_w;
+    smoothstep(0.0, 0.055, mass) * vertical_profile
 }
 
 fn latitude_band_profile(lat: f32) -> f32 {

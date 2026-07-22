@@ -251,8 +251,19 @@ Windows fast-incremental and macOS workaround examples live in
 - Parallel agents must use separate worktrees and therefore separate `target/`
   directories. They share sccache, not Cargo output directories. Size each
   Cargo process with `scripts/setup-build-env.sh --agents N` or
-  `scripts/setup-build-env.ps1 -AgentSlots N`; no two simultaneous Cargo
-  processes may write to the same target directory. On WSL/Linux, create the
+  `scripts/setup-build-env.ps1 -AgentSlots N` (**both default to 1** — the full
+  machine for the solo case; pass `N` only when you really will run N concurrent
+  Cargo processes); no two simultaneous Cargo processes may write to the same
+  target directory.
+- **After every `git worktree add`, resync sccache** — `scripts\setup-build-env.ps1
+  -SyncOnly` (Windows) or `scripts/setup-build-env.sh --agents N --all-worktrees`
+  (Linux/macOS). `SCCACHE_BASEDIRS` is a startup snapshot of `git worktree list`
+  held by the *server*; a worktree missing from it can never hit another
+  worktree's cache and silently does a full cold build. `bash
+  scripts/check-build-env.sh` names any worktree that is not normalized. sccache
+  activation itself is the global `RUSTC_WRAPPER` on Windows (a repo-local
+  `.cargo/config.toml` is invisible to worktrees outside the checkout) — see
+  `docs/build_speed.md` §5.0/§5.3.1. On WSL/Linux, create the
   complete worktree set first, run `scripts/setup-build-env.sh --agents N
   --all-worktrees`, source `scripts/sccache-on.sh` in every agent shell, and
   require `bash scripts/check-build-env.sh --parallel` to pass before work begins.

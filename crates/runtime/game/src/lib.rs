@@ -7,6 +7,7 @@ mod base_editor;
 mod body_tree_panel;
 mod bridge;
 mod camera;
+pub mod capture_health;
 mod control_bus;
 mod controls;
 mod coords;
@@ -517,6 +518,11 @@ impl AppBuilder {
                      cosmic_text=warn,gilrs_core=warn,gilrs=warn,\
                      offset_allocator=warn"
                     .to_string(),
+                // Counts ERROR events so a headless capture that logged a
+                // shader/pipeline validation failure can exit non-zero instead
+                // of writing a PNG and reporting success (BL-20). See
+                // `capture_health`.
+                custom_layer: capture_health::error_capture_layer,
                 ..default()
             });
         // No winit event loop in headless mode — `ScheduleRunnerPlugin` (added below)

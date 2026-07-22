@@ -29,6 +29,8 @@
     orbital_cloud_shade,
     sample_weather_soft,
     orbital_cloud_normal_body,
+    cloud_surface_density,
+    cloud_surface_column_density,
     WEATHER_TEXEL_ANGLE,
 }
 
@@ -76,6 +78,7 @@ struct SolidPlanetParams {
 // surface-following first vertical with optical-depth/height moments.
 @group(3) @binding(5) var cloud_weather_tex: texture_cube<f32>;
 @group(3) @binding(6) var cloud_weather_sampler: sampler;
+@group(3) @binding(7) var cloud_surface_density_tex: texture_cube<f32>;
 #endif
 
 // Rotate vector `v` by unit quaternion `q` (xyz = axis·sin, w = cos).
@@ -252,7 +255,7 @@ fn fragment(in: VertexOutput) -> FragOutput {
     let weather_lod = clamp(
         log2(max(length(fwidth(n_body)) / WEATHER_TEXEL_ANGLE, 1.0)),
         0.0,
-        5.0,
+        7.0,
     );
     if params.albedo.w >= 0.5 {
         let cube = textureSampleLevel(albedo_cube_tex, albedo_cube_sampler, n_body, 0.0);
@@ -317,11 +320,17 @@ fn fragment(in: VertexOutput) -> FragOutput {
         // Surface shadow probe: weather between this terrain point and the sun.
         let sun_body = rotate_quat(params.orientation, sun_dir);
         let shadow_n = normalize(n_body + sun_body * 0.07);
-        let shadow_col = weather_column_from_texel(
-            sample_weather_soft(cloud_weather_tex, cloud_weather_sampler, shadow_n, weather_lod),
+        let shadow_strata = textureSampleLevel(
+            cloud_surface_density_tex,
+            cloud_weather_sampler,
+            shadow_n,
+            weather_lod,
+        );
+        let shadow_density = cloud_surface_column_density(
+            shadow_strata,
         );
         let day_shadow = smoothstep(-0.05, 0.25, dot(normal, sun_dir));
-        let shadow_op = clamp(1.0 - exp(-shadow_col.optical_depth * shadow_col.optical_depth), 0.0, 1.0);
+        let shadow_op = clamp(1.0 - exp(-shadow_density * shadow_density * 3.0), 0.0, 1.0);
         lit *= mix(1.0, 0.58, shadow_op * day_shadow * 0.85);
 
         // Height-parallax sample: re-hit a sphere at the local deck altitude so
@@ -352,7 +361,16 @@ fn fragment(in: VertexOutput) -> FragOutput {
             weather_lod,
         );
         let column = weather_column_from_texel(weather);
-        if column.opacity > 1.0e-3 {
+        let surface_strata = textureSampleLevel(
+            cloud_surface_density_tex,
+            cloud_weather_sampler,
+            cloud_n_body,
+            weather_lod,
+        );
+        let surface_density = cloud_surface_column_density(
+            surface_strata,
+        );
+        if surface_density > 1.0e-3 {
             // Moment normal from a coarser mip (the stencil widens with lod)
             // and relaxed 0.25 toward the sphere normal — matching the cloud
             // composite's far-range relaxation, so both orbital projections
@@ -391,7 +409,12 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 * 0.55
                 * shade.x;
             let night = smoothstep(-0.12, 0.08, n_dot_l);
-            lit = mix(lit, cloud_lit * night, shade.y * night);
+            let surface_opacity = clamp(
+                surface_density * (1.0 - exp(-column.optical_depth * 1.2)),
+                0.0,
+                0.92,
+            );
+            lit = mix(lit, cloud_lit * night, surface_opacity * night);
         }
     }
 
