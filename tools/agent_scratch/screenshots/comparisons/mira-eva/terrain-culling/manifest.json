@@ -1,0 +1,55 @@
+{
+  "schema_version": 2,
+  "created_unix_s": 1784741162,
+  "revision": "8f2c8f8da6ecf0665a383246680a93bb76796a47",
+  "working_tree_dirty": true,
+  "preset": "mira-eva",
+  "axis": "terrain-culling",
+  "axis_env_key": "THALOS_TERRAIN_CULL",
+  "capture_mode": "cold",
+  "game_executable": "C:\\Users\\korbi\\Documents\\thalos\\.claude\\worktrees\\terrain-status-f451c4\\target\\debug\\thalos_capture_host.exe",
+  "invariant_environment": {
+    "THALOS_SCREENSHOT_AZIMUTH": null,
+    "THALOS_SCREENSHOT_DISTANCE": null,
+    "THALOS_SCREENSHOT_ELEVATION": null,
+    "THALOS_SCREENSHOT_HUD": null,
+    "THALOS_SCREENSHOT_SIZE": null,
+    "THALOS_SCREENSHOT_WARMUP": null,
+    "THALOS_SSAO": null,
+    "THALOS_TERRAIN_INSPECTION": null,
+    "THALOS_TILE_CACHE": null,
+    "THALOS_WGPU_BACKEND": null
+  },
+  "image_width": 2048,
+  "image_height": 1280,
+  "variants": [
+    {
+      "ordinal": 1,
+      "label": "backface",
+      "env_value": "back",
+      "image": "tools/agent_scratch/screenshots/comparisons/mira-eva/terrain-culling/01_backface.png"
+    },
+    {
+      "ordinal": 2,
+      "label": "two-sided",
+      "env_value": "none",
+      "image": "tools/agent_scratch/screenshots/comparisons/mira-eva/terrain-culling/02_two-sided.png"
+    }
+  ],
+  "contact_sheet": "tools/agent_scratch/screenshots/comparisons/mira-eva/terrain-culling/contact_sheet.png",
+  "comparisons": [
+    {
+      "baseline": "backface",
+      "variant": "two-sided",
+      "diff_image": "tools/agent_scratch/screenshots/comparisons/mira-eva/terrain-culling/diff_01_vs_02.png",
+      "wipe_image": "tools/agent_scratch/screenshots/comparisons/mira-eva/terrain-culling/wipe_01_vs_02.png",
+      "metrics": {
+        "mean_abs_rgb_255": 7.725583902994791,
+        "rms_rgb_255": 29.631118747731875,
+        "max_channel_delta": 255,
+        "changed_pixels": 205601,
+        "changed_fraction": 0.07843055725097656
+      }
+    }
+  ]
+}

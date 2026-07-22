@@ -2566,6 +2566,23 @@ fn eva_surface_context(
         .unwrap_or(0.0) as f64;
     let surface_r = radius_m + height_m;
 
+    // The EVA site is a *fixed* body-fixed direction (the canonical spawn), with
+    // no sun constraint — unlike every other airless preset, which searches a
+    // lighting band. Log the resulting incidence so a black frame can be told
+    // apart from a render bug (BL-34).
+    static EVA_SUN_LOGGED: std::sync::Once = std::sync::Once::new();
+    EVA_SUN_LOGGED.call_once(|| {
+        if let Some(sun_body) = sun_direction_world(solar, body_id)
+            .map(|sun| (body_state.orientation.inverse() * sun).normalize())
+        {
+            let incidence_deg = dir_body.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
+            info!(
+                target: "thalos::screenshot",
+                "eva site: solar incidence {incidence_deg:.1}° ({})",
+                if incidence_deg >= 90.0 { "NIGHT" } else { "lit" },
+            );
+        }
+    });
     Some(HubContext {
         body_id,
         center_world: body_state.position + up_world * surface_r,
