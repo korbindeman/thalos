@@ -10,6 +10,7 @@
     orbital_cloud_shade,
     sample_weather_soft,
     orbital_cloud_normal_body,
+    cloud_surface_density,
     WEATHER_TEXEL_ANGLE,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
@@ -42,6 +43,7 @@ struct CloudCompositeParams {
 @group(3) @binding(4) var weather_sampler: sampler;
 @group(3) @binding(5) var cloud_layer_texture: texture_2d<f32>;
 @group(3) @binding(6) var cloud_distance_texture: texture_2d<f32>;
+@group(3) @binding(7) var surface_density_texture: texture_cube<f32>;
 
 struct VertexInput {
     @builtin(instance_index) instance_index: u32,
@@ -204,14 +206,17 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
         if hit_base && tb0 > 0.0 { seg_end = tb0; } else { seg_end = tt1; }
     }
     seg_start = max(seg_start, 0.0);
-    seg_end = min(seg_end, seg_start + 50000.0);
-    let step = clamp((seg_end - seg_start) / 42.0, 65.0, 500.0);
+    seg_end = min(seg_end, seg_start + 75000.0);
+    // Mirror the adaptive marcher's maximum clear-air reach. Fine refinement
+    // consumes more iterations only after broad mass is found, where opacity
+    // normally terminates the near ray before the reach frontier matters.
+    let step = 600.0;
     let span = steps * step;
     let t_stop = min(seg_start + span, seg_end);
     let fade_begin = min(seg_start + 0.50 * span, t_stop);
     // z = the marcher's entry-distance ownership (its ENTRY_FADE window):
     // shells entered far away belong wholly to this band march.
-    let near_scale = 1.0 - smoothstep(36000.0, 50000.0, seg_start);
+    let near_scale = 1.0 - smoothstep(56000.0, 75000.0, seg_start);
     return vec3<f32>(fade_begin, t_stop, near_scale);
 }
 
@@ -220,7 +225,7 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
 // column occupancy × local vertical profile, so the limb gets true vertical
 // thickness and distant horizon decks break where columns are clear — instead
 // of one representative sphere whose tangent painted a hard-edged solid wall.
-// Weather varies at ≥ ~20 km/texel, so K samples across even a 500 km chord
+// Weather varies at ≥ ~5 km/texel at the base level, so K samples across even a 500 km chord
 // stay well-sampled (no 3-D noise is touched here).
 const ORBITAL_MARCH_SAMPLES = 6u;
 
@@ -288,7 +293,7 @@ fn sample_orbital_cloud(
     let lod_chord = clamp(
         log2(max((seg / planet_radius) / WEATHER_TEXEL_ANGLE, 1.0)),
         0.0,
-        5.0,
+        7.0,
     );
     // `col.opacity` is an AREAL FRACTION (see weather_cloud_opacity), so the
     // chord takes the strongest single column plus a damped stacking term —
@@ -308,8 +313,6 @@ fn sample_orbital_cloud(
         let h_b = (length(cam_pos + t_b * ray_dir - planet_center) - planet_radius - base_alt)
             * inv_thickness;
         h_prev = h_b;
-        // Partition of unity with the near march: segments the marcher already
-        // integrated contribute nothing here.
         var far_w = 1.0;
         if reach.y > 0.0 && reach.z > 0.0 {
             var near_own = 0.0;
@@ -325,24 +328,30 @@ fn sample_orbital_cloud(
         }
         let p = cam_pos + t_m * ray_dir - planet_center;
         let n_l = rotate_quat(cloud_params.world_to_body_orientation, normalize(p));
-        let col = weather_column_from_texel(
-            textureSampleLevel(weather_texture, weather_sampler, n_l, lod_chord),
+        let weather = textureSampleLevel(weather_texture, weather_sampler, n_l, lod_chord);
+        let col = weather_column_from_texel(weather);
+        let strata = textureSampleLevel(
+            surface_density_texture,
+            weather_sampler,
+            n_l,
+            lod_chord,
         );
-        if col.opacity <= 1.0e-4 {
+        // Deterministic Simpson-like vertical integration over the chord
+        // segment. All three evaluations reuse one filtered surface texel, so
+        // the far tier follows the same typed density contract without point-
+        // sampling a Cartesian volume or adding stochastic holes.
+        let density_a = cloud_surface_density(strata, clamp(h_a, 0.0, 1.0));
+        let density_m = cloud_surface_density(
+            strata,
+            clamp(0.5 * (h_a + h_b), 0.0, 1.0),
+        );
+        let density_b = cloud_surface_density(strata, clamp(h_b, 0.0, 1.0));
+        let profile = 0.25 * density_a + 0.50 * density_m + 0.25 * density_b;
+        if profile <= 1.0e-4 {
             continue;
         }
-        // Analytic box-profile occupancy: the fraction of this segment's
-        // height span that lies inside the column's deck. Point-sampling the
-        // profile needed a per-pixel jitter against arc stripes, and that
-        // jitter — with no temporal pass over this material — rendered as
-        // white-noise speckle holes across the far disc; the segment integral
-        // is deterministic and smooth in both t and screen space.
-        let h_lo = min(h_a, h_b);
-        let h_hi = max(h_a, h_b);
-        let overlap = max(min(h_hi, col.top_frac) - max(h_lo, col.base_frac), 0.0);
-        let profile = clamp(overlap / max(h_hi - h_lo, 1.0e-4), 0.0, 1.0);
         let a_col = 1.0 - exp(-col.optical_depth * 1.2);
-        let candidate = col.opacity * profile * a_col * far_w;
+        let candidate = profile * a_col * far_w;
         if candidate > best_c {
             best_c = candidate;
             best_t = t_m;

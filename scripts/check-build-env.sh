@@ -62,21 +62,38 @@ if have rustc; then
   [[ -n "$rust_host" ]] && ok "Rust host: $rust_host" || fail "could not determine Rust host triple"
 fi
 
+# sccache is activated EITHER by a machine-global RUSTC_WRAPPER (the Windows
+# path -- reaches worktrees a repo-local config can never be discovered from) or
+# by build.rustc-wrapper in a per-worktree config (the Linux --all-worktrees
+# path). Accept either; failing only on the config form is what let worktrees
+# build uncached while this check still passed.
 sccache_bin=""
+if [[ -n "${RUSTC_WRAPPER:-}" ]]; then
+  sccache_bin="$RUSTC_WRAPPER"
+  ok "sccache activation: RUSTC_WRAPPER (global, worktree-independent)"
+fi
+
 if [[ -f "$config" ]]; then
   ok "local Cargo config: $config"
-  grep -Eq '^[[:space:]]*rustc-wrapper[[:space:]]*=' "$config" \
-    && ok "Cargo rustc-wrapper configured" || fail "Cargo rustc-wrapper missing from $config"
   grep -Eq '^[[:space:]]*jobs[[:space:]]*=' "$config" \
-    && ok "Cargo job budget configured" || fail "Cargo job budget missing from $config"
-  sccache_bin="$(sed -n 's/^[[:space:]]*rustc-wrapper[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
+    && ok "Cargo job budget configured: $(sed -n 's/^[[:space:]]*jobs[[:space:]]*=[[:space:]]*\([0-9]*\).*/\1/p' "$config" | head -1)" \
+    || fail "Cargo job budget missing from $config"
+  if [[ -z "$sccache_bin" ]]; then
+    config_wrapper="$(sed -n 's/^[[:space:]]*rustc-wrapper[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$config" | head -1)"
+    if [[ -n "$config_wrapper" ]]; then
+      sccache_bin="$config_wrapper"
+      ok "sccache activation: build.rustc-wrapper in $config"
+    else
+      fail "no sccache activation: set RUSTC_WRAPPER globally or build.rustc-wrapper in $config"
+    fi
+  fi
   if [[ "$os" == "Linux" && -n "$rust_host" ]]; then
     grep -Fq "[target.$rust_host]" "$config" \
       && ok "host-specific linker section configured" \
       || fail "missing [target.$rust_host] in $config"
   fi
 else
-  fail "$config is missing; run scripts/setup-build-env.sh"
+  fail "$config is missing; run scripts/setup-build-env.sh (or .ps1 on Windows)"
 fi
 [[ -n "$sccache_bin" ]] || sccache_bin="$(command -v sccache 2>/dev/null || true)"
 if [[ -n "$sccache_bin" && -x "$sccache_bin" ]]; then
@@ -106,9 +123,35 @@ if [[ -n "$sccache_bin" && -x "$sccache_bin" ]]; then
     ok "sccache server responds"
     if grep -qi 'Base director' <<<"$stats"; then
       ok "sccache base-directory normalization is active"
-      grep -Fq "$repo_root" <<<"$stats" \
-        && ok "sccache normalization includes this worktree" \
-        || fail "sccache base directories do not include $repo_root; rerun setup after creating worktrees"
+      # Compare canonically: git bash reports "/c/Users/korbi/x" while sccache
+      # prints "c:/users/korbi/x/". Without this the check fails on a correct
+      # Windows setup and passes on nothing.
+      canon_path() {
+        printf '%s' "$1" \
+          | sed -e 's#^/\([A-Za-z]\)/#\1:/#' -e 's#\\#/#g' -e 's#/*$##' \
+          | tr 'A-Z' 'a-z'
+      }
+      live_dirs="$(canon_path "$(sed -n 's/^Base directories[[:space:]]*//p' <<<"$stats")")"
+      # Every worktree must be normalized, not just this one: a worktree missing
+      # from the server's set hashes absolute paths and can never hit another
+      # worktree's cache. The set is a startup snapshot, so it silently decays
+      # on each `git worktree add`.
+      missing=0
+      while IFS= read -r worktree_root; do
+        [[ -n "$worktree_root" ]] || continue
+        if grep -qF "$(canon_path "$worktree_root")" <<<"$live_dirs"; then
+          ok "sccache normalizes worktree: $worktree_root"
+        else
+          fail "sccache does NOT normalize worktree: $worktree_root (cross-worktree hits impossible)"
+          missing=$((missing + 1))
+        fi
+      done < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p')
+      if (( missing > 0 )); then
+        case "$os" in
+          MINGW*|MSYS*|CYGWIN*) echo "      fix: scripts\\setup-build-env.ps1 -SyncOnly" >&2 ;;
+          *) echo "      fix: scripts/setup-build-env.sh --agents <N> --all-worktrees" >&2 ;;
+        esac
+      fi
     else
       fail "sccache did not report base directories; verify SCCACHE_BASEDIRS/version"
     fi
@@ -182,10 +225,20 @@ if [[ $require_parallel -eq 1 ]]; then
   [[ -n "${SCCACHE_BASEDIRS:-}" ]] \
     && ok "parallel mode: SCCACHE_BASEDIRS is set" \
     || fail "parallel mode is missing SCCACHE_BASEDIRS"
+  # Cargo discovers config by walking UP from the cwd, so a worktree nested
+  # inside the checkout inherits the repo-root config for free. Only worktrees
+  # outside it (C:/tmp/..., ~/.codex/worktrees/...) need their own -- those are
+  # the ones that silently built with no linker and no job budget.
   while IFS= read -r worktree_root; do
-    [[ -f "$worktree_root/.cargo/config.toml" ]] \
-      && ok "worktree config: $worktree_root" \
-      || fail "worktree lacks .cargo/config.toml: $worktree_root"
+    [[ -n "$worktree_root" ]] || continue
+    if [[ -f "$worktree_root/.cargo/config.toml" ]]; then
+      ok "worktree config: $worktree_root"
+    elif [[ "$worktree_root" == "$repo_root"/* ]]; then
+      ok "worktree inherits repo-root config: $worktree_root"
+    else
+      fail "worktree outside the checkout has no .cargo/config.toml: $worktree_root"
+      echo "      no rust-lld and no job budget there; rerun setup with --all-worktrees/-AllWorktrees" >&2
+    fi
   done < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p')
 fi
 

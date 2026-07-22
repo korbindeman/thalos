@@ -729,6 +729,9 @@ pub(crate) fn spawn_body_terrain(
         sun_shadow_map_2: sun_shadow_maps[2].clone(),
         // White fallback until the terrain loop patches the live AO image.
         ao: Handle::default(),
+        // Likewise for the contact-shadow term (W18a); the gate lives in
+        // `extras.shadow.gate.z`, written by the sun-shadow rig.
+        contact_shadow: Handle::default(),
     };
 
     let mut terrain = commands.spawn((
@@ -1138,6 +1141,9 @@ pub(super) fn update_body_terrain_atmosphere(
     // .4 = screen-space AO image (F5); patched onto each terrain material so the
     //      shader can multiply it into the ambient occlusion.
     // .5 = AO config: drives the per-material AO gate/debug flag (inspection.w).
+    // .6 = screen-space contact-shadow image (W18a); patched on alongside the AO
+    //      image. Its gate travels inside `.3`'s block (`gate.z`), published by
+    //      the shadow rig, so there is no separate config arg here.
     cloud_io: (
         Option<Res<thalos_body_render::CloudsConfig>>,
         Res<super::clouds::ActiveCloudBody>,
@@ -1145,6 +1151,7 @@ pub(super) fn update_body_terrain_atmosphere(
         Res<super::sun_shadow::SunShadowState>,
         Option<Res<super::ssao::AoImage>>,
         Res<super::ssao::SsaoConfig>,
+        Option<Res<super::contact_shadow::ContactShadowImage>>,
     ),
     flatten_registry: Res<TerrainFlattenRegistry>,
     // ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident-height-tile lookup inputs for the sky material's
@@ -1460,6 +1467,11 @@ pub(super) fn update_body_terrain_atmosphere(
             mat.ao = ao.handle.clone();
         }
         mat.extras.inspection.w = cloud_io.5.terrain_flag();
+        // Contact shadows (W18a): bind the live full-res image; the gate came in
+        // with `extras.shadow` above (`gate.z`), so nothing extra is set here.
+        if let Some(contact) = &cloud_io.6 {
+            mat.contact_shadow = contact.handle.clone();
+        }
         // Live strength/gain override (keeps the terrain's atmosphere-driven
         // ambient sky fill in step with the sky dome). `< 0` = keep authored.
         if tuning.strength >= 0.0 {

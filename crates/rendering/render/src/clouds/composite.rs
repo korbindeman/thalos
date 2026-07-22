@@ -41,6 +41,10 @@ pub struct CloudCompositeMaterial {
     /// Near-volume first-hit distance, metres from the ship camera.
     #[texture(6, sample_type = "float", filterable = false)]
     pub cloud_distance: Handle<Image>,
+    /// Canonical four-stratum surface-space broad density. Reuses the weather
+    /// sampler at binding 4 so both projections select identical mip footprints.
+    #[texture(7, dimension = "cube")]
+    pub surface_density: Handle<Image>,
 }
 
 impl Material for CloudCompositeMaterial {

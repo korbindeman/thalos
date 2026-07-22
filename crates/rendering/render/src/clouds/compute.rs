@@ -139,6 +139,7 @@ fn prepare_textures_bind_group(
     let history_distance_view = gpu_images
         .get(&clouds_image.history_distance_image)
         .unwrap();
+    let surface_density_view = gpu_images.get(&clouds_image.surface_density_image).unwrap();
     let bind_group = render_device.create_bind_group(
         None,
         &pipeline_cache.get_bind_group_layout(&pipeline.texture_bind_group_layout),
@@ -150,6 +151,7 @@ fn prepare_textures_bind_group(
             (4, &weather_view.sampler),
             (5, &history_view.texture_view),
             (6, &history_distance_view.texture_view),
+            (7, &surface_density_view.texture_view),
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));

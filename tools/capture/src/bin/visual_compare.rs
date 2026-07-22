@@ -79,6 +79,27 @@ const SSAO_VARIANTS: &[Variant] = &[
     },
 ];
 
+/// Shadow-tier axis (BL-37). Isolates the **contact tier** (W18a) against the
+/// cascade rig alone — the single factor under test is whether the screen-space
+/// contact march contributes, per
+/// ADR-20260722T111848Z-shadows-three-tier-not-virtual-shadow-maps. `raw` paints
+/// the contact term itself, which separates "the march is wrong" from "the
+/// receiver applies it wrong".
+const SHADOW_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "cascade-only",
+        value: "off",
+    },
+    Variant {
+        label: "contact",
+        value: "on",
+    },
+    Variant {
+        label: "raw",
+        value: "show",
+    },
+];
+
 const TERRAIN_LIGHTING_VARIANTS: &[Variant] = &[
     Variant {
         label: "lit",
@@ -136,6 +157,11 @@ const AXES: &[Axis] = &[
         name: "ssao",
         env_key: "THALOS_SSAO",
         variants: SSAO_VARIANTS,
+    },
+    Axis {
+        name: "shadow",
+        env_key: "THALOS_CONTACT_SHADOW",
+        variants: SHADOW_VARIANTS,
     },
     Axis {
         name: "terrain-lighting",

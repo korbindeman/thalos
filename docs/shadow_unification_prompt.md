@@ -120,16 +120,52 @@
 >    beyond the caster band is the heightfield horizon term's job (W12), per
 >    the MSFS split.
 >
-> **Remaining:** user interactive verification (crispness + unpaused
-> stability) → bias/strength tuning; **per-fragment heightfield horizon term
-> for all spine materials (W12 v2 — the "Terrain Shadows" half of the MSFS
-> split, now the top fidelity item)**; grass cast; W18 PCSS (contact-hardening
-> penumbras; consider Vogel-disk + per-pixel rotation only if TAA lands — 
-> without temporal accumulation rotated-disk noise shows raw); W2 cloud
-> shadows; F8's `shade_surface` port retiring the `SHADOW_FLOOR` attenuation.
-> Perf headroom if needed: hardware comparison samplers (halve tap cost),
-> round-robin far-cascade updates. Status also recorded in
-> `docs/graphics_fidelity.md` §3 F6 + §4.2 W5/W6/W12.
+> **Remaining — reordered 2026-07-22 by
+> ADR-20260722T111848Z-shadows-three-tier-not-virtual-shadow-maps**, which
+> formalises the MSFS split this file already anticipated into **three range
+> regimes with three mechanisms**, and rejects virtual shadow maps (VSM serves
+> only the mid-field, the one regime already adequate; the terrain — our
+> dominant receiver — never renders into the cascade maps, so the caster set is
+> small and a page table is pure overhead):
+>
+> 1. User interactive verification (crispness + unpaused stability) →
+>    bias/strength tuning.
+> 2. ~~**W18a contact shadows**~~ — **landed 2026-07-22** (check + clippy
+>    clean, awaiting screenshot). `rendering::contact_shadow`: full-res
+>    R16Float pass over `SceneDepthImage`, 12-step view-space march toward the
+>    sun, thickness-tested occluders (depth is a heightfield, not a solid, so
+>    without it a distant mountain shadows everything in front of it),
+>    grazing-widened normal bias, 120 m fade-out. Full-res and unblurred
+>    deliberately — SSAO's half-res + blur would erase the high-frequency edge
+>    that is the whole point. The gate rides `ShadowCascadeBlock.gate.z`
+>    (published by the rig, so every consumer inherits it) and
+>    `thalos::shadow::contact_shadow_factor` is the one sampler. **Terrain is
+>    the only receiver so far** — the remaining wiring (veg/rock/grass, hull,
+>    and `ShadowedStandardMaterial` for runway/structures) is the follow-on,
+>    and the runway matters most since parked-craft grounding is the point.
+>    Diagnostics: `THALOS_CONTACT_SHADOW=off|show`, `just compare <preset>
+>    shadow`.
+> 3. **W12 v2** — per-fragment heightfield horizon term for all spine
+>    materials (the far-field tier; cascades cannot reach here either).
+> 4. **Hardware comparison samplers** — reclassified from "perf headroom if
+>    needed" to a **prerequisite**: `cascade_factor` currently issues 16
+>    `textureLoad`s and hand-weights a separable tent, where 9
+>    `textureSampleCompare` taps reach equivalent filter quality with free
+>    bilinear. This is what funds PCSS.
+> 5. **W18c PCSS** contact-hardening penumbras + a cross-cascade blend (only
+>    the outermost cascade fades today, so 0→1 and 1→2 hand off hard — a seam
+>    that gets *more* visible once penumbra width varies). Consider
+>    Vogel-disk + per-pixel rotation only if TAA lands; without temporal
+>    accumulation rotated-disk noise shows raw.
+> 6. Grass cast; W2 cloud shadows; F8's `shade_surface` port retiring the
+>    `SHADOW_FLOOR` attenuation.
+>
+> **Cascade extents deliberately do not grow** — requests to "reach further"
+> are answered by step 3, not by larger boxes, which is what forces every bias
+> constant in `thalos::shadow` to be hard-capped today. Round-robin
+> far-cascade updates remain available as perf headroom. Status also recorded
+> in `docs/graphics_fidelity.md` §3 F6 + §4.2 W5/W6/W12/W18, and queued as
+> backlog rows W18 / W12r / BL-37.
 
 Self-contained prompt for the agent taking on the shadow sprint. Read
 `docs/graphics_fidelity.md` §2.3 (one-world invariants #2 and #3), §3 (F6), and
@@ -215,9 +251,16 @@ hypothesis set, falsifiable tests — before patching anything.
    no-bake invariant). This is the actual answer to "shadows at any range".
 5. **Then retire the analytic terrain craft-shadow proxy** once craft cast into
    the rig on every receiver — one definition of the craft's shadow.
-6. Optional polish after the above verifies: PCSS contact hardening (W18,
-   reuse `SceneDepthImage`), cloud shadows (W2/CLOUD-5, integrate the canonical
-   `CloudWeatherField`/density into `CloudSunTransmittance`).
+6. **Not optional polish** (reclassified 2026-07-22,
+   ADR-20260722T111848Z-shadows-three-tier-not-virtual-shadow-maps): **W18a
+   screen-space contact shadows** are the contact tier — the regime cascade 0
+   cannot serve at ~0.2 m/texel — and land before PCSS, which in turn waits on
+   the hardware-comparison-sampler refactor that pays for it. Cloud shadows
+   (W2/CLOUD-5, integrating the canonical `CloudWeatherField`/density into
+   `CloudSunTransmittance`) stay after those. Note W11's aerial-perspective
+   froxel volume (ADR-20260722T111847Z) makes **volumetric shafts** nearly free
+   — sampling `thalos::shadow` per froxel — so it is worth landing before
+   further shadow-filter work.
 
 ## Constraints & tooling
 

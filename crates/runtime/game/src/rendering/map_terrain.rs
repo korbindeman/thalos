@@ -431,6 +431,9 @@ fn spawn_map_terrain(
         sun_shadow_map_2: sun_shadow_maps[2].clone(),
         // Orbital map terrain never runs SSAO (inspection.w stays 0); white fallback.
         ao: Handle::default(),
+        // Nor contact shadows — map terrain never binds the cascade rig at all
+        // (gate.x stays 0), so gate.z is moot; white fallback.
+        contact_shadow: Handle::default(),
     };
 
     let entity = commands

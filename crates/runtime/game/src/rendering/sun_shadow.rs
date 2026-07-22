@@ -457,6 +457,9 @@ fn update_sun_shadow_camera(
     origin: Res<crate::rendering::RenderOrigin>,
     view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
     height_sources: Res<thalos_physics_local::HeightSourceRegistry>,
+    // Contact tier (W18a): its gate is published in `block.gate.z` so it reaches
+    // every consumer through the binding they already carry.
+    contact: Res<super::contact_shadow::ContactShadowConfig>,
     mut shadow_cams: Query<
         (
             &mut Transform,
@@ -770,7 +773,17 @@ fn update_sun_shadow_camera(
             block.params[i] = Vec4::new(1.0 / (far - SHADOW_NEAR_M), texel, 0.0, 0.0);
             looks[i] = look_i;
         }
-        block.gate = Vec4::new(SHADOW_STRENGTH, active_cascades as f32, 0.0, 0.0);
+        // z = the contact-shadow gate (W18a). Published from the rig rather than
+        // per-material so every consumer of the block inherits it. Note it rides
+        // *inside* the cascade gate: when `gate.x == 0` the samplers early-out
+        // fully lit and the contact term is moot along with them — the rig-off
+        // cases (orbital map terrain, inactive pass) want no shadow at all.
+        block.gate = Vec4::new(
+            SHADOW_STRENGTH,
+            active_cascades as f32,
+            contact.shadow_gate(),
+            0.0,
+        );
         // Sun direction (toward the sun) drives the sampler's slope-scaled bias.
         block.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
         state.block = block;

@@ -215,6 +215,80 @@ km macro modulation once per short ray; neither changes sample positions. Any
 future empty-space leap requires a true max-density bound over the skipped
 interval.
 
+## 2026-07-22 BL-33 adaptive-march checkpoint
+
+The immutable CLOUD-0 and CLOUD-2/3 baselines above remain the historical
+before-state. BL-33 increases the canonical weather cube from 256² to 1024²
+per face and from six to eight mip levels. The complete RGBA8 weather mip chain
+is 33,553,920 bytes; total 1280×720 Baseline cloud allocation is now
+74,612,224 bytes (71.16 MiB).
+
+Matched cold Baseline captures for the accepted enriched-weather,
+coarse-to-fine adaptive marcher, and 112-probe reach extension report:
+
+| View | GPU mean | GPU p95 |
+|---|---:|---:|
+| Runway | 1.474 ms | 1.498 ms |
+| Cruise | 1.004 ms | 0.992 ms* |
+| Planet | 0.078 ms | 0.085 ms |
+| Limb | 0.081 ms | 0.081 ms* |
+| Sunset | 1.229 ms | 1.247 ms |
+
+`*` A small number of timing outliers lifted the arithmetic mean above p95;
+the report preserves both raw aggregates rather than forcing an ordering.
+
+The runway coverage/banding probe measured 16.49% cloud coverage and 22.38
+normalized contour extrema, versus 13.15% and 27.85 after the weather-only
+slice. Cruise coverage remained stable at 10.90% versus 11.11%.
+The reach slice kept the 600 m/120 m cadence but raised the Baseline/production
+budget from 80 to 112 probes (48.0 → 67.2 km clear-air reach), expanded the
+shell/handoff cap from 50 to 75 km, and bounded the context anchor to 25 km
+beyond entry. A fixed-mask comparison kept runway extrema stable (9.21 → 9.14
+per cloud width) while cruise cloud coverage rose 20.2% from newly resolved
+cells. Final evidence and process logs live under
+`artifacts/visual/runs/bl-33/step-4/`; every log
+passed the fatal shader/pipeline/panic/capture-health scan. Planet projection
+is seam-free. The visibly smoother slab in grazing limb/cruise/sunset views is
+the still-open CLOUD-6 density-derived-atlas/reduced-limb residual, not an
+accepted fidelity result. A 24-sample live march of the exact 3-D basis was
+tested and fully reverted after it aliased the periodic volume into severe
+horizontal combs across grazing chords; the far tier therefore requires the
+planned prefiltered moment atlas.
+
+A follow-up GPU atlas bracket showed that prefiltering alone is insufficient
+when the producer projects that same periodic near tile over the whole planet.
+A 512² cubemap carrying OD/height moments and then four vertical OD strata was
+tested with sparse and true tangent-footprint filters plus 6- and 24-sample
+reconstruction. Weak filters exposed a repeating planet grid; strong filters
+collapsed it back into the smooth slab. All implementation changes were
+reverted. Rejected evidence is retained under
+`artifacts/visual/runs/bl-33/step-6a/` through `step-6h/`; the accepted baseline
+remains `step-4/`. See
+[ADR-20260722T111036Z](adr/20260722T111036Z-far-atlas-cannot-project-the-periodic-near-tile.md).
+
+The follow-up weather-phase interpretation was also bounded and rejected as a
+far producer. Continuous coverage/base/top phase offsets on the broad and
+formation domains improved the accepted local runway metric (20.32% coverage,
+6.22 extrema per 1,000 masked cloud pixels) while leaving cruise coverage at
+83.32%. But a cold 512² four-stratum bake of that exact density drew long
+curved/diagonal comb families across `cloud-planet`: smoothly warping one tile
+does not remove its repeat frequency. The atlas code/allocation was reverted;
+the weather fallback rollback differs from the step-4 planet frame by only
+0.020/255 MAE and reports the original 71.16 MiB allocation. Evidence:
+`step-8a/` and `step-8-rollback/`. See
+[ADR-20260722T135123Z](adr/20260722T135123Z-weather-phase-warp-does-not-make-a-periodic-cloud-basis-aperiodic.md).
+
+A controlled incommensurate-domain follow-up then separated producer repeat
+from reconstruction. The second 3-D domain passed local runway/cruise gates;
+forcing it to contribute 35% everywhere materially changed density without
+collapsing coverage. Yet the same atlas/chord control retained the long curved
+planet comb, only moving the bands. This rejects planet-wide evaluation of any
+small Cartesian 3-D tile: CLOUD-6 must derive its global moments from a
+surface-parameterized density field shared back into the near volume. The
+second near fetch and all atlas plumbing were reverted. Evidence is retained
+under `step-10a/` and `step-10b/`; see
+[ADR-20260722T141000Z](adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md).
+
 ## Interactive regression checklist
 
 These motion checks remain the interactive acceptance pass for the completed

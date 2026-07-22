@@ -86,6 +86,7 @@ search path (INC-0008) and starts one clean process per variant.
 | Axis | Variants | Intended diagnosis |
 |---|---|---|
 | `ssao` | `off`, `on`, `raw` | No AO, normal AO application, and the raw AO field |
+| `shadow` | `cascade-only`, `contact`, `raw` | Isolate the **contact tier** (W18a) from the cascade rig: does the screen-space contact march contribute, and is a defect in the march or in how receivers apply it (ADR-20260722T111848Z) |
 | `terrain-lighting` | `lit`, `fullbright`, `geometric-normal` | Separate raster coverage from lighting, then isolate the terrain normal stack |
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
 | `terrain-regolith-filter` | `legacy-unfiltered`, `footprint-filtered` | Matched before/after for airless procedural-detail Nyquist filtering |

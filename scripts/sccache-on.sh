@@ -21,11 +21,28 @@ fi
 export CARGO_INCREMENTAL=0
 export SCCACHE_DIR="${SCCACHE_DIR:-$HOME/.cache/sccache}"
 export SCCACHE_CACHE_SIZE="${SCCACHE_CACHE_SIZE:-50G}"
+
+# sccache splits SCCACHE_BASEDIRS with the PLATFORM separator. Under git bash the
+# roots are Windows paths ("C:/Users/..."), so joining with ':' shreds every
+# drive letter into its own bogus root and normalization silently does nothing.
+case "$(uname -s)" in
+  MINGW*|MSYS*|CYGWIN*) path_sep=';' ;;
+  *) path_sep=':' ;;
+esac
+
+# Longest-first: worktrees nest inside the repo root (.claude/worktrees/*), and a
+# shorter parent matching first would rewrite paths differently than the main
+# checkout does -- the two could then never share a cache entry.
 worktree_roots=()
 while IFS= read -r root; do worktree_roots+=("$root"); done \
-  < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p')
+  < <(git -C "$repo_root" worktree list --porcelain | sed -n 's/^worktree //p' \
+      | awk '{ print length, $0 }' | sort -rn | cut -d' ' -f2-)
 (( ${#worktree_roots[@]} == 0 )) && worktree_roots=("$repo_root")
-export SCCACHE_BASEDIRS="$(IFS=:; echo "${worktree_roots[*]}")"
+export SCCACHE_BASEDIRS="$(IFS="$path_sep"; echo "${worktree_roots[*]}")"
+
+# Activation must survive leaving this directory: a repo-local
+# build.rustc-wrapper is invisible to worktrees outside the checkout.
+export RUSTC_WRAPPER="$sccache_bin"
 export THALOS_SCCACHE_BIN="$sccache_bin"
 
 # Hosted agent runners may reap daemons started by a provisioning process. Make
@@ -34,8 +51,27 @@ if ! "$THALOS_SCCACHE_BIN" --show-stats >/dev/null 2>&1; then
   "$THALOS_SCCACHE_BIN" --start-server >/dev/null
 fi
 
+# SCCACHE_BASEDIRS is read by the SERVER at startup, so exporting it into this
+# shell does nothing for an already-running daemon. A worktree missing from the
+# live server's set hashes absolute paths and can never hit another worktree's
+# cache -- the failure is invisible, so say it out loud.
+live_basedirs="$("$THALOS_SCCACHE_BIN" --show-stats 2>/dev/null | sed -n 's/^Base directories[[:space:]]*//p')"
+if [[ -n "$live_basedirs" ]] \
+  && ! grep -qiF "$(printf '%s' "$repo_root" | tr 'A-Z' 'a-z')" <<<"$(printf '%s' "$live_basedirs" | tr 'A-Z' 'a-z')"; then
+  echo "!! sccache server does NOT normalize this worktree: $repo_root" >&2
+  echo "   Cross-worktree cache hits are impossible until the server is restarted." >&2
+  if pgrep -x cargo >/dev/null 2>&1 || pgrep -x rustc >/dev/null 2>&1; then
+    echo "   Cargo/rustc active - restart it once builds finish:" >&2
+  else
+    "$THALOS_SCCACHE_BIN" --stop-server >/dev/null 2>&1 || true
+    "$THALOS_SCCACHE_BIN" --start-server >/dev/null
+    echo "   Restarted the server with the current worktree set."
+  fi
+fi
+
 echo "parallel cache mode ON  (CARGO_INCREMENTAL=0)"
+echo "  RUSTC_WRAPPER=$RUSTC_WRAPPER"
 echo "  SCCACHE_DIR=$SCCACHE_DIR  SCCACHE_CACHE_SIZE=$SCCACHE_CACHE_SIZE"
 echo "  SCCACHE_BASEDIRS=$SCCACHE_BASEDIRS"
 echo "  stats: \"$THALOS_SCCACHE_BIN\" --show-stats"
-echo "  return to iterate mode: unset CARGO_INCREMENTAL"
+echo "  return to iterate mode: unset CARGO_INCREMENTAL RUSTC_WRAPPER"

@@ -1,4 +1,5 @@
 #import bevy_open_world::common
+#import thalos::atmosphere::cloud_surface_shape
 
 // Camera-change threshold for the temporal-history gate. Coarse on purpose:
 // while the sim runs, the rotating body-fixed frame puts ~1e-7/column f32
@@ -35,22 +36,18 @@ const WORLEY_RESOLUTION_F32 = 64.0;
 // so all field sampling below wraps positions into one world-space tile period
 // FIRST (`fract(pos / period)`) and scales the small remainder up.
 //
-// ── Bounded-step raymarch ────────────────────────────────────────────────────
-// Upstream marches a *fixed step count* across the whole [start, end] segment.
-// At planet scale that breaks near the horizon: a near-tangent view ray grazes
-// the cloud shell, its segment stretches to tens of km, and the few steps alias
-// into radial "fountain" streaks. We march a world-space step bounded to
-// [MIN_STEP_M, CLOUD_STEP_M] instead — sized so a short band crossing (a
-// steep ray through the deck) gets ~TARGET_BAND_STEPS samples; a coarser step
-// there leaves so few samples per band that the start dither shows as a
-// moiré/crosshatch pattern. Long near-tangent segments stay at CLOUD_STEP_M,
-// capped at MAX_RAY_STEPS, with a distance haze-out so the bounded reach reads
-// as natural aerial perspective rather than a hard edge.
-const CLOUD_STEP_M = 500.0;       // coarsest near-field step (long horizon segments)
-const MIN_STEP_M = 65.0;          // finest step (short band crossings)
-const TARGET_BAND_STEPS = 42.0;   // target samples across one band crossing
+// ── Cheap/full-density adaptive march ────────────────────────────────────────
+// Clear air advances in 600 m intervals while evaluating the smooth broad mass
+// only. A meaningful hit backs up one interval and switches to the proven
+// 120 m full-density cadence; four empty fine samples return to coarse mode.
+// This samples every interval at the frequency it can represent — it is not an
+// empty-space leap and does not use weather/profile hints as a resume gate.
+const CLOUD_STEP_M = 600.0;       // broad-mass cadence through clear air
+const MIN_STEP_M = 120.0;         // full-density cadence after a broad hit
+const REFINE_EMPTY_LIMIT = 4u;
+const BROAD_HIT_DENSITY_FRACTION = 0.01;
 const MAX_RAY_STEPS_CAP = 128u;   // compile-time safety cap; config selects ≤ this
-const MAX_CLOUD_DIST = 50000.0;   // metres; the march's cost-bounded reach
+const MAX_CLOUD_DIST = 75000.0;   // metres; the march's cost-bounded shell segment
 // The march owns only this near region: with ≤128 steps it cannot sample the
 // 1–4 km base features across a 100+ km limb chord without moiré (verified
 // 2026-07-22 — a distance-stretched step aliased the whole disc into a dot
@@ -60,10 +57,10 @@ const MAX_CLOUD_DIST = 50000.0;   // metres; the march's cost-bounded reach
 // owns them (partition of unity, see cloud_composite.wgsl — keep these
 // windows in lockstep with `march_reach` there). Unlike the pre-CLOUD-6
 // haze-out these clouds are replaced, not deleted.
-const ENTRY_FADE_START = 36000.0;
-const ENTRY_FADE_END = 50000.0;
-const DETAIL_NEAR_M = 10000.0;
-const DETAIL_FAR_M = 22000.0;
+const ENTRY_FADE_START = 56000.0;
+const ENTRY_FADE_END = 75000.0;
+const DETAIL_FILTER_BEGIN = 0.25;
+const DETAIL_FILTER_END = 0.50;
 const CAMERA_CUT_DELTA = 0.05;
 // Airlight restoration: in-scattered air between the camera and each cloud
 // sample. The composite draws clouds OVER the already-integrated sky, which
@@ -129,6 +126,9 @@ struct Config {
 // paints coherent streak artifacts.
 @group(1) @binding(5) var history_texture: texture_2d<f32>;
 @group(1) @binding(6) var history_distance_texture: texture_2d<f32>;
+// Canonical surface-space broad shape at four normalized-height strata. It is
+// generated/versioned with weather and shares weather_sampler's filter state.
+@group(1) @binding(7) var surface_density_texture: texture_cube<f32>;
 struct Ray {
     step_distance: f32,
     dir_length: f32,
@@ -159,6 +159,11 @@ struct RaymarchResult {
 // the canonical planet-fixed weather cubemap.
 fn sample_weather(n: vec3f) -> vec4f {
     return textureSampleLevel(weather_texture, weather_sampler, n, 0.0);
+}
+
+fn sample_surface_density(n: vec3f, shell_height: f32) -> f32 {
+    let strata = textureSampleLevel(surface_density_texture, weather_sampler, n, 0.0);
+    return cloud_surface_shape(strata, shell_height);
 }
 
 fn volume_corner(c: vec3i) -> vec4f {
@@ -205,6 +210,18 @@ fn rotated_domain(p: vec3f) -> vec3f {
     );
 }
 
+fn weather_phase_offset(weather: vec4f, period: f32) -> vec3f {
+    // Continuous coverage/base/top channels bend periodic 3-D source domains
+    // into the non-periodic planet weather field. The categorical type channel
+    // is deliberately excluded so a type boundary cannot pop the volume.
+    return period * vec3f(
+        1.35 * (weather.r - 0.5) + 0.65 * (weather.b - 0.5),
+        -1.10 * (weather.a - 0.5) + 0.55 * (weather.r - 0.5),
+        1.20 * (weather.r - 0.5) - 0.75 * (weather.b - 0.5)
+            + 0.45 * (weather.a - 0.5),
+    );
+}
+
 // Typed volumetric density. Weather changes continuously along the view ray;
 // every base/detail sample is full 3-D world-space structure. Empty-space
 // acceleration must use a truly conservative volume in a future optimization:
@@ -214,6 +231,7 @@ fn get_cloud_map_density(
     pos: vec3f,
     shell_height: f32,
     weather: vec4f,
+    surface_density: f32,
     detail_weight: f32,
     macro_noise: f32,
     formation: f32,
@@ -232,7 +250,9 @@ fn get_cloud_map_density(
 
     let shape_scale = max(config.clouds_base_shape_scale_m, 500.0);
     let broad = cloud_volume(
-        rotated_domain(pos) + vec3f(1800.0, -4200.0, 900.0),
+        rotated_domain(pos)
+            + weather_phase_offset(weather, shape_scale)
+            + vec3f(1800.0, -4200.0, 900.0),
         shape_scale,
     );
     // Broad Perlin/Worley masses. The erosion channel stays out of the solid
@@ -248,7 +268,11 @@ fn get_cloud_map_density(
     // even field of same-scale puffs.
     let threshold = mix(0.58, 0.30, cov)
         + (0.5 - macro_noise) * 0.07
-        + (0.5 - formation) * 0.17;
+        + (0.5 - formation) * 0.17
+        // Surface density is already thresholded/profiled before mipmapping.
+        // It biases where local bodies form without replacing the accepted
+        // Cartesian morphology or applying the far response a second time.
+        + (0.35 - surface_density) * 0.08;
     let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
     var mass = shape - threshold - vertical_narrow;
 
@@ -312,6 +336,7 @@ fn get_normalized_height(pos: vec3f) -> f32 {
 fn volumetric_sun_depth(
     origin: vec3f,
     weather: vec4f,
+    surface_density: f32,
     macro_noise: f32,
     formation: f32,
     jitter: f32,
@@ -326,7 +351,15 @@ fn volumetric_sun_depth(
         if (normalized_height > 1.0) { return optical_depth; };
 
         let density =
-            get_cloud_map_density(pos, normalized_height, weather, 0.0, macro_noise, formation);
+            get_cloud_map_density(
+                pos,
+                normalized_height,
+                weather,
+                surface_density,
+                0.0,
+                macro_noise,
+                formation,
+            );
         optical_depth += density * ray_step_size;
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
         distance_along_ray += ray_step_size;
@@ -494,9 +527,9 @@ fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray
     // across tens of km and alias (see the header comment).
     seg_end = min(min(seg_end, max_dist), seg_start + MAX_CLOUD_DIST);
 
-    // Adaptive step: ~TARGET_BAND_STEPS samples across this segment, bounded
-    // (see the header comment).
-    let step = clamp((seg_end - seg_start) / TARGET_BAND_STEPS, MIN_STEP_M, CLOUD_STEP_M);
+    // Jitter only the first fine sample. Coarse probes back up before they hand
+    // a hit to the full-density cadence, so they cannot skip the entry edge.
+    let step = MIN_STEP_M;
     // The full-step temporal phase is safe now that the minimum density
     // feature is larger than one march step. It prevents near-horizontal rays
     // from stacking their samples into coherent bands; history averages the
@@ -518,7 +551,11 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     // Per-ray weather context varies over tens-of-km scales, so one evaluation
     // at the segment midpoint serves the short view segment. Base/detail shape
     // remains full 3-D per sample.
-    let mid = ray_origin + (0.5 * (ray.start + ray.end)) * ray_dir;
+    // The per-ray weather/formation context must remain local when range grows:
+    // preserve the old midpoint for short segments, but never anchor more than
+    // 25 km beyond shell entry (finding G in the BL-33 fidelity pass).
+    let context_t = ray.start + min(0.5 * (ray.end - ray.start), 25000.0);
+    let mid = ray_origin + context_t * ray_dir;
     let n_mid = normalize(mid);
     var weather = sample_weather(n_mid);
     if (weather.r * config.clouds_coverage <= 1.0e-3) {
@@ -529,9 +566,12 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     // paying a second trilinear volume fetch at every 200–500 m step. The same
     // fetch's perlin channel doubles as the weather-system `formation` field
     // (cluster gate in `get_cloud_map_density`) at zero extra cost.
+    let macro_period = max(config.clouds_base_shape_scale_m, 500.0) * 2.7;
     let macro_sample = cloud_volume(
-        mid + vec3f(-7300.0, 2100.0, 4900.0),
-        max(config.clouds_base_shape_scale_m, 500.0) * 2.7,
+        mid
+            + weather_phase_offset(weather, macro_period)
+            + vec3f(-7300.0, 2100.0, 4900.0),
+        macro_period,
     );
     let macro_noise = macro_sample.a;
     let formation = macro_sample.r;
@@ -554,6 +594,11 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     var dist = max_dist;
     var scattered_light = vec3f(0.0, 0.0, 0.0);
     var transmittance = 1.0;
+    var refining = false;
+    var consecutive_empty = 0u;
+    // Never backtrack outside the physical shell. Later coarse hits may rewind
+    // one broad interval, but never before the last completed fine frontier.
+    var refined_until = ray.start;
 
     // March-exhaustion fade: a ray travelling far *inside* the deck uses all
     // its configured step cap and stops mid-cloud; the entry-distance haze below never
@@ -561,7 +606,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     // as a sharp tonal seam arc across the deck. Dissolve density over the
     // last third of the marched reach instead.
     let ray_step_limit = clamp(config.clouds_raymarch_steps_count, 1u, MAX_RAY_STEPS_CAP);
-    let march_span = f32(ray_step_limit) * ray.step_distance;
+    let march_span = f32(ray_step_limit) * CLOUD_STEP_M;
     // Wide dissolve (half the span) so the far estimator's smoother texture
     // fades in over kilometres instead of appearing at a visible seam line.
     let reach_fade_begin = ray.start + 0.50 * march_span;
@@ -572,18 +617,60 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         let world_position = ray_origin + dir_length * ray_dir;
         weather = sample_weather(normalize(world_position));
         let normalized_height = get_normalized_height(world_position);
-        let detail_weight = 1.0 - smoothstep(DETAIL_NEAR_M, DETAIL_FAR_M, dir_length);
+        let surface_density = sample_surface_density(
+            normalize(world_position),
+            clamp(normalized_height, 0.0, 1.0),
+        );
+        let density_threshold = max(config.clouds_density, 1.0e-5)
+            * BROAD_HIT_DENSITY_FRACTION;
+
+        if (!refining) {
+            let broad_density = get_cloud_map_density(
+                world_position,
+                clamp(normalized_height, 0.0, 1.0),
+                weather,
+                surface_density,
+                0.0,
+                macro_noise,
+                formation,
+            );
+            if (broad_density > density_threshold) {
+                refining = true;
+                consecutive_empty = 0u;
+                dir_length = max(
+                    refined_until,
+                    dir_length - CLOUD_STEP_M,
+                );
+            } else {
+                dir_length += CLOUD_STEP_M;
+            }
+            continue;
+        }
+
+        let detail_feature_m = max(config.clouds_detail_scale_m, 50.0);
+        let detail_weight = 1.0 - smoothstep(
+            detail_feature_m * DETAIL_FILTER_BEGIN,
+            detail_feature_m * DETAIL_FILTER_END,
+            MIN_STEP_M,
+        );
 
         let clouds_density_sampled =
             get_cloud_map_density(
                 world_position,
                 clamp(normalized_height, 0.0, 1.0),
                 weather,
+                surface_density,
                 detail_weight,
                 macro_noise,
                 formation,
             )
             * (1.0 - smoothstep(reach_fade_begin, reach_end, dir_length));
+
+        if (clouds_density_sampled > density_threshold) {
+            consecutive_empty = 0u;
+        } else {
+            consecutive_empty += 1u;
+        }
 
         if (clouds_density_sampled > 0.0) {
             dist = min(dist, dir_length);
@@ -603,7 +690,14 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
             // Filtered sun optical depth (smooth broad mass only, jittered tap
             // ladder) drives per-octave multi-scatter attenuation.
             let tau_sun =
-                volumetric_sun_depth(world_position, weather, macro_noise, formation, jitter);
+                volumetric_sun_depth(
+                    world_position,
+                    weather,
+                    surface_density,
+                    macro_noise,
+                    formation,
+                    jitter,
+                );
             let sun_T = atmosphere_sun_transmittance(world_position);
             let powder = powder_term(density_fraction, ray_dot_sun);
             let octave_shadow = vec3f(
@@ -623,7 +717,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
             // in-scatter is pre-attenuated before the BodySky composite, plus
             // the airlight the cloud's opacity occludes out of the composite.
             let S = clouds_density_sampled * (amb + direct);
-            let delta_transmittance = exp(-clouds_density_sampled * ray.step_distance);
+            let delta_transmittance = exp(-clouds_density_sampled * MIN_STEP_M);
             let view_T = atmosphere_view_transmittance(world_position, ray_origin);
             var integrated_scattering = S * (1.0 - delta_transmittance) / clouds_density_sampled;
             integrated_scattering = integrated_scattering * view_T
@@ -635,7 +729,12 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
 
         if transmittance <= config.clouds_min_transmittance { break; }
 
-        dir_length += ray.step_distance;
+        dir_length += MIN_STEP_M;
+        refined_until = max(refined_until, dir_length);
+        if (consecutive_empty >= REFINE_EMPTY_LIMIT) {
+            refining = false;
+            consecutive_empty = 0u;
+        }
     }
 
     // Entry-distance dissolve: rays that only meet the shell far away hand

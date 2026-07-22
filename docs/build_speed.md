@@ -213,11 +213,33 @@ sccache caches individual rustc compilations keyed on inputs, so a repeated
 compile (same crate, same flags, same sources) is a cache read instead of a
 rebuild.
 
-### 5.1 The incremental interaction — read this first
+### 5.0 Activation is global, not per-directory — read this first
+Cargo discovers `.cargo/config.toml` by walking **up** from the current
+directory. That file is gitignored and written per checkout, so a worktree
+created outside the main tree (`C:/tmp/…`, `~/.codex/worktrees/…`) finds no
+config at all and builds with **no sccache and no fast linker** — silently, at
+full apparent success. Activation therefore lives wherever the platform can make
+it durable and directory-independent:
+
+| Platform | Activation | Set by |
+|---|---|---|
+| Windows | `RUSTC_WRAPPER` **user environment variable** | `scripts\setup-build-env.ps1` |
+| Linux / macOS | `build.rustc-wrapper` in each worktree's config | `scripts/setup-build-env.sh --all-worktrees` |
+
+The generated `.cargo/config.toml` carries only what genuinely differs per
+checkout: the **job budget** and the **linker**. On Windows a worktree that never
+got provisioned still gets the cache; it only misses rust-lld and the job budget.
+
+> **User environment variables reach new shells only.** After running the
+> Windows setup script, close and reopen the terminal before building.
+
+### 5.1 The incremental interaction
 **sccache cannot cache incrementally compiled crates.** Cargo's dev incremental
 setting applies to workspace members and path dependencies, not registry
-dependencies. The generated local config therefore keeps sccache as the normal
-`rustc-wrapper` without forcing `CARGO_INCREMENTAL` either way:
+dependencies. `profile.dev` sets `incremental = true`, so in the iterate regime
+every *workspace* crate is non-cacheable by construction and sccache's value is
+confined to registry dependencies on cold/clean builds. Activation is left on
+unconditionally without forcing `CARGO_INCREMENTAL` either way:
 
 - In the **Iterate** regime (editing your crates on one machine), incremental is
   the win for Thalos crates while sccache still caches registry dependencies.
@@ -255,8 +277,44 @@ dot-source `scripts/sccache-on.ps1` (PowerShell). They also set
 checkout root is stripped and identical relative source/target paths hash
 consistently. They also start the local server if a hosted runner reaped the
 daemon created during provisioning. Unset only `CARGO_INCREMENTAL` to return to the normal iterate
-regime. Because base directories are server configuration, provision worktrees
-before starting parallel builds and restart sccache after the set changes.
+regime.
+
+### 5.3.1 `SCCACHE_BASEDIRS` decays silently — the failure to watch for
+Base-directory normalization is the **entire** mechanism by which worktree B
+hits an object cached by worktree A: each listed root is stripped so the two
+produce identical relative paths and therefore identical hashes. A worktree
+*not* in the list hashes absolute paths and can never hit another's cache — it
+just quietly does a full cold build.
+
+Three properties make this fail without any error:
+
+1. **It is a snapshot.** The setup script captures `git worktree list` at
+   provisioning time. Every later `git worktree add` — every agent spin-up —
+   leaves a worktree outside the set.
+2. **It is server configuration, read at startup.** Exporting the variable into
+   a shell does nothing to an already-running daemon; the set only changes on
+   `sccache --stop-server` + `--start-server`.
+3. **Roots must be listed longest-first.** Worktrees nest inside the repo root
+   (`.claude/worktrees/*`). If a shorter parent matched first it would rewrite
+   `.claude/worktrees/x/crates/…` where the main checkout produces `crates/…` —
+   different hashes, so the two could never share. The scripts sort descending
+   by path length.
+
+Resync after adding a worktree:
+
+```bash
+scripts/setup-build-env.ps1 -SyncOnly              # Windows
+scripts/setup-build-env.sh --agents <N> --all-worktrees   # Linux/macOS
+```
+
+`bash scripts/check-build-env.sh` verifies every worktree is normalized and
+names the ones that are not. Both resync paths refuse to restart the daemon
+while `cargo`/`rustc`/`dx` is running; rerun once the build is idle.
+
+> **Windows path separator.** sccache splits `SCCACHE_BASEDIRS` with the
+> *platform* separator — `;` on Windows. Joining with `:` under git bash shreds
+> every `C:/…` root into `C` plus a bogus path, and normalization silently
+> stops working.
 
 ### 5.4 Verify it's working
 ```bash
@@ -298,15 +356,22 @@ single-agent laptop or a larger agent box.
 for two simultaneous agents:
 
 ```toml
+# sccache is NOT configured here on Windows — it is the global RUSTC_WRAPPER
+# user env var (§5.0), so it also reaches worktrees outside this checkout.
 [build]
-jobs = 8
-rustc-wrapper = "sccache"
+jobs = 16   # logical CPUs / expected concurrent Cargo processes; 16 = solo
 
 [target.x86_64-pc-windows-msvc]
 # rust-lld.exe on PATH also works; absolute path is the toolchain copy.
 linker = "C:/Users/korbi/.rustup/toolchains/1.97.0-x86_64-pc-windows-msvc/lib/rustlib/x86_64-pc-windows-msvc/bin/rust-lld.exe"
 
 ```
+
+`jobs` is scheduling only — it never enters a fingerprint, so changing it costs
+nothing. **Provisioning defaults to one Cargo process** (`jobs` = all logical
+CPUs), because the common case is working alone and the old two-agent default
+silently halved the machine for it. Pass `-AgentSlots N` / `--agents N` when you
+actually intend N concurrent Cargo processes.
 
 Then: Defender exclusions (§3.8). `just check` while editing; one
 `just game`/`just screenshot` when you need
@@ -340,7 +405,7 @@ The default new linker is fast; local config only needs cache and job policy:
 ```toml
 [build]
 jobs = 4
-rustc-wrapper = "sccache"
+rustc-wrapper = "sccache"   # macOS/Linux: activation lives in the config (§5.0)
 ```
 
 If a macOS toolchain hits stale `.llvm.<hash>` anonymous-symbol references

@@ -98,6 +98,37 @@ fn cascade_bias_m(texel_m: f32, slope: f32) -> f32 {
     return clamp(texel_m * BIAS_TEXELS * (1.0 + slope), BIAS_MIN_M, BIAS_MAX_M);
 }
 
+// ── Contact tier (W18a) ───────────────────────────────────────────────────────
+//
+// The cascades above are the MID-FIELD tier of the three-tier shadow split
+// (ADR-20260722T111848Z-shadows-three-tier-not-virtual-shadow-maps). They cannot
+// serve the 0–50 m contact band — cascade 0 is ~0.2 m/texel, coarser than a
+// landing-gear strut — so `rendering::contact_shadow` marches the copied scene
+// depth toward the sun and publishes a full-res factor that receivers multiply
+// into their DIRECT sun gate (never the ambient: ambient contact occlusion is
+// F5's SSAO, and applying both to ambient double-darkens).
+//
+// The gate rides in `block.gate.z` (0 = skip, 1 = apply, 2 = the caller paints
+// the raw value as a diagnostic), so a material that already binds the cascade
+// block needs no extra uniform — only the texture pair.
+fn contact_shadow_factor(
+    block: ShadowCascadeBlock,
+    tex: texture_2d<f32>,
+    samp: sampler,
+    frag_coord: vec2<f32>,
+    viewport: vec2<f32>,
+) -> f32 {
+    if (block.gate.z < 0.5) {
+        return 1.0;
+    }
+    // `frag_coord` is the framebuffer pixel coordinate; the full-res target spans
+    // the viewport exactly, so this is a direct [0,1] screen UV. (Deriving the
+    // viewport from `textureDimensions` instead mis-registers by a texel on odd
+    // sizes — the banding source `screen_space_ao` documents.)
+    let uv = frag_coord / max(viewport, vec2<f32>(1.0));
+    return clamp(textureSampleLevel(tex, samp, uv, 0.0).r, 0.0, 1.0);
+}
+
 // True when the current pass renders through an ORTHOGRAPHIC camera — in this
 // project that means a sun-shadow cascade camera (or an offline bake rig), never
 // a player view. Vegetation/rock casters use this to (a) bypass their clipmap

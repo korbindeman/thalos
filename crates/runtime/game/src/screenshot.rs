@@ -57,6 +57,7 @@ use thalos_world::BodyId;
 
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::loading::AppState;
+use crate::rendering::contact_shadow::ContactShadowConfig;
 use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
 use crate::rendering::ssao::SsaoConfig;
 use crate::rendering::{SimulationState, SolarSystemState};
@@ -585,9 +586,9 @@ impl CloudCaptureQuality {
 
     fn view_steps(self) -> u32 {
         match self {
-            Self::Low => 48,
-            Self::Baseline => 80,
-            Self::High => 96,
+            Self::Low => 64,
+            Self::Baseline => 112,
+            Self::High => 128,
             Self::Reference => 128,
         }
     }
@@ -1708,6 +1709,7 @@ fn apply_live_capture_diagnostics(
     mut clouds: ResMut<CloudsConfig>,
     mut ocean_debug: ResMut<OceanDebugSettings>,
     mut ssao: ResMut<SsaoConfig>,
+    mut contact_shadow: ResMut<ContactShadowConfig>,
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
 ) {
     if !cfg.is_changed() && !runtime.is_changed() {
@@ -1755,6 +1757,7 @@ fn apply_live_capture_diagnostics(
         .and_then(|value| value.trim().parse().ok());
 
     ssao.apply_capture_mode(runtime.get("THALOS_SSAO"));
+    contact_shadow.apply_capture_mode(runtime.get("THALOS_CONTACT_SHADOW"));
     let inspection = terrain_inspection_override(runtime.get("THALOS_TERRAIN_INSPECTION"));
     for (_, material) in terrain_materials.iter_mut() {
         material.extras.inspection.x = inspection;
@@ -2606,7 +2609,8 @@ fn write_cloud_probe_report(
             "\"memory\":{{\"render_bytes\":{},\"distance_bytes\":{},",
             "\"history_bytes\":{},\"history_distance_bytes\":{},",
             "\"base_atlas_bytes\":{},\"worley_bytes\":{},",
-            "\"coverage_bytes\":{},\"total_bytes\":{}}}}}\n"
+            "\"coverage_bytes\":{},\"surface_density_bytes\":{},",
+            "\"total_bytes\":{}}}}}\n"
         ),
         unix_ms,
         cfg.preset.name(),
@@ -2633,6 +2637,7 @@ fn write_cloud_probe_report(
         memory.base_atlas_bytes,
         memory.worley_bytes,
         memory.coverage_bytes,
+        memory.surface_density_bytes,
         memory.total_bytes,
     );
     OpenOptions::new()
