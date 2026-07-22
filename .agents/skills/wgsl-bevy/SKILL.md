@@ -34,6 +34,7 @@ immediately:
 
 - `patch` — hit July 2026 in `gpu_grass.wgsl` (`let patch = …` → ``name `patch` is a reserved keyword``; the whole grass pipeline silently stopped rendering). Renamed to `mottle`.
 - `meta` — hit July 2026 in `body_terrain.wgsl` (struct field `meta: vec4<f32>` → ``name `meta` is a reserved keyword``; the terrain pipeline failed to build and the whole ground vanished while everything else kept rendering). Renamed to `header`. Uniform structs match the Rust mirror by declaration order, not name, so renaming only the WGSL side is safe.
+- `macro` — hit July 2026 in `clouds_compute.wgsl` (`let macro = …` → ``name `macro` is a reserved keyword``; both cloud compute pipelines failed at runtime even though Rust compiled). Renamed to `macro_noise`.
 
 ### Strict numeric typing — no implicit conversions
 
@@ -198,3 +199,22 @@ the vertex entry in `#ifndef FRAGMENT … #endif` (naga_oil supports `#ifndef`).
 Top-file helper functions shared by both are fine ungated as long as they don't
 construct `Coordinate` or use derivatives. Hit July 2026 adding the analytic
 pad-flatten vertex stage to `body_terrain.wgsl`.
+
+### Naga requires an explicit tail return after a returning `loop`
+
+Naga does not prove that an unconditional WGSL `loop` is exhaustive even when
+every apparent exit path returns a value. A function such as `fn f() -> T` whose
+body ends immediately after that loop fails validation with `Returning None
+where Some([...]) is expected`. Add an explicit, type-correct fallback `return`
+after the loop (it may be unreachable in practice). Hit July 2026 while adding
+resident-ancestor fallback to the udlod tile-tree lookup.
+
+### Procedural normal detail needs footprint filtering, not only distance fade
+
+A camera-distance fade does not bound a procedural octave's screen frequency:
+a grazing surface can compress metre-scale noise into subpixel fragments while
+remaining well inside the distance band. Compute a world/body-space footprint
+from `dpdx`/`dpdy` in uniform fragment control flow and fade each colour and
+normal octave as the footprint approaches its wavelength. Otherwise a strong
+BRDF response can turn unresolved normal flips into bright/dark stipple even on
+fully opaque geometry. Hit July 2026 on Mira's Hapke regolith (INC-0009).
