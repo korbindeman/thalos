@@ -689,6 +689,14 @@ enum ScreenshotFraming {
         /// is cross-lit; small angles look into the sun.
         sun_azimuth_deg: f32,
         dark_side: FrameSide,
+        /// When set, the boom length becomes this multiple of the landmark
+        /// crater's radius instead of `distance_m`.
+        ///
+        /// A framing that must contain a crater cannot use a fixed distance: the
+        /// site search picks the feature, and a boom tuned for a 6 km crater
+        /// frames open ground around a 30 km one. Falls back to `distance_m`
+        /// when the search resolved no landmark.
+        landmark_radii: Option<f32>,
     },
     /// The whole body as a disc, viewed at a chosen **phase angle** from the
     /// sun, rolled so the terminator runs vertically.
@@ -1297,6 +1305,7 @@ impl ScreenshotPreset {
                 framing: ScreenshotFraming::SunRelativeGodView {
                     sun_azimuth_deg: 70.0,
                     dark_side: FrameSide::Left,
+                    landmark_radii: None,
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1310,14 +1319,14 @@ impl ScreenshotPreset {
                 height: 1080,
                 // Bearing is sun-relative (see `framing`), so this is unused.
                 azimuth_deg: 0.0,
-                // Lower and closer than the 14°/40 km first cut, which framed
-                // open plain: 8° puts the eye ~4.2 km over the focus at 30 km
-                // out, so the far wall rises against the sky the way an oblique
-                // orbital crater view reads, instead of being flattened into a
-                // survey plan view. Still clears Mira's ±5.3 km relief because
-                // the boom starts from the crater floor, not a ridge.
-                elevation_deg: 8.0,
-                distance_m: 30_000.0,
+                // Looking *into* a crater needs enough depression to see the
+                // floor and far wall: at 8° a 57 km-wide crater foreshortened
+                // into a thin band on the horizon. 20° keeps the view clearly
+                // oblique — the far rim still rises against the sky — while the
+                // floor opens up. Distance is crater-scaled (see `framing`), so
+                // this fallback only applies if no landmark resolved.
+                elevation_deg: 20.0,
+                distance_m: 60_000.0,
                 // Closest of the three framings, so the heaviest cold package
                 // probe — matches `MiraSurface`'s measured convergence.
                 warmup_frames: 1_200,
@@ -1330,6 +1339,9 @@ impl ScreenshotPreset {
                 framing: ScreenshotFraming::SunRelativeGodView {
                     sun_azimuth_deg: 55.0,
                     dark_side: FrameSide::Left,
+                    // Stand off ~2.6 crater radii so the far wall and floor both
+                    // sit in frame whatever size the search lands on.
+                    landmark_radii: Some(2.6),
                 },
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -2190,11 +2202,12 @@ fn drive_headless_screenshot(
                 // which face turns toward the camera — keep it well lit.
                 ScreenshotPreset::MiraDisc => AirlessSunGeometry::SubSolar,
                 // Grazing light for long rim shadows across the macro bands.
-                // The 90 km bracket showed `Oblique` washes relief out flat at
-                // survey range, so the rim probe joins the approach here.
-                ScreenshotPreset::MiraApproach | ScreenshotPreset::MiraRim => {
-                    AirlessSunGeometry::Grazing
-                }
+                ScreenshotPreset::MiraApproach => AirlessSunGeometry::Grazing,
+                // The rim probe sits back in `Oblique`: grazing light at close
+                // range buries the floor and central peak in shadow and drives
+                // the BL-33 speckle to its worst (MIRA-V6). Large craters are
+                // reachable in this band now that the landmark set is
+                // size-stratified rather than age-gated.
                 _ => AirlessSunGeometry::Oblique,
             },
             match cfg.preset {
@@ -2773,8 +2786,10 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
         ScreenshotFraming::SunRelativeGodView {
             sun_azimuth_deg,
             dark_side,
+            landmark_radii,
         } => format!(
-            "{{\"kind\":\"sun_relative_god_view\",\"sun_azimuth_deg\":{sun_azimuth_deg:.4},\"dark_side\":\"{dark_side:?}\",\"elevation_deg\":{:.4},\"distance_m\":{:.3}}}",
+            "{{\"kind\":\"sun_relative_god_view\",\"sun_azimuth_deg\":{sun_azimuth_deg:.4},\"dark_side\":\"{dark_side:?}\",\"landmark_radii\":{},\"elevation_deg\":{:.4},\"distance_m\":{:.3}}}",
+            landmark_radii.map(|v| format!("{v:.4}")).unwrap_or_else(|| "null".to_string()),
             cfg.elevation_deg, cfg.distance_m
         ),
         ScreenshotFraming::BodyDisc {
@@ -2972,6 +2987,7 @@ fn pose_camera(
         ScreenshotFraming::SunRelativeGodView {
             sun_azimuth_deg,
             dark_side,
+            landmark_radii,
         } => pose_sun_relative_god_view(
             cfg,
             focus,
@@ -2981,6 +2997,7 @@ fn pose_camera(
             cell,
             sun_azimuth_deg,
             dark_side,
+            landmark_radii,
         ),
         ScreenshotFraming::BodyDisc {
             phase_deg,
@@ -3073,9 +3090,14 @@ fn pose_sun_relative_god_view(
     cell: &mut CellCoord,
     sun_azimuth_deg: f32,
     dark_side: FrameSide,
+    landmark_radii: Option<f32>,
 ) {
     let ctx = &focus.hub;
     let up = ctx.up_world;
+    let boom_m = match (landmark_radii, focus.landmark_radius_m) {
+        (Some(radii), Some(radius_m)) => (radius_m * f64::from(radii)).max(1_000.0),
+        _ => cfg.distance_m,
+    };
     let Some(sun_world) = sun_direction_world(solar, ctx.body_id) else {
         // No solar state yet — fall back rather than pose from a zero vector.
         pose_god_view_camera(cfg, ctx, root, transform, cell);
@@ -3103,7 +3125,7 @@ fn pose_sun_relative_god_view(
     for sign in [1.0_f64, -1.0] {
         let horiz = sun_horizon * az.cos() + sun_perp * (az.sin() * sign);
         let offset_dir = horiz * elev.cos() + up * elev.sin();
-        let camera_world = ctx.center_world + offset_dir * cfg.distance_m;
+        let camera_world = ctx.center_world + offset_dir * boom_m;
         let forward = (ctx.center_world - camera_world).normalize();
         let look_up = if forward.dot(up).abs() > 0.99 { sun_perp } else { up };
         let right = screen_right(forward, look_up);

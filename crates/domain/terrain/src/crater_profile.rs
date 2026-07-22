@@ -544,7 +544,7 @@ pub(crate) fn degradation_softness(radius_m: f32, age_gyr: f32) -> f32 {
     diffusion_softness.max(age_softness).clamp(0.0, 1.0)
 }
 
-pub(crate) fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
+pub fn degradation_factor(radius_m: f32, age_gyr: f32) -> f32 {
     let d_m = radius_m * 2.0;
 
     let k = KAPPA_M2_PER_MYR * age_gyr * 1000.0;

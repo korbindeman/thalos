@@ -274,6 +274,67 @@ fn print_runtime_height_profile(static_surface: thalos_terrain::StaticSurfaceDat
         alias_audit(texel_m, 96, 4);
     }
 
+    // --- Landmark/height agreement (MIRA-V5) ----------------------------------
+    //
+    // Cinematic framings pick a crater out of `static_surface.craters` and point
+    // the camera at it. That metadata is only useful if the *height field*
+    // actually has a bowl there. Profile across the highest-legibility landmark
+    // and report its measured depth against what the record claims — a flat
+    // profile means the two layers disagree and no camera angle will fix it.
+    let craters = &surface.static_surface.craters;
+    let legibility = |crater: &thalos_terrain::Crater| {
+        crater.radius_m * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr)
+    };
+    let landmark = craters
+        .iter()
+        .filter(|crater| (4_000.0..=30_000.0).contains(&crater.radius_m))
+        .max_by(|a, b| legibility(a).total_cmp(&legibility(b)));
+    if let Some(crater) = landmark {
+        let center_dir = crater.center.as_dvec3().normalize();
+        let reference = if center_dir.y.abs() > 0.99 {
+            DVec3::X
+        } else {
+            DVec3::Y
+        };
+        let across = reference.cross(center_dir).normalize();
+        let radius = f64::from(crater.radius_m);
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        let mut rim = f32::NEG_INFINITY;
+        let mut floor = f32::INFINITY;
+        // Sample out to 2 radii so both the bowl and the raised rim are covered.
+        let samples = 129;
+        for i in 0..samples {
+            let t = (f64::from(i) / f64::from(samples - 1)) * 2.0 - 1.0;
+            let offset_m = t * radius * 2.0;
+            let dir = (center_dir + across * (offset_m / radius_m)).normalize();
+            let h = surface_height_m(&surface, &state, dir, 50.0);
+            lo = lo.min(h);
+            hi = hi.max(h);
+            if t.abs() < 0.25 {
+                floor = floor.min(h);
+            }
+            if (t.abs() - 1.0).abs() < 0.15 {
+                rim = rim.max(h);
+            }
+        }
+        println!(
+            "  landmark crater: r {:.1} km, age {:.2} Gyr, retained {:.3}; record depth {:.1} m / rim {:.1} m",
+            crater.radius_m / 1000.0,
+            crater.age_gyr,
+            thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr),
+            crater.depth_m,
+            crater.rim_height_m,
+        );
+        println!(
+            "  measured across it: span {:.1} m (min {:.1} / max {:.1}), rim-to-floor {:.1} m",
+            hi - lo,
+            lo,
+            hi,
+            rim - floor,
+        );
+    }
+
     // Audit the canonical screenshot boom independently of its azimuth. A
     // focus on a crater floor can put a low-elevation orbit camera inside the
     // surrounding wall even though the focus sample itself is exact.

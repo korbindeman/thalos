@@ -56,6 +56,13 @@ pub use package::{
     SCHEMA_VERSION as PACKAGE_SCHEMA_VERSION, TerrainPackageManifest, load_static_package,
     write_static_package,
 };
+/// How much of a crater's authored relief survives its age, in `0..1`.
+///
+/// Exported because consumers that *choose* craters (cinematic framings picking
+/// a landmark) must rank them by the same degradation the renderer applies —
+/// otherwise they select an ancient basin that has been flattened to nothing and
+/// frame empty ground.
+pub use crater_profile::degradation_factor;
 pub use procedural::{
     GENERATOR_VERSION, MacroBiome, ProceduralSurface, climate_cold_lift_m, climate_warmth,
 };
