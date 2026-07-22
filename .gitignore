@@ -32,3 +32,7 @@ rustc-ice-*.txt
 /terrain_data/processed/
 /terrain_data/synthetic/
 /terrain_runs/
+
+# Agent scratch: comparison runs are regenerated on demand; durable evidence
+# belongs in artifacts/visual/runs/ per docs/visual_testing.md.
+tools/agent_scratch/
