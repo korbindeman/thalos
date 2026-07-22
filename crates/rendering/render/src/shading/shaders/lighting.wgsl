@@ -160,11 +160,14 @@ const SCENE_FLUX_SCALE: f32 = 0.5;
 // comment cites for the Moon — mature highland 0.102 → w 0.41, mature mare
 // 0.043 → w 0.17, fresh excavation 0.235 → w 0.94.
 const HAPKE_W_FROM_ALBEDO: f32 = 4.0;
-// Restores the exposure calibration from when `w` was pinned at 0.45 and the
-// caller multiplied by albedo afterwards, so this change moves *contrast*
-// without moving overall scene brightness. Chosen so mature highland lands at
-// its previous radiance; everything else moves relative to it.
-const HAPKE_OUTPUT_SCALE: f32 = 0.128;
+// Overall gain for the Hapke path. 0.128 reproduced the exposure from when `w`
+// was pinned at 0.45 and the caller multiplied by albedo afterwards, isolating
+// the contrast change; 0.175 then lifts airless surfaces ~0.45 stop, which is
+// the "regolith should read brighter" correction against lunar reference
+// photography. This is the one brightness knob for the Hapke path and it also
+// reaches body impostors, which shade through the same routine. Global scene
+// exposure is a separate concern and stays with GF-CAL.
+const HAPKE_OUTPUT_SCALE: f32 = 0.175;
 
 fn hapke_w_from_albedo(albedo: vec3<f32>) -> vec3<f32> {
     return clamp(albedo * HAPKE_W_FROM_ALBEDO, vec3<f32>(0.02), vec3<f32>(0.95));
