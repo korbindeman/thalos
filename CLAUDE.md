@@ -12,9 +12,37 @@ it, explain why the existing approach falls short, and update this
 file (and the relevant spec under `docs/`) so the next agent inherits
 the new shape, not the old one. No silent rewrites.
 
-## Current focus: architecture & code quality
+## Current focus: neural terrain × standard-path renderer (keystone)
 
-The active sprint is a **consolidation pass**: the feature push (surface bases,
+The keystone sprint (2026-07-23, ADR-20260723T142945Z-neural-terrain-standard-renderer-keystone)
+is **make Thalos look good** through two paired efforts designed for each other:
+
+- **Neural terrain** — terrain-diffusion-style hierarchical diffusion
+  (MIT-licensed pretrained earth-like models, fine-tuned in PyTorch behind the
+  offline package boundary; ADR-20260723T143155Z), Thalos/earth-like first,
+  airless second, one unified model architecture as the end state.
+- **A renderer on Bevy's standard path** — terrain (and every opaque surface)
+  as ordinary `Mesh` + `StandardMaterial`/`ExtendedMaterial` under Bevy
+  lighting/shadows; Solari as a *measured* option. This resolves fork Q9 and
+  inverts the F-series direction: one lighting universe is reached by moving
+  terrain onto Bevy's path (where crafts already live via
+  `ShadowedStandardMaterial`), not by porting crafts onto the custom spine.
+  Volumetrics/sky (BodySky atmosphere, clouds, analytic ocean, celestial sky)
+  remain custom composites — the explicit carve-out.
+
+The vehicle is a **standalone probe** (a separate clean-room Bevy repo at Earth
+scale with `big_space`; milestone gates M0–M5), whose M5 extraction plan brings
+the results back into Thalos. Strategy + sequencing: `docs/roadmap/neural_terrain_renderer.md`
+(`ntr §N`). Consequences inside this repo: `thalos_udlod` and the terrain WGSL
+stack are **end-of-life** (defect-driven fixes only, no new investment); the
+spine-port gfx items (F4r/F5r/F7/F8/F9/W12r/TM1) are **frozen**; the surviving
+composites (clouds, atmosphere, ocean, plumes) continue; MIRA-1 finishes its L2
+gate, then pauses.
+
+## Background focus: architecture & code quality
+
+This sprint continues as **background work** (demoted from primary 2026-07-23;
+it is largely renderer-agnostic). It is a **consolidation pass**: the feature push (surface bases,
 space-center hub, launch flows, GPU grass, shadow unification) left behind
 sloppily hacked seams that now generate a steady stream of bugs — parallel
 mechanisms for the same job, copy-pasted flows that drift apart, and
@@ -43,9 +71,18 @@ natural support for any N instances. The plan lives in
   superseded path you touch get deleted in the same change, not left "for
   reference".
 
-## Secondary focus: graphics fidelity
+## Background focus: graphics fidelity (triaged 2026-07-23)
 
-The active sprint is pushing toward MSFS/KSP2-tier visuals. The full plan is in
+> **Keystone triage:** the F-series *direction* is inverted by the keystone
+> sprint (see above / ADR-20260723T142945Z). Spine-port and udlod-coupled items
+> (F4r, F5r, F7, F8a/b, F9, W12r, TM1) are **frozen** — no new investment. The
+> **composites survive and continue**: clouds, atmosphere, ocean, plumes,
+> celestial sky, and the capture harness. The one-world principle below still
+> holds; only the mechanism changed (everything opaque converges on Bevy's
+> path, not the custom spine). The section is retained as written for
+> background context and for the surviving composite work.
+
+The sprint was pushing toward MSFS/KSP2-tier visuals. The full plan is in
 `docs/roadmap/graphics_fidelity.md` (restructured 2026-06-30 around a full architecture
 review). The doc is now organised around two ideas, not a flat task list:
 

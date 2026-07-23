@@ -23,9 +23,10 @@ for superseded reference material.
 
 Active strategy and sequencing, not implementation detail.
 
-- [Architecture cleanup](roadmap/architecture_cleanup.md) — primary consolidation sprint.
-- [Graphics fidelity](roadmap/graphics_fidelity.md) — one-world rendering strategy and F1–F9 foundation.
-- [Mira learned terrain](roadmap/mira_learned_terrain.md) — L1–L6 milestones, visual gates, dataset growth, compute ledger, evidence.
+- [Neural terrain × standard-path renderer](roadmap/neural_terrain_renderer.md) — **keystone / primary sprint**: paired diffusion terrain + Bevy-standard-path renderer, probe milestones, extraction plan.
+- [Architecture cleanup](roadmap/architecture_cleanup.md) — background consolidation sprint (demoted from primary 2026-07-23).
+- [Graphics fidelity](roadmap/graphics_fidelity.md) — one-world rendering strategy; spine-port items frozen by the keystone triage, composites continue.
+- [Mira learned terrain](roadmap/mira_learned_terrain.md) — L1–L6 milestones, visual gates, dataset growth, compute ledger, evidence; paused after L2 closure per the keystone.
 
 ### [Gameplay systems](gameplay/)
 
@@ -118,6 +119,7 @@ the backlog.
 | Prefix | Points to |
 |--------|-----------|
 | bare `§N` | a section of the current document |
+| `ntr §N` | [neural terrain × standard-path renderer](roadmap/neural_terrain_renderer.md) |
 | `clean §N` | [architecture cleanup](roadmap/architecture_cleanup.md) |
 | `gfx §N` | [graphics fidelity](roadmap/graphics_fidelity.md) |
 | `cloud §N` | [clouds](rendering/clouds.md) |
