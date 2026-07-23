@@ -98,6 +98,19 @@ design around procedural assumptions).
 1. **Reproduce upstream.** Pinned Python env (PyTorch/diffusers,
    infinite-tensor fork); run the released 90 m and 30 m models locally;
    verify seed-determinism and windowed-fusion behavior; record content hashes.
+1b. **Direct reference, not imitation** (user direction 2026-07-23). The
+   released pipeline is a *working earth-like implementation of the whole
+   cascade* — coarse model (23 km/px elev+climate) → detail model (90 m) —
+   so it is consumed **directly** as the terrain source and held as the
+   **benchmark**: export its coarse band + detail regions into the tile
+   contract (probe first, game after extraction); compute reference metrics
+   (hypsometry, slope distribution, radial spectrum slope — MIRA-L-gate
+   style) from its flat output; require the spherical composition to match
+   those metrics as cube-sphere addressing wraps around it. Probe-side
+   analytic octaves demote to gap-filler outside baked coverage. Only after
+   the pipeline is proven against this reference does the recipe transfer to
+   new datasets (Thalos-authored conditioning, airless) — the §4.3/companion
+   -ADR path, unchanged in destination but now benchmark-anchored.
 2. **Spherical adaptation.** Cube-sphere addressing `(face, level, x, y)` +
    halo; conditioning includes unit direction, scale level, body seed, physical
    sample spacing (so faces aren't six unrelated planar worlds); cross-face
