@@ -86,9 +86,7 @@ impl BodySurfaceRegistry {
                         )
                     })?;
                     let package_fingerprint = package.manifest.artifact_fingerprint();
-                    registry
-                        .airless_landmarks
-                        .insert(body.id, airless_landmarks(&package.static_surface.craters));
+                    let craters = package.static_surface.craters.clone();
                     let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
                         .map_err(|error| format!("{} dynamic terrain: {error}", body.name))?;
                     let tectonics =
@@ -98,14 +96,21 @@ impl BodySurfaceRegistry {
                         dynamic_layers,
                         tectonics,
                     };
-                    (
-                        Arc::new(PackageSurface::new(
-                            package.manifest,
-                            surface,
-                            DynamicSurfaceState::default(),
-                        )),
-                        package_fingerprint,
-                    )
+                    let surface_arc: Arc<dyn SurfaceQuery> = Arc::new(PackageSurface::new(
+                        package.manifest,
+                        surface,
+                        DynamicSurfaceState::default(),
+                    ));
+                    // Landmarks are derived AFTER the surface exists so their
+                    // relief can be measured from the one height authority
+                    // rather than estimated by a parallel analytic model (which
+                    // max-selection turns into a bug: the "most legible" pick
+                    // is exactly the crater the model most overestimates).
+                    registry.airless_landmarks.insert(
+                        body.id,
+                        airless_landmarks(&craters, surface_arc.as_ref(), body.radius_m),
+                    );
+                    (surface_arc, package_fingerprint)
                 }
                 _ => (
                     Arc::new(ProceduralSurface::new(body.radius_m as f32, body.id as u32)),
@@ -155,22 +160,25 @@ const LANDMARK_BUDGET: usize = 256;
 ///   which is what a survey framing wants: sharp rims, unambiguous morphology.
 ///   Callers taking the first acceptable landmark keep exactly the prior
 ///   behaviour, so the existing probes are unaffected.
-/// - **Most legible (second half).** Ranked by `radius x degradation_factor` —
-///   big *and* still sharp. A framing that must *contain* a crater rather than
-///   survey near one needs these, and they were previously unreachable twice
-///   over: the `age <= 1 Gyr` gate excludes big craters almost by construction
-///   (large basins are ancient — Mira authors `crater_age_bias: 2.6` against
-///   only `forced_young_count: 8`), and the surviving list was then truncated
-///   around 10 km, so "largest" returned a 6 km crater on a body with 30 km
-///   ones. Ranking on raw radius instead overcorrects: it returns the *oldest*
-///   basins, which `degradation_factor` has relaxed and infilled to nearly flat
-///   ground, and the framing lands on an empty plain again. Size must be
-///   weighted by surviving relief, using the renderer's own model.
+/// - **Most legible (second half).** Big *and* still sharp — a framing that
+///   must *contain* a crater rather than survey near one needs these. The
+///   candidate pool is pre-ranked by the cheap analytic
+///   `radius x degradation_factor`, but the kept set and the stored `relief_m`
+///   come from **sampling the surface itself**. The analytic estimate must not
+///   be the stored value: a max-over-candidates consumer (the rim framing's
+///   `MostLegible`) selects exactly the crater the model most *overestimates*
+///   — on Mira that was a claimed 5.8 km-relief basin whose baked ground
+///   samples ±0.5 m-scale plains, so the framing hovered over nothing
+///   (found 2026-07-24 during NTR-X1 verification).
 ///
 /// Duplicates between the halves are harmless and deliberately not filtered:
 /// "first in band" and "largest in band" both give the same answer with or
 /// without them.
-fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<AirlessLandmark> {
+fn airless_landmarks(
+    craters: &[thalos_terrain::Crater],
+    surface: &dyn SurfaceQuery,
+    body_radius_m: f64,
+) -> Vec<AirlessLandmark> {
     const RADIUS_BAND_M: std::ops::RangeInclusive<f32> = 4_000.0..=30_000.0;
     let half = LANDMARK_BUDGET / 2;
 
@@ -178,6 +186,36 @@ fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<AirlessLandmark>
         craters
             .iter()
             .filter(|crater| RADIUS_BAND_M.contains(&crater.radius_m))
+    };
+
+    // Surviving relief measured from the height authority: centre sample plus
+    // two rings (floor at 0.55 r, rim at 1.0 r), max − min. Coarse LOD — this
+    // asks "does the crater read at framing scale", not for micro-detail.
+    let measured_relief = |crater: &thalos_terrain::Crater| -> f32 {
+        let dir = crater.center.as_dvec3().normalize();
+        let arc = f64::from(crater.radius_m) / body_radius_m;
+        let seed = if dir.dot(DVec3::Y).abs() < 0.95 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        let tangent_a = seed.cross(dir).normalize();
+        let tangent_b = dir.cross(tangent_a).normalize();
+        let lod_m = (crater.radius_m / 8.0).max(64.0);
+        let mut lo = surface.sample_height_m(dir.as_vec3(), lod_m);
+        let mut hi = lo;
+        for ring_frac in [0.55_f64, 1.0] {
+            let ring_arc = arc * ring_frac;
+            for k in 0..8 {
+                let a = std::f64::consts::TAU * k as f64 / 8.0;
+                let ring = tangent_a * a.cos() + tangent_b * a.sin();
+                let sample_dir = (dir * ring_arc.cos() + ring * ring_arc.sin()).normalize();
+                let h = surface.sample_height_m(sample_dir.as_vec3(), lod_m);
+                lo = lo.min(h);
+                hi = hi.max(h);
+            }
+        }
+        hi - lo
     };
 
     let mut typical: Vec<&thalos_terrain::Crater> =
@@ -189,21 +227,29 @@ fn airless_landmarks(craters: &[thalos_terrain::Crater]) -> Vec<AirlessLandmark>
     });
     typical.truncate(half);
 
+    // Analytic pre-rank bounds how many craters we pay to measure; measured
+    // relief then decides what survives into the legible half.
     let legibility = |crater: &thalos_terrain::Crater| {
         crater.radius_m * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr)
     };
-    let mut legible: Vec<&thalos_terrain::Crater> = in_band().collect();
-    legible.sort_by(|a, b| legibility(b).total_cmp(&legibility(a)));
+    let mut pool: Vec<&thalos_terrain::Crater> = in_band().collect();
+    pool.sort_by(|a, b| legibility(b).total_cmp(&legibility(a)));
+    pool.truncate(half * 2);
+    let mut legible: Vec<(&thalos_terrain::Crater, f32)> = pool
+        .into_iter()
+        .map(|crater| (crater, measured_relief(crater)))
+        .collect();
+    legible.sort_by(|a, b| b.1.total_cmp(&a.1));
     legible.truncate(half);
 
     typical
         .into_iter()
+        .map(|crater| (crater, measured_relief(crater)))
         .chain(legible)
-        .map(|crater| AirlessLandmark {
+        .map(|(crater, relief_m)| AirlessLandmark {
             dir: crater.center.as_dvec3().normalize(),
             radius_m: crater.radius_m,
-            relief_m: crater.depth_m
-                * thalos_terrain::degradation_factor(crater.radius_m, crater.age_gyr),
+            relief_m,
         })
         .collect()
 }

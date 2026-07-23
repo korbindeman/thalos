@@ -370,6 +370,8 @@ struct StreamedTile {
     key: TileKey,
     built: BuiltTile,
     gen_micros: u64,
+    /// Sampled height range (m) — diagnostic for flat-terrain regressions.
+    h_range: (f32, f32),
 }
 
 /// One streaming tile terrain on a body grid entity. Insert on the body's
@@ -384,6 +386,10 @@ pub struct TileTerrainRoot {
     resident: HashMap<TileKey, Entity>,
     pending: HashMap<TileKey, Task<StreamedTile>>,
     gen_stats: GenStats,
+    /// Latched true the first time the desired set is fully resident. After
+    /// that, the hole-free despawn rule keeps coverage complete, so the
+    /// impostor↔terrain swap can trust it without flickering back.
+    covered_once: bool,
 }
 
 /// Rolling per-tile generation-time telemetry; logs every 200 landings so
@@ -393,22 +399,28 @@ pub struct TileTerrainRoot {
 struct GenStats {
     samples: Vec<u64>,
     total_landed: u64,
+    h_min: f32,
+    h_max: f32,
 }
 
 impl GenStats {
-    fn record(&mut self, micros: u64) {
+    fn record(&mut self, micros: u64, h_range: (f32, f32)) {
         self.samples.push(micros);
         self.total_landed += 1;
+        self.h_min = self.h_min.min(h_range.0);
+        self.h_max = self.h_max.max(h_range.1);
         if self.samples.len() >= 200 {
             self.samples.sort_unstable();
             let mean = self.samples.iter().sum::<u64>() / self.samples.len() as u64;
             let p95 = self.samples[self.samples.len() * 95 / 100];
             info!(
-                "tile terrain: {} tiles landed | gen mean {:.1} ms p95 {:.1} ms (last {})",
+                "tile terrain: {} tiles landed | gen mean {:.1} ms p95 {:.1} ms (last {}) | h [{:.1}, {:.1}] m",
                 self.total_landed,
                 mean as f64 / 1000.0,
                 p95 as f64 / 1000.0,
-                self.samples.len()
+                self.samples.len(),
+                self.h_min,
+                self.h_max,
             );
             self.samples.clear();
         }
@@ -434,11 +446,19 @@ impl TileTerrainRoot {
             resident: HashMap::new(),
             pending: HashMap::new(),
             gen_stats: GenStats::default(),
+            covered_once: false,
         }
     }
 
     pub fn resident_count(&self) -> usize {
         self.resident.len()
+    }
+
+    /// True once the streamed terrain has (ever) fully covered the desired
+    /// selection — the impostor↔terrain handoff criterion (the analogue of
+    /// udlod's `pinned_tiles_ready`).
+    pub fn coverage_ready(&self) -> bool {
+        self.covered_once
     }
 
     pub fn settled(&self) -> bool {
@@ -578,8 +598,14 @@ fn stream_tile_terrain(
         let task = pool.spawn(async move {
             let started = std::time::Instant::now();
             let tile = provider.request(key, radius);
+            let h_range = tile
+                .heights_m
+                .iter()
+                .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &h| {
+                    (lo.min(h), hi.max(h))
+                });
             let built = build_tile_mesh(&tile, radius);
-            StreamedTile { key, built, gen_micros: started.elapsed().as_micros() as u64 }
+            StreamedTile { key, built, gen_micros: started.elapsed().as_micros() as u64, h_range }
         });
         root_ref.pending.insert(key, task);
     }
@@ -595,7 +621,7 @@ fn stream_tile_terrain(
         }
     });
     for done in landed {
-        root_ref.gen_stats.record(done.gen_micros);
+        root_ref.gen_stats.record(done.gen_micros, done.h_range);
         let (cell, local) = grid.translation_to_grid(done.built.origin);
         let entity = commands
             .spawn((
@@ -607,6 +633,17 @@ fn stream_tile_terrain(
             ))
             .id();
         root_ref.resident.insert(done.key, entity);
+    }
+
+    if !root_ref.covered_once
+        && !root_ref.desired.is_empty()
+        && root_ref.desired.iter().all(|k| root_ref.resident.contains_key(k))
+    {
+        root_ref.covered_once = true;
+        info!(
+            "tile terrain: first full coverage ({} tiles) — impostor handoff ready",
+            root_ref.resident.len()
+        );
     }
 
     // Hole-free despawn (probe M2 rule).

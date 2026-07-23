@@ -902,6 +902,10 @@ pub(super) fn sync_body_render_lod(
             Without<BodyOcean>,
         ),
     >,
+    tile_roots: Query<(
+        &crate::rendering::tile_terrain::TileTerrainBody,
+        &thalos_body_render::tiles::TileTerrainRoot,
+    )>,
 ) {
     let Ok(cam_xform) = ship_cam_q.single() else {
         return;
@@ -928,10 +932,19 @@ pub(super) fn sync_body_render_lod(
     // resident-ancestor chain (otherwise the GPU samples
     // `INVALID_ATLAS_INDEX` → vertices drop to `min_height` → visible "void"
     // holes during the load window).
-    let terrain_resident: std::collections::HashSet<BodyId> = terrains
+    let mut terrain_resident: std::collections::HashSet<BodyId> = terrains
         .iter()
         .filter_map(|(t, atlas, _)| atlas.pinned_tiles_ready().then_some(t.body_id))
         .collect();
+    // Standard-path tile terrain (NTR-X1) counts as resident ground once it
+    // has fully covered its selection — same handoff the udlod atlas gate
+    // provides. Without this the impostor billboard (an analytic smooth
+    // sphere) stays visible at every distance and paints over the tiles.
+    for (body, root) in &tile_roots {
+        if root.coverage_ready() {
+            terrain_resident.insert(body.body_id);
+        }
+    }
 
     // Returns (distance, swap_threshold, shell_radius) for one body, or
     // None if the body or its render-space position is missing. The swap
@@ -1152,6 +1165,7 @@ pub(super) fn update_body_terrain_atmosphere(
         Option<Res<super::ssao::AoImage>>,
         Res<super::ssao::SsaoConfig>,
         Option<Res<super::contact_shadow::ContactShadowImage>>,
+        Res<super::clouds::BodyCloudFill>,
     ),
     flatten_registry: Res<TerrainFlattenRegistry>,
     // ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident-height-tile lookup inputs for the sky material's
@@ -1432,6 +1446,16 @@ pub(super) fn update_body_terrain_atmosphere(
                 } else {
                     Vec4::ZERO
                 },
+                // Derived far opacity response (BL-20260723T214730Z). Zeros
+                // (no calibration) render the far tier invisible — that only
+                // happens if the spawn derivation was skipped, and
+                // `drive_clouds` warns loudly for that case.
+                fill_response: cloud_io
+                    .7
+                    .0
+                    .get(&i)
+                    .map(|calibration| calibration.far_response_vec4s())
+                    .unwrap_or([Vec4::ZERO; 4]),
             },
         );
     }
