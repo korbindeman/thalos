@@ -27,9 +27,21 @@ use thalos_body_render::tiles::{
 };
 use thalos_world::BodyId;
 
+use super::terrain_residency::TerrainRebuildRequest;
 use super::types::RealSpaceBody;
 use super::view_anchor::ViewAnchor;
 use crate::terrain_registry::BodySurfaceRegistry;
+use std::sync::Mutex;
+
+/// Bodies currently owned by the tile renderer — read by
+/// `terrain_residency::try_spawn` (which may run before this plugin's
+/// systems), hence a process-global rather than a Bevy resource.
+static TILE_RENDERED: Mutex<Vec<thalos_world::BodyId>> = Mutex::new(Vec::new());
+
+/// Is `body_id` rendered by the tile path (udlod stands down for it)?
+pub fn tile_rendered(body_id: BodyId) -> bool {
+    tile_renderer_enabled() && TILE_RENDERED.lock().is_ok_and(|v| v.contains(&body_id))
+}
 
 /// One env check, cached: `THALOS_TILE_RENDERER=1|true|on|yes`.
 pub fn tile_renderer_enabled() -> bool {
@@ -67,6 +79,7 @@ fn ensure_tile_root(
     bodies: Query<(Entity, &RealSpaceBody)>,
     existing: Query<(), With<TileTerrainRoot>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
+    mut rebuild: ResMut<TerrainRebuildRequest>,
     mut commands: Commands,
 ) {
     if !existing.is_empty() {
@@ -102,6 +115,13 @@ fn ensure_tile_root(
     commands
         .entity(entity)
         .insert((root, TileTerrainBody { body_id: resolved.body }));
+    if let Ok(mut list) = TILE_RENDERED.lock() {
+        list.push(resolved.body);
+    }
+    // Boot race: residency may have spawned udlod for this body before the
+    // anchor resolved. A rebuild request despawns it; the respawn declines
+    // via the `tile_rendered` gate, leaving the tile path sole owner.
+    rebuild.request(resolved.body);
 }
 
 /// Republish the selection eye from `ViewAnchor` each frame.

@@ -427,10 +427,12 @@ fn try_spawn(
 ) -> Option<ResidencyEntry> {
     let body = sim.system.bodies.get(body_id)?;
 
-    // NTR-X1: when the standard-path tile renderer is active, udlod ground
-    // terrain stands down for every body (ntr §6 slice 1; the tile driver
-    // owns the anchor body, remaining bodies render impostor-only).
-    if crate::rendering::tile_terrain::tile_renderer_enabled() {
+    // NTR-X1: bodies owned by the standard-path tile renderer stand down
+    // here — every OTHER body keeps the full udlod stack (terrain + sky dome
+    // + ocean), so flying from the tile body to Thalos still gets atmosphere
+    // and ground detail (user finding 2026-07-24: the original all-body gate
+    // left Thalos with neither renderer).
+    if crate::rendering::tile_terrain::tile_rendered(body_id) {
         return None;
     }
 

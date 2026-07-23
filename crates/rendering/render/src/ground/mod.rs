@@ -42,7 +42,7 @@ mod scatter;
 mod sky_material;
 mod synthetic;
 mod tile_lattice;
-mod tile_synthesis_pool;
+pub(crate) mod tile_synthesis_pool;
 mod tree_atlas;
 mod tree_impostor;
 mod tree_material;

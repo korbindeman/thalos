@@ -25,7 +25,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::math::DVec3;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy::tasks::{Task, block_on, poll_once};
 use big_space::prelude::*;
 use thalos_terrain::SurfaceQuery;
 
@@ -181,20 +181,40 @@ impl TerrainTileProvider for SurfaceQueryProvider {
         let spacing = key.sample_spacing_m(radius_m);
         let side = SurfaceTile::grid_side();
         let step = 1.0 / (TILE_RES - 1) as f64;
+        // Package/point-query sampling is the expensive half (the
+        // raster->point->raster tax, ADR-20260722T105147Z) — spread rows
+        // across the shared *bounded* eval pool, exactly like udlod's
+        // `compute_tile_pixels` (never rayon's implicit global pool; see
+        // `ground::tile_synthesis_pool`).
+        let rows: Vec<(Vec<f32>, Vec<[f32; 3]>)> =
+            crate::ground::tile_synthesis_pool::tile_eval_pool().install(|| {
+                use rayon::prelude::*;
+                (0..side)
+                    .into_par_iter()
+                    .map(|j| {
+                        let mut h = Vec::with_capacity(side);
+                        let mut a = Vec::with_capacity(side);
+                        let t = (j as f64 - TILE_HALO as f64) * step;
+                        for i in 0..side {
+                            let s = (i as f64 - TILE_HALO as f64) * step;
+                            let sample =
+                                self.surface.sample_d(key.dir_at(s, t), spacing as f32);
+                            h.push(sample.height_m);
+                            a.push([
+                                sample.albedo_linear.x,
+                                sample.albedo_linear.y,
+                                sample.albedo_linear.z,
+                            ]);
+                        }
+                        (h, a)
+                    })
+                    .collect()
+            });
         let mut heights = Vec::with_capacity(side * side);
         let mut albedo = Vec::with_capacity(side * side);
-        for j in 0..side {
-            for i in 0..side {
-                let s = (i as f64 - TILE_HALO as f64) * step;
-                let t = (j as f64 - TILE_HALO as f64) * step;
-                let sample = self.surface.sample_d(key.dir_at(s, t), spacing as f32);
-                heights.push(sample.height_m);
-                albedo.push([
-                    sample.albedo_linear.x,
-                    sample.albedo_linear.y,
-                    sample.albedo_linear.z,
-                ]);
-            }
+        for (h, a) in rows {
+            heights.extend(h);
+            albedo.extend(a);
         }
         SurfaceTile { key, sample_spacing_m: spacing, heights_m: heights, albedo_linear: albedo }
     }
@@ -349,6 +369,7 @@ pub struct TileEyeTarget {
 struct StreamedTile {
     key: TileKey,
     built: BuiltTile,
+    gen_micros: u64,
 }
 
 /// One streaming tile terrain on a body grid entity. Insert on the body's
@@ -362,6 +383,36 @@ pub struct TileTerrainRoot {
     desired: HashSet<TileKey>,
     resident: HashMap<TileKey, Entity>,
     pending: HashMap<TileKey, Task<StreamedTile>>,
+    gen_stats: GenStats,
+}
+
+/// Rolling per-tile generation-time telemetry; logs every 200 landings so
+/// the raster->point->raster tax stays measured (the tile-native package
+/// provider is the planned fix).
+#[derive(Default)]
+struct GenStats {
+    samples: Vec<u64>,
+    total_landed: u64,
+}
+
+impl GenStats {
+    fn record(&mut self, micros: u64) {
+        self.samples.push(micros);
+        self.total_landed += 1;
+        if self.samples.len() >= 200 {
+            self.samples.sort_unstable();
+            let mean = self.samples.iter().sum::<u64>() / self.samples.len() as u64;
+            let p95 = self.samples[self.samples.len() * 95 / 100];
+            info!(
+                "tile terrain: {} tiles landed | gen mean {:.1} ms p95 {:.1} ms (last {})",
+                self.total_landed,
+                mean as f64 / 1000.0,
+                p95 as f64 / 1000.0,
+                self.samples.len()
+            );
+            self.samples.clear();
+        }
+    }
 }
 
 impl TileTerrainRoot {
@@ -382,6 +433,7 @@ impl TileTerrainRoot {
             desired: HashSet::new(),
             resident: HashMap::new(),
             pending: HashMap::new(),
+            gen_stats: GenStats::default(),
         }
     }
 
@@ -517,13 +569,17 @@ fn stream_tile_terrain(
         pa.total_cmp(&pb)
     });
     let budget = MAX_IN_FLIGHT.saturating_sub(root_ref.pending.len());
-    let pool = AsyncComputeTaskPool::get();
+    // Dedicated pool: routing this through AsyncComputeTaskPool starves
+    // Avian's collider-tree optimisation and hitches the main thread (the
+    // documented reason `ground::tile_synthesis_pool` exists).
+    let pool = crate::ground::tile_synthesis_pool::tile_synthesis_pool();
     for key in missing.into_iter().take(budget) {
         let provider = root_ref.provider.clone();
         let task = pool.spawn(async move {
+            let started = std::time::Instant::now();
             let tile = provider.request(key, radius);
             let built = build_tile_mesh(&tile, radius);
-            StreamedTile { key, built }
+            StreamedTile { key, built, gen_micros: started.elapsed().as_micros() as u64 }
         });
         root_ref.pending.insert(key, task);
     }
@@ -539,6 +595,7 @@ fn stream_tile_terrain(
         }
     });
     for done in landed {
+        root_ref.gen_stats.record(done.gen_micros);
         let (cell, local) = grid.translation_to_grid(done.built.origin);
         let entity = commands
             .spawn((
