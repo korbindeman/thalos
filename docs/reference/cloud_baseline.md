@@ -289,6 +289,30 @@ second near fetch and all atlas plumbing were reverted. Evidence is retained
 under `step-10a/` and `step-10b/`; see
 [ADR-20260722T141000Z](../adr/20260722T141000Z-far-cloud-density-is-surface-parameterized.md).
 
+## 2026-07-22 CLOUD-6 static handoff acceptance
+
+Cold tier isolation proved the cruise band belonged to the far estimator, not
+the near march. Accepted single-factor comparisons are under
+`tools/agent_scratch/screenshots/comparisons/cloud-cruise/`:
+
+- `cloud-tier`: near-only / composite / far-only;
+- `cloud-far-filter`: chord-mip / pixel-footprint, with far-only invariant;
+- `cloud-far-aggregation`: stacked / coverage-preserving, with far-only and
+  pixel-footprint invariants;
+- `cloud-density-coupling`: legacy bias / shared envelope.
+
+The accepted renderer uses projected-pixel mips, prefiltered areal-mean chord
+opacity, a 0.45 expected sub-cell morphology fill, and the shared four-stratum
+envelope in the near density. Final cold `cloud-runway`, `cloud-cruise`,
+`cloud-limb`, and `cloud-planet` images are in `artifacts/visual/latest/`; all
+captures were complete with no shader/pipeline/capture-health errors. The
+remaining acceptance step is the user-run in-motion handoff.
+
+Final 1080p Baseline cloud-compute timings were 1.927 ms mean / 1.943 ms p95
+(runway), 1.064 / 1.073 ms (cruise), 0.079 / 0.080 ms (limb), and 0.081 /
+0.086 ms (planet). Persistent cloud allocation is 108,166,144 bytes
+(103.16 MiB), including the 33,553,920-byte four-stratum density cube.
+
 ## Interactive regression checklist
 
 These motion checks remain the interactive acceptance pass for the completed

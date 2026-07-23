@@ -220,7 +220,7 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
     return vec3<f32>(fade_begin, t_stop, near_scale);
 }
 
-// Reduced weather-column band march: the far estimator's answer to grazing
+// Reduced surface-density band march: the far estimator's answer to grazing
 // geometry. K stratified samples traverse the ray's shell band accumulating
 // column occupancy × local vertical profile, so the limb gets true vertical
 // thickness and distant horizon decks break where columns are clear — instead
@@ -228,6 +228,16 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
 // Weather varies at ≥ ~5 km/texel at the base level, so K samples across even a 500 km chord
 // stay well-sampled (no 3-D noise is touched here).
 const ORBITAL_MARCH_SAMPLES = 6u;
+// The surface payload is the broad selector/envelope. The near estimator still
+// requires an independent 3-D base-shape hit inside that envelope; this is the
+// expected occupied fraction of one resolved envelope cell after that test.
+// Without it, the far tier renders the envelope itself as finished cloud and
+// becomes much denser than the near volume it is supposed to summarize.
+// Raised 0.45 → 0.60 with the surface-authority near threshold (2026-07-23):
+// inside a resolved envelope cell the Cartesian sculptor now passes most of
+// the mass, so the expected sub-cell fill is higher than under the legacy
+// independent-threshold contract.
+const FAR_SUBCELL_MORPHOLOGY_FILL = 0.60;
 
 fn sample_orbital_cloud(
     cam_pos: vec3<f32>,
@@ -301,7 +311,9 @@ fn sample_orbital_cloud(
     // 46%-coverage planet into solid overcast.
     var best_c = 0.0;
     var sum_c = 0.0;
+    var sample_weight = 0.0;
     var best_t = -1.0;
+    var best_lod = 7.0;
     // Height at the running segment boundary, as a fraction of the shell.
     var h_prev = (length(cam_pos + t0 * ray_dir - planet_center) - planet_radius - base_alt)
         * inv_thickness;
@@ -314,7 +326,12 @@ fn sample_orbital_cloud(
             * inv_thickness;
         h_prev = h_b;
         var far_w = 1.0;
-        if reach.y > 0.0 && reach.z > 0.0 {
+        // Far-only diagnostic (tier_diagnostic = +1) bypasses the near/far
+        // ownership weighting so the far tier's FULL field is visible at any
+        // framing — the only way to A/B the two tiers' weather registration
+        // at one camera pose.
+        let ownership_active = cloud_params.cloud_march.y < 0.5;
+        if ownership_active && reach.y > 0.0 && reach.z > 0.0 {
             var near_own = 0.0;
             if reach.y - reach.x > 1.0 {
                 near_own = 1.0 - smoothstep(reach.x, reach.y, t_m);
@@ -328,40 +345,99 @@ fn sample_orbital_cloud(
         }
         let p = cam_pos + t_m * ray_dir - planet_center;
         let n_l = rotate_quat(cloud_params.world_to_body_orientation, normalize(p));
-        let weather = textureSampleLevel(weather_texture, weather_sampler, n_l, lod_chord);
+        let pixel_world_m = t_m * 2.0
+            / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
+        let lod_pixel = clamp(
+            log2(max((pixel_world_m / planet_radius) / WEATHER_TEXEL_ANGLE, 1.0)),
+            0.0,
+            7.0,
+        );
+        let lod = mix(lod_chord, lod_pixel, clamp(cloud_params.cloud_march.z, 0.0, 1.0));
+        let weather = textureSampleLevel(weather_texture, weather_sampler, n_l, lod);
         let col = weather_column_from_texel(weather);
+        // Same 0.75 lod floor as sample_weather_soft: raw mip 0 resolves the
+        // 1024-face texel lattice into crunchy cell borders.
         let strata = textureSampleLevel(
             surface_density_texture,
             weather_sampler,
             n_l,
-            lod_chord,
+            max(lod, 0.75),
         );
-        // Deterministic Simpson-like vertical integration over the chord
-        // segment. All three evaluations reuse one filtered surface texel, so
-        // the far tier follows the same typed density contract without point-
-        // sampling a Cartesian volume or adding stochastic holes.
-        let density_a = cloud_surface_density(strata, clamp(h_a, 0.0, 1.0));
-        let density_m = cloud_surface_density(
-            strata,
-            clamp(0.5 * (h_a + h_b), 0.0, 1.0),
-        );
-        let density_b = cloud_surface_density(strata, clamp(h_b, 0.0, 1.0));
+        // Analytic per-segment layer overlap, evaluated in LAYER-RELATIVE
+        // space: clip the segment's height span against this texel's
+        // [base, top] and integrate the strata profile over the clipped
+        // portion only. Segments that never enter the layer contribute
+        // nothing AND don't dilute the mean — averaging over all six
+        // segments made a long grazing chord divide its one in-layer hit
+        // toward zero, which erased every cloud from the limb view.
+        let seg_lo = min(h_a, h_b);
+        let seg_hi = max(h_a, h_b);
+        let ov_lo = max(seg_lo, col.base_frac);
+        let ov_hi = min(seg_hi, col.top_frac);
+        if ov_hi <= ov_lo {
+            continue;
+        }
+        // Soft overlap weight: a segment fades in as its clipped span grows
+        // toward half the layer thickness. A hard on/off clip made the
+        // contribution DISCONTINUOUS in view angle, and tangent-geometry ray
+        // families swept that step into razor-edged "knife blade" streaks
+        // across the sky (user frames, 2026-07-23). Fully-inside grazing
+        // segments all carry the same small weight, so the weighted mean —
+        // and therefore grazing opacity — is unchanged.
+        let layer_span = max(col.top_frac - col.base_frac, 0.02);
+        let overlap_w = clamp((ov_hi - ov_lo) / (0.5 * layer_span), 0.0, 1.0);
+        let w_seg = far_w * overlap_w;
+        sample_weight += w_seg;
+        let inv_layer = 1.0 / layer_span;
+        let l_a = (ov_lo - col.base_frac) * inv_layer;
+        let l_b = (ov_hi - col.base_frac) * inv_layer;
+        let density_a = cloud_surface_density(strata, l_a);
+        let density_m = cloud_surface_density(strata, 0.5 * (l_a + l_b));
+        let density_b = cloud_surface_density(strata, l_b);
         let profile = 0.25 * density_a + 0.50 * density_m + 0.25 * density_b;
         if profile <= 1.0e-4 {
             continue;
         }
-        let a_col = 1.0 - exp(-col.optical_depth * 1.2);
-        let candidate = profile * a_col * far_w;
+        // Thinness response only: areal occupancy already lives in `profile`
+        // (the strata are prefiltered areal density). Real clouds are almost
+        // always optically thick, so this floors high — only genuinely thin
+        // columns (low stratus veils, storm fringes) stay translucent.
+        let a_col = mix(0.70, 1.0, 1.0 - exp(-col.optical_depth * 1.4));
+        let candidate = profile * a_col * w_seg;
         if candidate > best_c {
             best_c = candidate;
             best_t = t_m;
+            best_lod = lod;
         }
         sum_c += candidate;
     }
+    let stacked_opacity = best_c + 0.35 * (sum_c - best_c) * (1.0 - best_c);
+    let mean_c = sum_c / max(sample_weight, 1.0e-4);
+    // Two footprint regimes (CLOUD-6 round 2, 2026-07-23 verdict):
+    // - UNRESOLVED (pixel footprint ≫ weather texel): the filtered mean is the
+    //   probability this footprint contains cloud, so opacity = areal mean ×
+    //   sub-cell fill. Rendering anything sharper would alias.
+    // - RESOLVED (pixel footprint ≲ texel): the mip-0 strata signal IS the
+    //   cell pattern. Rendering it as a flat sub-unit alpha painted the whole
+    //   planet as a translucent veil; instead sharpen density → opacity so
+    //   cell interiors go near-opaque and gaps go clear, matching the discrete
+    //   morphology the near volume resolves from the same field.
+    let resolved = 1.0 - clamp(best_lod * 0.5, 0.0, 1.0);
+    let areal_opacity = mean_c * FAR_SUBCELL_MORPHOLOGY_FILL;
+    // Resolved-footprint response (the state the accepted planet/cruise
+    // captures used). KNOWN OPEN DEFECT: at mid-altitude this renders a
+    // moderate-strata field ~9× denser than the near tier's quantile fill of
+    // the same cube (measured tier A/B 2026-07-23, near 0.109 vs far 0.989);
+    // the response-pairing needs a derived common fill function — see the
+    // backlog row minted 2026-07-23 before re-tuning constants blind.
+    let resolved_opacity = smoothstep(0.06, 0.40, mean_c) * 0.95;
+    let coverage_opacity = mix(areal_opacity, resolved_opacity, resolved);
+    // DEBUG PROBE (temporary): stage ladder — 0.15 = loop reached,
+    // 0.45 = some segment had far_w > 0, 0.9 = some segment found overlap.
     let march_opacity = clamp(
-        best_c + 0.35 * (sum_c - best_c) * (1.0 - best_c),
+        mix(stacked_opacity, coverage_opacity, clamp(cloud_params.cloud_march.w, 0.0, 1.0)),
         0.0,
-        0.92,
+        0.95,
     );
     if march_opacity <= 1.0e-3 || best_t < 0.0 {
         return CloudOverlay(vec3<f32>(0.0), 0.0);
@@ -382,18 +458,29 @@ fn sample_orbital_cloud(
     );
     let n_body_lit_raw =
         orbital_cloud_normal_body(weather_texture, weather_sampler, cloud_n_l, lod_chord);
+    // The moment normal is fetched at the footprint-matched mip, so its relief
+    // is resolved-scale by construction; keep a stronger floor at range so the
+    // disc shows cell relief instead of flat sphere shading (the veil look).
     let normal_detail = smoothstep(220000.0, 60000.0, best_t);
-    let n_body_lit = normalize(mix(cloud_n_l, n_body_lit_raw, 0.25 + 0.75 * normal_detail));
+    let n_body_lit = normalize(mix(cloud_n_l, n_body_lit_raw, 0.40 + 0.60 * normal_detail));
     let q = cloud_params.world_to_body_orientation;
     let cloud_n_lit_w = rotate_quat(vec4(-q.xyz, q.w), n_body_lit);
     let n_dot_l = dot(cloud_n_lit_w, cloud_params.sun_dir_flux.xyz);
     let view_mu = max(dot(cloud_n_lit_w, -ray_dir), 0.0);
     let shade = orbital_cloud_shade(column, n_dot_l, view_mu);
-    let night = smoothstep(-0.12, 0.08, n_dot_l);
+    // Day/night and warm-hour chroma follow the GEOMETRIC solar elevation at
+    // the sample (radial up · sun). Driving them from the relief-perturbed
+    // shading normal painted midday cells that merely tilt away from the sun
+    // in sunset orange — the pink limb/horizon fringes.
+    let sun_elev_geo = dot(cloud_n_w, cloud_params.sun_dir_flux.xyz);
+    let night = smoothstep(-0.12, 0.08, sun_elev_geo);
+    // Warm hour is a narrow band near the terminator (< ~9° solar elevation).
+    // Completing the transition at 0.45 tinted two-thirds of the lit disc
+    // cream — daylit clouds must read white.
     let sun_chroma = mix(
         vec3<f32>(1.0, 0.45, 0.18),
         vec3<f32>(1.0, 0.97, 0.92),
-        smoothstep(0.05, 0.45, clamp(n_dot_l, 0.0, 1.0)),
+        smoothstep(0.02, 0.16, clamp(sun_elev_geo, 0.0, 1.0)),
     );
     // Occupancy comes from the band march; `shade.y` would double-count it.
     let opacity = march_opacity * night;
@@ -402,7 +489,9 @@ fn sample_orbital_cloud(
         * sun_chroma
         * cloud_params.sun_dir_flux.w
         * SCENE_FLUX_SCALE
-        * 0.55
+        // 0.55 → 0.68: far cells read grey next to the near volume's sunlit
+        // white at the handoff (2026-07-23 cruise capture).
+        * 0.68
         * shade.x
         * night;
 
@@ -411,11 +500,15 @@ fn sample_orbital_cloud(
     // distant decks then read as extinction-only brown. Approximate the veil
     // with the same analytic β the near march uses and restore it here.
     let dens = exp(-max(cloud_alt, 0.0) / 8000.0);
-    let mu_view = max(abs(dot(cloud_n_w, ray_dir)), 0.2);
-    let d_air = min(best_t, 60000.0 / mu_view);
+    // Equivalent air path via a Schueler-style air mass: one scale height over
+    // view inclination. The former flat 60 km/mu cap modelled a horizontal
+    // in-atmosphere path; applied to an orbital top-down ray it attenuated
+    // ~74 % of the blue and turned the whole disc's clouds beige.
+    let mu_view = abs(dot(cloud_n_w, ray_dir));
+    let d_air = min(best_t, 8000.0 / max(mu_view + 0.10, 0.15));
     let tau = vec3<f32>(5.5e-6, 1.3e-5, 3.2e-5) * dens * d_air;
     let view_T = exp(-tau);
-    let day = smoothstep(-0.05, 0.30, n_dot_l);
+    let day = smoothstep(-0.05, 0.30, sun_elev_geo);
     let e_air = vec3<f32>(0.40, 0.55, 0.85)
         * cloud_params.sun_dir_flux.w
         * SCENE_FLUX_SCALE
@@ -454,16 +547,19 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     );
     let cloud_near = textureLoad(cloud_distance_texture, ref_coord, 0).r;
     let near_vis = near_visibility(cloud_near, scene_t, oc_len_sq, b);
+    let tier_diagnostic = cloud_params.cloud_march.y;
+    let near_enabled = select(1.0, 0.0, tier_diagnostic > 0.5);
+    let far_enabled = select(1.0, 0.0, tier_diagnostic < -0.5);
     let near_cloud = CloudOverlay(
-        near_sample.rgb * near_vis,
-        (1.0 - near_sample.a) * near_vis,
+        near_sample.rgb * near_vis * near_enabled,
+        (1.0 - near_sample.a) * near_vis * near_enabled,
     );
     let orbital = sample_orbital_cloud(
         cam_pos, ray_dir, planet_center, planet_radius, oc_len_sq, b, scene_t,
     );
     let cloud = CloudOverlay(
-        near_cloud.premul_rgb + orbital.premul_rgb * (1.0 - near_cloud.opacity),
-        1.0 - (1.0 - near_cloud.opacity) * (1.0 - orbital.opacity),
+        near_cloud.premul_rgb + orbital.premul_rgb * far_enabled * (1.0 - near_cloud.opacity),
+        1.0 - (1.0 - near_cloud.opacity) * (1.0 - orbital.opacity * far_enabled),
     );
     if cloud.opacity <= 1.0e-5 {
         discard;

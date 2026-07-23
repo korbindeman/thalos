@@ -178,47 +178,113 @@ impl CloudWeatherField {
                     );
                     let cellular_cut = 1.0 - (2.0 * cellular_cut_raw - 1.0).abs();
                     let cellular = 0.68 * cellular_mass + 0.32 * cellular_cut;
-                    // Cellular weight is slightly higher than the first CLOUD-3
-                    // checkpoint so open-sky pockets survive into interior and
-                    // runway views, but stays below the level that shattered the
-                    // limb into cubemap-scale confetti.
-                    let coverage = (climate.coverage
-                        + climate.band_strength * band
-                        + climate.variation
-                            * (0.62 * (regional - 0.5)
-                                + 0.43 * (mesoscale - 0.5)
-                                + 0.32 * (cellular - 0.5)
-                                + 0.22 * (frontal - 0.35)))
-                        .clamp(0.0, 1.0);
 
-                    // Kind changes at synoptic/mesoscale rather than one type
-                    // covering an entire horizon.
-                    let selector = fbm3(dir * 42.0 + Vec3::splat(17.0), climate.seed ^ 0xC10D, 3);
-                    let cloud_type = if selector < type_mix[0] {
-                        0.08
-                    } else if selector < type_mix[0] + type_mix[1] {
-                        0.50
-                    } else {
-                        0.94
-                    };
+                    // ── Regime-structured occupancy (BL-20260723T165923Z) ──
+                    // Real skies are organized, not statistically uniform: a
+                    // synoptic OCCUPANCY field thresholded into weather systems
+                    // with genuinely clear air between them, and a coherent
+                    // REGIME per region (scattered-cumulus field / stratus
+                    // sheet / storm cluster, plus frontal ridges) that sets the
+                    // local coverage texture, cloud type, and vertical extent.
+                    // The previous producer summed fixed-scale noises around
+                    // one mean, which rendered the whole planet as the same
+                    // mid-cumulus speckle (2026-07-23 user verdict).
+                    //
+                    // Occupancy: threshold the synoptic field at the quantile
+                    // matching authored mean coverage; soft edges so systems
+                    // thin out rather than shear off.
+                    let system_field = regional
+                        + 0.35 * climate.band_strength * band
+                        + 0.08 * (mesoscale - 0.5);
+                    let occ_threshold = 0.70 - 0.36 * climate.coverage.clamp(0.0, 1.0);
+                    let occupancy =
+                        smoothstep(occ_threshold - 0.07, occ_threshold + 0.09, system_field);
+                    // 0 at a system's fringe, 1 deep inside: deep systems are
+                    // more developed (storm potential, higher fill).
+                    let intensity =
+                        smoothstep(occ_threshold + 0.02, occ_threshold + 0.17, system_field);
+
+                    // Regime selector: an independent low-frequency partition,
+                    // uniformized so the authored type_mix reads as area
+                    // fractions of the cloudy world. Storms additionally need a
+                    // developed system core.
+                    let regime = fbm3(
+                        dir * 3.6 + Vec3::new(23.0, 5.0, -12.0),
+                        climate.seed ^ 0xC0DE,
+                        3,
+                    );
+                    let regime_x = smoothstep(0.36, 0.64, regime);
+                    let m_stratus = type_mix[0].clamp(0.0, 0.9);
+                    let m_storm = type_mix[2].clamp(0.0, 0.9);
+                    let stratus_region = smoothstep(
+                        1.0 - m_stratus - 0.06,
+                        (1.0 - m_stratus + 0.06).min(1.0),
+                        regime_x,
+                    );
+                    let storm_region = (1.0
+                        - smoothstep((m_storm - 0.06).max(0.0), m_storm + 0.06, regime_x))
+                        * (0.30 + 0.70 * intensity);
+                    let cumulus_region = (1.0 - stratus_region - storm_region).max(0.0);
+
+                    // Per-regime coverage texture. `variation` scales how deep
+                    // the mesoscale/cellular breakup cuts.
+                    let breakup = (0.55 + climate.variation).clamp(0.5, 1.5);
+                    let cell_broken =
+                        smoothstep(0.42, 0.78, 0.62 * cellular + 0.38 * mesoscale);
+                    let sheet_holes = smoothstep(0.66, 0.84, cellular);
+                    let storm_core =
+                        smoothstep(0.52, 0.78, 0.66 * mesoscale + 0.34 * cellular);
+                    let frontal_boost = frontal * occupancy;
+                    let cumulus_cov =
+                        (0.66 - 0.52 * breakup * (1.0 - cell_broken) + 0.10 * intensity)
+                            .clamp(0.0, 1.0);
+                    let stratus_cov = 0.94 - 0.30 * breakup * sheet_holes;
+                    let storm_cov =
+                        (0.40 + 0.46 * storm_core + 0.10 * intensity).clamp(0.0, 1.0);
+                    let cov_regime = stratus_region * stratus_cov
+                        + cumulus_region * cumulus_cov
+                        + storm_region * storm_cov;
+                    let coverage =
+                        (occupancy * cov_regime + 0.28 * frontal_boost).clamp(0.0, 1.0);
+
+                    // Cloud type follows the regime: sheets read stratus, storm
+                    // clusters read cumulonimbus at their cores, and building
+                    // cells inside deep cumulus fields turn congestus. Fronts
+                    // push toward storm so ridge lines carry tall cloud.
+                    // Building cells appear in ordinary cumulus fields too, not
+                    // only deep systems — within-horizon vertical hierarchy is
+                    // the main local monotony breaker (2026-07-23 round 2).
+                    let congestus = storm_core * (0.30 + 0.70 * intensity);
+                    let cloud_type = (stratus_region * 0.08
+                        + cumulus_region * (0.42 + 0.30 * congestus)
+                        + storm_region * (0.78 + 0.18 * storm_core)
+                        + 0.10 * frontal_boost)
+                        .clamp(0.02, 0.97);
                     let vertical_noise = fbm3(
                         dir * 34.0 + Vec3::new(31.0, -7.0, 13.0),
                         climate.seed ^ 0xA11E,
                         3,
                     );
-                    // Local base/top are fractions of the authored shell. Storm
-                    // towers claim most of the thickness so limb silhouettes
-                    // keep height; stratus stays a thin lower deck.
-                    let base = match cloud_type {
-                        value if value < 0.25 => 0.05 + 0.05 * vertical_noise,
-                        value if value < 0.75 => 0.02 + 0.07 * vertical_noise,
-                        _ => 0.01 + 0.04 * vertical_noise,
-                    };
-                    let top = match cloud_type {
-                        value if value < 0.25 => 0.16 + 0.12 * vertical_noise,
-                        value if value < 0.75 => 0.34 + 0.38 * vertical_noise,
-                        _ => 0.78 + 0.20 * vertical_noise,
-                    };
+                    // Local base/top are fractions of the authored shell, per
+                    // regime: thin low stratus decks, cumulus growing with its
+                    // cells, storm towers claiming most of the thickness so
+                    // limb silhouettes keep height.
+                    let base_stratus = 0.09 + 0.05 * vertical_noise;
+                    let base_cumulus = 0.10 + 0.07 * vertical_noise;
+                    let base_storm = 0.05 + 0.04 * vertical_noise;
+                    let top_stratus = base_stratus + 0.10 + 0.08 * vertical_noise;
+                    let top_cumulus = base_cumulus
+                        + 0.09
+                        + 0.52 * (0.30 * cell_broken + 0.70 * congestus)
+                        + 0.06 * vertical_noise;
+                    let top_storm = 0.60 + 0.38 * storm_core;
+                    let base = stratus_region * base_stratus
+                        + cumulus_region * base_cumulus
+                        + storm_region * base_storm;
+                    let top = (stratus_region * top_stratus
+                        + cumulus_region * top_cumulus
+                        + storm_region * top_storm)
+                        .max(base + 0.04);
                     // Canonical surface-space broad shape. These fields live on
                     // the unit direction sphere, so they are seamless across
                     // cubemap faces and never inherit the near volume's small
@@ -244,24 +310,32 @@ impl CloudWeatherField {
                     let shape_cut = 1.0 - (2.0 * shape_cut_raw - 1.0).abs();
                     let surface_shape = [
                         0.56 * shape_mass + 0.24 * shape_cut + 0.20 * cellular,
-                        0.48 * shape_mass + 0.25 * shape_cut + 0.17 * selector + 0.10 * cellular,
+                        0.48 * shape_mass + 0.25 * shape_cut + 0.17 * regime_x + 0.10 * cellular,
                         0.39 * shape_mass
                             + 0.23 * shape_cut
                             + 0.21 * vertical_noise
-                            + 0.17 * selector,
+                            + 0.17 * regime_x,
                         0.31 * shape_mass
                             + 0.20 * shape_cut
                             + 0.28 * vertical_noise
-                            + 0.21 * selector,
+                            + 0.21 * regime_x,
                     ];
-                    let surface_density = [0.125, 0.375, 0.625, 0.875].map(|height| {
+                    // Strata are LAYER-RELATIVE: four samples across the local
+                    // [base, top] interval, not the whole shell. Fixed shell
+                    // heights had a dead zone — a ~2 km deck sitting between
+                    // two sampling heights read zero from every stratum, so
+                    // the far tier showed clear sky over a solid near-volume
+                    // deck (2026-07-23). Consumers map their shell height
+                    // through the same weather base/top channels.
+                    let top_c = top.max(base + 0.02);
+                    let surface_density = [0.125, 0.375, 0.625, 0.875].map(|q| {
                         cloud_surface_density_cpu(
                             surface_shape,
-                            height,
+                            base + q * (top_c - base),
                             coverage,
                             cloud_type,
                             base,
-                            top.max(base + 0.02),
+                            top_c,
                         )
                     });
                     let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
@@ -269,7 +343,7 @@ impl CloudWeatherField {
                         encode(coverage),
                         encode(cloud_type),
                         encode(base),
-                        encode(top.max(base + 0.02)),
+                        encode(top_c),
                     ]);
                     surface_density_texels.push(surface_density.map(encode));
                 }
@@ -381,7 +455,14 @@ fn cloud_surface_density_cpu(
     let storm_w = smoothstep(0.72, 0.88, cloud_type);
     let cumulus_w = (1.0 - stratus_w - storm_w).max(0.0);
     let threshold = 0.58 + (0.30 - 0.58) * cov;
-    let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
+    // Tall columns (congestus/storm towers) keep their mass with height
+    // instead of thinning into squat blobs; squat fair-weather columns still
+    // round off. Mirrored in `get_cloud_map_density` (clouds_compute.wgsl) —
+    // keep the two in lockstep.
+    let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
+    let vertical_narrow = h
+        * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w)
+        * (1.0 - 0.55 * column_tall);
 
     let z = normalized_height.clamp(0.0, 1.0) * 4.0 - 0.5;
     let shape = if z <= 0.0 {

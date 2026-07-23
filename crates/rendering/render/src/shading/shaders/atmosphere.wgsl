@@ -547,23 +547,32 @@ fn atmosphere_jitter(coord: vec2<f32>) -> f32 {
 /// weather cells. Shape comes from the continuous coverage field rather than
 /// the categorical type channel, which is reserved for vertical structure.
 fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
-    // AREAL-FRACTION semantics, calibrated against the NEAR volume's
-    // formation gate: this is the fraction of the texel's area the marcher
-    // would actually fill with cloud (its 3-D shape field exceeding
-    // `mix(0.58, 0.30, cov·1.25)`), NOT a solid-slab opacity. Far consumers
-    // must treat it as coverage — a band march that compounds it as
-    // independent opaque segments turns a 46%-coverage planet into solid
-    // overcast; the old 0.55–0.73 gate under-filled the far layer instead.
-    // Both directions break "one weather, two estimators".
-    return smoothstep(0.45, 0.80, raw_coverage * 1.22);
+    // AREAL-FRACTION semantics. The regime producer (2026-07-23) authors the
+    // coverage channel as a true areal fraction with genuine zeros between
+    // weather systems, so this is now close to identity: a soft formation toe
+    // suppresses mip-filtering residue, nothing more. The previous
+    // smoothstep(0.45, 0.80, cov·1.22) remap — calibrated to the old
+    // everything-near-the-mean statistics — deleted moderate-coverage cumulus
+    // fields from the far tier entirely while the near volume still rendered
+    // them: the "impostor missing where volumetrics exist" failure.
+    return smoothstep(0.04, 0.20, raw_coverage) * clamp(raw_coverage * 1.05, 0.0, 1.0);
 }
 
 /// Linearly reconstruct the canonical broad shape signal from four
-/// normalized-height strata (channel centres at 1/8, 3/8, 5/8, 7/8). The
-/// payload is authored in body-direction space and therefore has no Cartesian
-/// planet-scale repeat.
-fn cloud_surface_shape(strata: vec4<f32>, normalized_height: f32) -> f32 {
-    let z = clamp(normalized_height, 0.0, 1.0) * 4.0 - 0.5;
+/// LAYER-RELATIVE strata (channel centres at 1/8, 3/8, 5/8, 7/8 of the local
+/// [base, top] interval — see the CPU producer). Callers map their shell
+/// height through the same weather base/top channels:
+/// `h_layer = (h_shell − base) / (top − base)`. Layer-relative sampling keeps
+/// full vertical resolution for a thin deck wherever it sits in the shell;
+/// the previous fixed shell-height strata had a dead zone where a ~2 km layer
+/// between two sampling heights read zero from every stratum (2026-07-23).
+/// Outside the layer the density is a hard zero — the strata edge values are
+/// in-cloud samples, so clamping to them painted a halo above tops.
+/// The payload is authored in body-direction space and therefore has no
+/// Cartesian planet-scale repeat.
+fn cloud_surface_shape(strata: vec4<f32>, layer_height: f32) -> f32 {
+    if layer_height <= -0.04 || layer_height >= 1.04 { return 0.0; }
+    let z = clamp(layer_height, 0.0, 1.0) * 4.0 - 0.5;
     if z <= 0.0 { return strata.x; }
     if z < 1.0 { return mix(strata.x, strata.y, z); }
     if z < 2.0 { return mix(strata.y, strata.z, z - 1.0); }
@@ -575,11 +584,12 @@ fn cloud_surface_shape(strata: vec4<f32>, normalized_height: f32) -> f32 {
 /// Coverage, typed height response, and formation threshold are applied by the
 /// CPU producer before its mip chain is built; this function reconstructs that
 /// already-filterable density rather than thresholding a filtered raw signal.
+/// `layer_height` is layer-relative (see [`cloud_surface_shape`]).
 fn cloud_surface_density(
     strata: vec4<f32>,
-    normalized_height: f32,
+    layer_height: f32,
 ) -> f32 {
-    return cloud_surface_shape(strata, normalized_height);
+    return cloud_surface_shape(strata, layer_height);
 }
 
 /// Footprint-filtered vertical column occupancy reconstructed from the same
@@ -621,18 +631,21 @@ fn weather_column_from_texel(weather: vec4<f32>) -> WeatherColumn {
     let local_base = clamp(weather.b, 0.0, 0.92);
     let local_top = max(clamp(weather.a, 0.02, 1.0), local_base + 0.02);
     let thickness = local_top - local_base;
-    // Match the near-volume formation idea: coverage is a threshold, not a
-    // linear opacity multiplier. Slightly softer than the old 0.60–0.70 gate so
-    // mesoscale cells survive filtering without a grey planetary veil.
+    // Coverage is areal occupancy (see weather_cloud_opacity); it must NOT
+    // also scale the column's optical depth — a cell inside a 30%-coverage
+    // field is just as optically thick as one inside overcast. Multiplying
+    // them made every moderate-coverage region simultaneously sparse AND
+    // translucent, which is the grey-veil signature. Optical depth is a
+    // per-cell property of type and thickness, with only a soft coverage
+    // response so filtered fringes thin out.
     let opacity = weather_cloud_opacity(cov);
     let stratus_w = 1.0 - smoothstep(0.18, 0.38, ty);
     let storm_w = smoothstep(0.72, 0.88, ty);
     let cumulus_w = max(0.0, 1.0 - stratus_w - storm_w);
-    // Column optical depth is used for lighting (self-shadow / core darkening)
-    // more than for occupancy — occupancy is `opacity` above. Thickness and
-    // type make storm towers denser than thin stratus without filling the disc.
     let type_density = 0.55 * stratus_w + 0.95 * cumulus_w + 1.35 * storm_w;
-    let optical_depth = opacity * type_density * (0.40 + 2.2 * thickness);
+    let optical_depth = (0.30 + 0.90 * smoothstep(0.06, 0.50, cov))
+        * type_density
+        * (0.40 + 2.6 * thickness);
     return WeatherColumn(
         opacity,
         optical_depth,

@@ -1457,6 +1457,14 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_CLOUD_TEMPORAL` — 0/off disables all history.
     /// - `THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION` — raw, dense, or sparse;
     ///   capture-only diagnostic override used by the moving-cloud A/B.
+    /// - `THALOS_SCREENSHOT_CLOUD_DENSITY_COUPLING` — legacy-bias or
+    ///   shared-envelope; capture-only near/far distribution contract A/B.
+    /// - `THALOS_SCREENSHOT_CLOUD_TIER` — near-only, composite, or far-only;
+    ///   capture-only estimator isolation diagnostic.
+    /// - `THALOS_SCREENSHOT_CLOUD_FAR_FILTER` — chord-mip or pixel-footprint;
+    ///   capture-only far projection footprint A/B.
+    /// - `THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION` — stacked or
+    ///   coverage-preserving; capture-only far opacity A/B.
     /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
     /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults under
     ///   `artifacts/diagnostics/`).
@@ -1611,6 +1619,10 @@ const CAPTURE_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_CLOUD_TEMPORAL",
     "THALOS_SCREENSHOT_CLOUD_COVERAGE",
     "THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION",
+    "THALOS_SCREENSHOT_CLOUD_DENSITY_COUPLING",
+    "THALOS_SCREENSHOT_CLOUD_TIER",
+    "THALOS_SCREENSHOT_CLOUD_FAR_FILTER",
+    "THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION",
     "THALOS_SCREENSHOT_OCEAN_TIME",
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
@@ -1989,6 +2001,67 @@ fn apply_live_capture_diagnostics(
         }
     };
     clouds.reprojection_strength = reprojection_strength;
+    clouds.surface_density_coupling = match runtime
+        .get("THALOS_SCREENSHOT_CLOUD_DENSITY_COUPLING")
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("legacy") | Some("legacy-bias") | Some("off") | Some("0") => 0.0,
+        Some("shared") | Some("shared-envelope") | Some("on") | Some("1") | None => 1.0,
+        Some(other) => {
+            warn!(
+                target: "thalos::screenshot",
+                "unknown THALOS_SCREENSHOT_CLOUD_DENSITY_COUPLING={other:?}; using shared-envelope"
+            );
+            1.0
+        }
+    };
+    clouds.tier_diagnostic = match runtime
+        .get("THALOS_SCREENSHOT_CLOUD_TIER")
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("near") | Some("near-only") | Some("-1") => -1.0,
+        Some("composite") | Some("both") | Some("0") | None => 0.0,
+        Some("far") | Some("far-only") | Some("1") => 1.0,
+        Some(other) => {
+            warn!(
+                target: "thalos::screenshot",
+                "unknown THALOS_SCREENSHOT_CLOUD_TIER={other:?}; using composite"
+            );
+            0.0
+        }
+    };
+    clouds.far_pixel_footprint = match runtime
+        .get("THALOS_SCREENSHOT_CLOUD_FAR_FILTER")
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("chord") | Some("chord-mip") | Some("legacy") | Some("0") => 0.0,
+        Some("pixel") | Some("pixel-footprint") | Some("on") | Some("1") | None => 1.0,
+        Some(other) => {
+            warn!(
+                target: "thalos::screenshot",
+                "unknown THALOS_SCREENSHOT_CLOUD_FAR_FILTER={other:?}; using pixel-footprint"
+            );
+            1.0
+        }
+    };
+    clouds.far_coverage_preserving = match runtime
+        .get("THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION")
+        .map(|raw| raw.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("stacked") | Some("legacy") | Some("0") => 0.0,
+        Some("coverage") | Some("coverage-preserving") | Some("on") | Some("1") | None => 1.0,
+        Some(other) => {
+            warn!(
+                target: "thalos::screenshot",
+                "unknown THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION={other:?}; using coverage-preserving"
+            );
+            1.0
+        }
+    };
     clouds.resolution_scale = cfg.cloud_quality.resolution_scale();
     clouds.sparse_march = sparse_march;
     if let Some(coverage) = cfg.cloud_coverage_scale {
@@ -2220,6 +2293,7 @@ fn drive_headless_screenshot(
     mut camera: Query<(&mut Transform, &mut CellCoord, &mut Projection), With<ShipCamera>>,
     diagnostics: Res<DiagnosticsStore>,
     clouds: Res<CloudsConfig>,
+    active_captures: Query<(), With<Capturing>>,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -2351,6 +2425,13 @@ fn drive_headless_screenshot(
 
     if driver.captured {
         if persistent {
+            return;
+        }
+        // Screenshot readback is asynchronous. Do not start the fixed flush
+        // tail until Bevy has removed the `Capturing` marker; on slower cold
+        // runs the old 24-frame countdown could exit first, close the result
+        // channel, and invalidate an otherwise healthy render.
+        if !active_captures.is_empty() {
             return;
         }
         driver.tail += 1;

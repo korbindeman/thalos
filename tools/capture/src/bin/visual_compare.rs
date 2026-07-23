@@ -35,6 +35,7 @@ const KNOWN_PRESETS: &[&str] = &[
     "cloud-cruise",
     "cloud-interior",
     "cloud-limb",
+    "cloud-planet",
     "cloud-sunset",
     "plume",
 ];
@@ -45,6 +46,8 @@ const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_DISTANCE",
     "THALOS_SCREENSHOT_WARMUP",
     "THALOS_SCREENSHOT_HUD",
+    "THALOS_SCREENSHOT_CLOUD_TIER",
+    "THALOS_SCREENSHOT_CLOUD_FAR_FILTER",
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
@@ -153,6 +156,54 @@ const CLOUD_RECONSTRUCTION_VARIANTS: &[Variant] = &[
     },
 ];
 
+const CLOUD_DENSITY_COUPLING_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "legacy-bias",
+        value: "legacy-bias",
+    },
+    Variant {
+        label: "shared-envelope",
+        value: "shared-envelope",
+    },
+];
+
+const CLOUD_TIER_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "near-only",
+        value: "near-only",
+    },
+    Variant {
+        label: "composite",
+        value: "composite",
+    },
+    Variant {
+        label: "far-only",
+        value: "far-only",
+    },
+];
+
+const CLOUD_FAR_FILTER_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "chord-mip",
+        value: "chord-mip",
+    },
+    Variant {
+        label: "pixel-footprint",
+        value: "pixel-footprint",
+    },
+];
+
+const CLOUD_FAR_AGGREGATION_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "stacked",
+        value: "stacked",
+    },
+    Variant {
+        label: "coverage-preserving",
+        value: "coverage-preserving",
+    },
+];
+
 const AXES: &[Axis] = &[
     Axis {
         name: "ssao",
@@ -183,6 +234,26 @@ const AXES: &[Axis] = &[
         name: "cloud-reconstruction",
         env_key: "THALOS_SCREENSHOT_CLOUD_RECONSTRUCTION",
         variants: CLOUD_RECONSTRUCTION_VARIANTS,
+    },
+    Axis {
+        name: "cloud-density-coupling",
+        env_key: "THALOS_SCREENSHOT_CLOUD_DENSITY_COUPLING",
+        variants: CLOUD_DENSITY_COUPLING_VARIANTS,
+    },
+    Axis {
+        name: "cloud-tier",
+        env_key: "THALOS_SCREENSHOT_CLOUD_TIER",
+        variants: CLOUD_TIER_VARIANTS,
+    },
+    Axis {
+        name: "cloud-far-filter",
+        env_key: "THALOS_SCREENSHOT_CLOUD_FAR_FILTER",
+        variants: CLOUD_FAR_FILTER_VARIANTS,
+    },
+    Axis {
+        name: "cloud-far-aggregation",
+        env_key: "THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION",
+        variants: CLOUD_FAR_AGGREGATION_VARIANTS,
     },
 ];
 

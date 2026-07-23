@@ -411,10 +411,13 @@ fn fragment(in: VertexOutput) -> FragOutput {
                 * 0.55
                 * shade.x;
             let night = smoothstep(-0.12, 0.08, n_dot_l);
+            // Occupancy is the strata density; optical depth contributes only
+            // a thinness response (matching the cloud composite's chord), so
+            // resolved decks read solid white instead of a translucent veil.
             let surface_opacity = clamp(
-                surface_density * (1.0 - exp(-column.optical_depth * 1.2)),
+                surface_density * mix(0.70, 1.0, 1.0 - exp(-column.optical_depth * 1.4)),
                 0.0,
-                0.92,
+                0.95,
             );
             lit = mix(lit, cloud_lit * night, surface_opacity * night);
         }

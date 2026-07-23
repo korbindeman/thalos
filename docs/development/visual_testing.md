@@ -89,6 +89,11 @@ retains streamed terrain and renderer caches. Use the cold lane for final
 regression proof; its orchestrator reproduces Cargo's complete dynamic-library
 search path (INC-0008) and starts one clean process per variant.
 
+Cold-process shutdown is completion-driven: after requesting the image, the
+headless driver waits for Bevy's `Capturing` marker to clear before counting its
+readback-flush tail. A fixed frame delay is not a readback-completion contract
+(INC-20260722T172947Z-cold-capture-exited-before-readback).
+
 ## Initial axes
 
 | Axis | Variants | Intended diagnosis |
@@ -103,6 +108,12 @@ Axes are intentionally typed in `tools/capture/src/bin/visual_compare.rs`. Add a
 new one only when every variant can be selected by a capture-only override that
 does not persist user settings. A multi-test may have N variants, but they must
 all remain values of the same factor.
+
+The axis environment key must also be present in the headless runtime's
+`CAPTURE_OVERRIDE_KEYS`; otherwise the runner labels distinct variants while
+the game silently renders the default each time. Any secondary diagnostic held
+fixed during an A/B belongs in `INVARIANT_ENV_KEYS` so the manifest proves it did
+not drift (INC-20260722T182934Z).
 
 `terrain-culling` is structural pipeline specialization, so the normal comparison
 command automatically sends that axis through the cold lane. New axes should be

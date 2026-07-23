@@ -7,6 +7,7 @@ pub mod craft;
 pub mod ground;
 pub mod impostor;
 pub mod shading;
+pub mod tiles;
 
 pub use clouds::*;
 pub use craft::*;
@@ -37,5 +38,9 @@ impl Plugin for BodyRenderPlugin {
         app.add_plugins(impostor::PlanetRenderingPlugin);
         app.add_plugins(clouds::CloudsPlugin);
         app.add_plugins(ground::ThalosTerrainPlugin);
+        // NTR-X1: the probe-extracted standard-path tile renderer. Inert
+        // until the game inserts a `tiles::TileTerrainRoot` (behind its
+        // `THALOS_TILE_RENDERER` toggle).
+        app.add_plugins(tiles::TileTerrainPlugin);
     }
 }

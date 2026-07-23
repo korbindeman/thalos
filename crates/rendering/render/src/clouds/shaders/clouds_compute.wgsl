@@ -77,6 +77,7 @@ struct Config {
     clouds_coverage: f32,
     clouds_density: f32,
     clouds_detail_scale_m: f32,
+    surface_density_coupling: f32,
     clouds_detail_strength: f32,
     clouds_base_edge_softness: f32,
     clouds_bottom_softness: f32,
@@ -161,9 +162,12 @@ fn sample_weather(n: vec3f) -> vec4f {
     return textureSampleLevel(weather_texture, weather_sampler, n, 0.0);
 }
 
-fn sample_surface_density(n: vec3f, shell_height: f32) -> f32 {
+// `layer_height` is LAYER-RELATIVE (0 = local base, 1 = local top, from the
+// same weather texel's base/top channels); outside the layer the shared shape
+// returns a hard zero. See cloud_surface_shape in thalos::atmosphere.
+fn sample_surface_density(n: vec3f, layer_height: f32) -> f32 {
     let strata = textureSampleLevel(surface_density_texture, weather_sampler, n, 0.0);
-    return cloud_surface_shape(strata, shell_height);
+    return cloud_surface_shape(strata, layer_height);
 }
 
 fn volume_corner(c: vec3i) -> vec4f {
@@ -258,22 +262,47 @@ fn get_cloud_map_density(
     // Broad Perlin/Worley masses. The erosion channel stays out of the solid
     // body: promoting its small cells into `shape` fragmented the volume into
     // screen-space stipple instead of adding readable billows.
-    let shape = broad.r * 0.52 + broad.g * 0.24 + broad.a * 0.24;
+    // Spectrum follows column height: tall (congestus/storm) columns weight
+    // the low-frequency channels so a tower reads as ONE coherent mass with
+    // large billows; squat fair-weather columns keep the small-lobe mix. This
+    // is a sub-strata morphology choice, so it has no CPU mirror.
+    let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
+    let shape_squat = broad.r * 0.52 + broad.g * 0.24 + broad.a * 0.24;
+    let shape_tall = broad.r * 0.64 + broad.g * 0.06 + broad.a * 0.30;
+    let shape = mix(shape_squat, shape_tall, column_tall);
 
-    // Coverage is a formation threshold, not an opacity multiplier: lowering
-    // it opens clear sky between otherwise equally dense cloud masses.
-    // `formation` (the ~10–20 km octave of the per-ray macro fetch) swings the
-    // threshold between cloud-cluster interiors and clear lanes, so lobes
-    // gather into weather-system-scale bodies of varied size instead of one
-    // even field of same-scale puffs.
-    let threshold = mix(0.58, 0.30, cov)
+    // Formation authority is the NON-PERIODIC surface field. The strata
+    // density (coverage threshold + typed vertical response, applied by the
+    // CPU producer on the body-direction sphere) decides where cloud bodies
+    // live; the periodic Cartesian volume only sculpts sub-texel lobes inside
+    // that envelope. The previous threshold let the 21.6 km macro octave and
+    // the 8 km tile's low frequencies organize clouds over tens of km, and the
+    // spherical shell cut that Cartesian repeat into planet-visible rows
+    // (ADR-20260722T141000Z; 2026-07-23 user verdict). `macro_noise` remains
+    // only as a faint sub-dominant variety term.
+    let coupling = clamp(config.surface_density_coupling, 0.0, 1.0);
+    // The threshold makes the near tier's COLUMN areal fill (seen from above)
+    // equal the strata density — the contract the far tier reads directly. A
+    // vertical ray takes several decorrelated 3-D samples through the layer,
+    // so column fill is the UNION of per-sample exceedance; per-sample
+    // quantile mapping alone still rendered a 0.1–0.3 field as a ~0.69 deck
+    // (measured, tier A/B 2026-07-23). Curve fitted empirically against the
+    // pixel-measured near-only fill at the spaceport framing.
+    let env = clamp(surface_density, 0.0, 1.0);
+    let threshold_surface = mix(0.81, 0.44, env) + (0.5 - macro_noise) * 0.05;
+    // Capture-only legacy branch (surface_density_coupling = 0): the old
+    // Cartesian-organized threshold, kept for A/B attribution.
+    let threshold_legacy = mix(0.58, 0.30, cov)
         + (0.5 - macro_noise) * 0.07
         + (0.5 - formation) * 0.17
-        // Surface density is already thresholded/profiled before mipmapping.
-        // It biases where local bodies form without replacing the accepted
-        // Cartesian morphology or applying the far response a second time.
         + (0.35 - surface_density) * 0.08;
-    let vertical_narrow = h * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w);
+    let threshold = mix(threshold_legacy, threshold_surface, coupling);
+    // Tall columns keep mass with height (towers); squat puffs round off.
+    // Mirrored in `cloud_surface_density_cpu` — keep in lockstep.
+    // (`column_tall` is declared at the shape-spectrum blend above.)
+    let vertical_narrow = h
+        * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w)
+        * (1.0 - 0.55 * column_tall);
     var mass = shape - threshold - vertical_narrow;
 
     // Cumulonimbus anvils broaden again near the tropopause, but only where
@@ -313,7 +342,19 @@ fn get_cloud_map_density(
     }
 
     let shaped = smoothstep(0.0, max(config.clouds_base_edge_softness, 0.015), mass);
-    return max(shaped * vertical_profile * config.clouds_density, 0.0);
+    // The surface field owns planet-scale occupancy in every projection. At
+    // mip 0 this is a coherent body-fixed envelope; the Cartesian volume only
+    // sculpts sub-cell shape inside it. Far consumers sample the same payload
+    // at footprint mips, so refinement adds morphology instead of replacing
+    // one cloud distribution with another.
+    let shared_envelope = smoothstep(0.04, 0.42, surface_density);
+    return max(
+        shaped
+            * vertical_profile
+            * mix(1.0, shared_envelope, coupling)
+            * config.clouds_density,
+        0.0,
+    );
 }
 
 fn get_normalized_height(pos: vec3f) -> f32 {
@@ -558,7 +599,12 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     let mid = ray_origin + context_t * ray_dir;
     let n_mid = normalize(mid);
     var weather = sample_weather(n_mid);
-    if (weather.r * config.clouds_coverage <= 1.0e-3) {
+    // The regime producer authors REAL zero-coverage regions, so a clear
+    // context point no longer implies a clear ray: also probe a coarse mip
+    // (~80 km footprint) before culling, or clouds vanish whenever the 25 km
+    // anchor lands in the clear lane ahead of a system.
+    let weather_region = textureSampleLevel(weather_texture, weather_sampler, n_mid, 4.0);
+    if (max(weather.r, weather_region.r) * config.clouds_coverage <= 1.0e-3) {
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
     // The anti-tiling modulation has a ~21.6 km period. Sampling it once per
@@ -617,9 +663,10 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         let world_position = ray_origin + dir_length * ray_dir;
         weather = sample_weather(normalize(world_position));
         let normalized_height = get_normalized_height(world_position);
+        let layer_h = (normalized_height - weather.b) / max(weather.a - weather.b, 0.02);
         let surface_density = sample_surface_density(
             normalize(world_position),
-            clamp(normalized_height, 0.0, 1.0),
+            layer_h,
         );
         let density_threshold = max(config.clouds_density, 1.0e-5)
             * BROAD_HIT_DENSITY_FRACTION;

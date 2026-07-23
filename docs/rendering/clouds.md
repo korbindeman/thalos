@@ -497,17 +497,20 @@ evidence only, no timing claims):
   chords combine strongest-column + damped stacking, not independent slabs.
   Producer: band latitudes warped and gated (broken segments, not paint
   rings), zonally-elongated warped frontal ridges.
-- **Known remaining weaknesses** (recorded as the CLOUD-6 residual): the far
-  field at grazing regimes (limb probe, cruise horizon) still tends toward a
-  slab with soft box-mip squares at coarse lod — the reduced-detail limb
-  volume is the intended fix; the offline OD/normal atlas and the in-motion
-  surface↔orbit handoff check (user, live session) remain open.
+- **CLOUD-6 static handoff completion (2026-07-22).** Tier-isolated cold
+  captures pinned the slab to the far projection. Far mips now follow projected
+  pixel footprint rather than six-sample chord spacing; the chord preserves the
+  prefiltered areal mean rather than strongest-hit/stacked opacity; and the
+  result includes the near tier's expected sub-cell 3-D morphology fill. The
+  near volume is gated by the same four-stratum surface envelope. Runway,
+  cruise, limb, and planet captures retain coherent gaps and no longer thicken
+  solely with range. See ADR-20260722T182853Z and
+  INC-20260722T182934Z. The in-motion handoff check remains user verification.
 
 ### BL-33 fidelity convergence checkpoint (2026-07-22)
 
-Three independently verified slices landed; the full BL-33 item remains `wip`
-because the far estimator still needs density-derived moments and a
-reduced-detail limb volume.
+The static BL-33/CLOUD-6 convergence slices are headless-verified; the item is
+`verify` pending the user-run in-motion surface↔orbit handoff.
 
 - **Canonical weather resolution and hierarchy.** Correcting the old scale
   estimate showed that a 256 face represented about 19.5 km/texel at the
@@ -597,6 +600,135 @@ reduced-detail limb volume.
   surface-space density contract exists; it is not another independent
   weather field. Its density basis must not project the periodic near tile
   verbatim across the sphere.
+
+### Round 2 — user verdict and the regime/morphology rework (2026-07-23)
+
+The user verified the 2026-07-22 state against the Blackrack/MSFS reference
+set and **failed it** on three axes (orbit, high-aerial, and cruise
+screenshots): the far estimator reads as a thick translucent veil that is
+simultaneously everywhere and missing where the volumetrics are; the 67 km
+near/far handoff is a visible seam even in stills; and the volumetric field is
+monotone same-scale puffs with visible lattice rows at cruise. Root causes and
+the round-2 response (CLOUD-6 round 2 + BL-20260723T165923Z + BL-33):
+
+1. **Regime-structured weather producer** (`CloudWeatherField::from_climate`):
+   a synoptic occupancy field *thresholded* into weather systems with genuine
+   zero-coverage clear air between them (the old producer summed fixed-scale
+   noises around one mean — statistically identical speckle everywhere); an
+   intensity term for system cores; a regime partition honouring the authored
+   `type_mix` (scattered-cumulus fields / stratus sheets / storm clusters,
+   plus the retained frontal ridges); per-regime coverage texture, cloud type
+   (congestus building inside cumulus fields), and per-regime base/top so
+   thin decks and tall towers coexist. Round-2 calibration from the user's
+   live pass: bases lifted (~0.10 shell fraction), coverage thinned, gaps
+   widened, congestus no longer gated to deep systems only.
+2. **Near-tier formation authority moved to the surface field**
+   (`get_cloud_map_density`): the strata density drives the formation
+   threshold (`mix(0.76, 0.30, env)`); the periodic Cartesian tile only
+   sculpts sub-texel lobes inside that envelope, so the spherical shell can no
+   longer cut its repeat into planet-visible rows (completes the
+   ADR-20260722T141000Z direction). The legacy Cartesian-organized threshold
+   is retained behind `surface_density_coupling = 0` for A/B attribution.
+   A coarse-mip region probe protects rays whose 25 km context anchor lands
+   in a clear lane. Tower morphology: tall columns hold mass with height
+   (`column_tall` reduces `vertical_narrow`, mirrored in the CPU strata
+   producer) and weight the broad-shape spectrum toward low frequencies so a
+   tower reads as one coherent mass while fair-weather puffs stay small.
+3. **Far tier renders morphology, not a veil** (`sample_orbital_cloud` +
+   shared helpers): `weather_cloud_opacity` recalibrated from the old
+   near-mean statistics remap (`smoothstep(0.45, 0.80, cov·1.22)` deleted
+   moderate-coverage fields from the far tier entirely) to a
+   soft-toe areal fraction; column optical depth no longer multiplies areal
+   coverage (a cell in a 30 %-coverage field is as optically thick as one in
+   overcast — the double-count made every moderate region simultaneously
+   sparse and translucent, the grey-veil signature); and opacity is
+   footprint-split — unresolved footprints keep the areal-mean alpha,
+   resolved footprints sharpen density into near-opaque cells with clear
+   gaps, with stronger moment-normal relief at range. `SolidPlanetMaterial`
+   mirrors the thinness-only optical-depth response.
+
+4. **Layer-relative strata (contract change).** The four surface-density
+   strata were sampled at fixed shell heights (12.5/37.5/62.5/87.5 % of the
+   10.5 km shell). Any layer thinner than the ~2.6 km stratum spacing could
+   fall entirely between two sampling heights and read zero from every
+   stratum — which is exactly what the round-2 base lift did to quiet cumulus
+   decks (~13–33 % of the shell): the far tier showed clear sky over a solid
+   near-volume deck (user screenshots, 2026-07-23). The strata are now
+   authored at 1/8, 3/8, 5/8, 7/8 of the local **[base, top]** interval, and
+   every consumer maps its shell height through the same weather base/top
+   channels (`h_layer = (h − base)/(top − base)`); outside the layer the
+   shared reconstruction returns a hard zero (clamping to edge-stratum values
+   painted a halo above tops). A thin deck now keeps full vertical resolution
+   wherever it sits, so layer altitude/thickness are free per regime. The
+   strata *column max* (`cloud_surface_column_density`, used by
+   `SolidPlanetMaterial`) is layer-invariant and unchanged.
+
+**Round-3 capture iteration (2026-07-23, cold lane):** four defects found and
+fixed against the fresh five-preset sweep. (a) The layer-relative chord lost
+grazing clouds — averaging over all six segments diluted a thin layer's one
+in-layer hit toward zero at the limb; replaced with an analytic per-segment
+layer-overlap clip (only intersecting segments enter the mean, evaluated over
+the clipped layer-relative span). (b) Sunset chroma keyed on the
+relief-perturbed shading normal painted midday cells that tilt away from the
+sun in orange; day/night and warm chroma now follow the geometric solar
+elevation, with the warm band narrowed to < ~9°. (c) The far foreground-air
+veil used a flat 60 km/µ horizontal path; from orbit top-down that stripped
+~74 % of the blue and turned the disc's clouds beige — replaced with a
+scale-height air-mass path (`8000 / (µ + 0.10)`). (d) The strata fetch now
+shares `sample_weather_soft`'s 0.75 mip floor so mip-0 texel lattice stops
+crunching cell borders. Far radiance prefactor 0.55 → 0.68 to match the near
+volume at the handoff. Final planet/cruise/limb/runway/sunset captures: white
+broken systems with real clear regions from orbit, near↔far handoff without an
+occupancy or colour jump in stills, limb "pink slab" identified as laterite
+terrain (not clouds).
+
+**Quantile fill contract (round 3, from the user's ascent sequence):** the
+near tier's areal fill must EQUAL the strata density — the same contract the
+far tier reads directly. The env smoothstep saturated at sd 0.60, so any
+moderate-density texel (an authored 30–50 % broken field) rendered ~90 %
+solid near the camera while the impostor honestly drew the sparse patches;
+the visible "transition arc" at the 67 km reach was exactly that fill step.
+The threshold is now the exceedance quantile of the tile's shape
+distribution, linear in sd (`mix(0.72, 0.32, sd)`), which also delivers the
+"too dense" correction globally. Residual: per-texel agreement is
+approximate (different bases); judged by the in-motion user gate.
+
+**Round 4 — the ascent-mismatch root causes (2026-07-23, probe-driven):**
+the user's ascent kept showing a solid near-tier deck under a cloudless
+impostor. A probe/A-B chain (stage ladder → strata content → rotation
+discriminators → same-framing tier A/B via a new ownership-bypassing
+`far-only` diagnostic) found and fixed three real defects: (1) the composite
+read **spawn-time per-body weather-cube copies whose GPU content had diverged
+from the live cubes** the marcher samples — the far tier was reading
+near-empty strata; the composite now binds the compute pass's live cubes for
+the active body (one weather authority, one upload); (2) `sync_cloud_weather_map`
+now replaces the cube assets wholesale through `cloud_weather_image` instead
+of mutating `image.data` in place; (3) the marcher's exact world→body frame
+(wind included) is published as `ActiveCloudFrame` and overrides the
+composite's copy — registration by construction. Falsified along the way
+(recorded in BL-20260723T214730Z): quat-convention inversion, wind-angle
+misregistration in cold runs, and a Rust/WGSL uniform-layout mismatch.
+**Resolution (2026-07-24, INC-20260723T221126Z):** the alignment failure's
+true root cause was that the NEAR marcher sampled a runtime-updated copy of
+the weather cubes whose GPU content the re-upload path had scrambled — the
+volumetrics flew a corrupted field while impostor/composite rendered the
+correct spawn-time upload. Runtime cube mutation is now eliminated:
+`sync_cloud_weather_binding` handle-swaps the compute pass onto the active
+body's spawn-uploaded cubes (`BodyCloudCubes`), so one correctly-uploaded
+field serves every consumer. Tier A/B, cruise, runway, and disc captures
+agree. **User live verdict 2026-07-24: positioning is consistent** — the
+alignment defect is closed. Two residuals remain, owned by
+BL-20260723T214730Z: the near volumetrics render *thinner* than the thick
+impostor suggests (fill/optical-depth parity — re-measure from scratch, all
+pre-fix parity numbers were taken against the corrupted cube), and the
+near↔far transition is *coarse* (the handoff needs finer morphology blending,
+not just occupancy continuity).
+
+Verification: headless sweep passed agent-side as above; the remaining gates
+are user-run — the ascent-site near/far agreement (pending
+BL-20260723T214730Z), in-motion surface↔orbit handoff, and the local-view
+morphology verdict (squat puffs vs congestus towers in one horizon) that
+round-2's calibration targets.
 
 ### Program acceptance matrix
 

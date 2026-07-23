@@ -67,6 +67,19 @@ pub struct CloudsConfig {
     pub clouds_base_shape_scale_m: f32,
     /// Characteristic world-space period of edge erosion detail, metres.
     pub clouds_detail_scale_m: f32,
+    /// How strongly the canonical surface-space density gates the local 3-D
+    /// morphology. Production uses 1.0; capture comparisons can set 0.0 to
+    /// reproduce the legacy threshold-nudge path.
+    pub surface_density_coupling: f32,
+    /// Capture diagnostic: -1 = near volume only, 0 = production composite,
+    /// 1 = far surface projection only.
+    pub tier_diagnostic: f32,
+    /// 0 = chord-spacing mip for the far projection; 1 = projected-pixel
+    /// footprint mip. The latter keeps resolved surface cells at long range.
+    pub far_pixel_footprint: f32,
+    /// 0 = legacy stacking of filtered areal samples along a far cloud chord;
+    /// 1 = sample-count-independent coverage preservation.
+    pub far_coverage_preserving: f32,
     /// Direction towards the sun.
     pub sun_dir: Vec4,
     /// Color of the sun (HDR, RGBA).
@@ -127,6 +140,10 @@ impl Default for CloudsConfig {
             clouds_min_transmittance: 0.1,
             clouds_base_shape_scale_m: 8_000.0,
             clouds_detail_scale_m: 450.0,
+            surface_density_coupling: 1.0,
+            tier_diagnostic: 0.0,
+            far_pixel_footprint: 1.0,
+            far_coverage_preserving: 1.0,
             sun_dir: Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0),
             sun_color: Vec4::new(1.0, 0.9, 0.85, 1.0) * 1.4,
             cloud_albedo: Vec4::ONE,

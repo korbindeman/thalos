@@ -13,7 +13,7 @@
 //!
 //! **Weather.** Large-scale structure comes from a planet-fixed RGBA cubemap
 //! ([`thalos_body_render::CloudWeatherMap`]).
-//! [`sync_cloud_weather_map`] projects the per-body
+//! [`sync_cloud_weather_binding`] projects the per-body
 //! [`CloudWeatherField`](crate::solar_system_state::CloudWeatherField)
 //! (owned by `SolarSystemState`, like the other per-body environment state)
 //! into that texture. RGBA carries coverage, type, normalized base, and
@@ -85,6 +85,27 @@ const AMBIENT_BOTTOM_SCALE: f32 = 0.042;
 #[derive(Resource, Default, Clone, Copy)]
 pub struct ActiveCloudBody(pub Option<BodyId>);
 
+/// The exact world→body-fixed frame the near-volume marcher samples the
+/// weather/strata cubes in (wind advection included). The cloud composite's
+/// far tier MUST sample through this same quat: deriving a second world→body
+/// rotation in `ground_terrain` misregistered the two tiers' weather fields on
+/// the sphere — the far tier rendered the deck displaced, which read as "the
+/// impostor shows clear sky over a solid deck" on ascent (probe-diagnosed
+/// 2026-07-23). **Sole writer:** [`drive_clouds`].
+#[derive(Resource, Default, Clone, Copy)]
+pub struct ActiveCloudFrame(pub Quat);
+
+/// Per-body spawn-uploaded weather/strata cube handles (weather, strata).
+/// EVERY consumer — the near-volume compute pass included — must sample these
+/// initial-upload cubes: the runtime re-upload path (both `image.data`
+/// mutation and wholesale asset replacement) scrambles cube face/mip layout
+/// on the GPU, so a runtime-refreshed copy silently diverges from the field
+/// every other consumer reads (BL-20260723T214730Z — the near volumetrics
+/// flew through a corrupted field while the impostor showed the correct one).
+/// Populated at body spawn; consumed by [`sync_cloud_weather_binding`].
+#[derive(Resource, Default)]
+pub struct BodyCloudCubes(pub std::collections::HashMap<BodyId, (Handle<Image>, Handle<Image>)>);
+
 pub struct CloudsRenderPlugin;
 
 impl Plugin for CloudsRenderPlugin {
@@ -92,11 +113,13 @@ impl Plugin for CloudsRenderPlugin {
         app.register_type::<CloudsConfig>()
             .register_type::<CameraMatrices>()
             .init_resource::<ActiveCloudBody>()
+            .init_resource::<ActiveCloudFrame>()
+            .init_resource::<BodyCloudCubes>()
             .add_systems(bevy::app::PostStartup, init_cloud_appearance)
             .add_systems(
                 Update,
                 (
-                    sync_cloud_weather_map,
+                    sync_cloud_weather_binding,
                     sync_cloud_composite_visibility
                         .after(super::ground_terrain::sync_body_render_lod),
                 ),
@@ -146,8 +169,11 @@ fn sync_cloud_composite_visibility(
 /// atmosphere projection.
 fn sync_cloud_composite_materials(
     active: Res<ActiveCloudBody>,
+    frame: Res<ActiveCloudFrame>,
     cloud_layer: Option<Res<CloudRenderTexture>>,
     cloud_distance: Option<Res<CloudDistanceTexture>>,
+    live_weather: Option<Res<CloudWeatherMap>>,
+    live_strata: Option<Res<CloudSurfaceDensityMap>>,
     blanks: Option<Res<super::spawn::BlankCloudTextures>>,
     skies: Query<(
         &super::ground_terrain::BodySky,
@@ -179,12 +205,30 @@ fn sync_cloud_composite_materials(
         material.atmosphere = atmosphere;
         material.params = params;
         if active.0 == Some(clouds.body_id) {
+            // Registration by construction: the far tier samples the weather
+            // sphere through the marcher's exact frame, not ground_terrain's
+            // independently derived rotation (see `ActiveCloudFrame`).
+            let q = frame.0;
+            bevy::log::info_once!(
+                target: "thalos::clouds",
+                "composite frame override: marcher q_bw={:?}, ground_terrain q={:?}",
+                q,
+                material.params.world_to_body_orientation,
+            );
+            material.params.world_to_body_orientation = Vec4::new(q.x, q.y, q.z, q.w);
             if let Some(layer) = cloud_layer.as_deref() {
                 material.cloud_layer = layer.handle.clone();
             }
             if let Some(distance) = cloud_distance.as_deref() {
                 material.cloud_distance = distance.handle.clone();
             }
+            // NOTE (BL-20260723T214730Z): the composite deliberately keeps the
+            // spawn-time cube bindings. Binding the compute pass's live cubes
+            // here is the intended single-authority end state, but the runtime
+            // re-upload path scrambles cube face/mip layout on the GPU, so the
+            // live cubes' content cannot be trusted by mip-sampling consumers
+            // until that is fixed.
+            let _ = (&live_weather, &live_strata);
         } else if let Some(blanks) = blanks.as_deref() {
             material.cloud_layer = blanks.layer.clone();
             material.cloud_distance = blanks.distance.clone();
@@ -226,6 +270,7 @@ fn drive_clouds(
     exposure: Res<CameraExposure>,
     graphics: Res<GraphicsSettings>,
     mut active: ResMut<ActiveCloudBody>,
+    mut frame: ResMut<ActiveCloudFrame>,
     mut cam_mat: ResMut<CameraMatrices>,
     mut config: ResMut<CloudsConfig>,
     time: Res<Time>,
@@ -326,6 +371,9 @@ fn drive_clouds(
     *wind_angle = (*wind_angle + climate.wind_m_s[0] * time.delta_secs() / radius.max(1.0))
         .rem_euclid(std::f32::consts::TAU);
     let q_bw = (Quat::from_rotation_y(*wind_angle) * body_rot.inverse()).normalize();
+    // Publish the marcher's frame so the composite's far tier samples the
+    // weather sphere through the IDENTICAL rotation (see `ActiveCloudFrame`).
+    frame.0 = q_bw;
     let cam_body = q_bw * to_cam;
     cam_mat.translation = cam_body;
     // Rays use only the rotation part of this matrix (w = 0), but the shader's
@@ -404,33 +452,39 @@ fn drive_clouds(
         Vec4::new(0.30, 0.36, 0.48, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
 }
 
-/// Upload the active body's canonical cubemap field. No default is generated
-/// here: authored `CloudClimate::None` is authoritative.
-fn sync_cloud_weather_map(
+/// Point the near-volume compute pass at the ACTIVE body's spawn-uploaded
+/// weather/strata cubes. This is a pure HANDLE REBIND — no image data is ever
+/// mutated at runtime, because the re-upload path scrambles cube face/mip
+/// layout on the GPU (BL-20260723T214730Z): the previous in-place
+/// `image.data` refresh fed the marcher a corrupted field, so the volumetrics
+/// could never line up with the impostor's correct spawn-time field. The
+/// compute bind group is rebuilt from `CloudsImage` every frame, so the swap
+/// takes effect on the next frame. Future live weather (CLOUD-7 advection)
+/// must create a NEW image asset per version rather than mutating in place.
+fn sync_cloud_weather_binding(
     active: Res<ActiveCloudBody>,
+    cubes: Res<BodyCloudCubes>,
     cache: Res<SolarSystemState>,
-    weather: Option<Res<CloudWeatherMap>>,
-    surface_density: Option<Res<CloudSurfaceDensityMap>>,
-    mut images: ResMut<Assets<Image>>,
-    mut last: Local<Option<(BodyId, u32)>>,
+    clouds_image: Option<ResMut<thalos_body_render::CloudsImage>>,
+    weather: Option<ResMut<CloudWeatherMap>>,
+    surface_density: Option<ResMut<CloudSurfaceDensityMap>>,
+    mut last: Local<Option<BodyId>>,
 ) {
     let Some(body_id) = active.0 else {
         return;
     };
-    let Some(weather) = weather else {
+    if *last == Some(body_id) {
+        return;
+    }
+    let Some((weather_handle, strata_handle)) = cubes.0.get(&body_id) else {
         return;
     };
-    let Some(surface_density) = surface_density else {
-        return;
-    };
-    let Some(field) = cache
+    if let Some(field) = cache
         .environment
         .get(body_id)
         .and_then(|env| env.cloud_weather.as_ref())
-    else {
-        return;
-    };
-    if field.face_size != WEATHER_FACE_SIZE {
+        && field.face_size != WEATHER_FACE_SIZE
+    {
         error!(
             target: "thalos::clouds",
             "weather field face size {} does not match renderer {}",
@@ -439,20 +493,16 @@ fn sync_cloud_weather_map(
         );
         return;
     }
-    if *last == Some((body_id, field.version)) {
+    let Some(mut clouds_image) = clouds_image else {
         return;
+    };
+    clouds_image.weather_image = weather_handle.clone();
+    clouds_image.surface_density_image = strata_handle.clone();
+    if let Some(mut weather) = weather {
+        weather.handle = weather_handle.clone();
     }
-    {
-        let Some(mut image) = images.get_mut(&weather.handle) else {
-            return;
-        };
-        image.data = Some(field.rgba8_mip_chain());
+    if let Some(mut surface_density) = surface_density {
+        surface_density.handle = strata_handle.clone();
     }
-    {
-        let Some(mut image) = images.get_mut(&surface_density.handle) else {
-            return;
-        };
-        image.data = Some(field.surface_density_rgba8_mip_chain());
-    }
-    *last = Some((body_id, field.version));
+    *last = Some(body_id);
 }

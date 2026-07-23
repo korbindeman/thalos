@@ -18,6 +18,7 @@ pub(crate) struct CloudsUniform {
     pub clouds_coverage: f32,
     pub clouds_density: f32,
     pub clouds_detail_scale_m: f32,
+    pub surface_density_coupling: f32,
     pub clouds_detail_strength: f32,
     pub clouds_base_edge_softness: f32,
     pub clouds_bottom_softness: f32,
@@ -69,6 +70,7 @@ impl Default for CloudsUniform {
             clouds_min_transmittance: 0.0,
             clouds_base_shape_scale_m: 0.0,
             clouds_detail_scale_m: 0.0,
+            surface_density_coupling: 1.0,
             sun_dir: Vec4::ZERO,
             sun_color: Vec4::ZERO,
             cloud_albedo: Vec4::ONE,
@@ -91,8 +93,13 @@ pub(crate) struct CloudsUniformBuffer {
     pub buffer: UniformBuffer<CloudsUniform>,
 }
 
+/// Compute-pass image bindings. Public so the game can REBIND the weather /
+/// strata cube handles to a body's spawn-uploaded images (handle swap only —
+/// runtime re-upload of cube data scrambles face/mip layout on the GPU, see
+/// BL-20260723T214730Z). The texture bind group is rebuilt from this resource
+/// every frame, so a swap takes effect immediately.
 #[derive(Resource, Clone, ExtractResource, AsBindGroup)]
-pub(crate) struct CloudsImage {
+pub struct CloudsImage {
     #[storage_texture(0, image_format = Rgba32Float, access = ReadWrite)]
     pub cloud_render_image: Handle<Image>,
 

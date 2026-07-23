@@ -53,7 +53,7 @@ pub use self::images::{
 
 use self::compute::CloudsComputePlugin;
 use self::images::build_images;
-use self::uniforms::CloudsImage;
+pub use self::uniforms::CloudsImage;
 
 /// Handle to the final cloud render texture (RGBA32F: `rgb` = premultiplied
 /// in-scatter, `a` = transmittance). The game binds this in a fullscreen

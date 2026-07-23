@@ -1421,7 +1421,12 @@ pub(super) fn update_body_terrain_atmosphere(
                         .0
                         .as_ref()
                         .map(|cfg| {
-                            Vec4::new(cfg.clouds_raymarch_steps_count as f32, 0.0, 0.0, 0.0)
+                            Vec4::new(
+                                cfg.clouds_raymarch_steps_count as f32,
+                                cfg.tier_diagnostic,
+                                cfg.far_pixel_footprint,
+                                cfg.far_coverage_preserving,
+                            )
                         })
                         .unwrap_or(Vec4::ZERO)
                 } else {

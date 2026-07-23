@@ -300,6 +300,14 @@ pub(super) fn spawn_bodies(
                 CloudWeatherField::MIP_LEVELS,
             ));
             solar.install_cloud_weather(body.id, field);
+            // Registry for the near-marcher handle rebind: the compute pass
+            // must sample THESE spawn-uploaded cubes, never a runtime-mutated
+            // copy (the re-upload path scrambles cube face/mip layout on the
+            // GPU — BL-20260723T214730Z).
+            world_state.body_cloud_cubes.0.insert(
+                body.id,
+                (weather_image.clone(), surface_density_image.clone()),
+            );
             (weather_image, surface_density_image)
         } else {
             (blank_weather.clone(), blank_weather.clone())
