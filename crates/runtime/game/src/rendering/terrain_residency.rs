@@ -427,6 +427,13 @@ fn try_spawn(
 ) -> Option<ResidencyEntry> {
     let body = sim.system.bodies.get(body_id)?;
 
+    // NTR-X1: when the standard-path tile renderer is active, udlod ground
+    // terrain stands down for every body (ntr §6 slice 1; the tile driver
+    // owns the anchor body, remaining bodies render impostor-only).
+    if crate::rendering::tile_terrain::tile_renderer_enabled() {
+        return None;
+    }
+
     // Bodies without authored terrain never get a ground-LOD entity.
     // (Stars, gas giants.) `dominant_body()` could in principle return one of
     // these, so we have to guard.

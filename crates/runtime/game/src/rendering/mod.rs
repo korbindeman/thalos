@@ -32,6 +32,7 @@ mod spawn;
 pub(crate) mod ssao;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
+pub(crate) mod tile_terrain;
 mod trails;
 mod transforms;
 mod types;
@@ -115,6 +116,9 @@ impl Plugin for RenderingPlugin {
             // for cached providers) and the registry has to exist by then.
             .add_plugins(tile_cache::TileCachePlugin)
             .add_plugins(TerrainResidencyPlugin)
+            // NTR-X1: standard-path tile terrain driver — no-op unless
+            // THALOS_TILE_RENDERER=1 (which also gates udlod's try_spawn).
+            .add_plugins(tile_terrain::TileTerrainDriverPlugin)
             .add_plugins(map_terrain::MapTerrainPlugin)
             .add_plugins(clouds::CloudsRenderPlugin)
             .add_plugins(ocean::OceanRenderPlugin)
