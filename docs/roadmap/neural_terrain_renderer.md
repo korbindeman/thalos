@@ -119,6 +119,42 @@ design around procedural assumptions).
    fine-tune dataset/config. Q10 (pixel vs latent storage) is still the open
    schema fork and now gates this workstream too.
 
+**Candidate mechanism — one field kernel, two backends (CubeCL).** The model is
+not the whole terrain. Downstream of it sits a *field cascade* every band
+shares: parent upsample + conditioning, the sub-model-scale analytic detail
+octaves, normal/slope derivation, material/albedo derivation, and structure
+conditioning (flatten pads as a tile input, §6.5). That cascade has three
+consumers which, written conventionally, become three implementations —
+
+- the offline bakery (package emission, §4.5): CPU/CUDA, f64 available;
+- runtime GPU tile synthesis: wgpu → WGSL/SPIR-V, f32 with translated origin;
+- the runtime CPU height authority: colliders, spawn search, EVA, HUD (§6.3).
+
+— and udlod's abandoned GPU tile production died on exactly that
+(`terrain_lod_optimization.md` *What did not land, and why*): moving synthesis
+to a compute shader creates a **second height authority** that drifts from the
+CPU one the colliders read. [CubeCL](https://github.com/tracel-ai/cubecl)
+writes such kernels once in Rust (`#[cube]`) and compiles them to
+CUDA/ROCm/SPIR-V/WGSL/Metal plus a CPU runtime, so the *duplication* half of
+that blocker stops existing by construction rather than by differential test.
+
+What it does **not** solve: wgpu exposes no f64, so the runtime compilation is
+f32-with-translated-origin either way; and one source is not bit-identical
+across backends (FMA contraction, transcendentals, vectorization), so parity
+stays a *tolerance* gate. It is also **not** the render path — standard PBR +
+WGSL stands (§2), and CubeCL's own device/allocator makes render-graph interop
+a cost with no benefit — and **not** the model runtime: training is PyTorch
+(ADR-20260723T143155Z), with Burn (CubeCL underneath, already in-tree via
+`tools/terrain_train`) the Rust inference candidate only if on-device decode
+wins Q10.
+
+**Why it is an early decision.** The cost is paid the moment the cascade is
+written a second time. The probe's analytic provider is single-implementation
+CPU through M2; the fork opens at M4 (parent-conditioned residual bands) and
+closes at M5/extraction, when collision joins as a consumer. Evaluating after
+that is a rewrite — which is precisely how udlod reached "needs a decision and
+a GPU, not something to land blind."
+
 Burn/MIRA-1 finishes its L2 gate evidence, then pauses (keystone ADR §4).
 Nothing downstream of L2 starts.
 
@@ -180,9 +216,10 @@ Order of re-entry, to be finalized by the M5 extraction plan:
 | Fork | Gates | Notes |
 |---|---|---|
 | Bevy/`big_space`/Solari revisions to pin together for the probe | probe M0 | probe-repo decision; report back |
-| Patch resolution + screen-space-error rule | probe M2 | 33² vs 65² measured |
+| Patch resolution + screen-space-error rule | probe M2 (distance-only placeholder shipped) → sharpen at M4/M5 | 33² vs 65² measured. The target rule is **relief-aware screen-space geometric error**, not distance: split only when refinement would move the surface by > τ px, so smooth terrain (ocean floor, plains) spends far less of the tile budget at equal distance. The error term comes from provider metadata — the package lineage already stores per-node max declared error (MIRA-0), and at M4 the neural residual band's amplitude *is* the refinement error; `HeightTile` min/max is the interim proxy. udlod precedent: `TileProvider::subdivision_scale` ≤ 1 — relief-awareness may only *remove* detail below the distance cap, never add it (scale-consistency invariant) |
 | Collision at M2 or after multiscale | probe M2/M4 | leaning after-M4 per probe non-goals |
 | Q10 — package storage: pixel heights vs latent + on-device decode | §4.5 package emission; MIRA-2/3 schema freeze | carried over from *Decisions pending* |
 | Unified model architecture across body classes | after the earth-like fine-tune produces accepted Thalos terrain | companion ADR end state; resist architecture (not just stack) divergence meanwhile |
 | Learned climate channels as landcover conditioning | §4.4 evaluation | could retire TM-P2r/TM-P3b-style authored climate growth |
+| Q11 — single-source field kernel (CubeCL `#[cube]`, one Rust source compiled to GPU + CPU) vs hand-maintained WGSL/Rust pairs for the post-model cascade | opens at probe M4 (residual bands), binding at M5/extraction when collision joins as a height consumer | §4 *Candidate mechanism* |
 | Solari adoption | probe M5 measurements | RT gating + BLAS churn on streamed tiles are the questions |
