@@ -15,30 +15,13 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+use thalos_capture_protocol::CAPTURE_PRESETS;
 
-const FONT_BYTES: &[u8] = include_bytes!("../../../../assets/fonts/Inter-SemiBold.ttf");
+const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
 const DIFF_AMPLIFICATION: u16 = 4;
-const KNOWN_PRESETS: &[&str] = &[
-    "spaceport-aerial",
-    "runway-atmosphere",
-    "hub",
-    "dry-belt",
-    "earth-reference",
-    "mira-orbit",
-    "mira-surface",
-    "mira-eva",
-    "cloud-runway",
-    "cloud-motion",
-    "cloud-cruise",
-    "cloud-interior",
-    "cloud-limb",
-    "cloud-planet",
-    "cloud-sunset",
-    "plume",
-];
 const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_SIZE",
     "THALOS_SCREENSHOT_AZIMUTH",
@@ -311,18 +294,8 @@ struct ManifestComparison {
     metrics: DiffMetrics,
 }
 
-fn main() -> ExitCode {
-    match run() {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("visual comparison failed: {error}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-fn run() -> Result<(), String> {
-    let Some(args) = parse_args()? else {
+pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> {
+    let Some(args) = parse_args(args)? else {
         return Ok(());
     };
     let workspace = workspace_root();
@@ -348,9 +321,9 @@ fn run() -> Result<(), String> {
     let out_dir = absolutize(
         &workspace,
         args.out_dir.unwrap_or_else(|| {
-            PathBuf::from("tools")
-                .join("agent_scratch")
-                .join("screenshots")
+            PathBuf::from("artifacts")
+                .join("visual")
+                .join("runs")
                 .join("comparisons")
                 .join(&args.preset)
                 .join(args.axis.name)
@@ -386,7 +359,7 @@ fn run() -> Result<(), String> {
             args.axis.env_key,
             variant.value
         );
-        let mut command = if cold {
+        if cold {
             let mut command = Command::new(&game);
             command
                 .env("THALOS_SCREENSHOT", &args.preset)
@@ -397,26 +370,41 @@ fn run() -> Result<(), String> {
                     dynamic_library_env_key(),
                     dynamic_library_path.as_ref().expect("cold path has dylibs"),
                 );
-            command
+            command.current_dir(&workspace);
+            let output = command
+                .output()
+                .map_err(|error| format!("launch {}: {error}", game.display()))?;
+            let process_log = format!(
+                "{}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if !output.status.success() {
+                return Err(format!(
+                    "variant '{}' exited with {}\n{}",
+                    variant.label,
+                    output.status,
+                    process_log
+                        .lines()
+                        .rev()
+                        .take(50)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ));
+            }
+            if let Some(error) = crate::render_log_failure(&process_log) {
+                return Err(format!("variant '{}': {error}", variant.label));
+            }
         } else {
-            let mut command = Command::new(capture_cli_from_current_exe());
-            command
-                .arg("shot")
-                .arg(&args.preset)
-                .arg("--out")
-                .arg(&path)
-                .arg("--report")
-                .arg(&report_path)
-                .arg("--set")
-                .arg(format!("{}={}", args.axis.env_key, variant.value));
-            command
-        };
-        command.current_dir(&workspace);
-        let status = command
-            .status()
-            .map_err(|error| format!("launch {}: {error}", game.display()))?;
-        if !status.success() {
-            return Err(format!("variant '{}' exited with {status}", variant.label));
+            crate::capture(
+                &args.preset,
+                Some(path.clone()),
+                Some(report_path.clone()),
+                vec![format!("{}={}", args.axis.env_key, variant.value)],
+            )?;
         }
         if !path.is_file() {
             return Err(format!(
@@ -536,12 +524,12 @@ fn run() -> Result<(), String> {
     Ok(())
 }
 
-fn parse_args() -> Result<Option<Args>, String> {
+fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String> {
     let mut positional = Vec::new();
     let mut out_dir = None;
     let mut game = None;
     let mut cold = false;
-    let mut args = env::args().skip(1);
+    let mut args = args;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "-h" | "--help" => {
@@ -570,10 +558,10 @@ fn parse_args() -> Result<Option<Args>, String> {
     }
 
     let preset = canonical_slug(positional.first().map_or("earth-reference", String::as_str));
-    if !KNOWN_PRESETS.contains(&preset.as_str()) {
+    if !CAPTURE_PRESETS.contains(&preset.as_str()) {
         return Err(format!(
             "unknown preset '{preset}'; expected one of {}",
-            KNOWN_PRESETS.join(", ")
+            CAPTURE_PRESETS.join(", ")
         ));
     }
     let axis_name = canonical_slug(positional.get(1).map_or("ssao", String::as_str));
@@ -603,8 +591,8 @@ fn parse_args() -> Result<Option<Args>, String> {
 fn print_help() {
     println!(
         "\
-Usage: visual_compare [preset] [axis] [--out DIR] [--cold] [--game PATH]\n\
-       visual_compare --list\n\n\
+Usage: thalos_capture compare [preset] [axis] [--out DIR] [--cold] [--game PATH]\n\
+       thalos_capture compare --list\n\n\
 Defaults: preset=earth-reference axis=ssao\n\
 Artifacts: artifacts/visual/runs/comparisons/<preset>/<axis>/\n\
 Run through: just compare [preset] [axis]"
@@ -613,7 +601,7 @@ Run through: just compare [preset] [axis]"
 }
 
 fn print_axes() {
-    println!("Presets: {}", KNOWN_PRESETS.join(", "));
+    println!("Presets: {}", CAPTURE_PRESETS.join(", "));
     println!("Axes:");
     for axis in AXES {
         println!(
@@ -642,19 +630,11 @@ fn workspace_root() -> PathBuf {
 }
 
 fn game_binary_from_current_exe() -> PathBuf {
-    let current = env::current_exe().expect("resolve visual_compare executable");
+    let current = env::current_exe().expect("resolve thalos_capture executable");
     let profile_dir = current
         .parent()
-        .expect("visual_compare lives under <target>/<profile>");
+        .expect("thalos_capture lives under <target>/<profile>");
     profile_dir.join(format!("thalos_capture_host{}", env::consts::EXE_SUFFIX))
-}
-
-fn capture_cli_from_current_exe() -> PathBuf {
-    env::current_exe()
-        .expect("resolve visual_compare executable")
-        .parent()
-        .expect("visual_compare lives under <target>/<profile>")
-        .join(format!("thalos_capture{}", env::consts::EXE_SUFFIX))
 }
 
 /// Reproduce Cargo's dynamic-library launch environment when the comparison

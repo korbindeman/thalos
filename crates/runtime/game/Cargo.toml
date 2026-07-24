@@ -46,15 +46,20 @@ wgpu = { version = "29", default-features = false, features = ["counters"], opti
 bevy_render_gl_backend = { package = "bevy_render", version = "0.19", default-features = false, features = ["gles"], optional = true }
 
 [features]
-# Normal renderer-development fingerprint shared by the interactive launcher,
-# cold capture, and visual labs. The persistent hotpatch lane below is the one
-# intentional static-renderer exception.
-dev-renderer = ["bevy/dynamic_linking", "dep:bevy_render_gl_backend"]
-# Agent-facing persistent renderer loop. `embedded_watcher` includes Bevy's
-# normal file watcher, so both `assets/shaders/*` and crate-embedded WGSL are
-# reloaded in the running capture process. Hotpatching stays dev-only and is
-# driven by the Dioxus `dx serve --hot-patch` launcher.
-dev-iteration = ["bevy/hotpatching", "bevy/embedded_watcher", "dep:bevy_render_gl_backend"]
+# The one renderer-development fingerprint, shared by the interactive
+# launcher, cold capture, AND the persistent capture server
+# (ADR-20260724T153619Z-retire-hotpatch-single-stable-capture-lane).
+# `embedded_watcher` includes Bevy's normal file watcher, so both
+# `assets/shaders/*` and crate-embedded WGSL hot-reload in any running
+# dev process — the persistent screenshot host and the interactive game
+# alike. Rust hot-patching was retired (an applied subsecond patch
+# stack-overflowed the app, INC-20260724T044418Z); Rust edits restart the
+# capture host instead, automatically.
+dev-renderer = [
+    "bevy/dynamic_linking",
+    "bevy/embedded_watcher",
+    "dep:bevy_render_gl_backend",
+]
 # Profiling. Enable one at a time. Chrome produces trace-*.json in cwd;
 # Tracy streams to a running Tracy client over localhost.
 profile-chrome = ["bevy/trace_chrome"]

@@ -231,7 +231,8 @@ just screenshot mira-rim      # reference framing 3/3: low oblique across a
 just compare spaceport-aerial ssao       # off/on/raw multi-test of the AO path
 just screenshot-cold ocean    # clean-process/full-warm-up verification
 just compare-cold spaceport-aerial ssao # isolated acceptance matrix
-just capture-stop             # stop/rebuild after structural Rust changes
+just capture-stop             # stop the persistent capture host (optional —
+                              #   Rust edits auto-restart it on the next shot)
 just map                  # whole-planet biome map export → target/world_map.png
                           #   (true macro palette, hillshaded, web-mercator) +
                           #   target/world_biomes.png (flat MacroBiome class map)
@@ -282,13 +283,17 @@ changes the stable LLVM baseline for all platforms.
 
 Portable dev profile policy (incremental workspace crates, line-table debug
 information, and optimization levels) lives in `Cargo.toml`. Machine-specific
-linkers, sccache paths, and per-process job budgets belong in local Cargo config;
-backend experiments remain prohibited. Bevy dynamic linking is the exception: the interactive/cold renderer
-lane (`just game`, `just screenshot-cold`, `just compare-cold`, `just preview`,
-`just ui-preview`) shares it by committed default. The high-frequency `just
-screenshot` / `just compare` lane instead reuses one static `dev-iteration`
-binary through Dioxus/Subsecond hotpatching plus Bevy's file/embedded asset
-watcher; do not combine the two loading mechanisms. Override `game_command` in
+linkers and per-process job budgets belong in local Cargo config;
+backend experiments remain prohibited. There is no compiler cache — sccache was
+removed 2026-07-23 (ADR-20260723T222214Z-abandon-sccache: build corruption plus
+a large silent-misactivation surface for a marginal solo-loop benefit). Every
+dev renderer lane — `just game`, `just screenshot` (persistent host),
+`just screenshot-cold`, `just compare`, `just preview`, `just ui-preview` —
+shares **one dynamic-linking fingerprint** (`dev-renderer`, which also carries
+Bevy's `embedded_watcher` for in-place WGSL reload). Rust hot-patching was
+retired 2026-07-24 (ADR-20260724T153619Z: an applied subsecond patch
+stack-overflowed the app — INC-20260724T044418Z); Rust edits restart the
+capture host via an automatic rebuild instead. Override `game_command` in
 `.env.just` to opt out of dynamic linking locally. The normal
 Windows iteration path stays on LLVM. Do not add unstable `-Zthreads`: the
 2026-07-20 parallel-MIR ICE poisoned incremental objects and turned a proposed
@@ -303,31 +308,67 @@ Windows fast-incremental and macOS workaround examples live in
   Concurrent game/check/screenshot invocations mostly wait on Cargo's target
   lock while competing for CPU and memory; they make an already large Bevy link
   appear even slower. Use `just check` during edits, then perform one
-  linked `just game` or persistent `just screenshot` when needed. Do not start a
-  separate Cargo command while `dx` is compiling a hot patch.
+  linked `just game` or persistent `just screenshot` when needed.
 - Parallel agents must use separate worktrees and therefore separate `target/`
-  directories. They share sccache, not Cargo output directories. Size each
-  Cargo process with `scripts/setup-build-env.sh --agents N` or
+  directories. There is no shared compiler cache: each worktree compiles the
+  Bevy dep graph cold the first time, so reuse worktrees rather than recreating
+  them. Size each Cargo process with `scripts/setup-build-env.sh --agents N` or
   `scripts/setup-build-env.ps1 -AgentSlots N` (**both default to 1** — the full
   machine for the solo case; pass `N` only when you really will run N concurrent
   Cargo processes); no two simultaneous Cargo processes may write to the same
   target directory.
-- **After every `git worktree add`, resync sccache** — `scripts\setup-build-env.ps1
-  -SyncOnly` (Windows) or `scripts/setup-build-env.sh --agents N --all-worktrees`
-  (Linux/macOS). `SCCACHE_BASEDIRS` is a startup snapshot of `git worktree list`
-  held by the *server*; a worktree missing from it can never hit another
-  worktree's cache and silently does a full cold build. `bash
-  scripts/check-build-env.sh` names any worktree that is not normalized. sccache
-  activation itself is the global `RUSTC_WRAPPER` on Windows (a repo-local
-  `.cargo/config.toml` is invisible to worktrees outside the checkout) — see
-  `docs/development/build_speed.md` §5.0/§5.3.1. On WSL/Linux, create the
-  complete worktree set first, run `scripts/setup-build-env.sh --agents N
-  --all-worktrees`, source `scripts/sccache-on.sh` in every agent shell, and
-  require `bash scripts/check-build-env.sh --parallel` to pass before work begins.
-  WSL repositories live on the Linux filesystem, never under `/mnt/c`.
-- Keep each intentional renderer lane on its one Bevy/wgpu feature fingerprint:
-  dynamic for interactive/cold tools, static `dev-iteration` for the persistent
-  capture server. Adding any other mixture forces another full graph. In particular, wgpu's diagnostic
+- **Worktrees outside the checkout need their own config.** A worktree nested
+  inside the tree inherits the repo-root `.cargo/config.toml` (fast linker + job
+  budget) via Cargo's upward discovery; one created elsewhere (`C:/tmp`,
+  `~/.codex/worktrees`) does not, and builds with the stock linker and no job
+  budget until you run `scripts/setup-build-env.sh --agents N --all-worktrees`
+  (Linux/macOS) or `scripts\setup-build-env.ps1 -AllWorktrees` (Windows). On
+  WSL/Linux, create the complete worktree set first, provision it in one pass,
+  and require `bash scripts/check-build-env.sh --parallel` to pass before work
+  begins. WSL repositories live on the Linux filesystem, never under `/mnt/c`.
+- **The screenshot loop has exactly two speeds, by design**
+  (ADR-20260724T153619Z): **WGSL edits hot-reload in the running host** (~3 s
+  to a fresh PNG — keep visual iteration WGSL-first), and **any Rust/manifest
+  edit restarts the host automatically** — the next `just screenshot` detects
+  stale sources, rebuilds (dynamic relink), and reboots (~1.5–2.5 min warm).
+  There is no in-process Rust reload and no crash class; `just capture-stop`
+  is optional hygiene, not a required step. The Windows linker stays the
+  `lld-link.exe` shim copy of rust-lld written by `setup-build-env.ps1`
+  (INC-20260724T030400Z — guards any tool that drives the linker raw).
+- **Never hand-roll `cargo clean -p <subset>`.** The dev lane links Bevy
+  dynamically, so `bevy_dylib` and every crate linked against it are **one
+  artifact set**; cleaning part of it while `profile.dev`'s incremental caches
+  survive leaves codegen units naming the old dylib's internalized symbols, and
+  the build dies with `undefined symbol: anon.*.llvm.*`
+  (INC-20260724T182642Z). That link error is an *artifact* problem, never a
+  missing dependency. The capture client **self-heals it once** (drops
+  `target/debug/incremental`, rebuilds, retries); if it reports the retry also
+  failed, run `just build-reset` — the one supported full reset (stop host +
+  drop incremental + clean the dynamic-linking crate set together).
+- **A detached process must inherit nothing from the caller's console/pipes.**
+  The persistent capture host outlives its client by design, so on Windows it
+  used to hold the invoking shell's stdout pipe forever (`CreateProcess`
+  inherits *every* inheritable handle, not just the redirected stdio) — any
+  piped or background-captured `just screenshot|capture` then hung until the
+  harness timed out, minutes after the PNGs had landed
+  (INC-20260724T185500Z). The host is now launched through `Start-Process`
+  (`ShellExecuteEx`, `bInheritHandles = FALSE`) with its log redirection in a
+  generated `.cmd` shim, so it starts with an empty inherited handle table and
+  **piping/backgrounding a capture is safe** (measured: cold spawn 30 s, reuse
+  5 s, both delivering output). Apply the same rule to any future detached
+  helper — on Windows neither redirecting the child's stdio nor clearing
+  `HANDLE_FLAG_INHERIT` on your std handles is sufficient (both were tried and
+  measured), because inheritable *duplicates* ride along invisibly.
+- **Per-body failures stay per-body.** A missing or stale offline terrain
+  package degrades *that body* (recorded in `BodySurfaceRegistry::degraded`,
+  reported in the startup banner) instead of panicking the process — a stale
+  `Mira.bin` must never block a Thalos capture (INC-20260724T182643Z). Evidence
+  integrity is enforced at the request boundary instead: the capture server
+  refuses a shot whose **target** body is degraded, naming the `just bake`
+  command. Apply the same shape to new body-scoped resources.
+- Keep every dev renderer lane on the **one dynamic `dev-renderer`
+  fingerprint** — interactive game, persistent capture host, and cold capture
+  alike. Adding any other Bevy/wgpu feature mixture forces another full graph. In particular, wgpu's diagnostic
   `counters` feature is intentionally opt-in as `thalos_game/gpu-counters`; do
   not enable it in the default dependency graph. Both dev lanes also compile
   wgpu's GL backend (`bevy_render/gles` via `crates/runtime/game/Cargo.toml`)
@@ -460,10 +501,15 @@ equatorial wet belt), poses the *actual*
 focus — reusing the real camera keeps the scene-depth / atmosphere / SSAO /
 sun-shadow render graph coupled — hides the HUD, and renders one frame off-screen to
 its stable preset filename under `artifacts/visual/latest/`. The first call boots a
-persistent renderer; compatible later calls reuse its world/GPU while Rust ECS
-systems hot-patch and file-backed or embedded WGSL reloads in place. A preset or
-viewport change restarts it. Structural Rust edits (types/layout, plugin/schedule,
-resource initialization) require `just capture-stop`; the next capture rebuilds.
+persistent renderer; compatible later calls reuse its world/GPU while
+file-backed and embedded WGSL reload in place (~3 s to a fresh PNG). Any
+Rust/manifest edit, viewport change, or incompatible boot context restarts the
+host automatically on the next call; presets sharing target body + spawn
+scenario + hub mode + viewport + startup overrides reuse it. `just capture <preset>...` batches
+several scenes through one controller invocation. The client detects stale sources, rebuilds
+(dynamic relink), and reboots (~1.5–2.5 min warm; ADR-20260724T153619Z).
+It also rejects unknown scene names, corrupt/missing images, and fatal
+shader/pipeline/device logs, and retries one dead or wedged host once.
 This folder is
 the curated latest-view surface: one image per canonical preset, overwritten on
 the next capture. Numbered experiments, crops, and alternate framings belong in
@@ -495,6 +541,8 @@ the smallest canonical tool that answers the question:
 - `just screenshot <preset>` — one in-context beauty frame: reproduce a visual
   symptom, establish a baseline, or verify a change when no competing renderer
   configuration needs comparison.
+- `just capture <preset>...` — several canonical scenes; compatible boot
+  contexts amortize one world/GPU startup.
 - `just compare <preset> <axis>` — A/B or N-way attribution: compare render
   paths, feature toggles, diagnostic fields, or tuning alternatives while one
   declared factor changes and every other capture input stays fixed.
@@ -518,7 +566,7 @@ still changes LOD, SSAO, shadows, antialiasing, and other inputs under test.
    `ScreenshotPreset`; do not approximate it with manual camera placement.
 3. Choose one typed axis that separates the candidates. Initial axes include
    `ssao` (`off`/`on`/`raw`) and the terrain/cloud diagnostic axes. Add a new axis in
-   `tools/capture/src/bin/visual_compare.rs` only when all variants are values of
+   `tools/capture/src/compare.rs` only when all variants are values of
    the **same factor** and use capture-only overrides that never persist user
    settings. Never smuggle several setting changes into one variant.
 4. Run the matrix, for example:

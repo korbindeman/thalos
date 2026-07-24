@@ -1,8 +1,9 @@
 # Capture architecture
 
-**Status:** migration active 2026-07-21. CAP-1 has landed compile-clean; the
+**Status:** migration active 2026-07-24. CAP-1 has landed compile-clean; the
 interactive and headless apps are thin shells over `thalos_runtime`. The typed
-protocol, dedicated capture host, and lightweight Rust controller have landed;
+protocol, dedicated capture host, and single Rust controller now own stills,
+multi-scene batches, comparisons, lifecycle recovery, and evidence validation;
 the coupled capture systems still move out of the runtime incrementally.
 
 ## 1. Goal
@@ -15,8 +16,17 @@ contract.
 
 The two operating lanes are both permanent:
 
-- **Persistent:** hot-patched world/GPU reuse for the shortest agent feedback loop.
+- **Persistent:** stable world/GPU reuse plus WGSL hot reload for the shortest
+  agent feedback loop. Rust/manifest edits rebuild and restart automatically.
 - **Cold:** clean process, full warm-up, isolated state for acceptance evidence.
+
+Reliability is a contract, not a convenience. Valid use must either produce a
+decodable image from a healthy renderer or return one actionable failure. The
+controller rejects unknown scene names, stale/dead heartbeats, missing or corrupt
+outputs, and shader/pipeline/device failures even if Bevy happened to write a
+PNG. A dead or wedged persistent host receives one automatic clean restart and
+request retry; agents do not spend a second turn discovering that the server was
+gone.
 
 ## 2. Process and package shape
 
@@ -75,6 +85,14 @@ Environment variables remain only as a temporary compatibility adapter. New
 capture features extend `CaptureSpec`; they do not add another environment-key
 protocol.
 
+Protocol v2 also publishes the boot-compatible preset set. A boot context is the
+tuple `(target body, spawn scenario, hub mode, viewport, startup overrides)`:
+framing and live diagnostics may change in-process, while a different tuple
+triggers a managed restart. This lets runway/cloud/massif views or
+orbit/ocean/cloud views amortize one expensive world boot without pretending
+incompatible scenes share state.
+See ADR-20260724T162943Z-capture-reuse-by-boot-context.
+
 ## 4. Capture runtime
 
 `thalos_capture_runtime` owns one explicit state machine:
@@ -98,6 +116,7 @@ The Rust `thalos_capture` CLI is the single public orchestrator:
 
 ```text
 thalos capture shot spaceport-aerial
+thalos capture shot spaceport-aerial runway-atmosphere cloud-runway
 thalos capture compare spaceport-aerial ssao
 thalos capture record cloud-sunset --seconds 8 --fps 60
 thalos capture verify
@@ -105,10 +124,15 @@ thalos capture status
 thalos capture stop
 ```
 
-`just screenshot`, `just compare`, and their cold variants remain stable aliases.
-The CLI owns host lifecycle, typed matrices, provenance, artifact assembly, and
-hot-reload readiness. The persistent host reuses compatible scene state; the
-cold lane starts a fresh host.
+`just screenshot`, `just capture`, `just compare`, and their cold variants
+remain stable aliases. `shot` accepts multiple scene names; compatible scenes
+reuse the current host and incompatible scenes restart automatically. The CLI
+uses the host's advertised compatibility set to pull same-context scenes
+together, minimizing boots even if the caller supplied an interleaved list. It
+owns host lifecycle, typed matrices, provenance, artifact assembly, reload
+readiness, output decoding, fatal-render-error promotion, and one-shot host
+recovery. Comparison assembly is a module of this binary, not a second
+controller executable.
 
 Video uses exact frame time `n / fps`, not wall time. The runtime renders into a
 small readback ring while background workers write a lossless frame sequence.
@@ -155,9 +179,11 @@ prove it renders every canonical preset through the shared runtime.
 
 ### CAP-3 — Rust CLI, comparisons, and artifacts
 
-Replace the Python controller and runtime-owned comparison example, retain `just` aliases,
-introduce typed request/result manifests, move generated evidence to
-`artifacts/`, and make pipeline/render errors fatal to a request.
+The Python controller and separate comparison executable are gone. Retain
+`just` aliases, finish typed request/result manifests, and complete immutable
+per-run bundles. Multi-scene batching, boot-context reuse, generated-evidence
+migration, output validation, automatic host recovery, and fatal
+shader/pipeline/device-error promotion have landed compile-clean.
 
 ### CAP-4 — Deterministic frame sequences and video
 
@@ -169,7 +195,8 @@ short motion/temporal probe in both persistent and cold lanes.
 
 - Interactive and capture apps demonstrably use the same runtime/plugin graph.
 - Every current preset and typed comparison is available through the Rust CLI.
-- Persistent capture still hot-patches Rust systems and reloads WGSL.
+- Persistent capture reloads WGSL in-process and automatically rebuilds/restarts
+  after Rust or manifest edits.
 - Cold results match the prior canonical framing before old entry points retire.
 - Invalid render pipelines fail requests.
 - A deterministic video rerun produces the same frame count, timestamps,

@@ -57,9 +57,12 @@ preview-window:
     cargo run -p thalos_body_render --features bevy/dynamic_linking --example object_preview -- --window
 
 # Headless screenshot: the first call boots one persistent off-screen renderer;
-# later calls reuse it while Dioxus/Subsecond hot-patches Rust systems and Bevy
-# reloads both file-backed and embedded WGSL. Switching preset/viewport performs
-# a managed restart because those inputs shape the boot world/render target.
+# later calls reuse it while Bevy reloads both file-backed and embedded WGSL in
+# place (~3 s to a fresh PNG). Rust/manifest edits restart the host through an
+# automatic rebuild on the next call — there is no in-process Rust reload
+# (hot-patching retired, ADR-20260724T153619Z). Presets with the same body,
+# spawn scenario, hub mode, and viewport reuse one booted world; incompatible
+# scenes and viewport changes perform a managed restart.
 # `just screenshot` does the spaceport aerial; `just screenshot runway-atmosphere`
 # captures a low near-horizontal view inside the atmosphere; `just screenshot hub` captures
 # the space-center hub exactly as PLAY presents it (spaceport built, no craft
@@ -85,6 +88,11 @@ preview-window:
 screenshot preset="spaceport-aerial":
     cargo run -p thalos_capture --bin thalos_capture -- shot "{{preset}}"
 
+# Capture several scenes through one controller invocation. Compatible scenes
+# reuse the same world/GPU; the controller restarts only at boot-world boundaries.
+capture *presets:
+    cargo run -p thalos_capture --bin thalos_capture -- shot {{presets}}
+
 # Authoritative one-shot capture: clean process, full preset warmup, then exit.
 screenshot-cold preset="spaceport-aerial":
     {{ if os() == "windows" { "$env:THALOS_SCREENSHOT='" + preset + "'; " } else { "THALOS_SCREENSHOT='" + preset + "' " } }}{{capture_command}}
@@ -95,6 +103,16 @@ capture-status:
 capture-stop:
     cargo run -p thalos_capture --bin thalos_capture -- stop
 
+# Full dev-lane reset when the build tree disagrees with itself (link errors
+# naming `anon.*.llvm.*` internal symbols). Stops the host, drops
+# target/debug/incremental, and cleans the dynamic-linking crate set as ONE
+# unit. Never hand-roll `cargo clean -p bevy_dylib` (or any subset): cleaning
+# the dylib while dependent incremental caches survive is what creates that
+# corruption. The capture client also self-heals this once automatically —
+# reach for this only when it reports the retry failed too.
+build-reset:
+    cargo run -p thalos_capture --bin thalos_capture -- reset
+
 # Deterministic visual A/B or N-way comparison. The lightweight orchestrator
 # sends every variant to the same persistent renderer used by `just screenshot`,
 # resetting temporal histories between captures. Outputs full captures + contact sheet +
@@ -103,15 +121,13 @@ capture-stop:
 # Axes include ssao (off/on/raw), terrain-lighting, terrain-culling,
 # terrain-regolith-filter, and cloud-reconstruction. See docs/development/visual_testing.md.
 compare preset="spaceport-aerial" axis="ssao":
-    cargo build -p thalos_capture --bins
-    {{ if os() == "windows" { "target/debug/visual_compare.exe" } else { "./target/debug/visual_compare" } }} "{{preset}}" "{{axis}}"
+    cargo run -p thalos_capture --bin thalos_capture -- compare "{{preset}}" "{{axis}}"
 
 # Clean-process evidence lane. Use after exploratory iteration and for structural
 # pipeline axes (terrain-culling automatically falls back here).
 compare-cold preset="spaceport-aerial" axis="ssao":
     cargo build -p thalos_capture_host --features dev-renderer
-    cargo build -p thalos_capture --bins
-    {{ if os() == "windows" { "target/debug/visual_compare.exe" } else { "./target/debug/visual_compare" } }} "{{preset}}" "{{axis}}" --cold
+    cargo run -p thalos_capture --bin thalos_capture -- compare "{{preset}}" "{{axis}}" --cold
 
 # Offline authored terrain package. The MVP producer is the deterministic
 # airless compiler; ADR-20260720T211046Z-offline-terrain-packages's diffusion producer will emit the same package

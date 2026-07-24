@@ -1,5 +1,13 @@
 # INC-0019: sccache silently inactive in worktrees; job budget halved for the solo case
 
+> **Superseded 2026-07-23:** sccache has been removed from Thalos entirely
+> (ADR-20260723T222214Z-abandon-sccache). This post-mortem is retained as
+> history; its sccache fixes and the standing rule it added (resync
+> `SCCACHE_BASEDIRS` after every `git worktree add`) no longer apply — there is
+> no cache to normalize, and the `sccache-on.*` helpers and `build_speed.md`
+> §5.0/§5.3.1 it references are gone. The unrelated fix in this record — the job
+> budget defaulting to the whole machine (1 Cargo process) — survives.
+
 - **Status:** Fixed
 - **Date:** 2026-07-22 (observed) / 2026-07-22 (fixed)
 - **Severity:** perf (build iteration)

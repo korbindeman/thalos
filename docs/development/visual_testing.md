@@ -2,7 +2,9 @@
 
 Thalos diagnoses and iterates on graphics with deterministic, full-resolution
 headless captures. ADR-20260721T192218Z-persistent-visual-iteration keeps the
-one-camera design while making the normal loop persistent and hot-patched.
+one-camera design while making the normal loop persistent; its experimental
+Rust hot-patch mechanism was superseded by
+ADR-20260724T153619Z-retire-hotpatch-single-stable-capture-lane.
 A live multi-camera split screen is still rejected: it would
 duplicate the one-view renderer and change LOD, SSAO, shadow, antialiasing, and
 other viewport-dependent inputs while supposedly holding them constant.
@@ -11,6 +13,9 @@ other viewport-dependent inputs while supposedly holding them constant.
 
 - `just screenshot <preset>` captures one in-context beauty frame through the
   persistent renderer. Compatible subsequent captures reuse its world and GPU.
+- `just capture <preset>...` captures several scenes in one invocation.
+  Presets sharing body + spawn + hub mode + viewport + startup overrides
+  amortize one world boot; other boot contexts restart automatically.
 - F8 in a live 3-D view + `just screenshot latest` hands the player's exact
   body-fixed camera position, orientation, lens, and viewport to an agent.
 - F2 desktop screenshots and F8 perspective handoffs show saved/error toasts
@@ -74,13 +79,13 @@ framing overrides (`THALOS_SCREENSHOT_SIZE`, `_AZIMUTH`, `_ELEVATION`,
 The runner owns `THALOS_SCREENSHOT_OUT` and the axis-specific override so those
 cannot drift between captures.
 
-The first persistent capture launches the hotpatch-enabled game through `dx`.
-Later Rust-system edits are compiled as Subsecond patches; file-backed and
-embedded WGSL changes reload through Bevy's asset watcher. The client waits for
-the relevant reload event before capture. A preset or viewport change performs a
-managed restart because it changes the boot world or viewport-sized resources.
-Type/layout, plugin/schedule, and resource-initialization changes require `just
-capture-stop`; ordinary system-body edits do not.
+The first persistent capture launches the host with plain `cargo run` on the
+shared stable `dev-renderer` fingerprint. File-backed and embedded WGSL changes
+reload through Bevy's asset watcher; the client waits for the reload event.
+Any Rust/manifest edit triggers a managed rebuild/restart on the next request.
+Preset changes reuse the process when their boot context matches; body, spawn,
+hub-mode, or viewport changes restart it. Manual `just capture-stop` is optional
+hygiene.
 
 Every request reapplies live diagnostic resources and invalidates cloud temporal
 history. The first frame uses the preset's full warm-up; subsequent requests use
@@ -104,8 +109,9 @@ readback-flush tail. A fixed frame delay is not a readback-completion contract
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
 | `terrain-regolith-filter` | `legacy-unfiltered`, `footprint-filtered` | Matched before/after for airless procedural-detail Nyquist filtering |
 
-Axes are intentionally typed in `tools/capture/src/bin/visual_compare.rs`. Add a
-new one only when every variant can be selected by a capture-only override that
+Axes are intentionally typed in `tools/capture/src/compare.rs`, inside the
+single `thalos_capture` binary. Add a new one only when every variant can be
+selected by a capture-only override that
 does not persist user settings. A multi-test may have N variants, but they must
 all remain values of the same factor.
 
@@ -149,10 +155,11 @@ can produce a non-zero diff without a meaningful visual regression. Use the
 contact sheet/wipe to interpret the numbers and keep the diagnosis tied to a
 specific hypothesis.
 
-Known harness gap (BL-20): a headless game process can currently keep running or exit zero even
-after Bevy logs a shader/pipeline validation failure, leaving a PNG with missing
-render layers. Until the runner promotes those errors to a failed variant,
-inspect stderr and reject any comparison containing a pipeline-cache error.
+BL-20 landed 2026-07-24: the controller scans the current request's host log
+(including first-boot initialization), promotes shader/pipeline/device failures
+to a failed request, validates that the output exists and decodes, and refuses
+to assemble comparisons from invalid variants. Cold variants receive the same
+log validation.
 
 ## Root-cause loop
 

@@ -17,13 +17,15 @@ Portable incremental and debug-info policy lives in the root `Cargo.toml`.
 Local config contains only:
 
 - the supported platform linker;
-- the sccache wrapper and cache location;
 - a per-Cargo-process job budget sized for expected concurrent agents.
+
+There is no compiler cache: sccache was removed 2026-07-23
+(ADR-20260723T222214Z-abandon-sccache). See build_speed.md §5.
 
 Do not add a compiler-backend override. The pinned stable toolchain uses LLVM;
 any future deviation is a cross-platform architecture decision, not local tuning.
 
-### Renderer iteration: persistent hotpatch lane and dynamic-link lane
+### Renderer iteration: one stable dynamic-link lane
 
 `just game` and the explicit cold screenshot lane use the `justfile`'s shared
 `game_command`, which defaults to
@@ -41,7 +43,8 @@ Any cold-path tool that launches a dynamic dev renderer executable directly must
 contract by prepending the Cargo profile directory, its `deps` directory, and
 `rustc --print target-libdir` to `PATH` (Windows),
 `DYLD_FALLBACK_LIBRARY_PATH` (macOS), or `LD_LIBRARY_PATH` (other Unix).
-`visual_compare` owns this for `just compare-cold`; omitting the rustc directory can
+The integrated `thalos_capture compare` path owns this for `just compare-cold`;
+omitting the rustc directory can
 still miss dynamically linked `std` even after `bevy_dylib` is found. See
 INC-0008.
 
@@ -55,15 +58,13 @@ e.g. on a platform where the feature misbehaves — override the whole command i
 THALOS_GAME_COMMAND="cargo run -p thalos_game"
 ```
 
-The high-frequency graphics loop is separate: `just screenshot` starts (or
-reuses) one static `thalos_capture_host` renderer through Dioxus/Subsecond, with the
-`dev-iteration` feature. Rust ECS-system bodies hot-patch without relinking or
-restarting the world. Bevy watches normal asset shaders and WGSL registered via
-`embedded_asset!`, so both shader forms reload in the same process. `just compare`
-sends its variants to that exact process. The first use requires the one-time
-developer install `cargo binstall dioxus-cli@0.7.9` (the setup script provisions
-this pinned version); the repository controller then
-starts `dx serve --hot-patch` automatically.
+The high-frequency graphics loop uses the same fingerprint: `just screenshot`
+starts (or reuses) one persistent `thalos_capture_host` renderer, spawned by
+the capture client as a detached `cargo run … --features dev-renderer`
+(ADR-20260724T153619Z-retire-hotpatch-single-stable-capture-lane; no external
+tooling required). Bevy watches normal asset shaders and WGSL registered via
+`embedded_asset!`, so both shader forms reload in the same process (~3 s to a
+fresh PNG). `just compare` sends its variants to that exact process.
 
 Useful lifecycle commands:
 
@@ -74,13 +75,20 @@ just screenshot-cold spaceport-aerial
 just compare-cold spaceport-aerial ssao
 ```
 
-The server restarts automatically when the preset or viewport changes. Stop it
-manually after structural Rust changes (types/layout, plugin or schedule wiring,
-resource initialization) that cannot be represented by a function patch. The
-next screenshot rebuilds and starts it again. The hotpatch lane deliberately does
-not enable `bevy/dynamic_linking`: on Windows those two runtime-loading mechanisms
-compete over DLL/link contracts, while either one already removes the dominant
-steady-state relink.
+The server reuses presets with the same body, spawn scenario, hub mode,
+viewport, and startup-only override fingerprint. It restarts automatically when
+that boot context changes **and**
+whenever any workspace `.rs`/`.toml` is newer than the running host — the next
+capture stops it, rebuilds (dynamic relink), and boots it again
+(~1.5–2.5 min warm). There is no in-process Rust reload: dx/subsecond
+hot-patching was retired after an applied patch reproducibly crashed the app
+(INC-20260724T044418Z). `just capture-stop` remains as manual hygiene.
+
+`just capture <preset>...` batches several scenes through one controller
+invocation, amortizing the world/GPU boot wherever the boot context matches.
+`just compare` is a subcommand of that same controller, not a separate
+executable. The controller validates scene names and decoded outputs, rejects
+fatal shader/pipeline/device logs, and retries one dead or wedged host once.
 
 ### Game window / renderer launch toggles
 
@@ -183,15 +191,16 @@ data are not caches.
 ### Fast build setup — see docs/development/build_speed.md
 
 The full cross-platform build-acceleration guide — fast linkers per platform
-(rust-lld on Windows, mold on Linux/WSL), incremental + trimmed debug, **sccache**
-setup, Windows Defender exclusions, headless-Vulkan requirements, and the
+(rust-lld on Windows, mold on Linux/WSL), incremental + trimmed debug,
+Windows Defender exclusions, headless-Vulkan requirements, and the
 **per-environment agent build workflow** (single machine vs. parallel worktrees
-vs. a Linux cloud box) — is [build_speed.md](build_speed.md). Run
+vs. a Linux cloud box) — is [build_speed.md](build_speed.md). There is no
+compiler cache (sccache removed, build_speed.md §5). Run
 `scripts/setup-build-env.sh` (Linux/macOS/WSL) or `scripts/setup-build-env.ps1`
 (Windows) to install the tools and write the local, gitignored config.
 For WSL/Linux parallel boxes, create all worktrees first, run the shell setup
-with `--agents <N> --all-worktrees`, source `scripts/sccache-on.sh` in every
-agent shell, and require `bash scripts/check-build-env.sh --parallel` to pass before
+with `--agents <N> --all-worktrees`, and require
+`bash scripts/check-build-env.sh --parallel` to pass before
 the agent starts compiling or capturing.
 
 Invariants that still bind here (detailed in build_speed.md):
@@ -200,7 +209,7 @@ Invariants that still bind here (detailed in build_speed.md):
   `game`/`screenshot`/`check` invocations serialize on the target lock and
   contend for CPU + several GiB of compiler memory. Use `just check` while
   editing, then one linked `just game`/`just screenshot`. (Genuinely parallel
-  agents get their own worktree + target dir + shared sccache instead — see
+  agents get their own worktree + target dir instead — see
   build_speed.md §7.2.)
 - **No unstable `-Zthreads`** — the 2026-07-20 parallel-MIR ICE (INC-0006) left
   unlinkable incremental objects; a speculative speedup became a full recovery

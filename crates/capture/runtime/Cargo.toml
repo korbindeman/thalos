@@ -11,5 +11,4 @@ thalos_capture_protocol = { path = "../protocol" }
 
 [features]
 dev-renderer = ["thalos_runtime/dev-renderer"]
-dev-iteration = ["thalos_runtime/dev-iteration"]
 gpu-counters = ["thalos_runtime/gpu-counters"]

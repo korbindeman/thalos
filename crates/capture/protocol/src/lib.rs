@@ -8,7 +8,40 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-pub const CAPTURE_PROTOCOL_SCHEMA: u32 = 1;
+pub const CAPTURE_PROTOCOL_SCHEMA: u32 = 2;
+
+/// Canonical scene names accepted by the capture utility.
+///
+/// Keep this list aligned with the runtime's `ScreenshotPreset` enum. Clients
+/// use it for early validation so a typo can never silently capture the
+/// default scene.
+pub const CAPTURE_PRESETS: &[&str] = &[
+    "latest-perspective",
+    "spaceport-aerial",
+    "runway-atmosphere",
+    "hub",
+    "dry-belt",
+    "earth-reference",
+    "ocean",
+    "ocean-slopes",
+    "mira-orbit",
+    "mira-surface",
+    "mira-eva",
+    "mira-disc",
+    "mira-approach",
+    "mira-rim",
+    "cloud-runway",
+    "cloud-motion",
+    "cloud-cruise",
+    "cloud-interior",
+    "cloud-limb",
+    "cloud-planet",
+    "cloud-sunset",
+    "plume",
+    "massif-aerial",
+    "massif-ridge",
+    "massif-valley",
+];
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -47,12 +80,14 @@ pub struct CaptureServerState {
     pub schema_version: u32,
     pub pid: u32,
     pub preset: String,
+    /// Presets that can be captured without rebuilding this boot world.
+    #[serde(default)]
+    pub compatible_presets: Vec<String>,
     pub width: u32,
     pub height: u32,
     pub ready: bool,
     pub busy: bool,
     pub completed_captures: u64,
-    pub code_reload_unix_ms: u128,
     pub shader_reload_unix_ms: u128,
     pub heartbeat_unix_ms: u128,
 }
@@ -62,9 +97,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn legacy_capture_request_deserializes() {
+    fn capture_request_deserializes() {
         let request: CaptureRequest = serde_json::from_str(
-            r#"{"schema_version":1,"id":"abc","action":"capture","preset":"hub","overrides":{}}"#,
+            r#"{"schema_version":2,"id":"abc","action":"capture","preset":"hub","overrides":{}}"#,
         )
         .expect("deserialize request");
         assert_eq!(request.action, CaptureAction::Capture);

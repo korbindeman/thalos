@@ -44,12 +44,14 @@ use bevy::{
 };
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::renderer_tile_lod_m_at;
+use thalos_body_render::tiles::TileTerrainRoot;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 use thalos_body_render::{
     BodyTerrainMaterial, CloudsConfig, HeightSource, cloud_target_memory_for,
 };
 use thalos_capture_protocol::{
-    CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureRequest, CaptureResponse, CaptureServerState,
+    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureRequest, CaptureResponse,
+    CaptureServerState,
 };
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
@@ -594,6 +596,27 @@ pub enum ScreenshotPreset {
     /// shock-diamond / sea-level look is reproducible regardless of the craft's
     /// real altitude. Scrub the pressure with `THALOS_PLUME_PRESSURE` (Pa).
     Plume,
+    /// **Showcase framing 1 of 3 (NTR-X4)** — aerial oblique establishing shot
+    /// of the diffusion window's NE massif (5.8 km peaks ~54 km NNE of the
+    /// spaceport), styled after the Alpine photogrammetry reference: the whole
+    /// massif with its valley flanks in frame, morning cross-light. The
+    /// primary judge-against-the-reference frame for mountain texturing.
+    ///
+    /// Boots the runway scenario purely for its fixed morning epoch (the sun
+    /// geometry at the massif is then deterministic); the site itself is a
+    /// fixed lat/lon derived from the 90 m detail raster, so these presets
+    /// only frame the intended mountains under `THALOS_TERRAIN=diffusion`.
+    MassifAerial,
+    /// **Showcase framing 2 of 3 (NTR-X4)** — mid-altitude shot across the
+    /// massif's summit ridge: close enough that per-material texture detail
+    /// (rock strata, scree, snow line) carries the frame rather than macro
+    /// shape.
+    MassifRidge,
+    /// **Showcase framing 3 of 3 (NTR-X4)** — from over the 1.8 km valley
+    /// floor NW of the peak, looking up the valley at the 4 km face: the
+    /// slope-driven rock/vegetation transition, talus aprons, and forest
+    /// edges read against near-vertical relief.
+    MassifValley,
 }
 
 /// Viewport-relative cloud quality ladder used by both verification captures
@@ -743,6 +766,34 @@ enum ScreenshotFraming {
 }
 
 impl ScreenshotPreset {
+    const ALL: &'static [Self] = &[
+        Self::LatestPerspective,
+        Self::SpaceportAerial,
+        Self::RunwayAtmosphere,
+        Self::Hub,
+        Self::DryBelt,
+        Self::EarthReference,
+        Self::Ocean,
+        Self::OceanSlopes,
+        Self::MiraOrbit,
+        Self::MiraSurface,
+        Self::MiraEva,
+        Self::MiraDisc,
+        Self::MiraApproach,
+        Self::MiraRim,
+        Self::CloudRunway,
+        Self::CloudMotion,
+        Self::CloudCruise,
+        Self::CloudInterior,
+        Self::CloudLimb,
+        Self::CloudPlanet,
+        Self::CloudSunset,
+        Self::Plume,
+        Self::MassifAerial,
+        Self::MassifRidge,
+        Self::MassifValley,
+    ];
+
     fn name(self) -> &'static str {
         match self {
             Self::LatestPerspective => "latest-perspective",
@@ -767,6 +818,9 @@ impl ScreenshotPreset {
             Self::CloudPlanet => "cloud-planet",
             Self::CloudSunset => "cloud-sunset",
             Self::Plume => "plume",
+            Self::MassifAerial => "massif-aerial",
+            Self::MassifRidge => "massif-ridge",
+            Self::MassifValley => "massif-valley",
         }
     }
 
@@ -805,6 +859,9 @@ impl ScreenshotPreset {
             | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
             "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
             "plume" | "engine" | "exhaust" | "rocket" => Self::Plume,
+            "massif-aerial" | "massif_aerial" | "massif" | "mountains" => Self::MassifAerial,
+            "massif-ridge" | "massif_ridge" | "ridge" => Self::MassifRidge,
+            "massif-valley" | "massif_valley" | "valley" => Self::MassifValley,
             other => {
                 eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
                 Self::SpaceportAerial
@@ -822,6 +879,11 @@ impl ScreenshotPreset {
             | Self::RunwayAtmosphere
             | Self::CloudRunway
             | Self::CloudMotion => SpawnSituation::Runway,
+            // The massif showcase presets ride the runway scenario for its
+            // fixed morning epoch: the massif sits ~0.5° from the spaceport,
+            // so the authored morning sun is the deterministic lighting there
+            // too. The camera then leaves the base for the fixed massif site.
+            Self::MassifAerial | Self::MassifRidge | Self::MassifValley => SpawnSituation::Runway,
             // The hub is the PLAY path: the placeholder parking orbit plus the
             // spaceport build (armed by `main.rs` via `boots_hub`).
             Self::Hub => SpawnSituation::ShipOrbit,
@@ -1171,6 +1233,81 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 report: crate::artifact_paths::default_jsonl_path("plume.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            // NTR-X4 showcase framings. All three point at fixed sites in the
+            // diffusion detail window (see `massif_site`), stream a cold wild
+            // mountain site, and therefore need the long warmup.
+            Self::MassifAerial => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/massif_aerial.png"),
+                width: 1920,
+                height: 1080,
+                // Camera south of the peak looking north across the massif;
+                // the fixed morning sun (local east) cross-lights from frame
+                // right, the reference's relief-legible geometry. 22 km out /
+                // 30° up frames the whole massif with its green valley flanks
+                // (14 km filled the frame with the summit snow plateau alone).
+                azimuth_deg: 270.0,
+                elevation_deg: 30.0,
+                distance_m: 22_000.0,
+                warmup_frames: 720,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("massif_aerial.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::MassifRidge => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/massif_ridge.png"),
+                width: 1920,
+                height: 1080,
+                // Closer boom from the south-southwest, low over the summit
+                // ridge, so per-material texture (strata, scree, the snow
+                // line) is the subject rather than the massif silhouette.
+                // NOTE `pose_god_view_camera`'s tangent basis mirrors east
+                // (its `east` = Y×up = −ENU east): for a camera-offset
+                // bearing B (true, from north) the azimuth to author is
+                // atan2(cos B, −sin B). B=210° (SSW) → 300°.
+                azimuth_deg: 300.0,
+                elevation_deg: 12.0,
+                distance_m: 5_000.0,
+                warmup_frames: 720,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("massif_ridge.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::MassifValley => ScreenshotConfig {
+                preset: self,
+                saved: None,
+                out: PathBuf::from("artifacts/visual/latest/massif_valley.png"),
+                width: 1920,
+                height: 1080,
+                // Focus sits on the NW face; the boom runs down-valley along
+                // the reciprocal of the measured valley→peak bearing (139°),
+                // i.e. camera-offset bearing 319° (NW), putting the camera
+                // over the 1.8 km valley floor looking up at the face. In
+                // the mirrored GodView basis (see massif-ridge note):
+                // atan2(cos 319°, −sin 319°) = 49°.
+                azimuth_deg: 49.0,
+                elevation_deg: 2.0,
+                distance_m: 9_000.0,
+                warmup_frames: 720,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("massif_valley.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1636,6 +1773,7 @@ const CAPTURE_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_CLOUD_FAR_FILTER",
     "THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION",
     "THALOS_SCREENSHOT_OCEAN_TIME",
+    "THALOS_PLUME_PRESSURE",
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
@@ -1705,10 +1843,10 @@ struct PersistentCaptureServer {
     boot_preset: Option<ScreenshotPreset>,
     boot_width: u32,
     boot_height: u32,
+    compatible_presets: Vec<String>,
     active_id: Option<String>,
     last_request_id: Option<String>,
     completed_captures: u64,
-    code_reload_unix_ms: u128,
     shader_reload_unix_ms: u128,
     settle_frames: u32,
     heartbeat_frame: u32,
@@ -1723,12 +1861,12 @@ impl PersistentCaptureServer {
             schema_version: CAPTURE_PROTOCOL_SCHEMA,
             pid: std::process::id(),
             preset: preset.name().to_owned(),
+            compatible_presets: self.compatible_presets.clone(),
             width: self.boot_width,
             height: self.boot_height,
             ready,
             busy: self.active_id.is_some(),
             completed_captures: self.completed_captures,
-            code_reload_unix_ms: self.code_reload_unix_ms,
             shader_reload_unix_ms: self.shader_reload_unix_ms,
             heartbeat_unix_ms: timestamp_millis(),
         };
@@ -1787,7 +1925,56 @@ struct ScreenshotDriver {
     /// Cached Mira survey site for the airless presets: body-fixed direction
     /// plus the landmark crater radius when the search locked onto one.
     airless_site: Option<(DVec3, Option<f64>)>,
+    /// Massif presets: latched once the streamed terrain at the focus is
+    /// refined (or the stream hold timed out). Until it latches the warmup
+    /// frame countdown is held — a cold wild-site fill is wall-clock bound,
+    /// not frame bound, so counting frames alone captures the coarse mips
+    /// (the 2026-07-24 baseline failure).
+    terrain_ready: bool,
+    /// Wall-clock seconds spent holding the warmup for terrain streaming.
+    terrain_wait_s: f64,
+    /// udlod-path plateau tracking: finest resident LOD (m/texel) seen at the
+    /// view, and how long it has held without improving.
+    terrain_best_lod_m: Option<f32>,
+    terrain_lod_hold_s: f64,
 }
+
+/// Streamed-terrain readiness inputs for the massif warmup hold, plus the
+/// in-flight capture query (bundled — `drive_headless_screenshot` sits at
+/// Bevy's function-system param limit).
+#[derive(bevy::ecs::system::SystemParam)]
+struct TerrainReadiness<'w, 's> {
+    active_captures: Query<'w, 's, (), With<Capturing>>,
+    time: Res<'w, Time<Real>>,
+    tile_roots: Query<
+        'w,
+        's,
+        (
+            &'static TileTerrainRoot,
+            &'static crate::rendering::tile_terrain::TileTerrainBody,
+        ),
+    >,
+    udlod_trees: Res<'w, TerrainViewComponents<TileTree>>,
+    udlod_terrains: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static crate::rendering::ground_terrain::BodyTerrain,
+            &'static TileAtlas,
+        ),
+    >,
+    camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
+}
+
+/// Ceiling on the massif warmup hold. Cold tile streaming to a wild mountain
+/// site is ~20–60 s; past this something is wedged and the capture proceeds
+/// (with a warning) rather than hanging the host.
+const MASSIF_STREAM_TIMEOUT_S: f64 = 180.0;
+/// udlod path: how long the finest resident LOD at the view must hold without
+/// improving before the ground counts as streamed (wall clock — headless frame
+/// rates make frame counts meaningless against ~30 ms/tile bakes).
+const MASSIF_LOD_PLATEAU_S: f64 = 6.0;
 
 pub struct HeadlessScreenshotPlugin {
     pub persistent: bool,
@@ -1833,8 +2020,6 @@ impl Plugin for HeadlessScreenshotPlugin {
                         .before(drive_headless_screenshot),
                 )
                 .add_systems(Update, record_shader_reloads);
-            #[cfg(feature = "dev-iteration")]
-            app.add_systems(Update, record_code_hotpatches);
         }
     }
 }
@@ -1848,17 +2033,6 @@ fn record_shader_reloads(
     }
 }
 
-#[cfg(feature = "dev-iteration")]
-fn record_code_hotpatches(
-    mut events: MessageReader<bevy::ecs::HotPatched>,
-    mut server: ResMut<PersistentCaptureServer>,
-) {
-    if events.read().next().is_some() {
-        server.code_reload_unix_ms = timestamp_millis();
-        info!(target: "thalos::screenshot", "Rust hot patch applied");
-    }
-}
-
 fn initialize_capture_server(
     cfg: Res<ScreenshotConfig>,
     mut server: ResMut<PersistentCaptureServer>,
@@ -1866,8 +2040,42 @@ fn initialize_capture_server(
     server.boot_preset = Some(cfg.preset);
     server.boot_width = cfg.width;
     server.boot_height = cfg.height;
+    server.compatible_presets = compatible_presets(&cfg);
     server.settle_frames = env_parse("THALOS_CAPTURE_SETTLE_FRAMES").unwrap_or(60);
     server.publish(false);
+}
+
+/// Presets whose app-builder inputs and render-target extent match the booted
+/// world. Camera framing and live diagnostic resources can change in-process;
+/// target body, spawn scenario, hub wiring, and viewport-sized render resources
+/// cannot.
+fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
+    debug_assert_eq!(
+        ScreenshotPreset::ALL
+            .iter()
+            .map(|preset| preset.name())
+            .collect::<Vec<_>>(),
+        CAPTURE_PRESETS,
+        "capture protocol and runtime preset catalogs diverged"
+    );
+    if boot.preset == ScreenshotPreset::LatestPerspective {
+        return vec![boot.preset.name().to_owned()];
+    }
+    ScreenshotPreset::ALL
+        .iter()
+        .copied()
+        .filter(|preset| *preset != ScreenshotPreset::LatestPerspective)
+        .filter(|preset| {
+            preset.target_body_name() == boot.target_body_name()
+                && preset.spawn_situation() == boot.spawn_situation()
+                && preset.boots_hub() == boot.boots_hub()
+        })
+        .filter(|preset| {
+            let defaults = preset.defaults();
+            defaults.width == boot.width && defaults.height == boot.height
+        })
+        .map(|preset| preset.name().to_owned())
+        .collect()
 }
 
 fn publish_capture_server_state(
@@ -1885,6 +2093,7 @@ fn poll_capture_requests(
     mut runtime: ResMut<CaptureRuntimeOverrides>,
     mut driver: ResMut<ScreenshotDriver>,
     mut server: ResMut<PersistentCaptureServer>,
+    surfaces: Res<crate::terrain_registry::BodySurfaceRegistry>,
     mut exit: MessageWriter<AppExit>,
 ) {
     let Ok(bytes) = fs::read(capture_request_path()) else {
@@ -1927,12 +2136,16 @@ fn poll_capture_requests(
     }
 
     let requested_preset = ScreenshotPreset::parse(&request.preset);
-    if Some(requested_preset) != server.boot_preset {
+    if !server
+        .compatible_presets
+        .iter()
+        .any(|preset| preset == requested_preset.name())
+    {
         server.respond(
             &request.id,
             false,
             format!(
-                "server booted for {}; restart it for {}",
+                "server booted for {}; {} needs a different boot world",
                 server.boot_preset.map_or("unknown", ScreenshotPreset::name),
                 requested_preset.name()
             ),
@@ -1943,6 +2156,22 @@ fn poll_capture_requests(
 
     let mut next = ScreenshotConfig::for_preset(requested_preset);
     next.apply_overrides(&request.overrides);
+    // A body with no constructed surface renders as a blank world. That is fine
+    // for a body merely present in the scene (it degrades locally), but a shot
+    // *of* it would be invalid evidence dressed as a valid PNG — refuse it with
+    // the repair command instead. See `BodySurfaceRegistry::degraded`.
+    if let Some(degraded) = surfaces.degraded_by_name(next.target_body_name()) {
+        server.respond(
+            &request.id,
+            false,
+            format!(
+                "{} has no terrain surface: {}",
+                degraded.body_name, degraded.reason
+            ),
+            None,
+        );
+        return;
+    }
     if next.width != server.boot_width || next.height != server.boot_height {
         server.respond(
             &request.id,
@@ -1965,6 +2194,13 @@ fn poll_capture_requests(
     driver.running_frames = 0;
     driver.captured = false;
     driver.tail = 0;
+    // Re-arm the massif streaming hold: a new request may frame a different
+    // (cold) site. When the ground is already streamed the gate re-passes in
+    // one settled check, so warm re-captures stay fast.
+    driver.terrain_ready = false;
+    driver.terrain_wait_s = 0.0;
+    driver.terrain_best_lod_m = None;
+    driver.terrain_lod_hold_s = 0.0;
     server.active_id = Some(request.id);
     server.publish(driver.retargeted);
 }
@@ -2124,13 +2360,23 @@ fn terrain_inspection_override(raw: Option<&str>) -> f32 {
 /// shocks toward the vacuum look.
 fn configure_plume_capture(
     cfg: Res<ScreenshotConfig>,
+    runtime: Res<CaptureRuntimeOverrides>,
     mut over: ResMut<crate::rendering::plume::PlumeDebugOverride>,
-    mut applied: Local<bool>,
 ) {
-    if *applied || cfg.preset != ScreenshotPreset::Plume {
+    if !cfg.is_changed() && !runtime.is_changed() {
         return;
     }
-    let pressure = env_parse::<f32>("THALOS_PLUME_PRESSURE").unwrap_or(101_325.0);
+    if cfg.preset != ScreenshotPreset::Plume {
+        over.throttle = None;
+        over.ambient_pressure_pa = None;
+        over.ignition = None;
+        return;
+    }
+    let pressure = runtime
+        .get("THALOS_PLUME_PRESSURE")
+        .and_then(|raw| raw.trim().parse::<f32>().ok())
+        .or_else(|| env_parse::<f32>("THALOS_PLUME_PRESSURE"))
+        .unwrap_or(101_325.0);
     over.throttle = Some(1.0);
     over.ambient_pressure_pa = Some(pressure.max(0.0));
     over.ignition = Some(1.0);
@@ -2138,7 +2384,6 @@ fn configure_plume_capture(
         target: "thalos::screenshot",
         "plume probe: throttle=1.0 ambient_pressure={pressure:.0} Pa"
     );
-    *applied = true;
 }
 
 /// Diagnostic: for each probe offset across the basin (metres from the pad
@@ -2305,7 +2550,7 @@ fn drive_headless_screenshot(
     mut camera: Query<(&mut Transform, &mut CellCoord, &mut Projection), With<ShipCamera>>,
     diagnostics: Res<DiagnosticsStore>,
     clouds: Res<CloudsConfig>,
-    active_captures: Query<(), With<Capturing>>,
+    readiness: TerrainReadiness,
     mut commands: Commands,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -2332,14 +2577,16 @@ fn drive_headless_screenshot(
             &height_sources,
             homeworld.0,
             &mut driver.dry_site_dir,
-        ).map(CaptureFocus::from),
+        )
+        .map(CaptureFocus::from),
         ScreenshotPreset::Ocean | ScreenshotPreset::OceanSlopes => ocean_site_context(
             &sim,
             &solar,
             &height_sources,
             homeworld.0,
             &mut driver.ocean_site_dir,
-        ).map(CaptureFocus::from),
+        )
+        .map(CaptureFocus::from),
         ScreenshotPreset::MiraOrbit
         | ScreenshotPreset::MiraSurface
         | ScreenshotPreset::MiraDisc
@@ -2377,6 +2624,13 @@ fn drive_headless_screenshot(
         }
         // Frame the craft itself, not a surface site.
         ScreenshotPreset::Plume => craft_context(&sim).map(CaptureFocus::from),
+        ScreenshotPreset::MassifAerial
+        | ScreenshotPreset::MassifRidge
+        | ScreenshotPreset::MassifValley => {
+            let (lat_deg, lon_deg) = massif_site(cfg.preset);
+            fixed_site_context(&sim, &solar, &height_sources, homeworld.0, lat_deg, lon_deg)
+                .map(CaptureFocus::from)
+        }
         _ => match cfg.framing {
             // The sun-relative and disc framings are only reachable from the
             // airless presets above, which resolve their own site; a non-Mira
@@ -2387,7 +2641,8 @@ fn drive_headless_screenshot(
             | ScreenshotFraming::LocalCloud {
                 site_sun_elevation_deg: None,
                 ..
-            } => hub_context(&sim, &solar, &height_sources, &registry, homeworld.0).map(CaptureFocus::from),
+            } => hub_context(&sim, &solar, &height_sources, &registry, homeworld.0)
+                .map(CaptureFocus::from),
             ScreenshotFraming::LocalCloud {
                 site_sun_elevation_deg: Some(sun_elevation_deg),
                 ..
@@ -2397,7 +2652,8 @@ fn drive_headless_screenshot(
                 &height_sources,
                 homeworld.0,
                 sun_elevation_deg,
-            ).map(CaptureFocus::from),
+            )
+            .map(CaptureFocus::from),
         },
     };
     let Some(ctx) = ctx else {
@@ -2433,7 +2689,15 @@ fn drive_headless_screenshot(
     } else if pose_cfg.preset == ScreenshotPreset::MiraEva {
         pose_eva_camera(pose_cfg, &ctx.hub, root, &mut transform, &mut cell);
     } else {
-        pose_camera(pose_cfg, &ctx, &sim, &solar, root, &mut transform, &mut cell);
+        pose_camera(
+            pose_cfg,
+            &ctx,
+            &sim,
+            &solar,
+            root,
+            &mut transform,
+            &mut cell,
+        );
     }
 
     if driver.captured {
@@ -2444,7 +2708,7 @@ fn drive_headless_screenshot(
         // tail until Bevy has removed the `Capturing` marker; on slower cold
         // runs the old 24-frame countdown could exit first, close the result
         // channel, and invalidate an otherwise healthy render.
-        if !active_captures.is_empty() {
+        if !readiness.active_captures.is_empty() {
             return;
         }
         driver.tail += 1;
@@ -2453,6 +2717,72 @@ fn drive_headless_screenshot(
             exit.write(AppExit::Success);
         }
         return;
+    }
+
+    // Massif presets: hold the warmup countdown until the streamed ground at
+    // the (fixed, cold, wild) site has actually refined — frame counts alone
+    // fire while only the coarse mip pyramid is resident, which renders the
+    // 5.8 km massif as soft ~800 m hills (the 2026-07-24 baseline failure).
+    if matches!(
+        cfg.preset,
+        ScreenshotPreset::MassifAerial
+            | ScreenshotPreset::MassifRidge
+            | ScreenshotPreset::MassifValley
+    ) && !driver.terrain_ready
+    {
+        let dt = readiness.time.delta_secs_f64();
+        let ready = if crate::rendering::tile_terrain::tile_renderer_enabled() {
+            // Tile path: the eye follows the posed camera, so "the desired
+            // selection is fully resident" is exactly "the site is streamed".
+            readiness
+                .tile_roots
+                .iter()
+                .find(|(_, b)| b.body_id == homeworld.0)
+                .is_some_and(|(root, _)| root.coverage_ready() && root.settled())
+        } else {
+            // udlod path: wall-clock plateau of the finest resident LOD at
+            // the streamer's view position (mirrors `surface_settle`).
+            match crate::surface_settle::resident_lod_under_view(
+                &sim,
+                &readiness.udlod_trees,
+                &readiness.udlod_terrains,
+                &readiness.camera_q,
+            ) {
+                Some(m)
+                    if driver
+                        .terrain_best_lod_m
+                        .is_none_or(|best| m < best * 0.999) =>
+                {
+                    driver.terrain_best_lod_m = Some(m);
+                    driver.terrain_lod_hold_s = 0.0;
+                    false
+                }
+                Some(_) => {
+                    driver.terrain_lod_hold_s += dt;
+                    driver.terrain_lod_hold_s >= MASSIF_LOD_PLATEAU_S
+                }
+                None => false,
+            }
+        };
+        if ready {
+            driver.terrain_ready = true;
+            info!(
+                target: "thalos::screenshot",
+                "massif terrain streamed ({:.1} s) — starting warmup",
+                driver.terrain_wait_s,
+            );
+        } else {
+            driver.terrain_wait_s += dt;
+            if driver.terrain_wait_s < MASSIF_STREAM_TIMEOUT_S {
+                return;
+            }
+            driver.terrain_ready = true;
+            warn!(
+                target: "thalos::screenshot",
+                "massif terrain still streaming after {:.0} s — capturing anyway",
+                driver.terrain_wait_s,
+            );
+        }
     }
 
     driver.running_frames += 1;
@@ -2558,9 +2888,12 @@ fn ocean_site_context(
     // Height sources / site searches work in the SURFACE body-fixed frame (the
     // frame the terrain renders in) — for tidally-locked moons that is NOT the
     // ephemeris orientation. One authority: `surface_orientation_authored`.
-    let surface_q =
-        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
-            .unwrap_or_else(|| body_state.orientation.normalize());
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
     let sun_world = (-body_state.position).normalize_or_zero();
     let sun_world = if sun_world == DVec3::ZERO {
         DVec3::Y
@@ -2669,9 +3002,12 @@ fn daylight_surface_context(
     // ocean-context note) — using the ephemeris orientation on a tidally
     // locked moon posed the rim camera ~130° of longitude away from its
     // crater.
-    let surface_q =
-        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
-            .unwrap_or_else(|| body_state.orientation.normalize());
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
     let sun_inertial = (-body_state.position).normalize_or_zero();
     let sun_world = if sun_inertial == DVec3::ZERO {
         DVec3::Y
@@ -2733,9 +3069,12 @@ fn eva_surface_context(
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let height_source = height_sources.get(body_id)?;
 
-    let surface_q =
-        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
-            .unwrap_or_else(|| body_state.orientation.normalize());
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
     let craft_world = sim.simulation.craft_state().translation.position;
     let up_world = (craft_world - body_state.position)
         .try_normalize()
@@ -2752,8 +3091,8 @@ fn eva_surface_context(
     // apart from a render bug (BL-34).
     static EVA_SUN_LOGGED: std::sync::Once = std::sync::Once::new();
     EVA_SUN_LOGGED.call_once(|| {
-        if let Some(sun_body) = sun_direction_world(solar, body_id)
-            .map(|sun| (surface_q.inverse() * sun).normalize())
+        if let Some(sun_body) =
+            sun_direction_world(solar, body_id).map(|sun| (surface_q.inverse() * sun).normalize())
         {
             let incidence_deg = dir_body.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
             info!(
@@ -3014,8 +3353,11 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
             landmark_radii,
         } => format!(
             "{{\"kind\":\"sun_relative_god_view\",\"sun_azimuth_deg\":{sun_azimuth_deg:.4},\"dark_side\":\"{dark_side:?}\",\"landmark_radii\":{},\"elevation_deg\":{:.4},\"distance_m\":{:.3}}}",
-            landmark_radii.map(|v| format!("{v:.4}")).unwrap_or_else(|| "null".to_string()),
-            cfg.elevation_deg, cfg.distance_m
+            landmark_radii
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_else(|| "null".to_string()),
+            cfg.elevation_deg,
+            cfg.distance_m
         ),
         ScreenshotFraming::BodyDisc {
             phase_deg,
@@ -3337,14 +3679,16 @@ fn pose_sun_relative_god_view(
 
     // Sun bearing projected onto the site's horizon. Degenerate only with the
     // sun exactly overhead, where every bearing is equivalent anyway.
-    let sun_horizon = (sun_world - up * sun_world.dot(up)).try_normalize().unwrap_or_else(|| {
-        let seed = if up.dot(DVec3::Y).abs() < 0.99 {
-            DVec3::Y
-        } else {
-            DVec3::X
-        };
-        seed.cross(up).normalize()
-    });
+    let sun_horizon = (sun_world - up * sun_world.dot(up))
+        .try_normalize()
+        .unwrap_or_else(|| {
+            let seed = if up.dot(DVec3::Y).abs() < 0.99 {
+                DVec3::Y
+            } else {
+                DVec3::X
+            };
+            seed.cross(up).normalize()
+        });
     let sun_perp = up.cross(sun_horizon).normalize();
 
     let az = (sun_azimuth_deg as f64).to_radians();
@@ -3358,7 +3702,11 @@ fn pose_sun_relative_god_view(
         let offset_dir = horiz * elev.cos() + up * elev.sin();
         let camera_world = ctx.center_world + offset_dir * boom_m;
         let forward = (ctx.center_world - camera_world).normalize();
-        let look_up = if forward.dot(up).abs() > 0.99 { sun_perp } else { up };
+        let look_up = if forward.dot(up).abs() > 0.99 {
+            sun_perp
+        } else {
+            up
+        };
         let right = screen_right(forward, look_up);
         let sun_on_right = sun_world.dot(right) > 0.0;
         // Dark half is opposite the sun.
@@ -3512,6 +3860,86 @@ fn pose_eva_camera(
     *transform = Transform::from_translation(local).looking_to(look_dir.as_vec3(), up.as_vec3());
 }
 
+/// Fixed showcase sites for the NTR-X4 massif presets, derived offline from
+/// the diffusion 90 m detail raster
+/// (`assets/terrain_packages/thalos_diffusion/thalos_site_detail_6144_90m.f32`,
+/// tangent-drape pixel→lat/lon per `DiffusionSurface::detail_px`):
+///
+/// - **peak**: the NE massif's 5799 m summit at raster px (3302, 2515) —
+///   20.7 km E / 50.1 km N of the spaceport site (7.6, 178).
+/// - **valley face**: 40 % of the way up from the 1836 m valley floor at
+///   px (3188, 2382) toward the peak, i.e. a focus on the massif's NW face;
+///   the valley→peak bearing is 139° true.
+///
+/// Re-derive with the raster scan if the diffusion window is re-exported
+/// (`scratch: find_massif.py` recipe lives in the NTR-X4 notes; the peak is
+/// simply the regional argmax, so any rescan reproduces it).
+fn massif_site(preset: ScreenshotPreset) -> (f64, f64) {
+    match preset {
+        ScreenshotPreset::MassifValley => (8.6307, 178.2639),
+        _ => (8.5015, 178.3756),
+    }
+}
+
+/// Focus for the fixed-lat/lon showcase presets: no site search, just the
+/// authored direction resolved in the surface body-fixed frame with the local
+/// terrain height sampled under it. Mirrors [`dry_site_context`]'s output
+/// shape; deterministic by construction, so nothing is cached.
+fn fixed_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    lat_deg: f64,
+    lon_deg: f64,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let hs = height_sources.get(body_id)?;
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
+
+    // Same lat/lon → direction convention as `DiffusionSurface` (lat from
+    // `dir.y`, lon = atan2(z, x)), so raster-derived coordinates land exactly.
+    let (lat_r, lon_r) = (lat_deg.to_radians(), lon_deg.to_radians());
+    let dir_body = DVec3::new(
+        lat_r.cos() * lon_r.cos(),
+        lat_r.sin(),
+        lat_r.cos() * lon_r.sin(),
+    )
+    .normalize();
+
+    let up_world = (surface_q * dir_body).normalize();
+    let height_m = hs
+        .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
+        .unwrap_or(0.0)
+        .max(0.0) as f64;
+    let pad_r = radius_m + height_m;
+    // One line per capture session (the context is re-resolved every frame —
+    // gate on first resolve via the height being sampled once is overkill;
+    // dedup happens in the log reader). Kept cheap and INFO so the capture log
+    // records which backing/height the fixed site actually resolved to.
+    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    LOGGED.get_or_init(|| {
+        info!(
+            target: "thalos::screenshot",
+            "fixed site ({lat_deg:.4}, {lon_deg:.4}): height {height_m:.0} m, diffusion={}",
+            crate::terrain_registry::thalos_diffusion_enabled(),
+        );
+    });
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * pad_r,
+        up_world,
+        pad_r,
+    })
+}
+
 /// Sample LOD hint (m) for the dry-site search's height / moisture probes — a
 /// coarse focus query, not a placement gate, so a wide hint is fine.
 const DRY_SITE_LOD_M: f32 = 8.0;
@@ -3539,9 +3967,12 @@ fn dry_site_context(
     let body_state = states.get(body_id)?;
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let hs = height_sources.get(body_id)?;
-    let surface_q =
-        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
-            .unwrap_or_else(|| body_state.orientation.normalize());
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
 
     let dir_body = match *cached_dir {
         Some(d) => d,
@@ -3651,9 +4082,12 @@ fn cloud_site_context(
         return None;
     }
 
-    let surface_q =
-        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
-            .unwrap_or_else(|| body_state.orientation.normalize());
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
     let sun_body = (surface_q.inverse() * sun_world).normalize();
     let seed = if sun_body.dot(DVec3::Y).abs() < 0.99 {
         DVec3::Y
