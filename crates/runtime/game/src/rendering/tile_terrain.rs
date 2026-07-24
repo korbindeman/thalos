@@ -107,20 +107,30 @@ fn ensure_tile_root(
         .get(resolved.body)
         .is_none_or(|body| body.terrestrial_atmosphere.is_none());
     let params = if airless { TileShadingParams::hapke() } else { TileShadingParams::pbr() };
-    let material = materials.add(tile_material(
-        StandardMaterial {
-            base_color: Color::WHITE,
-            perceptual_roughness: 0.97,
-            metallic: 0.0,
-            ..default()
-        },
-        params,
-    ));
     let radius_m = resolved.radius_m;
+    // One material per quadtree level: identical shading, but finer levels
+    // carry a larger depth bias so a refined tile visually wins wherever it
+    // overlaps a lingering coarser one (see tiles::LEVEL_DEPTH_BIAS_STEP).
+    let max_level = thalos_body_render::tiles::max_level_for(radius_m);
+    let level_materials: Vec<_> = (0..=max_level)
+        .map(|level| {
+            materials.add(tile_material(
+                StandardMaterial {
+                    base_color: Color::WHITE,
+                    perceptual_roughness: 0.97,
+                    metallic: 0.0,
+                    depth_bias: level as f32
+                        * thalos_body_render::tiles::LEVEL_DEPTH_BIAS_STEP,
+                    ..default()
+                },
+                params,
+            ))
+        })
+        .collect();
     let root = TileTerrainRoot::new(
         radius_m,
         Arc::new(SurfaceQueryProvider { surface }),
-        material,
+        level_materials,
     );
     info!(
         "tile terrain: installing on body {:?} (radius {:.0} m, max level {})",

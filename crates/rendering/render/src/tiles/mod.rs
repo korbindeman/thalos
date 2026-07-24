@@ -40,11 +40,20 @@ pub const MIN_LEVEL: u8 = 3;
 /// Split while camera distance < factor × tile arc.
 const SPLIT_FACTOR: f64 = 3.0;
 const MAX_IN_FLIGHT: usize = 24;
-/// Seconds a despawn-ready tile lingers before removal, covering the GPU
-/// upload latency of the tiles that replaced it (see `TileTerrainRoot::retiring`).
-/// Time-based, not frame-based: at uncapped frame rates a frame count shrinks
-/// to nothing, and under load single frames stretch.
-const DESPAWN_GRACE_S: f32 = 0.15;
+/// Despawn laxness: a despawn-ready tile lingers until BOTH gates pass —
+/// wall-clock (covers upload stalls) and frame count (covers the render
+/// pipeline, which is per-frame not per-second). Overlap while lingering is
+/// harmless: per-level depth bias makes the finer surface win wherever the
+/// two nearly coincide, so old tiles can stay up generously.
+const DESPAWN_GRACE_S: f32 = 0.5;
+const DESPAWN_GRACE_FRAMES: u16 = 20;
+/// Per-level depth-bias step (hardware `DepthBiasState.constant` units, via
+/// `StandardMaterial::depth_bias`). Finer tiles get a larger positive bias:
+/// under reversed-Z GreaterEqual, positive bias reads nearer, so wherever a
+/// stale coarse tile and its refined replacement are near-coplanar the
+/// refined one owns the pixels — "newest detail always wins" without
+/// coupling despawn timing to visual correctness.
+pub const LEVEL_DEPTH_BIAS_STEP: f32 = 2.0;
 
 // --- cube-sphere addressing (probe tiles.rs, verbatim) -----------------------
 
@@ -411,19 +420,20 @@ struct StreamedTile {
 pub struct TileTerrainRoot {
     pub radius_m: f64,
     pub provider: Arc<dyn TerrainTileProvider>,
-    pub material: Handle<material::TileTerrainMaterial>,
+    /// One material per quadtree level, identical except for the depth bias
+    /// (see [`LEVEL_DEPTH_BIAS_STEP`]). Indexed by `TileKey::level`.
+    pub materials: Vec<Handle<material::TileTerrainMaterial>>,
     pub max_level: u8,
     desired: HashSet<TileKey>,
     resident: HashMap<TileKey, Entity>,
     pending: HashMap<TileKey, Task<StreamedTile>>,
-    /// Tiles whose despawn condition holds, counting down a grace period
-    /// (seconds remaining). A freshly-landed covering tile takes a few frames
-    /// to reach the GPU (mesh upload / bind-group prepare); despawning the
-    /// covered parent the same frame its cover lands flashes holes during
-    /// motion (user finding 2026-07-24). The old surface stays up until the
-    /// new one is actually visible; if coverage regresses meanwhile, the
-    /// entry is dropped.
-    retiring: HashMap<TileKey, f32>,
+    /// Tiles whose despawn condition holds, counting down the lax grace
+    /// gates (seconds, frames remaining). If coverage regresses meanwhile,
+    /// the entry is dropped and the tile stays.
+    retiring: HashMap<TileKey, (f32, u16)>,
+    /// Seconds until the next coverage-invariant audit (see the check in
+    /// `stream_tile_terrain`).
+    coverage_check_countdown: f32,
     gen_stats: GenStats,
     /// Latched true the first time the desired set is fully resident. After
     /// that, the hole-free despawn rule keeps coverage complete, so the
@@ -472,25 +482,31 @@ impl GenStats {
     }
 }
 
+/// Deepest quadtree level for a body of `radius_m` — targets ~9 m sample
+/// spacing (probe budget). Public so drivers can size per-level resources
+/// (e.g. the depth-biased material set) before constructing the root.
+pub fn max_level_for(radius_m: f64) -> u8 {
+    let face_arc = radius_m * core::f64::consts::FRAC_PI_2;
+    ((face_arc / ((TILE_RES - 1) as f64 * 9.0)).log2().ceil() as u8).clamp(MIN_LEVEL + 1, 18)
+}
+
 impl TileTerrainRoot {
     pub fn new(
         radius_m: f64,
         provider: Arc<dyn TerrainTileProvider>,
-        material: Handle<material::TileTerrainMaterial>,
+        materials: Vec<Handle<material::TileTerrainMaterial>>,
     ) -> Self {
-        // Deepest level targets ~9 m sample spacing (probe budget).
-        let face_arc = radius_m * core::f64::consts::FRAC_PI_2;
-        let max_level = ((face_arc / ((TILE_RES - 1) as f64 * 9.0)).log2().ceil() as u8)
-            .clamp(MIN_LEVEL + 1, 18);
+        let max_level = max_level_for(radius_m);
         Self {
             radius_m,
             provider,
-            material,
+            materials,
             max_level,
             desired: HashSet::new(),
             resident: HashMap::new(),
             pending: HashMap::new(),
             retiring: HashMap::new(),
+            coverage_check_countdown: 2.0,
             gen_stats: GenStats::default(),
             covered_once: false,
         }
@@ -685,10 +701,16 @@ fn stream_tile_terrain(
             .gen_stats
             .record(done.gen_micros, done.h_range, done.built.mesh_h);
         let (cell, local) = grid.translation_to_grid(done.built.origin);
+        let material = root_ref
+            .materials
+            .get(done.key.level as usize)
+            .or_else(|| root_ref.materials.last())
+            .cloned()
+            .unwrap_or_default();
         let entity = commands
             .spawn((
                 Mesh3d(meshes.add(done.built.mesh)),
-                MeshMaterial3d(root_ref.material.clone()),
+                MeshMaterial3d(material),
                 Transform::from_translation(local),
                 cell,
                 ChildOf(root_entity),
@@ -742,20 +764,64 @@ fn stream_tile_terrain(
         })
         .copied()
         .collect();
-    // Grace-period retirement: a removable tile only despawns after its
-    // condition has held continuously for DESPAWN_GRACE_S, so the replacing
-    // meshes are actually on the GPU before the old surface drops.
+    // Lax retirement: a removable tile only despawns after its condition has
+    // held continuously through BOTH grace gates. Overlap while lingering is
+    // rendered correctly by the per-level depth bias (finer wins), so there
+    // is no pressure to despawn promptly.
     root_ref.retiring.retain(|key, _| removable.contains(key));
     let dt = time.delta_secs();
     for key in removable {
-        let remaining = root_ref.retiring.entry(key).or_insert(DESPAWN_GRACE_S);
-        if *remaining > 0.0 {
-            *remaining -= dt;
+        let (secs, frames) = root_ref
+            .retiring
+            .entry(key)
+            .or_insert((DESPAWN_GRACE_S, DESPAWN_GRACE_FRAMES));
+        if *secs > 0.0 || *frames > 0 {
+            *secs -= dt;
+            *frames = frames.saturating_sub(1);
             continue;
         }
         root_ref.retiring.remove(&key);
         if let Some(entity) = root_ref.resident.remove(&key) {
             commands.entity(entity).despawn();
+        }
+    }
+
+    // Coverage invariant check (cheap, every ~2 s): every desired tile's
+    // footprint must be served by the resident set — itself, a resident
+    // ancestor, or resident descendants. If this ever fires, holes are
+    // LOGICAL (a selection/despawn bug); if the screen shows holes while
+    // this stays silent, the problem is presentation-side (upload, culling,
+    // material) — the discriminator for the black-tile reports.
+    root_ref.coverage_check_countdown -= dt;
+    if root_ref.coverage_check_countdown <= 0.0 {
+        root_ref.coverage_check_countdown = 2.0;
+        let uncovered = root_ref
+            .desired
+            .iter()
+            .filter(|k| {
+                if root_ref.resident.contains_key(*k) {
+                    return false;
+                }
+                let mut probe = **k;
+                loop {
+                    match probe.parent() {
+                        Some(p) if p.level >= MIN_LEVEL => {
+                            probe = p;
+                            if root_ref.resident.contains_key(&probe) {
+                                return false;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                !covered_by_resident(**k, &root_ref.resident, root_ref.max_level)
+            })
+            .count();
+        if uncovered > 0 && root_ref.covered_once {
+            warn!(
+                "tile terrain: {uncovered} desired tiles LOGICALLY uncovered (of {}) — despawn/selection bug, not presentation",
+                root_ref.desired.len()
+            );
         }
     }
 }
