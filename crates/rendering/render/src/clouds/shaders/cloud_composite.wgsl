@@ -13,6 +13,8 @@
     cloud_surface_density,
     WEATHER_TEXEL_ANGLE,
     cloud_march_stop_m,
+    cloud_morph_noise,
+    cloud_strata_warp,
     CLOUD_MARCH_REACH_M,
     CLOUD_MARCH_ENTRY_FADE_START_M,
     CLOUD_MARCH_ENTRY_FADE_END_M,
@@ -245,37 +247,6 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
 // stay well-sampled (no 3-D noise is touched here).
 const ORBITAL_MARCH_SAMPLES = 6u;
 
-// Cheap 3-D value noise for the sub-texel morphology modulation. The hash is
-// INTEGER (common.wgsl `hash33` family): the float Hoskins hash degrades at
-// planet-scale lattice coordinates (~±1500 cells) — `fract(n · 0.1031)` is
-// f32-quantized there, and its correlated wrap boundaries traced straight
-// seam lines across every far cell (first two morphology capture rounds).
-fn morph_hash(p: vec3<f32>) -> f32 {
-    var q = vec3<u32>(bitcast<vec3<u32>>(vec3<i32>(floor(p))))
-        * vec3<u32>(1597334673u, 3812015801u, 2798796415u);
-    let n = (q.x ^ q.y ^ q.z) * 1597334673u;
-    return f32(n) * (1.0 / 4294967295.0);
-}
-
-fn morph_value_noise(x: vec3<f32>) -> f32 {
-    let p = floor(x);
-    var f = fract(x);
-    f = f * f * (3.0 - 2.0 * f);
-    let c000 = morph_hash(p);
-    let c100 = morph_hash(p + vec3<f32>(1.0, 0.0, 0.0));
-    let c010 = morph_hash(p + vec3<f32>(0.0, 1.0, 0.0));
-    let c110 = morph_hash(p + vec3<f32>(1.0, 1.0, 0.0));
-    let c001 = morph_hash(p + vec3<f32>(0.0, 0.0, 1.0));
-    let c101 = morph_hash(p + vec3<f32>(1.0, 0.0, 1.0));
-    let c011 = morph_hash(p + vec3<f32>(0.0, 1.0, 1.0));
-    let c111 = morph_hash(p + vec3<f32>(1.0, 1.0, 1.0));
-    let x00 = mix(c000, c100, f.x);
-    let x10 = mix(c010, c110, f.x);
-    let x01 = mix(c001, c101, f.x);
-    let x11 = mix(c011, c111, f.x);
-    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
-}
-
 // Sample the derived far opacity response (see `fill_response` above):
 // 16 nodes over [0, 1], linear between nodes.
 fn fill_response_sample(strata_mean: f32) -> f32 {
@@ -378,24 +349,6 @@ fn sample_orbital_cloud(
         let h_b = (length(cam_pos + t_b * ray_dir - planet_center) - planet_radius - base_alt)
             * inv_thickness;
         h_prev = h_b;
-        var far_w = 1.0;
-        // Far-only diagnostic (tier_diagnostic = +1) bypasses the near/far
-        // ownership weighting so the far tier's FULL field is visible at any
-        // framing — the only way to A/B the two tiers' weather registration
-        // at one camera pose.
-        let ownership_active = cloud_params.cloud_march.y < 0.5;
-        if ownership_active && reach.y > 0.0 && reach.z > 0.0 {
-            var near_own = 0.0;
-            if reach.y - reach.x > 1.0 {
-                near_own = 1.0 - smoothstep(reach.x, reach.y, t_m);
-            } else {
-                near_own = select(1.0, 0.0, t_m > reach.y);
-            }
-            far_w = 1.0 - reach.z * near_own;
-        }
-        if far_w <= 0.0 {
-            continue;
-        }
         let p = cam_pos + t_m * ray_dir - planet_center;
         let n_l = rotate_quat(cloud_params.world_to_body_orientation, normalize(p));
         let pixel_world_m = t_m * 2.0
@@ -416,10 +369,15 @@ fn sample_orbital_cloud(
         // share of the far tier's measured 3× areal excess over the near
         // volume at the 2026-07-24 A/B framing.
         let strata_floor = 0.75 * smoothstep(550.0, 1600.0, pixel_world_m);
+        // Resolved footprints warp the strata lookup (shared contract with
+        // the marcher's homogenized bands) so the ~5 km texel lattice reads
+        // as organic cells instead of rounded squares (user ascent verdict).
+        let seg_resolve = 1.0 - smoothstep(550.0, 1600.0, pixel_world_m);
+        let n_s = cloud_strata_warp(n_l, seg_resolve);
         let strata = textureSampleLevel(
             surface_density_texture,
             weather_sampler,
-            n_l,
+            n_s,
             max(lod, strata_floor),
         );
         // Analytic per-segment layer overlap, evaluated in LAYER-RELATIVE
@@ -445,7 +403,7 @@ fn sample_orbital_cloud(
         // and therefore grazing opacity — is unchanged.
         let layer_span = max(col.top_frac - col.base_frac, 0.02);
         let overlap_w = clamp((ov_hi - ov_lo) / (0.5 * layer_span), 0.0, 1.0);
-        let w_seg = far_w * overlap_w;
+        let w_seg = overlap_w;
         sample_weight += w_seg;
         let inv_layer = 1.0 / layer_span;
         let l_a = (ov_lo - col.base_frac) * inv_layer;
@@ -514,14 +472,13 @@ fn sample_orbital_cloud(
     let morph_resolve = 1.0 - smoothstep(550.0, 1600.0, px_morph);
     var mean_mod = mean_c;
     if morph_resolve > 1.0e-3 {
-        let m_broad = morph_value_noise(p_body / 2200.0);
-        // The fine octave needs its own, tighter alias gate: at the banded
-        // march's 240–300 km handoff the 830 m period is only ~3–4 px, which
-        // stippled a dot band across the horizon (post-band-march cruise
-        // capture). It collapses to its mean instead of shimmering.
+        // Shared noise (thalos::atmosphere) — the marcher's homogenized bands
+        // apply the same field to `env`, so both sides of the crossfade carry
+        // the same mottle. The fine octave keeps its own tighter alias gate:
+        // at the 240–300 km handoff its 830 m period is only ~3–4 px, which
+        // stippled a dot band across the horizon before it was gated.
         let fine_resolve = 1.0 - smoothstep(90.0, 300.0, px_morph);
-        let m_fine = morph_value_noise(p_body / 830.0 + vec3<f32>(7.3, 1.9, -4.7));
-        let morph = 0.65 * m_broad + 0.35 * mix(0.5, m_fine, fine_resolve);
+        let morph = cloud_morph_noise(p_body, fine_resolve);
         mean_mod = clamp(mean_c + (morph - 0.5) * (0.55 * morph_resolve), 0.0, 1.0);
     }
 
@@ -534,11 +491,28 @@ fn sample_orbital_cloud(
     // near-solid veil at mid-altitude (fill 1.00 vs the near tier's 0.04 at
     // the 2026-07-24 A/B framing).
     let coverage_opacity = fill_response_sample(mean_mod);
-    let march_opacity = clamp(
+    var march_opacity = clamp(
         mix(stacked_opacity, coverage_opacity, clamp(cloud_params.cloud_march.w, 0.0, 1.0)),
         0.0,
         0.95,
     );
+    // Near/far partition, applied to the CONVERGED OUTPUT opacity. Weighting
+    // the accumulation inputs instead (the old per-segment `far_w`) pushed
+    // the weight through the response's nonlinear toe while the near tier
+    // faded linearly in alpha — the two halves stopped summing to unity and
+    // the whole 240–300 km entry window rendered as a hazy over-count veil
+    // (the sharp ascent "circle", user verdict 2026-07-24). The far-only
+    // diagnostic (tier_diagnostic = +1) still bypasses ownership entirely.
+    let ownership_active = cloud_params.cloud_march.y < 0.5;
+    if ownership_active && reach.y > 0.0 && reach.z > 0.0 {
+        var near_own = 0.0;
+        if reach.y - reach.x > 1.0 {
+            near_own = 1.0 - smoothstep(reach.x, reach.y, t_morph);
+        } else {
+            near_own = select(1.0, 0.0, t_morph > reach.y);
+        }
+        march_opacity *= 1.0 - reach.z * near_own;
+    }
     if march_opacity <= 1.0e-3 {
         return CloudOverlay(vec3<f32>(0.0), 0.0);
     }

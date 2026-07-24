@@ -833,6 +833,26 @@ registration with shaded, white cells; limb and disc unchanged. Open:
 far-tier brightness prefactor re-match, GPU budget re-measurement, fringe
 stipple, user live gates.
 
+**Round 6b — the ascent regime (2026-07-24, user verdict on 6a):** three
+defects specific to the 100–400 km ascent view, all fixed against the
+ascent-altitude probes (`THALOS_SCREENSHOT_CAMERA_ALTITUDE`, 150/280/400 km):
+(a) the entry-ownership crossfade rendered as a sharp nadir CIRCLE filled
+with an over-count veil — the far tier weighted its accumulation *inputs*
+(through the response LUT's nonlinear toe) while the near tier faded
+linearly in alpha, so the two halves never summed to unity; ownership now
+attenuates the far tier's CONVERGED opacity (output-linear partition, at the
+occupancy-weighted chord position). (b) The ~5 km strata texels rendered as
+rounded SQUARES wherever footprints resolve them; a shared tangential
+domain warp (`cloud_strata_warp` in thalos::atmosphere — same function, same
+amount convention in the marcher's homogenized bands and the far tier, so
+the fields stay registered) turns the lattice organic. The warp is a
+measure-preserving direction remap, so the derived LUT statistics are
+unchanged. (c) The homogenized near band read as smooth blur against the far
+tier's crisp mottle; the sub-texel morphology noise is now part of the
+shared contract (`cloud_morph_noise`) and the marcher's coarse bands
+re-mottle `env` with the same field. Probes after: 150 km and 280 km nadir
+views read as ONE continuous organic field; cruise pixel-identical to 6a.
+
 **User verdict on round 5 (2026-07-24, live screenshots):**
 registration/thickness parity largely pass — "a lot of it is quite
 accurate" — but the transition still fails: the far sheet terminates on the

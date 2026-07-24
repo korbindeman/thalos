@@ -795,6 +795,78 @@ fn cloud_march_coarseness(t: f32) -> f32 {
     return c1 + c2;
 }
 
+// ── Shared strata domain warp ────────────────────────────────────────────────
+// Wherever the strata cube's ~5 km texels resolve on screen (the homogenized
+// march bands and the far/orbital projection), the raw bilinear payload reads
+// as rounded SQUARES — the texel lattice itself (user ascent verdict,
+// 2026-07-24). Both consumers warp the strata lookup direction through THIS
+// function with a matched amount, so cells turn organic while the two tiers
+// stay registered. The warp is a measure-preserving remap of the direction
+// domain, so the derived fill/response LUT statistics are unchanged — the CPU
+// calibration needs no mirror.
+
+fn strata_warp_hash(p: vec3<f32>) -> f32 {
+    var q = vec3<u32>(bitcast<vec3<u32>>(vec3<i32>(floor(p))))
+        * vec3<u32>(1597334673u, 3812015801u, 2798796415u);
+    let n = (q.x ^ q.y ^ q.z) * 1597334673u;
+    return f32(n) * (1.0 / 4294967295.0);
+}
+
+fn strata_warp_noise(x: vec3<f32>) -> f32 {
+    let p = floor(x);
+    var f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    let c000 = strata_warp_hash(p);
+    let c100 = strata_warp_hash(p + vec3<f32>(1.0, 0.0, 0.0));
+    let c010 = strata_warp_hash(p + vec3<f32>(0.0, 1.0, 0.0));
+    let c110 = strata_warp_hash(p + vec3<f32>(1.0, 1.0, 0.0));
+    let c001 = strata_warp_hash(p + vec3<f32>(0.0, 0.0, 1.0));
+    let c101 = strata_warp_hash(p + vec3<f32>(1.0, 0.0, 1.0));
+    let c011 = strata_warp_hash(p + vec3<f32>(0.0, 1.0, 1.0));
+    let c111 = strata_warp_hash(p + vec3<f32>(1.0, 1.0, 1.0));
+    let x00 = mix(c000, c100, f.x);
+    let x10 = mix(c010, c110, f.x);
+    let x01 = mix(c001, c101, f.x);
+    let x11 = mix(c011, c111, f.x);
+    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+
+/// Shared sub-texel morphology noise (BL-20260724T003705Z): the far tier
+/// perturbs its response-LUT input with this field, and the marcher's
+/// homogenized bands perturb `env` identically — SAME function, SAME
+/// amplitude convention — so the crossfaded fields carry the same mottled
+/// texture instead of smooth-vs-crisp mismatching (user ascent verdict,
+/// 150 km framing). `fine_amount` gates the 830 m octave (alias-prone at
+/// coarse footprints/steps); the broad 2.2 km octave always contributes.
+fn cloud_morph_noise(p_body: vec3<f32>, fine_amount: f32) -> f32 {
+    let broad = strata_warp_noise(p_body / 2200.0);
+    let fine = strata_warp_noise(p_body / 830.0 + vec3<f32>(7.3, 1.9, -4.7));
+    return 0.65 * broad + 0.35 * mix(0.5, fine, fine_amount);
+}
+
+/// Warp a body-fixed strata lookup direction by up to ~0.9 texels of organic
+/// tangential offset. `amount` in [0, 1]; keyed only on the direction, so any
+/// two consumers using the same amount sample the same warped field.
+fn cloud_strata_warp(n: vec3<f32>, amount: f32) -> vec3<f32> {
+    if amount <= 1.0e-3 {
+        return n;
+    }
+    // ~2-texel noise period on the unit sphere (1024-face cube).
+    let domain = n * 340.0;
+    let wu = strata_warp_noise(domain) - 0.5;
+    let wv = strata_warp_noise(domain + vec3<f32>(19.7, -7.3, 41.1)) - 0.5;
+    // Any stable tangent frame works — the warp only needs to be tangential
+    // and continuous away from the poles of the helper axis.
+    var t = cross(n, vec3<f32>(0.0, 1.0, 0.0));
+    if dot(t, t) < 1.0e-6 {
+        t = cross(n, vec3<f32>(1.0, 0.0, 0.0));
+    }
+    t = normalize(t);
+    let b = cross(n, t);
+    let amp = amount * (0.9 * 2.0 * WEATHER_TEXEL_ANGLE);
+    return normalize(n + (t * wu + b * wv) * amp);
+}
+
 /// Height-moment normal for orbital cloud lighting: finite difference of the
 /// local top/coverage field in the body-fixed tangent plane. Gives soft relief
 /// on storm cells without a pre-baked normal atlas.

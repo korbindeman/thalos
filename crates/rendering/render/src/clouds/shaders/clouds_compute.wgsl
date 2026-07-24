@@ -4,6 +4,8 @@
     cloud_march_step_m,
     cloud_march_stop_m,
     cloud_march_coarseness,
+    cloud_morph_noise,
+    cloud_strata_warp,
     CLOUD_MARCH_REACH_M,
     CLOUD_MARCH_ENTRY_FADE_START_M,
     CLOUD_MARCH_ENTRY_FADE_END_M,
@@ -322,8 +324,19 @@ fn get_cloud_map_density(
     let c1 = clamp(coarse, 0.0, 1.0);
     let c2 = clamp(coarse - 1.0, 0.0, 1.0);
     let coupling = clamp(config.surface_density_coupling, 0.0, 1.0);
-    let env = clamp(surface_density, 0.0, 1.0);
-    let shared_envelope = smoothstep(0.04, 0.42, surface_density);
+    var env = clamp(surface_density, 0.0, 1.0);
+    // Homogenized bands re-mottle `env` with the SHARED sub-texel morphology
+    // field (the far tier modulates its LUT input identically), so the
+    // smooth E[shaped | env] stand-in carries the same texture character as
+    // both the far projection and the sculpted near bands — without this the
+    // 90 km+ band read as blur against the far tier's crisp mottle (user
+    // ascent verdict, 150 km framing). Broad octave only: the fine octave's
+    // 830 m period sits under the coarse bands' refine cadence.
+    if (c2 > 1.0e-3) {
+        let morph = cloud_morph_noise(pos, 0.0);
+        env = clamp(env + (morph - 0.5) * (0.55 * c2), 0.0, 1.0);
+    }
+    let shared_envelope = smoothstep(0.04, 0.42, env);
 
     let bottom_softness = max(config.clouds_bottom_softness, 0.01);
     let stratus_profile = smoothstep(0.0, bottom_softness * 0.45, h)
@@ -774,9 +787,6 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         weather = sample_weather(up);
         let normalized_height = get_normalized_height(world_position);
         let layer_h = (normalized_height - weather.b) / max(weather.a - weather.b, 0.02);
-        let surface_density = sample_surface_density(up, layer_h);
-        let density_threshold = max(config.clouds_density, 1.0e-5)
-            * BROAD_HIT_DENSITY_FRACTION;
 
         // Banded cadence: broad step from the shared distance table, clamped
         // so steep rays still resolve thin layers vertically (such rays have
@@ -789,6 +799,15 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         let fine_step = broad_step * REFINE_STEP_FRACTION;
         // Field LOD at this distance (see get_cloud_map_density).
         let coarse = cloud_march_coarseness(dir_length);
+        // Homogenized bands warp the strata lookup through the SHARED
+        // contract (`cloud_strata_warp`) so the ~5 km texel lattice reads as
+        // organic cells; the far tier warps identically at its resolved
+        // footprints, so the crossfaded fields stay registered. Band 0 keeps
+        // the raw direction — there the Cartesian sculptor owns morphology.
+        let up_strata = cloud_strata_warp(up, clamp(coarse - 1.0, 0.0, 1.0));
+        let surface_density = sample_surface_density(up_strata, layer_h);
+        let density_threshold = max(config.clouds_density, 1.0e-5)
+            * BROAD_HIT_DENSITY_FRACTION;
 
         if (!refining) {
             let broad_density = get_cloud_map_density(
