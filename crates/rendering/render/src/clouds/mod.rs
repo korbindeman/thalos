@@ -48,7 +48,9 @@ use bevy::shader::load_shader_library;
 pub use self::composite::CloudCompositeMaterial;
 pub use self::compute::CameraMatrices;
 pub use self::config::CloudsConfig;
-pub use self::fill_lut::{CloudFillCalibration, FillCalibrationInput, derive_fill_calibration};
+pub use self::fill_lut::{
+    CloudFillCalibration, FILL_LUT_VERSION, FillCalibrationInput, derive_fill_calibration,
+};
 pub use self::images::{
     CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS,
     cloud_target_memory, cloud_target_memory_for, cloud_weather_image,

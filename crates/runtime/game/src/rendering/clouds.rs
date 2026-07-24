@@ -116,7 +116,7 @@ pub(crate) fn derive_body_fill_calibration(
     planet_radius_m: f32,
 ) -> CloudFillCalibration {
     let bottom_height_m = climate.base_altitude_m.max(0.0);
-    let calibration = derive_fill_calibration(&FillCalibrationInput {
+    let input = FillCalibrationInput {
         weather_texels: &field.texels,
         strata_texels: &field.surface_density_texels,
         face_size: field.face_size,
@@ -132,14 +132,126 @@ pub(crate) fn derive_body_fill_calibration(
             .max(bottom_height_m + 1.0),
         planet_radius_m,
         seed: field.seed,
-    });
+    };
+    // The Monte-Carlo derivation is a pure function of `input` (~4 s of boot
+    // on the dev box, BL-20260724T153620Z), so it disk-caches keyed by a hash
+    // of every input plus `FILL_LUT_VERSION` — algorithm changes must bump
+    // that constant in `fill_lut.rs` or a cached run calibrates yesterday's
+    // renderer.
+    let key = fill_lut_cache::key(&input);
+    if let Some(calibration) = fill_lut_cache::load(&key) {
+        info!(
+            target: "thalos::clouds",
+            threshold_nodes = ?calibration.threshold_nodes,
+            "cloud fill calibration loaded from cache ({key}.json)"
+        );
+        return calibration;
+    }
+    let calibration = derive_fill_calibration(&input);
     info!(
         target: "thalos::clouds",
         threshold_nodes = ?calibration.threshold_nodes,
         far_response = ?calibration.far_response,
         "derived cloud fill calibration"
     );
+    fill_lut_cache::store(&key, &calibration);
     calibration
+}
+
+/// Tiny disk cache for [`CloudFillCalibration`] (three fixed f32 arrays as
+/// JSON), mirroring the tile cache's location split: project-local `user/`
+/// in debug, OS app-data in release. `THALOS_CLOUD_LUT_CACHE=0` disables it
+/// while iterating on `fill_lut.rs` itself.
+mod fill_lut_cache {
+    use super::CloudFillCalibration;
+    use bevy::log::warn;
+    use serde::{Deserialize, Serialize};
+    use std::hash::{Hash, Hasher};
+    use std::path::PathBuf;
+
+    #[derive(Serialize, Deserialize)]
+    struct CachedCalibration {
+        threshold_nodes: Vec<f32>,
+        far_response: Vec<f32>,
+        shape_response: Vec<f32>,
+    }
+
+    pub(super) fn key(input: &thalos_body_render::FillCalibrationInput<'_>) -> String {
+        let mut hasher = std::hash::DefaultHasher::new();
+        thalos_body_render::FILL_LUT_VERSION.hash(&mut hasher);
+        input.weather_texels.hash(&mut hasher);
+        input.strata_texels.hash(&mut hasher);
+        input.face_size.hash(&mut hasher);
+        for scalar in [
+            input.coverage_scale,
+            input.density,
+            input.detail_strength,
+            input.base_edge_softness,
+            input.bottom_softness,
+            input.base_shape_scale_m,
+            input.detail_scale_m,
+            input.bottom_height_m,
+            input.top_height_m,
+            input.planet_radius_m,
+        ] {
+            scalar.to_bits().hash(&mut hasher);
+        }
+        input.seed.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    fn enabled() -> bool {
+        !std::env::var("THALOS_CLOUD_LUT_CACHE").is_ok_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+    }
+
+    fn cache_path(key: &str) -> PathBuf {
+        #[cfg(debug_assertions)]
+        let root = PathBuf::from("user/cloudfill");
+        #[cfg(not(debug_assertions))]
+        let root = bevy::platform::dirs::preferences_dir()
+            .map(|dir| dir.join("thalos").join("cloudfill"))
+            .unwrap_or_else(|| PathBuf::from("user/cloudfill"));
+        root.join(format!("{key}.json"))
+    }
+
+    pub(super) fn load(key: &str) -> Option<CloudFillCalibration> {
+        if !enabled() {
+            return None;
+        }
+        let cached: CachedCalibration =
+            serde_json::from_str(&std::fs::read_to_string(cache_path(key)).ok()?).ok()?;
+        Some(CloudFillCalibration {
+            threshold_nodes: cached.threshold_nodes.try_into().ok()?,
+            far_response: cached.far_response.try_into().ok()?,
+            shape_response: cached.shape_response.try_into().ok()?,
+        })
+    }
+
+    pub(super) fn store(key: &str, calibration: &CloudFillCalibration) {
+        if !enabled() {
+            return;
+        }
+        let path = cache_path(key);
+        let cached = CachedCalibration {
+            threshold_nodes: calibration.threshold_nodes.to_vec(),
+            far_response: calibration.far_response.to_vec(),
+            shape_response: calibration.shape_response.to_vec(),
+        };
+        let write = || -> std::io::Result<()> {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&path, serde_json::to_string(&cached)?.as_bytes())
+        };
+        if let Err(error) = write() {
+            warn!(target: "thalos::clouds", "could not store fill-calibration cache: {error}");
+        }
+    }
 }
 
 /// Per-body spawn-uploaded weather/strata cube handles (weather, strata).

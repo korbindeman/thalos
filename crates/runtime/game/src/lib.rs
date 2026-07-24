@@ -217,11 +217,20 @@ impl AppBuilder {
         // ------------------------------------------------------------------
         let system = load_solar_system_from_dir(std::path::Path::new("assets"))
             .expect("Failed to load solar system from assets/");
+        // Per-body surface failures degrade that body only (they are recorded
+        // on the registry and reported here); this `expect` now fires only for
+        // a failure global to the whole registry.
         let body_surfaces = BodySurfaceRegistry::load(
             &system.bodies,
             std::path::Path::new("assets/terrain_packages"),
         )
         .expect("Failed to load body terrain surfaces");
+        for degraded in body_surfaces.degraded_bodies() {
+            println!(
+                "  ! {} has no terrain surface: {}",
+                degraded.body_name, degraded.reason
+            );
+        }
 
         // ------------------------------------------------------------------
         // 1a. (Retired in terrain-rewrite 0b-1.) Procedural bodies now generate

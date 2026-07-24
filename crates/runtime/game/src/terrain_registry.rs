@@ -60,6 +60,23 @@ pub struct BodySurfaceRegistry {
     surfaces: HashMap<BodyId, Arc<dyn SurfaceQuery>>,
     fingerprints: HashMap<BodyId, u64>,
     airless_landmarks: HashMap<BodyId, Vec<AirlessLandmark>>,
+    degraded: HashMap<BodyId, DegradedSurface>,
+}
+
+/// A body whose canonical surface could not be constructed (a missing or stale
+/// offline package, a dynamic-layer compile failure).
+///
+/// Surface construction is **per body, and one body's failure is local to it**:
+/// the registry keeps the process up and records the body here instead of
+/// aborting the whole app. A stale `Mira.bin` must not block a Thalos capture —
+/// see INC-20260724T182643Z-unrelated-body-package-aborts-boot. Consumers see a
+/// degraded body as surface-less through the existing `Option` accessors; the
+/// capture server refuses to certify a shot whose *target* body is degraded, so
+/// the failure still cannot masquerade as valid evidence.
+#[derive(Clone, Debug)]
+pub struct DegradedSurface {
+    pub body_name: String,
+    pub reason: String,
 }
 
 /// NTR-X2a: render Thalos through the terrain-diffusion surface
@@ -104,65 +121,64 @@ impl BodySurfaceRegistry {
                     }
                 }
             }
-            let (surface, fingerprint): (Arc<dyn SurfaceQuery>, u64) = match &body.terrain {
+            let built = match &body.terrain {
                 TerrainConfig::Feature(feature)
                     if feature.archetype == BodyArchetype::AirlessImpactMoon =>
                 {
-                    let context = terrain_context(body);
-                    let options = TerrainCompileOptions::default();
-                    let key = cache::terrain_cache_key(
-                        &body.terrain,
-                        body.tectonics.as_ref(),
-                        &context,
-                        options,
-                    );
-                    let path = cache::cache_path(package_dir, &body.name);
-                    let package = load_static_package(&path, &body.name, key).map_err(|error| {
-                        format!(
-                            "{} requires an offline terrain package: {error}. Run `just bake {}`",
-                            body.name, body.name
-                        )
-                    })?;
-                    let package_fingerprint = package.manifest.artifact_fingerprint();
-                    let craters = package.static_surface.craters.clone();
-                    let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
-                        .map_err(|error| format!("{} dynamic terrain: {error}", body.name))?;
-                    let tectonics =
-                        compile_tectonics_from_config(body.tectonics.as_ref(), &context);
-                    let surface = PlanetSurface {
-                        static_surface: package.static_surface,
-                        dynamic_layers,
-                        tectonics,
-                    };
-                    let surface_arc: Arc<dyn SurfaceQuery> = Arc::new(PackageSurface::new(
-                        package.manifest,
-                        surface,
-                        DynamicSurfaceState::default(),
-                    ));
-                    // Landmarks are derived AFTER the surface exists so their
-                    // relief can be measured from the one height authority
-                    // rather than estimated by a parallel analytic model (which
-                    // max-selection turns into a bug: the "most legible" pick
-                    // is exactly the crater the model most overestimates).
-                    registry.airless_landmarks.insert(
-                        body.id,
-                        airless_landmarks(&craters, surface_arc.as_ref(), body.radius_m),
-                    );
-                    (surface_arc, package_fingerprint)
+                    build_airless_package_surface(body, package_dir)
                 }
-                _ => (
-                    Arc::new(ProceduralSurface::new(body.radius_m as f32, body.id as u32)),
-                    thalos_terrain::GENERATOR_VERSION ^ body.id as u64,
-                ),
+                _ => Ok(BuiltSurface {
+                    surface: Arc::new(ProceduralSurface::new(body.radius_m as f32, body.id as u32)),
+                    fingerprint: thalos_terrain::GENERATOR_VERSION ^ body.id as u64,
+                    landmarks: Vec::new(),
+                }),
             };
-            registry.surfaces.insert(body.id, surface);
-            registry.fingerprints.insert(body.id, fingerprint);
+            match built {
+                Ok(built) => {
+                    if !built.landmarks.is_empty() {
+                        registry.airless_landmarks.insert(body.id, built.landmarks);
+                    }
+                    registry.surfaces.insert(body.id, built.surface);
+                    registry.fingerprints.insert(body.id, built.fingerprint);
+                }
+                Err(reason) => {
+                    // Local failure, local consequence: this body loses its
+                    // surface, every other body loads normally, and the process
+                    // stays up. Aborting here used to make one stale package
+                    // (Mira) block unrelated work (a Thalos capture) —
+                    // INC-20260724T182643Z.
+                    bevy::log::error!(
+                        "{}: terrain surface unavailable — {reason}. \
+                         This body will not render; other bodies are unaffected.",
+                        body.name
+                    );
+                    registry.degraded.insert(
+                        body.id,
+                        DegradedSurface {
+                            body_name: body.name.clone(),
+                            reason,
+                        },
+                    );
+                }
+            }
         }
         Ok(registry)
     }
 
     pub fn surface(&self, body: BodyId) -> Option<Arc<dyn SurfaceQuery>> {
         self.surfaces.get(&body).cloned()
+    }
+
+    /// Name-keyed lookup for consumers that address bodies by authored name
+    /// (the capture presets' `target_body_name`).
+    pub fn degraded_by_name(&self, name: &str) -> Option<&DegradedSurface> {
+        self.degraded
+            .values()
+            .find(|entry| entry.body_name.eq_ignore_ascii_case(name))
+    }
+
+    pub fn degraded_bodies(&self) -> impl Iterator<Item = &DegradedSurface> + '_ {
+        self.degraded.values()
     }
 
     pub fn fingerprint(&self, body: BodyId) -> Option<u64> {
@@ -184,6 +200,59 @@ impl BodySurfaceRegistry {
             .iter()
             .map(|(body, surface)| (*body, Arc::clone(surface)))
     }
+}
+
+/// One body's constructed surface, before it is filed into the registry.
+struct BuiltSurface {
+    surface: Arc<dyn SurfaceQuery>,
+    fingerprint: u64,
+    landmarks: Vec<AirlessLandmark>,
+}
+
+/// Construct an airless body's surface from its offline package.
+///
+/// Split out of `BodySurfaceRegistry::load` so a per-body failure is an
+/// ordinary `Err` the caller records as degraded, rather than a `?` that
+/// aborts the load of every *other* body with it.
+fn build_airless_package_surface(
+    body: &BodyDefinition,
+    package_dir: &std::path::Path,
+) -> Result<BuiltSurface, String> {
+    let context = terrain_context(body);
+    let options = TerrainCompileOptions::default();
+    let key = cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
+    let path = cache::cache_path(package_dir, &body.name);
+    let package = load_static_package(&path, &body.name, key).map_err(|error| {
+        format!(
+            "requires an offline terrain package: {error}. Run `just bake {}`",
+            body.name
+        )
+    })?;
+    let fingerprint = package.manifest.artifact_fingerprint();
+    let craters = package.static_surface.craters.clone();
+    let dynamic_layers = compile_dynamic_surface_layers(&body.terrain, &context)
+        .map_err(|error| format!("dynamic terrain: {error}"))?;
+    let tectonics = compile_tectonics_from_config(body.tectonics.as_ref(), &context);
+    let surface = PlanetSurface {
+        static_surface: package.static_surface,
+        dynamic_layers,
+        tectonics,
+    };
+    let surface: Arc<dyn SurfaceQuery> = Arc::new(PackageSurface::new(
+        package.manifest,
+        surface,
+        DynamicSurfaceState::default(),
+    ));
+    // Landmarks are derived AFTER the surface exists so their relief can be
+    // measured from the one height authority rather than estimated by a
+    // parallel analytic model (which max-selection turns into a bug: the "most
+    // legible" pick is exactly the crater the model most overestimates).
+    let landmarks = airless_landmarks(&craters, surface.as_ref(), body.radius_m);
+    Ok(BuiltSurface {
+        surface,
+        fingerprint,
+        landmarks,
+    })
 }
 
 /// Total landmarks retained per airless body.

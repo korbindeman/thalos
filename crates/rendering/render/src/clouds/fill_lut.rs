@@ -45,6 +45,14 @@ pub const FILL_RESPONSE_ENTRIES: usize = 16;
 /// into a 2–3× fill overshoot (measured in the first derivation run).
 pub const THRESHOLD_NODES: usize = 8;
 
+/// Version of the derivation algorithm below. **Bump this whenever anything
+/// that affects `derive_fill_calibration`'s output changes** (the march
+/// cadence, shape/erosion mirrors, threshold fit, column count…): it is part
+/// of the disk-cache key the game uses to skip the multi-second Monte-Carlo
+/// at boot, and a stale hit silently calibrates yesterday's renderer —
+/// exactly the `GENERATOR_VERSION` rule the terrain tile cache follows.
+pub const FILL_LUT_VERSION: u32 = 1;
+
 /// Derived near-threshold curve + far opacity response for one body/climate.
 #[derive(Clone, Copy, Debug)]
 pub struct CloudFillCalibration {

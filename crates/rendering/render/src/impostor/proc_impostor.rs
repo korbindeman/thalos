@@ -134,7 +134,6 @@ pub fn bake_coast_bathymetry_cube(surface: &dyn SurfaceQuery, resolution: u32) -
     // One texel spans ~ this arc; feed it as the LOD so the bake reads the
     // matching (coarse, anti-aliased) octave set.
     let lod_m = (std::f32::consts::TAU * radius / (4.0 * res as f32)).max(1.0);
-    let mip_count = res.ilog2() + 1;
 
     // Per face: mip 0 sampled from the surface, then a 2×2-average chain down
     // to 1×1 — matching `TextureDataOrder::LayerMajor` (each layer's full mip
@@ -177,6 +176,39 @@ pub fn bake_coast_bathymetry_cube(surface: &dyn SurfaceQuery, resolution: u32) -
         .collect();
 
     let data: Vec<u8> = faces.into_iter().flatten().collect();
+    coast_bathymetry_cube_from_bytes(resolution, data)
+        .expect("freshly baked coast cube has the exact payload size")
+}
+
+/// Byte length of a [`bake_coast_bathymetry_cube`] payload at `resolution` —
+/// six faces of R16 texels, each face carrying its full mip chain
+/// (`LayerMajor`). The disk-cache layer validates against this before
+/// trusting a cached file.
+pub fn coast_bathymetry_cube_len(resolution: u32) -> usize {
+    let res = (resolution.max(4) as usize).next_power_of_two();
+    let mut per_face = 0usize;
+    let mut size = res;
+    loop {
+        per_face += size * size * 2;
+        if size == 1 {
+            break;
+        }
+        size /= 2;
+    }
+    per_face * 6
+}
+
+/// Rebuild the coast/bathymetry cube [`Image`] from a raw payload — the tail
+/// of [`bake_coast_bathymetry_cube`], split out so a disk-cached bake
+/// (`rendering::spawn`'s coast cache) skips the ~6 M surface samples and goes
+/// straight to upload. Returns `None` when `data` does not match the expected
+/// payload length for `resolution` (a stale or truncated cache file).
+pub fn coast_bathymetry_cube_from_bytes(resolution: u32, data: Vec<u8>) -> Option<Image> {
+    let res = (resolution.max(4) as usize).next_power_of_two();
+    if data.len() != coast_bathymetry_cube_len(resolution) {
+        return None;
+    }
+    let mip_count = res.ilog2() + 1;
     // `Image::new` debug-asserts `data.len()` against the BASE level only, so
     // a mipped payload must go through `new_uninit` + manual `data`.
     let mut image = Image::new_uninit(
@@ -198,7 +230,7 @@ pub fn bake_coast_bathymetry_cube(surface: &dyn SurfaceQuery, resolution: u32) -
     });
     // Trilinear: the shader's footprint LOD must interpolate between mips.
     image.sampler = bevy::image::ImageSampler::linear();
-    image
+    Some(image)
 }
 
 /// A 1×1×6 "sea level everywhere" coast cube for bodies without an ocean —

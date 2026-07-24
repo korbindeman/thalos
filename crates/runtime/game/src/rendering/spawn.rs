@@ -32,7 +32,8 @@ use thalos_body_render::{
     RingMaterial, RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial,
     SolidPlanetParams, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
     bake_multi_scatter_lut, bake_ocean_slope_texture, blank_coast_cube, blank_impostor_cube,
-    build_ring_mesh, cloud_weather_image, ocean_packet_phase_speeds,
+    build_ring_mesh, cloud_weather_image, coast_bathymetry_cube_from_bytes,
+    ocean_packet_phase_speeds,
 };
 use thalos_body_render::{BodyOceanMaterial, BodySkyExtra, BodySkyMaterial};
 use thalos_physics_canonical::canonical::Epoch;
@@ -349,14 +350,14 @@ pub(super) fn spawn_bodies(
             // resolved at range instead of fading out as the far authority
             // takes over — islands must not appear/disappear with camera
             // distance. ~25 MB, ~6.3 M rayon-parallel macro samples at spawn.
-            let coast_atlas = if body.terrain.ocean_sea_level_m().is_some() {
-                let surface = procedural_install
-                    .surfaces
-                    .surface(body.id)
-                    .expect("terrain body has a canonical surface");
-                images.add(bake_coast_bathymetry_cube(surface.as_ref(), 1024))
-            } else {
-                blank_coast.clone()
+            // A degraded body (no constructed surface — see
+            // `BodySurfaceRegistry::degraded`) binds the blank rather than
+            // panicking: its own visuals are wrong, every other body's are not.
+            let coast_atlas = match procedural_install.surfaces.surface(body.id) {
+                Some(surface) if body.terrain.ocean_sea_level_m().is_some() => {
+                    images.add(coast_cache::load_or_bake(body, surface.as_ref(), 1024))
+                }
+                _ => blank_coast.clone(),
             };
             if let (Some(_), Some(ocean_state)) =
                 (body.terrain.ocean_sea_level_m(), body.ocean.as_ref())
@@ -589,21 +590,28 @@ pub(super) fn spawn_bodies(
             // tells the shader to sample the cube (by the body-fixed normal, set
             // per frame in `update_solid_planet_params`) instead of the flat
             // colour; the xyz colour stays as the planetshine tint fallback.
+            // `albedo.w = 1` selects the cube; a degraded body (no constructed
+            // surface) binds a blank cube with `w = 0` so the shader takes the
+            // flat-colour path — one body's unusable terrain package must not
+            // panic the spawn of every other body.
+            let body_surface = procedural_install.surfaces.surface(body.id);
+            let (impostor_cube, cube_selected) = match &body_surface {
+                Some(surface) => (
+                    images.add(bake_impostor_albedo_cube(
+                        surface.as_ref(),
+                        256,
+                        body.terrain.ocean_sea_level_m(),
+                    )),
+                    1.0,
+                ),
+                None => (blank_impostor.clone(), 0.0),
+            };
             let albedo = Vec4::new(
                 albedo_linear.red,
                 albedo_linear.green,
                 albedo_linear.blue,
-                1.0,
+                cube_selected,
             );
-            let surface = procedural_install
-                .surfaces
-                .surface(body.id)
-                .expect("terrain body has a canonical surface");
-            let impostor_cube = images.add(bake_impostor_albedo_cube(
-                surface.as_ref(),
-                256,
-                body.terrain.ocean_sea_level_m(),
-            ));
             // Map-scale atmosphere optics for the rim glow + on-disc aerial
             // perspective. Airless procedural bodies have no
             // `terrestrial_atmosphere` → vacuum block → the shader early-outs.
@@ -704,13 +712,19 @@ pub(super) fn spawn_bodies(
             // GPU-atlas mirror with a CPU fallback — and (b) the propagator's
             // coarse orbital collision. Built from the same body params as the
             // ground tile provider (`spawn_body_terrain`) so all three agree.
-            let height_source = GpuAtlasMirrorHeightSource::new(Arc::clone(&surface));
-            procedural_install
-                .gpu_height_mirrors
-                .insert(body.id, height_source.mirror());
-            procedural_install
-                .height_sources
-                .insert(body.id, Arc::new(height_source));
+            // A degraded body registers no height source: consumers already
+            // treat a missing entry as "no ground here" (they read through
+            // `Option`), which is the truthful answer when the surface could
+            // not be constructed.
+            if let Some(surface) = &body_surface {
+                let height_source = GpuAtlasMirrorHeightSource::new(Arc::clone(surface));
+                procedural_install
+                    .gpu_height_mirrors
+                    .insert(body.id, height_source.mirror());
+                procedural_install
+                    .height_sources
+                    .insert(body.id, Arc::new(height_source));
+            }
             world_state.planetshine.by_body.insert(
                 body.id,
                 [albedo_linear.red, albedo_linear.green, albedo_linear.blue],
@@ -1108,4 +1122,100 @@ pub(super) fn spawn_bodies(
     // runtime. Seed the bake-install step's total to 0 so it completes
     // immediately and the loading screen advances to the terrain-residency gate.
     loading_tracker.set_total(crate::loading::step::BODIES, 0);
+}
+
+/// Disk cache for the per-ocean-body coast/bathymetry cube
+/// (BL-20260724T153621Z): the bake is ~6 M rayon surface samples (~2.5 s per
+/// body on the dev box, paid every boot), but its output is a pure function
+/// of the terrain generator + body config, so it caches like terrain tiles —
+/// keyed by `GENERATOR_VERSION` plus a hash of the body's authored terrain
+/// config. Location mirrors the tile cache's split (project-local `user/` in
+/// debug, OS app-data in release); `THALOS_COAST_CACHE=0` disables while
+/// iterating on the baker or generator.
+mod coast_cache {
+    use super::{bake_coast_bathymetry_cube, coast_bathymetry_cube_from_bytes};
+    use bevy::image::Image;
+    use bevy::log::{info, warn};
+    use std::hash::{Hash, Hasher};
+    use std::path::PathBuf;
+    use thalos_world::BodyDefinition;
+
+    /// Bump when the bake algorithm in
+    /// `thalos_body_render::bake_coast_bathymetry_cube` changes output
+    /// (sampling LOD, height packing, mip chain) — the same rule as
+    /// `GENERATOR_VERSION` for tiles and `FILL_LUT_VERSION` for clouds.
+    const COAST_BAKE_VERSION: u32 = 1;
+
+    pub(super) fn load_or_bake(
+        body: &BodyDefinition,
+        surface: &dyn thalos_terrain::SurfaceQuery,
+        resolution: u32,
+    ) -> Image {
+        let key = cache_key(body, resolution);
+        let path = cache_path(&key);
+        if enabled()
+            && let Ok(bytes) = std::fs::read(&path)
+            && let Some(image) = coast_bathymetry_cube_from_bytes(resolution, bytes)
+        {
+            info!(
+                target: "thalos::ocean",
+                body = %body.name,
+                "coast/bathymetry cube loaded from cache ({key}.bin)"
+            );
+            return image;
+        }
+        let image = bake_coast_bathymetry_cube(surface, resolution);
+        if enabled()
+            && let Some(data) = image.data.as_ref()
+        {
+            let write = || -> std::io::Result<()> {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&path, data)
+            };
+            if let Err(error) = write() {
+                warn!(target: "thalos::ocean", "could not store coast-cube cache: {error}");
+            }
+        }
+        image
+    }
+
+    fn cache_key(body: &BodyDefinition, resolution: u32) -> String {
+        let mut hasher = std::hash::DefaultHasher::new();
+        COAST_BAKE_VERSION.hash(&mut hasher);
+        thalos_terrain::GENERATOR_VERSION.hash(&mut hasher);
+        resolution.hash(&mut hasher);
+        body.radius_m.to_bits().hash(&mut hasher);
+        // TerrainConfig is Deserialize-only; its derived Debug string is a
+        // deterministic full-field projection, so it serves as the config
+        // hash input. Any authored-terrain change reshapes the string and
+        // misses the cache; baker/generator *code* changes are covered by the
+        // two version constants above.
+        format!("{:?}", body.terrain).hash(&mut hasher);
+        format!(
+            "{}_{:016x}",
+            body.name.to_ascii_lowercase(),
+            hasher.finish()
+        )
+    }
+
+    fn enabled() -> bool {
+        !std::env::var("THALOS_COAST_CACHE").is_ok_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
+        })
+    }
+
+    fn cache_path(key: &str) -> PathBuf {
+        #[cfg(debug_assertions)]
+        let root = PathBuf::from("user/coastcache");
+        #[cfg(not(debug_assertions))]
+        let root = bevy::platform::dirs::preferences_dir()
+            .map(|dir| dir.join("thalos").join("coastcache"))
+            .unwrap_or_else(|| PathBuf::from("user/coastcache"));
+        root.join(format!("{key}.bin"))
+    }
 }
