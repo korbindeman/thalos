@@ -577,11 +577,23 @@ pub fn select_leaves(cam_body: DVec3, radius_m: f64, max_level: u8) -> HashSet<T
     leaves
 }
 
-fn is_self_or_descendant(key: TileKey, anchor: TileKey) -> bool {
-    key.face == anchor.face
-        && key.level >= anchor.level
-        && (key.x >> (key.level - anchor.level)) == anchor.x
-        && (key.y >> (key.level - anchor.level)) == anchor.y
+/// Is `key`'s whole footprint covered by resident tiles (itself, or recursively
+/// by its children at any mix of levels)? Short-circuits at each resident node,
+/// so the traversal is bounded by the resident set, not by 4^depth.
+fn covered_by_resident(
+    key: TileKey,
+    resident: &HashMap<TileKey, Entity>,
+    max_level: u8,
+) -> bool {
+    if resident.contains_key(&key) {
+        return true;
+    }
+    if key.level >= max_level {
+        return false;
+    }
+    key.children()
+        .into_iter()
+        .all(|child| covered_by_resident(child, resident, max_level))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -681,30 +693,37 @@ fn stream_tile_terrain(
         );
     }
 
-    // Hole-free despawn (probe M2 rule).
+    // Hole-free despawn (probe M2 rule), with PROGRESSIVE replacement on
+    // split: a no-longer-desired tile is removable the moment every point it
+    // covers is served by SOME resident tile —
+    //  - merge case (a desired ancestor exists): that ancestor must be
+    //    resident;
+    //  - split case: each child subtree must be covered by resident tiles at
+    //    ANY level, not only the final desired leaves. Waiting for the full
+    //    leaf set (up to 4^n descendants) kept coarse blocky geometry poking
+    //    through refined crater walls long after its children had landed
+    //    (user finding 2026-07-24); releasing per covered level makes
+    //    refinement read as gradual sharpening instead of a late swap.
     let removable: Vec<TileKey> = root_ref
         .resident
         .keys()
         .filter(|k| !root_ref.desired.contains(k))
         .filter(|k| {
             let mut probe = **k;
-            let ancestor_ok = loop {
+            loop {
                 match probe.parent() {
                     Some(p) if p.level >= MIN_LEVEL => {
                         probe = p;
                         if root_ref.desired.contains(&probe) {
-                            break root_ref.resident.contains_key(&probe);
+                            // Merge case: coverage passes to the ancestor.
+                            return root_ref.resident.contains_key(&probe);
                         }
                     }
-                    _ => break true,
+                    _ => break,
                 }
-            };
-            ancestor_ok
-                && root_ref
-                    .desired
-                    .iter()
-                    .filter(|d| is_self_or_descendant(**d, **k))
-                    .all(|d| root_ref.resident.contains_key(d))
+            }
+            // Split case: coverage passes to resident descendants.
+            covered_by_resident(**k, &root_ref.resident, root_ref.max_level)
         })
         .copied()
         .collect();
