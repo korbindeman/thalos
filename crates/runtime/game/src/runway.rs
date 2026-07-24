@@ -252,6 +252,11 @@ const RUNWAY_SITE_LAT_DEG: f64 = 7.6;
 /// Runway-centre longitude (deg, body-fixed, +east; `atan2(z, x)`, matching the
 /// site log line).
 const RUNWAY_SITE_LON_DEG: f64 = 178.0;
+// Under `THALOS_TERRAIN=diffusion` (NTR-X2a) the same site holds: the
+// conditioned diffusion export keeps the canonical continents, and the
+// corrected 90 m window puts lat 7.6/lon 178 on a ~700 m plateau with ~19 m
+// relief over 5.8 km — flat enough that the basin flatten barely works.
+// Re-scan (`thalos_export.py` + a block scan) if the export seed changes.
 /// Takeoff-heading azimuth (deg) in the local tangent frame, measured from
 /// `TerrainPatchBasis::tangent_x` toward `tangent_z`. Any fixed value gives a
 /// constant strip; the pad is flat regardless of which way it points.

@@ -1,0 +1,21 @@
+{
+  "width": 6144,
+  "height": 6144,
+  "sha256_le_f32": "ea92aa9fd7a569c779d7af041e38b460c14700007727fb76194d93e3c999c268",
+  "min": 66.68820190429688,
+  "max": 5874.08251953125,
+  "mean": 1121.7156982421875,
+  "source": "xandergos/terrain-diffusion-90m native band, seed 1337",
+  "origin_native_px_xy": [
+    -4179,
+    -7763
+  ],
+  "site_lon_deg": 178.0,
+  "site_lat_deg": 7.6,
+  "px_m": 90.0,
+  "chart_center_px_xy": [
+    429.6722222222222,
+    198.67555555555555
+  ],
+  "planet_radius_m": 3186000.0
+}

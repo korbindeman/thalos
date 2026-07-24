@@ -1031,6 +1031,32 @@ impl ProceduralSurface {
         c * (1.0 + (tone * TONE_AMP) as f32)
     }
 
+    /// Macro landcover albedo + moisture for an **externally supplied**
+    /// geometric height — the seam alternative height backings (the diffusion
+    /// surface, NTR-X2a) color through, so the planet keeps ONE landcover /
+    /// palette / climate model no matter where its geometry comes from.
+    /// Moisture, orogeny weight, and tone come from this surface's own
+    /// canonical fields; the caller's `height_m` drives the altitude bands.
+    /// (Coherent by construction when the external geometry was conditioned
+    /// on this surface's macro band — the continents match.)
+    pub fn macro_albedo_for(&self, dir: DVec3, height_m: f64, lod_m: f32) -> (Vec3, f64, MacroBiome) {
+        let dir = dir.normalize_or_zero();
+        // Climate/orogeny inputs only need the macro evaluation — clamp the
+        // LOD coarse so the canonical height composition stays cheap.
+        let (_own_h, orogeny, c) = self.height_and_orogeny(dir, lod_m.max(1_500.0));
+        let p = dir * self.radius_m;
+        let sin_lat = dir.y.abs();
+        let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
+        let cold_lift = climate_cold_lift_m(sin_lat);
+        let warmth = climate_warmth(cold_lift);
+        let bands = macro_band_ts(height_m, orogeny, moisture, cold_lift, warmth);
+        (
+            self.albedo_from_bands(&bands, self.macro_tone(p)),
+            moisture,
+            classify_macro(&bands, height_m),
+        )
+    }
+
     /// One-evaluation variant of [`SurfaceQuery::sample_d`] that also returns
     /// the dominant [`MacroBiome`] class. Both the albedo mix chain and the
     /// classification read the same [`MacroBandTs`] evaluation, so the class

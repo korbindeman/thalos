@@ -36,3 +36,4 @@ rustc-ice-*.txt
 # Agent scratch: comparison runs are regenerated on demand; durable evidence
 # belongs in artifacts/visual/runs/ per docs/visual_testing.md.
 tools/agent_scratch/
+assets/terrain_packages/thalos_diffusion/thalos_site_detail_*.f32

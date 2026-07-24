@@ -1,0 +1,13 @@
+{
+  "width": 869,
+  "height": 434,
+  "sha256_le_f32": "0e02294c87d90427735f16bf47b61b303f3e710733418d747ceb7f590b068348",
+  "min": -0.0,
+  "max": 8297.5615234375,
+  "mean": 289.3479309082031,
+  "source": "xandergos/terrain-diffusion-90m coarse band, seed 1337, window off=(0,0)",
+  "mapping": "equirect",
+  "planet_radius_m": 3186000.0,
+  "px_m_equator": 23040.0,
+  "wrap_feather_px": 24
+}

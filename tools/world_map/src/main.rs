@@ -25,8 +25,8 @@
 
 use glam::DVec3;
 use rayon::prelude::*;
-use thalos_terrain::query::SurfaceQuery;
-use thalos_terrain::{MacroBiome, ProceduralSurface};
+use thalos_terrain::query::{SurfaceQuery, SurfaceSample};
+use thalos_terrain::{DiffusionSurface, MacroBiome, ProceduralSurface};
 
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/world_map.png");
 const OUT_BIOMES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/world_biomes.png");
@@ -34,6 +34,11 @@ const OUT_BIOMES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/worl
 // Runway site (matches `thalos_runtime::runway` / the ProceduralSurface scaffold).
 const RUNWAY_LAT_DEG: f64 = 7.6;
 const RUNWAY_LON_DEG: f64 = 178.0;
+/// One site for both terrain backings (the conditioned diffusion export keeps
+/// the canonical continents, and the site holds — see `runway.rs`).
+fn runway_site_latlon() -> (f64, f64) {
+    (RUNWAY_LAT_DEG, RUNWAY_LON_DEG)
+}
 
 /// Web-mercator latitude clamp: `atan(sinh(π))` ≈ 85.05113°, which makes the
 /// full-range map exactly square.
@@ -137,18 +142,59 @@ struct Px {
     biome: MacroBiome,
 }
 
+/// The tool's surface: the canonical procedural planet, or the NTR-X2a
+/// terrain-diffusion backing when `THALOS_TERRAIN=diffusion` (same toggle and
+/// data directory as the game's `BodySurfaceRegistry`).
+enum MapSurface {
+    Procedural(ProceduralSurface),
+    Diffusion(DiffusionSurface),
+}
+
+impl MapSurface {
+    fn sample_biome_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, MacroBiome) {
+        match self {
+            Self::Procedural(s) => s.sample_biome_d(dir, lod_m),
+            Self::Diffusion(s) => s.sample_biome_d(dir, lod_m),
+        }
+    }
+
+    fn query(&self) -> &dyn SurfaceQuery {
+        match self {
+            Self::Procedural(s) => s,
+            Self::Diffusion(s) => s,
+        }
+    }
+}
+
 fn main() {
     let radius_m = env_f64("WORLD_RADIUS_KM")
         .map(|km| km * 1000.0)
         .unwrap_or(3_186_000.0);
     let seed = env_f64("WORLD_SEED").map(|s| s as u32).unwrap_or(2);
-    let surface = ProceduralSurface::new(radius_m as f32, seed);
+    let diffusion = std::env::var("THALOS_TERRAIN")
+        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
+        .unwrap_or(false);
+    let surface = if diffusion {
+        let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
+        match DiffusionSurface::load(dir, radius_m as f32, seed) {
+            Ok(s) => {
+                println!("world_map: terrain-diffusion surface ({})", dir.display());
+                MapSurface::Diffusion(s)
+            }
+            Err(e) => {
+                eprintln!("THALOS_TERRAIN=diffusion: {e}; falling back to procedural");
+                MapSurface::Procedural(ProceduralSurface::new(radius_m as f32, seed))
+            }
+        }
+    } else {
+        MapSurface::Procedural(ProceduralSurface::new(radius_m as f32, seed))
+    };
 
     // Zoom mode: WORLD_ZOOM="lat,lon,half_km" renders a tangent-plane crop
     // (finer LOD) instead of the global map, to check that coastlines and
     // relief stay fractal/believable as you descend toward the surface.
     if let Ok(spec) = std::env::var("WORLD_ZOOM") {
-        render_zoom(&surface, radius_m, &spec);
+        render_zoom(surface.query(), radius_m, &spec);
         return;
     }
 
@@ -157,7 +203,7 @@ fn main() {
     // continental-slope steepness (is the land→abyss transition a natural ramp
     // or a cliff?).
     if let Ok(spec) = std::env::var("WORLD_TRANSECT") {
-        print_transect(&surface, radius_m, &spec);
+        print_transect(surface.query(), radius_m, &spec);
         return;
     }
 
@@ -181,7 +227,7 @@ fn main() {
         "world_map: radius {:.0} km, seed {}, height_range ±{:.0} m, {}x{} {} ({})",
         radius_m / 1000.0,
         seed,
-        surface.height_range_m(),
+        surface.query().height_range_m(),
         w,
         h,
         if proj == Proj::Mercator {
@@ -346,12 +392,13 @@ fn main() {
     }
 
     // Runway-site report.
-    let site = latlon_dir(RUNWAY_LAT_DEG, RUNWAY_LON_DEG);
-    let site_h = surface.sample_height_m(site.as_vec3(), 30.0) as f64;
+    let (site_lat, site_lon) = runway_site_latlon();
+    let site = latlon_dir(site_lat, site_lon);
+    let site_h = surface.query().sample_height_m(site.as_vec3(), 30.0) as f64;
     println!(
         "runway site (lat {:.1}, lon {:.1}): height {:.0} m  ({})",
-        RUNWAY_LAT_DEG,
-        RUNWAY_LON_DEG,
+        site_lat,
+        site_lon,
         site_h,
         if site_h >= 0.0 {
             "LAND"
@@ -494,7 +541,8 @@ fn draw_graticule(img: &mut image::RgbImage, frame: &Frame) {
 
 /// Red cross at the fixed runway site.
 fn mark_site(img: &mut image::RgbImage, frame: &Frame) {
-    let (si, sj) = frame.project(RUNWAY_LAT_DEG, RUNWAY_LON_DEG);
+    let (site_lat, site_lon) = runway_site_latlon();
+    let (si, sj) = frame.project(site_lat, site_lon);
     for d in -10..=10i64 {
         for (a, b) in [(si + d, sj), (si, sj + d)] {
             if a >= 0 && a < frame.w as i64 && b >= 0 && b < frame.h as i64 {
@@ -507,7 +555,7 @@ fn mark_site(img: &mut image::RgbImage, frame: &Frame) {
 /// Tangent-plane crop centred on `lat,lon` with `half_km` half-extent, at a LOD
 /// matched to the pixel spacing so the relief cascade fades in as it would near
 /// the camera. Writes target/world_zoom.png.
-fn render_zoom(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
+fn render_zoom(surface: &dyn SurfaceQuery, radius_m: f64, spec: &str) {
     let parts: Vec<f64> = spec
         .split(',')
         .filter_map(|s| s.trim().parse().ok())
@@ -585,7 +633,7 @@ fn render_zoom(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
 /// Walk a straight tangent line and print a height profile (a depth/altitude
 /// transect), so the shelf width and continental-slope steepness are legible as
 /// numbers, not just pixels.
-fn print_transect(surface: &ProceduralSurface, radius_m: f64, spec: &str) {
+fn print_transect(surface: &dyn SurfaceQuery, radius_m: f64, spec: &str) {
     let parts: Vec<f64> = spec
         .split(',')
         .filter_map(|s| s.trim().parse().ok())

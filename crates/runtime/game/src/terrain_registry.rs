@@ -62,10 +62,48 @@ pub struct BodySurfaceRegistry {
     airless_landmarks: HashMap<BodyId, Vec<AirlessLandmark>>,
 }
 
+/// NTR-X2a: render Thalos through the terrain-diffusion surface
+/// (`THALOS_TERRAIN=diffusion`). Content lives in
+/// `assets/terrain_packages/thalos_diffusion/` (exported by the
+/// terrain-diffusion checkout's `thalos_export.py`, conditioned on the
+/// canonical Thalos macro terrain via `export_thalos_macro.rs`). Also read by
+/// `runway::fixed_runway_site` — the diffusion coastline moved the flat
+/// coastal plain, so the authored spaceport site follows the toggle.
+pub fn thalos_diffusion_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("THALOS_TERRAIN")
+            .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
+            .unwrap_or(false)
+    })
+}
+
 impl BodySurfaceRegistry {
     pub fn load(bodies: &[BodyDefinition], package_dir: &std::path::Path) -> Result<Self, String> {
         let mut registry = Self::default();
         for body in bodies.iter().filter(|body| body.terrain.is_some()) {
+            if body.name == "Thalos" && thalos_diffusion_enabled() {
+                let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
+                match thalos_terrain::DiffusionSurface::load(dir, body.radius_m as f32, body.id as u32)
+                {
+                    Ok(surface) => {
+                        let fingerprint =
+                            thalos_terrain::GENERATOR_VERSION ^ surface.content_fingerprint;
+                        bevy::log::info!(
+                            "Thalos: terrain-diffusion surface active (fingerprint {fingerprint:#x})"
+                        );
+                        registry.surfaces.insert(body.id, Arc::new(surface));
+                        registry.fingerprints.insert(body.id, fingerprint);
+                        continue;
+                    }
+                    Err(error) => {
+                        bevy::log::warn!(
+                            "THALOS_TERRAIN=diffusion set but the diffusion surface failed to load \
+                             ({error}); falling back to the procedural surface"
+                        );
+                    }
+                }
+            }
             let (surface, fingerprint): (Arc<dyn SurfaceQuery>, u64) = match &body.terrain {
                 TerrainConfig::Feature(feature)
                     if feature.archetype == BodyArchetype::AirlessImpactMoon =>
@@ -188,9 +226,13 @@ fn airless_landmarks(
             .filter(|crater| RADIUS_BAND_M.contains(&crater.radius_m))
     };
 
-    // Surviving relief measured from the height authority: centre sample plus
-    // two rings (floor at 0.55 r, rim at 1.0 r), max − min. Coarse LOD — this
-    // asks "does the crater read at framing scale", not for micro-detail.
+    // Surviving relief measured from the height authority, and measured
+    // *bowl-shaped*: median of the rim ring (1.0 r) minus the floor (centre
+    // and the 0.4 r ring's median). A max−min window would re-create the
+    // selection bug one level down — over ~256 candidates the max−min winner
+    // is whichever window happens to straddle a neighbouring deep crater, not
+    // an actual bowl under the landmark. Medians make one stray sample
+    // harmless; a degraded crater (rim ≈ floor) correctly measures ~0.
     let measured_relief = |crater: &thalos_terrain::Crater| -> f32 {
         let dir = crater.center.as_dvec3().normalize();
         let arc = f64::from(crater.radius_m) / body_radius_m;
@@ -202,20 +244,23 @@ fn airless_landmarks(
         let tangent_a = seed.cross(dir).normalize();
         let tangent_b = dir.cross(tangent_a).normalize();
         let lod_m = (crater.radius_m / 8.0).max(64.0);
-        let mut lo = surface.sample_height_m(dir.as_vec3(), lod_m);
-        let mut hi = lo;
-        for ring_frac in [0.55_f64, 1.0] {
+        let ring_median = |ring_frac: f64| -> f32 {
             let ring_arc = arc * ring_frac;
-            for k in 0..8 {
-                let a = std::f64::consts::TAU * k as f64 / 8.0;
-                let ring = tangent_a * a.cos() + tangent_b * a.sin();
-                let sample_dir = (dir * ring_arc.cos() + ring * ring_arc.sin()).normalize();
-                let h = surface.sample_height_m(sample_dir.as_vec3(), lod_m);
-                lo = lo.min(h);
-                hi = hi.max(h);
-            }
-        }
-        hi - lo
+            let mut hs: Vec<f32> = (0..8)
+                .map(|k| {
+                    let a = std::f64::consts::TAU * k as f64 / 8.0;
+                    let ring = tangent_a * a.cos() + tangent_b * a.sin();
+                    let sample_dir = (dir * ring_arc.cos() + ring * ring_arc.sin()).normalize();
+                    surface.sample_height_m(sample_dir.as_vec3(), lod_m)
+                })
+                .collect();
+            hs.sort_by(f32::total_cmp);
+            (hs[3] + hs[4]) * 0.5
+        };
+        let centre = surface.sample_height_m(dir.as_vec3(), lod_m);
+        let floor = centre.min(ring_median(0.4));
+        let rim = ring_median(1.0);
+        (rim - floor).max(0.0)
     };
 
     let mut typical: Vec<&thalos_terrain::Crater> =

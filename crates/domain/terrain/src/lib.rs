@@ -11,6 +11,7 @@ pub mod cache;
 pub mod cold_desert_field;
 pub(crate) mod crater_profile;
 pub mod cubemap;
+pub mod diffusion_surface;
 pub mod feature_compiler;
 pub(crate) mod feature_compositor;
 pub mod field_surface;
@@ -63,6 +64,7 @@ pub use package::{
 /// otherwise they select an ancient basin that has been flattened to nothing and
 /// frame empty ground.
 pub use crater_profile::degradation_factor;
+pub use diffusion_surface::DiffusionSurface;
 pub use procedural::{
     GENERATOR_VERSION, MacroBiome, ProceduralSurface, climate_cold_lift_m, climate_warmth,
 };
