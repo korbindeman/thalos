@@ -434,6 +434,10 @@ pub struct TileTerrainRoot {
     /// Seconds until the next coverage-invariant audit (see the check in
     /// `stream_tile_terrain`).
     coverage_check_countdown: f32,
+    /// Forensics ring: recent despawns as (key, elapsed-seconds stamp,
+    /// merge-case?) so a failing audit can name the ancestor that dropped and
+    /// under which certificate. Capped at 512.
+    recent_despawns: Vec<(TileKey, f64, bool)>,
     gen_stats: GenStats,
     /// Latched true the first time the desired set is fully resident. After
     /// that, the hole-free despawn rule keeps coverage complete, so the
@@ -507,6 +511,7 @@ impl TileTerrainRoot {
             pending: HashMap::new(),
             retiring: HashMap::new(),
             coverage_check_countdown: 2.0,
+            recent_despawns: Vec::new(),
             gen_stats: GenStats::default(),
             covered_once: false,
         }
@@ -626,6 +631,97 @@ fn covered_by_resident(
         .all(|child| covered_by_resident(child, resident, max_level))
 }
 
+/// The despawn decision + retirement bookkeeping, extracted pure so the
+/// descent simulation test can drive the exact production logic. Returns the
+/// keys whose grace gates expired this tick (the caller despawns them).
+fn despawn_ready(
+    desired: &HashSet<TileKey>,
+    resident: &HashMap<TileKey, Entity>,
+    retiring: &mut HashMap<TileKey, (f32, u16)>,
+    max_level: u8,
+    dt: f32,
+) -> Vec<TileKey> {
+    let removable: HashSet<TileKey> = resident
+        .keys()
+        .filter(|k| !desired.contains(k))
+        .filter(|k| {
+            let mut probe = **k;
+            loop {
+                match probe.parent() {
+                    Some(p) if p.level >= MIN_LEVEL => {
+                        probe = p;
+                        if desired.contains(&probe) {
+                            // Merge case: coverage passes to the ancestor.
+                            return resident.contains_key(&probe);
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            // Split case: coverage passes to resident DESCENDANTS. Descend
+            // from the children — `covered_by_resident(k)` would see k
+            // itself (still in the resident map while we decide its removal)
+            // and trivially certify the tile with ITSELF. That self-
+            // certificate was the black-tile bug: any stale tile above the
+            // desired level "covered" itself, retired, and despawned after
+            // grace, abandoning its still-pending children (reproduced by
+            // `streaming_tests::descent_keeps_every_desired_tile_covered`).
+            if k.level >= max_level {
+                return false;
+            }
+            k.children()
+                .into_iter()
+                .all(|child| covered_by_resident(child, resident, max_level))
+        })
+        .copied()
+        .collect();
+    retiring.retain(|key, _| removable.contains(key));
+    let mut expired = Vec::new();
+    for key in removable {
+        let (secs, frames) = retiring.entry(key).or_insert((DESPAWN_GRACE_S, DESPAWN_GRACE_FRAMES));
+        if *secs > 0.0 || *frames > 0 {
+            *secs -= dt;
+            *frames = frames.saturating_sub(1);
+            continue;
+        }
+        retiring.remove(&key);
+        expired.push(key);
+    }
+    expired
+}
+
+/// Desired tiles whose footprint is unserved by the resident set (no resident
+/// self, ancestor, or descendant cover) — the coverage invariant. Shared by
+/// the runtime audit and the descent simulation test.
+fn uncovered_desired(
+    desired: &HashSet<TileKey>,
+    resident: &HashMap<TileKey, Entity>,
+    max_level: u8,
+) -> Vec<TileKey> {
+    desired
+        .iter()
+        .filter(|k| {
+            if resident.contains_key(*k) {
+                return false;
+            }
+            let mut probe = **k;
+            loop {
+                match probe.parent() {
+                    Some(p) if p.level >= MIN_LEVEL => {
+                        probe = p;
+                        if resident.contains_key(&probe) {
+                            return false;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+            !covered_by_resident(**k, resident, max_level)
+        })
+        .copied()
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn stream_tile_terrain(
     eye: Res<TileEye>,
@@ -741,48 +837,46 @@ fn stream_tile_terrain(
     //    through refined crater walls long after its children had landed
     //    (user finding 2026-07-24); releasing per covered level makes
     //    refinement read as gradual sharpening instead of a late swap.
-    let removable: HashSet<TileKey> = root_ref
-        .resident
-        .keys()
-        .filter(|k| !root_ref.desired.contains(k))
-        .filter(|k| {
-            let mut probe = **k;
-            loop {
-                match probe.parent() {
-                    Some(p) if p.level >= MIN_LEVEL => {
-                        probe = p;
-                        if root_ref.desired.contains(&probe) {
-                            // Merge case: coverage passes to the ancestor.
-                            return root_ref.resident.contains_key(&probe);
-                        }
-                    }
-                    _ => break,
-                }
-            }
-            // Split case: coverage passes to resident descendants.
-            covered_by_resident(**k, &root_ref.resident, root_ref.max_level)
-        })
-        .copied()
-        .collect();
     // Lax retirement: a removable tile only despawns after its condition has
     // held continuously through BOTH grace gates. Overlap while lingering is
     // rendered correctly by the per-level depth bias (finer wins), so there
-    // is no pressure to despawn promptly.
-    root_ref.retiring.retain(|key, _| removable.contains(key));
+    // is no pressure to despawn promptly. Decision logic lives in
+    // `despawn_ready` (pure — exercised by the descent simulation test).
     let dt = time.delta_secs();
-    for key in removable {
-        let (secs, frames) = root_ref
-            .retiring
-            .entry(key)
-            .or_insert((DESPAWN_GRACE_S, DESPAWN_GRACE_FRAMES));
-        if *secs > 0.0 || *frames > 0 {
-            *secs -= dt;
-            *frames = frames.saturating_sub(1);
-            continue;
-        }
-        root_ref.retiring.remove(&key);
+    let now = time.elapsed_secs_f64();
+    let expired = despawn_ready(
+        &root_ref.desired,
+        &root_ref.resident,
+        &mut root_ref.retiring,
+        root_ref.max_level,
+        dt,
+    );
+    for key in expired {
         if let Some(entity) = root_ref.resident.remove(&key) {
             commands.entity(entity).despawn();
+            // Forensics: record the despawn + which certificate held at this
+            // final revalidation frame (merge = desired ancestor resident).
+            let merge_case = {
+                let mut probe = key;
+                let mut merge = false;
+                loop {
+                    match probe.parent() {
+                        Some(p) if p.level >= MIN_LEVEL => {
+                            probe = p;
+                            if root_ref.desired.contains(&probe) {
+                                merge = true;
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
+                merge
+            };
+            if root_ref.recent_despawns.len() >= 512 {
+                root_ref.recent_despawns.remove(0);
+            }
+            root_ref.recent_despawns.push((key, now, merge_case));
         }
     }
 
@@ -795,34 +889,210 @@ fn stream_tile_terrain(
     root_ref.coverage_check_countdown -= dt;
     if root_ref.coverage_check_countdown <= 0.0 {
         root_ref.coverage_check_countdown = 2.0;
-        let uncovered = root_ref
-            .desired
-            .iter()
-            .filter(|k| {
-                if root_ref.resident.contains_key(*k) {
-                    return false;
-                }
-                let mut probe = **k;
-                loop {
-                    match probe.parent() {
-                        Some(p) if p.level >= MIN_LEVEL => {
-                            probe = p;
-                            if root_ref.resident.contains_key(&probe) {
-                                return false;
-                            }
-                        }
-                        _ => break,
-                    }
-                }
-                !covered_by_resident(**k, &root_ref.resident, root_ref.max_level)
-            })
-            .count();
-        if uncovered > 0 && root_ref.covered_once {
+        let uncovered =
+            uncovered_desired(&root_ref.desired, &root_ref.resident, root_ref.max_level);
+        if !uncovered.is_empty() && root_ref.covered_once {
             warn!(
-                "tile terrain: {uncovered} desired tiles LOGICALLY uncovered (of {}) — despawn/selection bug, not presentation",
+                "tile terrain: {} desired tiles LOGICALLY uncovered (of {}) — despawn/selection bug, not presentation",
+                uncovered.len(),
                 root_ref.desired.len()
             );
+            // Forensics for the first few: the full ancestor-chain state, and
+            // any recent despawn among the chain (with age + certificate).
+            for key in uncovered.iter().take(3) {
+                let mut chain = format!("{key:?}: self[");
+                chain.push_str(if root_ref.pending.contains_key(key) { "pending" } else { "absent" });
+                chain.push(']');
+                let mut probe = *key;
+                while let Some(p) = probe.parent() {
+                    if p.level < MIN_LEVEL {
+                        break;
+                    }
+                    probe = p;
+                    let state = if root_ref.resident.contains_key(&probe) {
+                        "R".to_string()
+                    } else if root_ref.pending.contains_key(&probe) {
+                        "pend".to_string()
+                    } else if let Some((_, stamp, merge)) = root_ref
+                        .recent_despawns
+                        .iter()
+                        .rev()
+                        .find(|(k, _, _)| *k == probe)
+                    {
+                        format!(
+                            "despawned {:.2}s ago ({})",
+                            now - stamp,
+                            if *merge { "merge" } else { "split" }
+                        )
+                    } else {
+                        "-".to_string()
+                    };
+                    chain.push_str(&format!(" L{}[{}]", probe.level, state));
+                }
+                warn!("tile terrain: uncovered chain {chain}");
+            }
         }
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+
+    /// Simulate the production streaming loop through a continuous descent —
+    /// selection, cancellation, capped admission, landing latency, lax
+    /// retirement, despawn — and assert the coverage invariant every tick.
+    /// This is the falsifiable repro for the in-game "black tiles while
+    /// descending into craters" reports: if the despawn/selection logic can
+    /// drop the last cover of a desired tile, this fails with the tick and
+    /// chain state.
+    #[test]
+    fn descent_keeps_every_desired_tile_covered() {
+        const RADIUS_M: f64 = 869_000.0;
+        const DT: f32 = 1.0 / 60.0;
+        const GEN_LATENCY_S: f32 = 0.032;
+        // Production parallelism: the synthesis pool runs 4 workers; the
+        // in-flight cap only bounds the queue. Landing rate ≈ 125 tiles/s,
+        // matching live telemetry.
+        const WORKERS: usize = 4;
+        let max_level = max_level_for(RADIUS_M);
+
+        // The harshest path we ship: plunge from 200 km to 30 m, then sweep
+        // laterally at aircraft speed just above the ground (the user's
+        // "close to the ground, in the craters" flight), then climb out and
+        // dive again elsewhere.
+        let site = DVec3::new(-0.71, 0.18, -0.68).normalize();
+        let drift = site.cross(DVec3::Y).normalize();
+        let cam_at = |t: f32| -> DVec3 {
+            let t = t as f64;
+            if t < 20.0 {
+                // Plunge.
+                let k = t / 20.0;
+                let alt = 200_000.0 * (1.0 - k).powi(3) + 30.0;
+                site * (RADIUS_M + alt)
+            } else if t < 50.0 {
+                // Low lateral sweep: 250 m/s at 30 m — the selection window
+                // races across the surface far faster than tiles can land.
+                let s = (t - 20.0) * 250.0 / RADIUS_M;
+                let dir = (site + drift * s).normalize();
+                dir * (RADIUS_M + 30.0)
+            } else {
+                // Climb out and dive onto a new spot.
+                let k = ((t - 50.0) / 10.0).min(1.0);
+                let s = 30.0 * 250.0 / RADIUS_M;
+                let dir = (site + drift * (s + k * 0.01)).normalize();
+                let alt = 30.0 + 20_000.0 * (0.5 - (k - 0.5).abs()).max(0.0) * 2.0;
+                dir * (RADIUS_M + alt)
+            }
+        };
+
+        let mut resident: HashMap<TileKey, Entity> = HashMap::new();
+        let mut retiring: HashMap<TileKey, (f32, u16)> = HashMap::new();
+        // (key, seconds-until-landed); at most MAX_IN_FLIGHT actively count
+        // down, the rest queue — mirrors the bounded pool.
+        let mut pending: Vec<(TileKey, f32)> = Vec::new();
+        let mut covered_once = false;
+        // Event log for post-mortem on failure: (t, what, key).
+        let mut events: Vec<(f32, &'static str, TileKey)> = Vec::new();
+        let related = |a: TileKey, b: TileKey| -> bool {
+            if a.face != b.face {
+                return false;
+            }
+            let (hi, lo) = if a.level <= b.level { (a, b) } else { (b, a) };
+            let shift = lo.level - hi.level;
+            (lo.x >> shift) == hi.x && (lo.y >> shift) == hi.y
+        };
+
+        let mut t = 0.0_f32;
+        while t < 62.0 {
+            let cam = cam_at(t);
+            let desired = select_leaves(cam, RADIUS_M, max_level);
+
+            // Cancel pendings nobody wants (production: Task drop).
+            let (keep, cancelled): (Vec<_>, Vec<_>) =
+                pending.into_iter().partition(|(key, _)| desired.contains(key));
+            pending = keep;
+            for (key, _) in cancelled {
+                events.push((t, "cancel", key));
+            }
+
+            // Admit missing by screen-size priority up to the in-flight cap.
+            let mut missing: Vec<TileKey> = desired
+                .iter()
+                .filter(|k| {
+                    !resident.contains_key(k) && !pending.iter().any(|(p, _)| p == *k)
+                })
+                .copied()
+                .collect();
+            missing.sort_by(|a, b| {
+                let pa = (cam - a.center_dir() * RADIUS_M).length() / tile_arc_m(a.level, RADIUS_M);
+                let pb = (cam - b.center_dir() * RADIUS_M).length() / tile_arc_m(b.level, RADIUS_M);
+                pa.total_cmp(&pb)
+            });
+            let budget = MAX_IN_FLIGHT.saturating_sub(pending.len());
+            for key in missing.into_iter().take(budget) {
+                pending.push((key, GEN_LATENCY_S));
+            }
+
+            // Advance the workers (only WORKERS progress at once) and land.
+            for slot in pending.iter_mut().take(WORKERS) {
+                slot.1 -= DT;
+            }
+            let mut landed: Vec<TileKey> = Vec::new();
+            pending.retain(|(key, remaining)| {
+                if *remaining <= 0.0 {
+                    landed.push(*key);
+                    false
+                } else {
+                    true
+                }
+            });
+            for key in landed {
+                events.push((t, "land", key));
+                resident.insert(key, Entity::PLACEHOLDER);
+            }
+
+            if !covered_once && !desired.is_empty() && desired.iter().all(|k| resident.contains_key(k))
+            {
+                covered_once = true;
+            }
+
+            for key in despawn_ready(&desired, &resident, &mut retiring, max_level, DT) {
+                events.push((t, "despawn", key));
+                resident.remove(&key);
+            }
+
+            if covered_once {
+                let uncovered = uncovered_desired(&desired, &resident, max_level);
+                if let Some(first) = uncovered.first().copied() {
+                    eprintln!("--- column history for uncovered {first:?} ---");
+                    for (et, what, key) in events.iter().filter(|(_, _, k)| related(*k, first)) {
+                        eprintln!("  t={et:.2} {what} {key:?}");
+                    }
+                    eprintln!("--- column current state ---");
+                    for (k, _) in resident.iter().filter(|(k, _)| related(**k, first)) {
+                        eprintln!("  resident {k:?} (retiring: {:?})", retiring.get(k));
+                    }
+                    for (k, _) in pending.iter().filter(|(k, _)| related(*k, first)) {
+                        eprintln!("  pending {k:?}");
+                    }
+                    for k in desired.iter().filter(|k| related(**k, first)) {
+                        eprintln!("  desired {k:?}");
+                    }
+                    panic!(
+                        "t={t:.2}s alt={:.0}m: {} desired tiles uncovered; first={first:?}; resident={} pending={} retiring={}",
+                        cam.length() - RADIUS_M,
+                        uncovered.len(),
+                        resident.len(),
+                        pending.len(),
+                        retiring.len(),
+                    );
+                }
+            }
+
+            t += DT;
+        }
+        assert!(covered_once, "descent never reached full coverage");
     }
 }
 
