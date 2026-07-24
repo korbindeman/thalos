@@ -866,6 +866,48 @@ visible range — see BL-20260724T003705Z-cloud-single-representation-reach.
 The derived `fill_lut` pairing survives as the contract for the remaining
 (true-orbit) representation boundary.
 
+### Round 7 — volumetric morphology: sculpted tops (2026-07-24)
+
+**User verdict on round 6b (live ascent screenshots): "continuity is quite
+acceptable now" — the transition gate passed.** The new front is the
+volumetric clouds themselves: "mostly really some flat sheets"
+(BL-20260724T022522Z-cloud-volumetric-morphology). Three coupled causes,
+three fixes, all in the shared-shaping lockstep trio (`get_cloud_map_density`
+in clouds_compute.wgsl · `march_column`/`sample_shaped` in fill_lut.rs ·
+`cloud_surface_density_cpu` in solar_system_state.rs):
+
+- **Tops were faded, not sculpted.** The convective vertical profiles bled
+  density out over the top ~30% of every column — a uniform soft lid at each
+  weather texel's top altitude, which is exactly the "flat sheet" read. Now
+  the profiles keep only a thin condensation skin (cumulus 0.93 / storm 0.94
+  top fades) and top *shape* comes from a quadratically height-rising
+  threshold (`dome = h²` × 0.42 cumulus / 0.30 storm, ×(1 − 0.45·column_tall))
+  — each lobe's top is the isosurface where its own shape noise dips under
+  the rising bar, so strong lobes tower and weak lobes stay squat
+  (MSFS/Nubis-style carved cauliflower domes). No transcendentals, so the
+  per-sample perf invariant holds. The term is near zero at the base where
+  areal fill is decided, and the spawn-time calibration re-derives the
+  formation threshold + both response LUTs against the new math, so tier
+  parity survives by construction.
+- **Erosion had one character at all heights.** It now flips: wispy
+  (inverted-Worley) shredding on undersides, cauliflower billow cuts on
+  domes, slightly stronger up high (`×(0.80 + 0.55·h)`); fill_lut pre-folds
+  the height factor into `SampleRecord::erode`.
+- **Ordinary cumulus had no room to develop.** The weather producer's
+  `top_cumulus` baseline gave plain fair-weather columns <1 km of a 10.5 km
+  shell; raised to 0.14 + 0.58·(0.42·cell_broken + 0.58·congestus) +
+  0.09·vertical_noise so broken fields read as mixed-height puffs and
+  building cells carry real depth.
+
+**Verification state: compile-clean, captures BLOCKED** — the GPU dropped
+off the bus mid-session ("GPU is lost", nvidia-smi; reboot required), after
+a capture-host boot OOM'd while the user's live game session held VRAM.
+Capture script staged at `artifacts/visual/runs/cloud_morph/capture_r7.sh`
+(cruise / interior / 20 km-above / runway framings); run it after reboot and
+judge dome variety, base wisps, and that stratus regions still read as
+sheets. Carried follow-ups: far prefactor (0.68) re-match, GPU budget
+re-measure.
+
 ### Program acceptance matrix
 
 | Scenario | Pass condition |

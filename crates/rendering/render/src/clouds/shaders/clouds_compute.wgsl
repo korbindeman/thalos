@@ -339,12 +339,20 @@ fn get_cloud_map_density(
     let shared_envelope = smoothstep(0.04, 0.42, env);
 
     let bottom_softness = max(config.clouds_bottom_softness, 0.01);
+    // Round-7 morphology: convective tops are SCULPTED, not faded. The former
+    // cumulus/storm profiles bled density out over the top 30% of every
+    // column, which capped each weather texel with the same soft flat lid —
+    // the "flat sheets" verdict. Tops are now carved by the height-rising
+    // dome threshold below (a noise isosurface: strong lobes tower, weak
+    // lobes stay squat) and the profile keeps only a thin condensation skin.
+    // Stratus stays a genuine sheet. Mirrored in `march_column` (fill_lut.rs)
+    // and `cloud_surface_density_cpu` — keep the three in lockstep.
     let stratus_profile = smoothstep(0.0, bottom_softness * 0.45, h)
         * (1.0 - smoothstep(0.72, 1.0, h));
     let cumulus_profile = smoothstep(0.0, bottom_softness * 0.75, h)
-        * (1.0 - smoothstep(0.70, 1.0, h));
+        * (1.0 - smoothstep(0.93, 1.0, h));
     let storm_profile = smoothstep(0.0, bottom_softness * 0.35, h)
-        * (1.0 - smoothstep(0.88, 1.0, h));
+        * (1.0 - smoothstep(0.94, 1.0, h));
     let vertical_profile = stratus_profile * stratus_w
         + cumulus_profile * cumulus_w
         + storm_profile * storm_w;
@@ -409,12 +417,19 @@ fn get_cloud_map_density(
         + (0.5 - formation) * 0.17
         + (0.35 - surface_density) * 0.08;
     let threshold = mix(threshold_legacy, threshold_surface, coupling);
-    // Tall columns keep mass with height (towers); squat puffs round off.
-    // Mirrored in `cloud_surface_density_cpu` — keep in lockstep.
-    // (`column_tall` is declared at the shape-spectrum blend above.)
-    let vertical_narrow = h
-        * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w)
-        * (1.0 - 0.55 * column_tall);
+    // Dome sculpting: the threshold rises QUADRATICALLY with height for the
+    // convective types, so each lobe's top is where its own shape noise dips
+    // under the rising bar — a per-lobe carved dome, cheap (no
+    // transcendentals) and calibration-safe (the spawn-time fit re-derives
+    // the formation threshold against this exact math, and the term is near
+    // zero at the base where areal fill is decided). Tall congestus/storm
+    // columns keep more mass with height so towers stay coherent. Mirrored
+    // in `march_column` (fill_lut.rs) and `cloud_surface_density_cpu` — keep
+    // the three in lockstep. (`column_tall` is declared at the
+    // shape-spectrum blend above.)
+    let dome = h * h;
+    let vertical_narrow = h * 0.04 * stratus_w
+        + dome * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
     var mass = shape - threshold - vertical_narrow;
 
     // Cumulonimbus anvils broaden again near the tropopause, but only where
@@ -443,7 +458,12 @@ fn get_cloud_map_density(
             // erosion feature, not the whole tile period.
             max(config.clouds_detail_scale_m, 50.0) * 8.0,
         );
-        mass -= (1.0 - detail.b) * edge * detail_weight_lod
+        // Height-typed erosion character: near the base the Worley field is
+        // FLIPPED so undersides shred into wisps; on domes it cuts
+        // cauliflower billows, slightly stronger up high so tops crisp.
+        // Mirrored in fill_lut's `SampleRecord::erode` — keep in lockstep.
+        let erode_src = mix(detail.b, 1.0 - detail.b, smoothstep(0.10, 0.32, h));
+        mass -= erode_src * (0.80 + 0.55 * h) * edge * detail_weight_lod
             * config.clouds_detail_strength * 0.55;
     }
 

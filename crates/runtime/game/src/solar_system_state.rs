@@ -273,10 +273,16 @@ impl CloudWeatherField {
                     let base_cumulus = 0.10 + 0.07 * vertical_noise;
                     let base_storm = 0.05 + 0.04 * vertical_noise;
                     let top_stratus = base_stratus + 0.10 + 0.08 * vertical_noise;
+                    // Ordinary cumulus fields develop real depth (round 7):
+                    // the former 0.09 baseline gave plain fair-weather
+                    // columns <1 km of a 10.5 km shell — everything below
+                    // congestus rendered as a squat sheet. Building cells now
+                    // carry more of the growth so broken fields read as
+                    // mixed-height puffs rather than one flat deck.
                     let top_cumulus = base_cumulus
-                        + 0.09
-                        + 0.52 * (0.30 * cell_broken + 0.70 * congestus)
-                        + 0.06 * vertical_noise;
+                        + 0.14
+                        + 0.58 * (0.42 * cell_broken + 0.58 * congestus)
+                        + 0.09 * vertical_noise;
                     let top_storm = 0.60 + 0.38 * storm_core;
                     let base = stratus_region * base_stratus
                         + cumulus_region * base_cumulus
@@ -455,14 +461,15 @@ fn cloud_surface_density_cpu(
     let storm_w = smoothstep(0.72, 0.88, cloud_type);
     let cumulus_w = (1.0 - stratus_w - storm_w).max(0.0);
     let threshold = 0.58 + (0.30 - 0.58) * cov;
-    // Tall columns (congestus/storm towers) keep their mass with height
-    // instead of thinning into squat blobs; squat fair-weather columns still
-    // round off. Mirrored in `get_cloud_map_density` (clouds_compute.wgsl) —
-    // keep the two in lockstep.
+    // Round-7 dome sculpting: convective tops are carved by a quadratically
+    // height-rising threshold (a per-lobe noise isosurface — strong lobes
+    // tower, weak lobes stay squat) instead of the former linear thinning;
+    // tall congestus/storm columns keep more mass with height so towers stay
+    // coherent. Mirrored in `get_cloud_map_density` (clouds_compute.wgsl) and
+    // `march_column` (fill_lut.rs) — keep the three in lockstep.
     let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
-    let vertical_narrow = h
-        * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w)
-        * (1.0 - 0.55 * column_tall);
+    let vertical_narrow = h * 0.04 * stratus_w
+        + (h * h) * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
 
     let z = normalized_height.clamp(0.0, 1.0) * 4.0 - 0.5;
     let shape = if z <= 0.0 {
@@ -481,12 +488,14 @@ fn cloud_surface_density_cpu(
     mass = mass.max((shape - (threshold - 0.06)) * anvil_profile * storm_w);
 
     let bottom_softness = 0.16;
+    // Thin condensation top skins (the dome term above owns top shape);
+    // stratus stays a genuine sheet. Lockstep with the marcher + fill_lut.
     let stratus_profile =
         smoothstep(0.0, bottom_softness * 0.45, h) * (1.0 - smoothstep(0.72, 1.0, h));
     let cumulus_profile =
-        smoothstep(0.0, bottom_softness * 0.75, h) * (1.0 - smoothstep(0.70, 1.0, h));
+        smoothstep(0.0, bottom_softness * 0.75, h) * (1.0 - smoothstep(0.93, 1.0, h));
     let storm_profile =
-        smoothstep(0.0, bottom_softness * 0.35, h) * (1.0 - smoothstep(0.88, 1.0, h));
+        smoothstep(0.0, bottom_softness * 0.35, h) * (1.0 - smoothstep(0.94, 1.0, h));
     let vertical_profile =
         stratus_profile * stratus_w + cumulus_profile * cumulus_w + storm_profile * storm_w;
     smoothstep(0.0, 0.055, mass) * vertical_profile

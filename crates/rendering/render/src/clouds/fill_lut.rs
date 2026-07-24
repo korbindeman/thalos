@@ -142,7 +142,10 @@ struct SampleRecord {
     anvil_base: f32,
     env: f32,
     envelope: f32,
-    detail_b: f32,
+    /// Height-typed erosion factor: `mix(detail.b, 1 − detail.b,
+    /// smoothstep(0.10, 0.32, h)) · (0.80 + 0.55 · h)`, pre-folded because
+    /// `h` is fixed per sample (mirrors the marcher's erosion character).
+    erode: f32,
     profile: f32,
     vertical_narrow: f32,
     /// `anvil_profile * storm_w` (0 outside storm columns).
@@ -478,7 +481,7 @@ fn sample_shaped(
     }
     let edge = 1.0 - smoothstep(0.02, 0.34, mass);
     if edge * detail_weight > 1.0e-3 {
-        mass -= (1.0 - s.detail_b) * edge * detail_weight * input.detail_strength * 0.55;
+        mass -= s.erode * edge * detail_weight * input.detail_strength * 0.55;
     }
     smoothstep(0.0, edge_softness, mass)
 }
@@ -638,17 +641,23 @@ fn march_column(
                 input.detail_scale_m.max(50.0) * 8.0,
             );
 
-            let vertical_narrow = h
-                * (0.04 * stratus_w + 0.19 * cumulus_w + 0.09 * storm_w)
-                * (1.0 - 0.55 * column_tall);
+            // Round-7 dome sculpting + thin top skins + height-typed erosion:
+            // exact mirrors of `get_cloud_map_density` — keep in lockstep.
+            let vertical_narrow = h * 0.04 * stratus_w
+                + (h * h)
+                    * (0.42 * cumulus_w + 0.30 * storm_w)
+                    * (1.0 - 0.45 * column_tall);
             let anvil_profile =
                 smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
             let stratus_profile = smoothstep(0.0, bottom_softness * 0.45, h)
                 * (1.0 - smoothstep(0.72, 1.0, h));
             let cumulus_profile = smoothstep(0.0, bottom_softness * 0.75, h)
-                * (1.0 - smoothstep(0.70, 1.0, h));
+                * (1.0 - smoothstep(0.93, 1.0, h));
             let storm_profile = smoothstep(0.0, bottom_softness * 0.35, h)
-                * (1.0 - smoothstep(0.88, 1.0, h));
+                * (1.0 - smoothstep(0.94, 1.0, h));
+            let erode_flip = smoothstep(0.10, 0.32, h);
+            let erode = (detail.z + (1.0 - 2.0 * detail.z) * erode_flip)
+                * (0.80 + 0.55 * h);
             let profile = stratus_profile * stratus_w
                 + cumulus_profile * cumulus_w
                 + storm_profile * storm_w;
@@ -658,7 +667,7 @@ fn march_column(
                 anvil_base: broad.x * 0.72 + broad.w * 0.28 - macro_term,
                 env,
                 envelope: smoothstep(0.04, 0.42, env),
-                detail_b: detail.z,
+                erode,
                 profile,
                 vertical_narrow,
                 anvil_gate: anvil_profile * storm_w,
