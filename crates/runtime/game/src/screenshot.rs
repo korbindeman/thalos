@@ -273,14 +273,23 @@ fn save_perspective(
         let camera_world = DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
             * crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M as f64
             + transform.translation.as_dvec3();
-        let camera_body = body_state.orientation.inverse() * (camera_world - body_state.position);
+        // Saved perspectives are body-fixed in the SURFACE frame (the frame
+        // the ground renders in), so a replay on a tidally-locked moon lands
+        // on the same terrain the user was looking at.
+        let surface_q = crate::rendering::transforms::surface_orientation_authored(
+            &sim.system.bodies,
+            anchor.body,
+            states,
+        )
+        .unwrap_or_else(|| body_state.orientation.normalize());
+        let camera_body = surface_q.inverse() * (camera_world - body_state.position);
         let rotation_world = DQuat::from_xyzw(
             transform.rotation.x as f64,
             transform.rotation.y as f64,
             transform.rotation.z as f64,
             transform.rotation.w as f64,
         );
-        let rotation_body = (body_state.orientation.inverse() * rotation_world).normalize();
+        let rotation_body = (surface_q.inverse() * rotation_world).normalize();
         let viewport = windows
             .single()
             .map(|window| {
@@ -2409,6 +2418,7 @@ fn drive_headless_screenshot(
         if !pose_saved_perspective(
             saved,
             homeworld.0,
+            &sim.system.bodies,
             &solar,
             root,
             &mut transform,
@@ -2542,6 +2552,12 @@ fn ocean_site_context(
     let body_state = states.get(body_id)?;
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let hs = height_sources.get(body_id)?;
+    // Height sources / site searches work in the SURFACE body-fixed frame (the
+    // frame the terrain renders in) — for tidally-locked moons that is NOT the
+    // ephemeris orientation. One authority: `surface_orientation_authored`.
+    let surface_q =
+        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
+            .unwrap_or_else(|| body_state.orientation.normalize());
     let sun_world = (-body_state.position).normalize_or_zero();
     let sun_world = if sun_world == DVec3::ZERO {
         DVec3::Y
@@ -2552,8 +2568,8 @@ fn ocean_site_context(
     let dir_body = match *cached_dir {
         Some(dir) => dir,
         None => {
-            let dir = find_ocean_site(hs.as_ref(), body_state.orientation, sun_world);
-            let up_world = (body_state.orientation * dir).normalize();
+            let dir = find_ocean_site(hs.as_ref(), surface_q, sun_world);
+            let up_world = (surface_q * dir).normalize();
             let sun_elevation_deg = up_world.dot(sun_world).clamp(-1.0, 1.0).asin().to_degrees();
             let depth_m = -hs
                 .sample_height_m(dir.as_vec3(), OCEAN_SITE_LOD_M)
@@ -2567,7 +2583,7 @@ fn ocean_site_context(
         }
     };
 
-    let up_world = (body_state.orientation * dir_body).normalize();
+    let up_world = (surface_q * dir_body).normalize();
     Some(HubContext {
         body_id,
         center_world: body_state.position + up_world * radius_m,
@@ -2646,13 +2662,20 @@ fn daylight_surface_context(
     let body_state = states.get(body_id)?;
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let hs = height_sources.get(body_id)?;
+    // Landmark dirs + height sources live in the SURFACE frame (see the
+    // ocean-context note) — using the ephemeris orientation on a tidally
+    // locked moon posed the rim camera ~130° of longitude away from its
+    // crater.
+    let surface_q =
+        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
+            .unwrap_or_else(|| body_state.orientation.normalize());
     let sun_inertial = (-body_state.position).normalize_or_zero();
     let sun_world = if sun_inertial == DVec3::ZERO {
         DVec3::Y
     } else {
         sun_inertial
     };
-    let sun_body = (body_state.orientation.inverse() * sun_world).normalize();
+    let sun_body = (surface_q.inverse() * sun_world).normalize();
     let (dir_body, landmark_radius_m) = match *cached_site {
         Some(site) => site,
         None => {
@@ -2672,7 +2695,7 @@ fn daylight_surface_context(
             site
         }
     };
-    let up_world = (body_state.orientation * dir_body).normalize();
+    let up_world = (surface_q * dir_body).normalize();
     let height_m = hs
         .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
         .unwrap_or(0.0) as f64;
@@ -2707,11 +2730,14 @@ fn eva_surface_context(
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let height_source = height_sources.get(body_id)?;
 
+    let surface_q =
+        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
+            .unwrap_or_else(|| body_state.orientation.normalize());
     let craft_world = sim.simulation.craft_state().translation.position;
     let up_world = (craft_world - body_state.position)
         .try_normalize()
         .unwrap_or_else(|| (-body_state.position).try_normalize().unwrap_or(DVec3::Y));
-    let dir_body = (body_state.orientation.inverse() * up_world).normalize();
+    let dir_body = (surface_q.inverse() * up_world).normalize();
     let height_m = height_source
         .sample_height_m(dir_body.as_vec3(), 1.0)
         .unwrap_or(0.0) as f64;
@@ -2724,7 +2750,7 @@ fn eva_surface_context(
     static EVA_SUN_LOGGED: std::sync::Once = std::sync::Once::new();
     EVA_SUN_LOGGED.call_once(|| {
         if let Some(sun_body) = sun_direction_world(solar, body_id)
-            .map(|sun| (body_state.orientation.inverse() * sun).normalize())
+            .map(|sun| (surface_q.inverse() * sun).normalize())
         {
             let incidence_deg = dir_body.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
             info!(
@@ -2827,7 +2853,13 @@ fn find_rugged_airless_site(
             .filter(|landmark| band.contains(&landmark.dir.dot(sun_dir)))
     };
     let landmark = match choice {
-        LandmarkChoice::Typical => in_band().next(),
+        // Relief is measured from the surface now (see `airless_landmarks`),
+        // so skip fully-degraded ghosts — the first in-band entry can be a
+        // crater the bake relaxed to a plain (measured ~0 m), which frames
+        // featureless ground.
+        LandmarkChoice::Typical => in_band()
+            .find(|landmark| landmark.relief_m > 500.0)
+            .or_else(|| in_band().next()),
         LandmarkChoice::MostLegible => in_band().max_by(|a, b| a.relief_m.total_cmp(&b.relief_m)),
     };
     if let Some(landmark) = landmark {
@@ -3018,19 +3050,23 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
 fn pose_saved_perspective(
     saved: &SavedPerspective,
     body_id: BodyId,
+    bodies: &[thalos_world::BodyDefinition],
     solar: &SolarSystemState,
     root: &Grid,
     transform: &mut Transform,
     cell: &mut CellCoord,
     projection: &mut Projection,
 ) -> bool {
-    let Some(body_state) = solar
-        .states
-        .as_deref()
-        .and_then(|states| states.get(body_id))
-    else {
+    let Some(states) = solar.states.as_deref() else {
         return false;
     };
+    let Some(body_state) = states.get(body_id) else {
+        return false;
+    };
+    // Same SURFACE frame the save wrote (see `handle_save_perspective`).
+    let surface_q =
+        crate::rendering::transforms::surface_orientation_authored(bodies, body_id, states)
+            .unwrap_or_else(|| body_state.orientation.normalize());
     let camera_body = DVec3::from_array(saved.camera_position_body_m);
     let rotation_body = DQuat::from_xyzw(
         saved.camera_rotation_body_xyzw[0],
@@ -3039,8 +3075,8 @@ fn pose_saved_perspective(
         saved.camera_rotation_body_xyzw[3],
     )
     .normalize();
-    let camera_world = body_state.position + body_state.orientation * camera_body;
-    let rotation_world = (body_state.orientation * rotation_body).normalize();
+    let camera_world = body_state.position + surface_q * camera_body;
+    let rotation_world = (surface_q * rotation_body).normalize();
     let (next_cell, local) = root.translation_to_grid(camera_world);
     *cell = next_cell;
     transform.translation = local;
@@ -3500,6 +3536,9 @@ fn dry_site_context(
     let body_state = states.get(body_id)?;
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let hs = height_sources.get(body_id)?;
+    let surface_q =
+        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
+            .unwrap_or_else(|| body_state.orientation.normalize());
 
     let dir_body = match *cached_dir {
         Some(d) => d,
@@ -3511,7 +3550,7 @@ fn dry_site_context(
             let sun_body = if sun_inertial == DVec3::ZERO {
                 DVec3::Y
             } else {
-                (body_state.orientation.inverse() * sun_inertial).normalize()
+                (surface_q.inverse() * sun_inertial).normalize()
             };
             let d = find_driest_site(hs.as_ref(), sun_body);
             *cached_dir = Some(d);
@@ -3525,7 +3564,7 @@ fn dry_site_context(
         }
     };
 
-    let up_world = (body_state.orientation * dir_body).normalize();
+    let up_world = (surface_q * dir_body).normalize();
     let height_m = hs
         .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
         .unwrap_or(0.0)
@@ -3609,7 +3648,10 @@ fn cloud_site_context(
         return None;
     }
 
-    let sun_body = (body_state.orientation.inverse() * sun_world).normalize();
+    let surface_q =
+        crate::rendering::transforms::surface_orientation_authored(&sim.system.bodies, body_id, states)
+            .unwrap_or_else(|| body_state.orientation.normalize());
+    let sun_body = (surface_q.inverse() * sun_world).normalize();
     let seed = if sun_body.dot(DVec3::Y).abs() < 0.99 {
         DVec3::Y
     } else {
@@ -3618,7 +3660,7 @@ fn cloud_site_context(
     let across_terminator = (seed - sun_body * seed.dot(sun_body)).normalize();
     let elevation = (sun_elevation_deg as f64).to_radians();
     let up_body = (sun_body * elevation.sin() + across_terminator * elevation.cos()).normalize();
-    let up_world = (body_state.orientation * up_body).normalize();
+    let up_world = (surface_q * up_body).normalize();
 
     let radius_m = sim.system.bodies.get(body_id)?.radius_m;
     let height_m = height_sources

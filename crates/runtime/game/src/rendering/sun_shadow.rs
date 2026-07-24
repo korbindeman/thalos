@@ -573,10 +573,11 @@ fn update_sun_shadow_camera(
         // mode (high orbit) genuinely is about the craft-as-caster, so it keeps
         // the canonical craft state; the anchor also falls back to the craft
         // when it is unresolved or resolved against another body.
-        let player_inertial = view_anchor
+        let anchor_here = view_anchor
             .resolved
-            .filter(|a| !craft_local && a.body == active_id)
-            .map(|a| a.cam_world(body_state))
+            .filter(|a| !craft_local && a.body == active_id);
+        let player_inertial = anchor_here
+            .map(|a| a.cam_world(states))
             .unwrap_or_else(|| sim.simulation.ship_state().position);
         let radial = player_inertial - body_state.position;
         let r = radial.length();
@@ -591,7 +592,15 @@ fn update_sun_shadow_camera(
         // cascades — the "pixelated shadow right at the craft" bug. A missing
         // height sample (cold tiles) falls back to the datum, which merely
         // reproduces the old centring until tiles stream in.
-        let dir_body = (body_state.orientation.inverse() * radial_dir).as_vec3();
+        // Height sources sample in the SURFACE body-fixed frame (the frame the
+        // terrain renders in). The anchor's nadir is already that frame; the
+        // craft fallback converts through the ephemeris orientation, which for
+        // a tidally-locked moon is a different frame — acceptable there only
+        // because the fallback is the craft path, and a datum-height miss just
+        // reproduces the old centring (see the comment above).
+        let dir_body = anchor_here
+            .map(|a| a.cam_dir.as_vec3())
+            .unwrap_or_else(|| (body_state.orientation.inverse() * radial_dir).as_vec3());
         let terrain_h = height_sources
             .get(active_id)
             .and_then(|hs| {

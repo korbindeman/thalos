@@ -299,6 +299,18 @@ pub(super) fn spawn_bodies(
                 field.face_size,
                 CloudWeatherField::MIP_LEVELS,
             ));
+            // Derived near/far fill pairing for this body's actual weather
+            // cube (BL-20260723T214730Z): one Monte-Carlo derivation feeds
+            // both the marcher's threshold curve and the composite's opacity
+            // LUT, so the two tiers render the same thickness by construction.
+            world_state.body_cloud_fill.0.insert(
+                body.id,
+                super::clouds::derive_body_fill_calibration(
+                    &field,
+                    climate,
+                    body.radius_m as f32,
+                ),
+            );
             solar.install_cloud_weather(body.id, field);
             // Registry for the near-marcher handle rebind: the compute pass
             // must sample THESE spawn-uploaded cubes, never a runtime-mutated
@@ -525,7 +537,6 @@ pub(super) fn spawn_bodies(
             // 0b-1 interim: the impostor is a lit solid-color sphere tinted by
             // the body colour. The real distant view (udlod everywhere visible
             // + unified atmosphere) is Slice 6, which deletes this stand-in.
-            let tidal_axis = matches!(body.kind, BodyKind::Moon).then_some(Vec3::Z);
 
             let body_entity = commands
                 .spawn((
@@ -543,10 +554,10 @@ pub(super) fn spawn_bodies(
 
             // Tidally-locked moons get their local +Z axis as the parent
             // direction (matches the editor); both the body entity and the
-            // real-space grid carry the tag.
-            if tidal_axis.is_some()
-                && let Some(parent_id) = body.parent
-            {
+            // real-space grid carry the tag. The rule lives in
+            // `transforms::authored_lock_parent` so frame-conversion consumers
+            // without ECS access derive the identical lock.
+            if let Some(parent_id) = super::transforms::authored_lock_parent(body) {
                 commands
                     .entity(body_entity)
                     .insert(TidallyLocked { parent_id });

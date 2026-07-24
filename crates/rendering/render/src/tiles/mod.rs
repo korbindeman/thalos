@@ -232,6 +232,23 @@ struct BuiltTile {
     mesh: Mesh,
     /// Body-fixed f64 position of the mesh origin (displaced tile center).
     origin: DVec3,
+    /// Radial deviation range (m) of the built interior vertices from the
+    /// reference sphere — the mesh-side counterpart of the provider height
+    /// range, so "heights sampled" vs "heights in the mesh" separate in the
+    /// telemetry.
+    mesh_h: (f32, f32),
+}
+
+/// Debug relief exaggeration (`THALOS_TILE_HEIGHT_SCALE`, default 1.0) —
+/// makes "is displacement reaching the rendered mesh at all" undeniable.
+fn debug_height_scale() -> f64 {
+    static SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *SCALE.get_or_init(|| {
+        std::env::var("THALOS_TILE_HEIGHT_SCALE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(1.0)
+    })
 }
 
 fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
@@ -240,13 +257,14 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     let side = SurfaceTile::grid_side();
     let res = TILE_RES;
     let step = 1.0 / (res - 1) as f64;
+    let h_scale = debug_height_scale();
 
     let mut pos_grid: Vec<DVec3> = Vec::with_capacity(side * side);
     for j in 0..side {
         for i in 0..side {
             let s = (i as f64 - halo as f64) * step;
             let t = (j as f64 - halo as f64) * step;
-            let h = tile.heights_m[j * side + i] as f64;
+            let h = tile.heights_m[j * side + i] as f64 * h_scale;
             pos_grid.push(key.dir_at(s, t) * (radius_m + h));
         }
     }
@@ -258,10 +276,14 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(res * res);
     let mut indices: Vec<u32> = Vec::with_capacity((res - 1) * (res - 1) * 6);
 
+    let mut mesh_h = (f32::INFINITY, f32::NEG_INFINITY);
     for j in 0..res {
         for i in 0..res {
             let (gi, gj) = (i + halo, j + halo);
             let p = pos_grid[gj * side + gi];
+            let dev = (p.length() - radius_m) as f32;
+            mesh_h.0 = mesh_h.0.min(dev);
+            mesh_h.1 = mesh_h.1.max(dev);
             let rel = p - origin;
             positions.push([rel.x as f32, rel.y as f32, rel.z as f32]);
             let du = pos_grid[gj * side + gi + 1] - pos_grid[gj * side + gi - 1];
@@ -287,8 +309,10 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
         }
     }
 
-    // Winding self-test — a probe M0 contract obligation.
-    {
+    // Winding self-test — a probe M0 contract obligation. Skipped under the
+    // debug height exaggeration: extreme scales legitimately invert steep
+    // triangles, which is the exaggeration doing its job, not a winding bug.
+    if (h_scale - 1.0).abs() < 1e-9 {
         let tri = [indices[0] as usize, indices[1] as usize, indices[2] as usize];
         let (p0, p1, p2) = (
             DVec3::from(positions[tri[0]].map(f64::from)),
@@ -347,7 +371,7 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
-    BuiltTile { mesh, origin }
+    BuiltTile { mesh, origin, mesh_h }
 }
 
 // --- streaming (probe streaming.rs, per-root) ------------------------------------
@@ -401,26 +425,32 @@ struct GenStats {
     total_landed: u64,
     h_min: f32,
     h_max: f32,
+    mesh_min: f32,
+    mesh_max: f32,
 }
 
 impl GenStats {
-    fn record(&mut self, micros: u64, h_range: (f32, f32)) {
+    fn record(&mut self, micros: u64, h_range: (f32, f32), mesh_h: (f32, f32)) {
         self.samples.push(micros);
         self.total_landed += 1;
         self.h_min = self.h_min.min(h_range.0);
         self.h_max = self.h_max.max(h_range.1);
+        self.mesh_min = self.mesh_min.min(mesh_h.0);
+        self.mesh_max = self.mesh_max.max(mesh_h.1);
         if self.samples.len() >= 200 {
             self.samples.sort_unstable();
             let mean = self.samples.iter().sum::<u64>() / self.samples.len() as u64;
             let p95 = self.samples[self.samples.len() * 95 / 100];
             info!(
-                "tile terrain: {} tiles landed | gen mean {:.1} ms p95 {:.1} ms (last {}) | h [{:.1}, {:.1}] m",
+                "tile terrain: {} tiles landed | gen mean {:.1} ms p95 {:.1} ms (last {}) | provider h [{:.1}, {:.1}] m | mesh h [{:.1}, {:.1}] m",
                 self.total_landed,
                 mean as f64 / 1000.0,
                 p95 as f64 / 1000.0,
                 self.samples.len(),
                 self.h_min,
                 self.h_max,
+                self.mesh_min,
+                self.mesh_max,
             );
             self.samples.clear();
         }
@@ -460,6 +490,7 @@ impl TileTerrainRoot {
     pub fn coverage_ready(&self) -> bool {
         self.covered_once
     }
+
 
     pub fn settled(&self) -> bool {
         self.pending.is_empty()
@@ -621,7 +652,9 @@ fn stream_tile_terrain(
         }
     });
     for done in landed {
-        root_ref.gen_stats.record(done.gen_micros, done.h_range);
+        root_ref
+            .gen_stats
+            .record(done.gen_micros, done.h_range, done.built.mesh_h);
         let (cell, local) = grid.translation_to_grid(done.built.origin);
         let entity = commands
             .spawn((

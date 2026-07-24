@@ -48,7 +48,7 @@
 //! camera's *look-at* ground intersection instead — nadir is the simple,
 //! robust standard clipmap choice.
 
-use bevy::math::DVec3;
+use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
 use big_space::prelude::CellCoord;
 use thalos_physics_canonical::types::BodyState;
@@ -58,6 +58,8 @@ use thalos_world::BodyId;
 use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M;
+use crate::rendering::transforms::{authored_lock_parent, surface_body_to_world_orientation_f64};
+use crate::rendering::types::TidallyLocked;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
 
 /// LOD hint for the anchor's single nadir terrain-height probe. Fine enough
@@ -76,14 +78,20 @@ pub struct ViewAnchor {
 }
 
 /// The view anchor resolved in the body-fixed frame of [`Self::body`]. All
-/// positions/directions are body-fixed metres; re-project to heliocentric with
-/// the *current* frame's [`BodyState`] via [`Self::cam_world`] /
-/// [`Self::ground_world`] (see the module note on frame coherence).
+/// positions/directions are body-fixed metres, in the **surface frame** — the
+/// same `surface_body_to_world_orientation_f64` frame the real-space body grid,
+/// the udlod terrain, the tile terrain, and the height sources use. (For a
+/// tidally-locked moon that frame differs from the raw ephemeris
+/// `BodyState::orientation` by the full lock rotation — resolving with the
+/// ephemeris frame put the anchor ~130° of longitude away from the camera on
+/// Mira, see INC-20260723T232652Z's successor investigation.) Re-project to
+/// heliocentric with the *current* frame's states via [`Self::cam_world`]
+/// (see the module note on frame coherence).
 #[derive(Clone, Copy)]
 pub struct AnchorBody {
     /// The nearest terrain-backed body (has a registered height source).
     pub body: BodyId,
-    /// Camera position, body-fixed.
+    /// Camera position, body-fixed (surface frame).
     pub cam_body: DVec3,
     /// Unit nadir direction (`cam_body / |cam_body|`), body-fixed.
     pub cam_dir: DVec3,
@@ -94,14 +102,30 @@ pub struct AnchorBody {
     pub ground_h_m: f64,
     /// Camera altitude above the sampled terrain, metres.
     pub agl_m: f64,
+    /// Tidal-lock parent (from the body entity's `TidallyLocked` tag), carried
+    /// so re-projection can rebuild the surface orientation at any epoch.
+    pub lock_parent: Option<BodyId>,
 }
 
 impl AnchorBody {
-    /// Heliocentric camera position at `state`'s epoch. (The ground point
-    /// below it is derivable as `state.position + state.orientation *
-    /// (cam_dir * (radius_m + ground_h_m))` should a consumer need it.)
-    pub fn cam_world(&self, state: &BodyState) -> DVec3 {
-        state.position + state.orientation * self.cam_body
+    /// The body's surface (body-fixed → world) orientation at the epoch of
+    /// `states` — the one orientation authority every surface consumer shares.
+    pub fn surface_orientation(&self, states: &[BodyState]) -> DQuat {
+        let lock = self.lock_parent.map(|parent_id| TidallyLocked { parent_id });
+        surface_body_to_world_orientation_f64(self.body, lock.as_ref(), states)
+            .or_else(|| states.get(self.body).map(|s| s.orientation.normalize()))
+            .unwrap_or(DQuat::IDENTITY)
+    }
+
+    /// Heliocentric camera position at the epoch of `states`. (The ground
+    /// point below it is derivable by substituting
+    /// `cam_dir * (radius_m + ground_h_m)` for `cam_body`.)
+    pub fn cam_world(&self, states: &[BodyState]) -> DVec3 {
+        let position = states
+            .get(self.body)
+            .map(|s| s.position)
+            .unwrap_or(DVec3::ZERO);
+        position + self.surface_orientation(states) * self.cam_body
     }
 }
 
@@ -162,7 +186,15 @@ fn update_view_anchor(
 
     let radius_m = sim.system.bodies[body].radius_m;
     let state = &states[body];
-    let cam_body = state.orientation.inverse() * (cam_pos - state.position);
+    // Resolve into the SURFACE body-fixed frame — the frame the body grid's
+    // rotation, the terrain renderers, and the height sources all share. For a
+    // tidally-locked moon this is the lock composition, not the raw ephemeris
+    // orientation (which is a different frame entirely).
+    let lock_parent = authored_lock_parent(&sim.system.bodies[body]);
+    let lock = lock_parent.map(|parent_id| TidallyLocked { parent_id });
+    let orientation = surface_body_to_world_orientation_f64(body, lock.as_ref(), states)
+        .unwrap_or_else(|| state.orientation.normalize());
+    let cam_body = orientation.inverse() * (cam_pos - state.position);
     let cam_r = cam_body.length();
     if cam_r <= 0.0 {
         return;
@@ -180,5 +212,6 @@ fn update_view_anchor(
         radius_m,
         ground_h_m,
         agl_m: cam_r - (radius_m + ground_h_m),
+        lock_parent,
     });
 }

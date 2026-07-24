@@ -34,7 +34,7 @@ pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
 pub(crate) mod tile_terrain;
 mod trails;
-mod transforms;
+pub(crate) mod transforms;
 mod types;
 mod vegetation;
 pub(crate) mod view_anchor;
@@ -55,6 +55,10 @@ pub(crate) mod view_anchor;
 pub const SHADOW_CASCADE_COUNT: usize = 2;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
+/// Test-only alias: the cloud-fill dev probe (`solar_system_state` tests)
+/// runs the spawn-time derivation without booting a capture.
+#[cfg(test)]
+pub(crate) use clouds::derive_body_fill_calibration as derive_body_fill_calibration_for_probe;
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 use ground_terrain::{
     pause_surface_terrain_streaming_at_high_warp, sync_body_render_lod,

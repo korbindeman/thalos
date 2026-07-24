@@ -353,6 +353,36 @@ pub(super) fn surface_body_to_world_orientation(
 /// [`thalos_udlod::prelude::PreciseRotation`]. At planet scale this rotation
 /// is applied to the camera→body vector (~radius), where f32 quaternion ULP
 /// is a flickering decimetre — see that component's docs.
+/// The authored-data tidal-lock rule — the ONE place that decides which bodies
+/// are surface-locked to a parent. `spawn` inserts the `TidallyLocked` tag
+/// from this, and frame-conversion consumers without ECS access (screenshot
+/// framings, saved-perspective replay) derive the lock from it directly, so
+/// the two can never disagree.
+pub fn authored_lock_parent(body: &thalos_world::BodyDefinition) -> Option<usize> {
+    matches!(body.kind, thalos_world::BodyKind::Moon)
+        .then_some(())
+        .and(body.parent)
+}
+
+/// Surface body-fixed → world orientation resolved from authored bodies +
+/// evaluated states alone (no ECS query). This is the frame every surface
+/// consumer must share — terrain renderers, height sources, view anchor,
+/// capture framings. Using the raw ephemeris `BodyState::orientation` instead
+/// is wrong for tidally-locked moons (the two frames differ by the full lock
+/// rotation — the Mira tile-shell 132° misplacement, INC-20260723T232652Z's
+/// successor finding).
+pub fn surface_orientation_authored(
+    bodies: &[thalos_world::BodyDefinition],
+    body_id: BodyId,
+    states: &[BodyState],
+) -> Option<DQuat> {
+    let lock = bodies
+        .get(body_id)
+        .and_then(authored_lock_parent)
+        .map(|parent_id| TidallyLocked { parent_id });
+    surface_body_to_world_orientation_f64(body_id, lock.as_ref(), states)
+}
+
 pub(super) fn surface_body_to_world_orientation_f64(
     body_id: BodyId,
     lock: Option<&TidallyLocked>,
