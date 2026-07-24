@@ -631,6 +631,42 @@ fn covered_by_resident(
         .all(|child| covered_by_resident(child, resident, max_level))
 }
 
+/// Bridge requests: children of stale resident ancestors whose replacement
+/// gap spans more than one level. Only desired tiles are generated otherwise,
+/// so a fast approach (selection skipping levels) left a coarse parent
+/// waiting for its ENTIRE deep leaf set — up to 4^gap tiles — while its
+/// geometry poked through the refined terrain. Bridges make replacement
+/// cascade level-by-level: each step releases on just 4 landings, and the
+/// visible overlap never spans more than one level (a divergence small
+/// enough for the per-level depth bias to hide). Pyramid overhead ≤ ~1/3.
+fn bridge_requests(
+    desired: &HashSet<TileKey>,
+    resident: &HashMap<TileKey, Entity>,
+) -> HashSet<TileKey> {
+    let mut bridges = HashSet::new();
+    for k in desired {
+        // Nearest resident strict ancestor decides the current gap.
+        let mut probe = *k;
+        while let Some(p) = probe.parent() {
+            if p.level < MIN_LEVEL {
+                break;
+            }
+            probe = p;
+            if resident.contains_key(&probe) {
+                if k.level > probe.level + 1 {
+                    for child in probe.children() {
+                        if !resident.contains_key(&child) && !desired.contains(&child) {
+                            bridges.insert(child);
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+    bridges
+}
+
 /// The despawn decision + retirement bookkeeping, extracted pure so the
 /// descent simulation test can drive the exact production logic. Returns the
 /// keys whose grace gates expired this tick (the caller despawns them).
@@ -743,15 +779,23 @@ fn stream_tile_terrain(
 
     root_ref.desired = select_leaves(cam, radius, max_level);
 
+    // Bridge tiles keep multi-level replacement progressive (see
+    // `bridge_requests`).
+    let bridges = bridge_requests(&root_ref.desired, &root_ref.resident);
+
     // Cancel pending tiles nobody wants (task drop aborts).
     let desired = &root_ref.desired;
-    root_ref.pending.retain(|key, _| desired.contains(key));
+    root_ref
+        .pending
+        .retain(|key, _| desired.contains(key) || bridges.contains(key));
 
-    // Admit missing, screen-size-priority (distance / tile size — absolute
-    // nearest-first starves coarse merge-targets; probe M3 finding).
+    // Admit missing (desired + bridges), screen-size-priority (distance /
+    // tile size — absolute nearest-first starves coarse merge-targets; probe
+    // M3 finding).
     let mut missing: Vec<TileKey> = root_ref
         .desired
         .iter()
+        .chain(bridges.iter())
         .filter(|k| !root_ref.resident.contains_key(k) && !root_ref.pending.contains_key(k))
         .copied()
         .collect();
@@ -1003,22 +1047,27 @@ mod streaming_tests {
             (lo.x >> shift) == hi.x && (lo.y >> shift) == hi.y
         };
 
+        // 62 s of flight, then hold still 13 s so retirement fully settles.
         let mut t = 0.0_f32;
-        while t < 62.0 {
+        while t < 75.0 {
             let cam = cam_at(t);
             let desired = select_leaves(cam, RADIUS_M, max_level);
+            let bridges = bridge_requests(&desired, &resident);
 
             // Cancel pendings nobody wants (production: Task drop).
-            let (keep, cancelled): (Vec<_>, Vec<_>) =
-                pending.into_iter().partition(|(key, _)| desired.contains(key));
+            let (keep, cancelled): (Vec<_>, Vec<_>) = pending
+                .into_iter()
+                .partition(|(key, _)| desired.contains(key) || bridges.contains(key));
             pending = keep;
             for (key, _) in cancelled {
                 events.push((t, "cancel", key));
             }
 
-            // Admit missing by screen-size priority up to the in-flight cap.
+            // Admit missing (desired + bridges) by screen-size priority up to
+            // the in-flight cap.
             let mut missing: Vec<TileKey> = desired
                 .iter()
+                .chain(bridges.iter())
                 .filter(|k| {
                     !resident.contains_key(k) && !pending.iter().any(|(p, _)| p == *k)
                 })
@@ -1093,6 +1142,21 @@ mod streaming_tests {
             t += DT;
         }
         assert!(covered_once, "descent never reached full coverage");
+
+        // After 13 s stationary, every stale tile (bridges included) must
+        // have retired: residents converge exactly onto the desired set.
+        let desired = select_leaves(cam_at(75.0), RADIUS_M, max_level);
+        let stale: Vec<TileKey> = resident
+            .keys()
+            .filter(|k| !desired.contains(k))
+            .copied()
+            .collect();
+        assert!(
+            stale.is_empty(),
+            "{} stale residents never retired after settling; first={:?}",
+            stale.len(),
+            stale.first()
+        );
     }
 }
 
