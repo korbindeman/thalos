@@ -29,7 +29,16 @@
             forced_young_count: 8,
             min_crater_radius_m: 650.0,
             max_crater_radius_m: 90000.0,
-            cubemap_bake_threshold_m: 1500.0,
+            // Above `max_crater_radius_m`: EVERY crater is runtime-synthesized
+            // analytically (round at any LOD) and none is rasterized into the
+            // 512-res height cubemap (~2.7 km/texel), where mid-size craters
+            // rendered as square texel bumps and large rims as staircases —
+            // the "super low res base" the NTR-X1 tile path exposed once its
+            // honest sampling replaced udlod's masking shader noise (the
+            // cubemap keeps only macro shape: basins, mare, megastructure).
+            // Sub-1.5 km craters were always runtime; this adds only the rare
+            // mid/large ones to per-sample synthesis.
+            cubemap_bake_threshold_m: 100000.0,
             secondary_parent_radius_m: 30000.0,
             secondaries_per_parent: 14,
             mare_fill_fraction: 0.72,

@@ -304,6 +304,10 @@ fn apply_craft_shadow(
     maps: Res<CraftShadowMaps>,
     mut materials: ResMut<Assets<ShipPartMaterial>>,
     mut shadowed_materials: ResMut<Assets<ShadowedStandardMaterial>>,
+    // Option: the tile-terrain material is registered by `TileTerrainPlugin`
+    // (BodyRenderPlugin apps); `CraftRenderPlugin`-only apps (the standalone
+    // editor) don't have it.
+    tile_materials: Option<ResMut<Assets<crate::tiles::material::TileTerrainMaterial>>>,
 ) {
     for (_, mat) in materials.iter_mut() {
         let ext = &mut mat.extension;
@@ -318,6 +322,15 @@ fn apply_craft_shadow(
         ext.sun_shadow_map_0 = maps.images[0].clone();
         ext.sun_shadow_map_1 = maps.images[1].clone();
         ext.sun_shadow_map_2 = maps.images[2].clone();
+    }
+    if let Some(mut tile_materials) = tile_materials {
+        for (_, mat) in tile_materials.iter_mut() {
+            let ext = &mut mat.extension;
+            ext.shadow = maps.block;
+            ext.sun_shadow_map_0 = maps.images[0].clone();
+            ext.sun_shadow_map_1 = maps.images[1].clone();
+            ext.sun_shadow_map_2 = maps.images[2].clone();
+        }
     }
 }
 

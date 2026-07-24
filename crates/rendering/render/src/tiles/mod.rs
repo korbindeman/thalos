@@ -29,6 +29,8 @@ use bevy::tasks::{Task, block_on, poll_once};
 use big_space::prelude::*;
 use thalos_terrain::SurfaceQuery;
 
+pub mod material;
+
 /// Vertices per tile side (core grid, excluding halo).
 pub const TILE_RES: usize = 65;
 /// Halo rings included in every sampled grid (edge-exact normals).
@@ -404,7 +406,7 @@ struct StreamedTile {
 pub struct TileTerrainRoot {
     pub radius_m: f64,
     pub provider: Arc<dyn TerrainTileProvider>,
-    pub material: Handle<StandardMaterial>,
+    pub material: Handle<material::TileTerrainMaterial>,
     pub max_level: u8,
     desired: HashSet<TileKey>,
     resident: HashMap<TileKey, Entity>,
@@ -461,7 +463,7 @@ impl TileTerrainRoot {
     pub fn new(
         radius_m: f64,
         provider: Arc<dyn TerrainTileProvider>,
-        material: Handle<StandardMaterial>,
+        material: Handle<material::TileTerrainMaterial>,
     ) -> Self {
         // Deepest level targets ~9 m sample spacing (probe budget).
         let face_arc = radius_m * core::f64::consts::FRAC_PI_2;
@@ -713,12 +715,18 @@ fn stream_tile_terrain(
     }
 }
 
-/// Registers the streaming system; inert until a [`TileTerrainRoot`] exists
-/// and the game writes [`TileEye`].
+/// Registers the tile material + streaming system; inert until a
+/// [`TileTerrainRoot`] exists and the game writes [`TileEye`].
 pub struct TileTerrainPlugin;
 
 impl Plugin for TileTerrainPlugin {
     fn build(&self, app: &mut App) {
+        // The tile shader imports `thalos::shadow` / `thalos::lighting`; make
+        // sure the library is registered (no-op if already added).
+        if !app.is_plugin_added::<crate::shading::PlanetLightingPlugin>() {
+            app.add_plugins(crate::shading::PlanetLightingPlugin);
+        }
+        app.add_plugins(bevy::pbr::MaterialPlugin::<material::TileTerrainMaterial>::default());
         app.init_resource::<TileEye>()
             .add_systems(Update, stream_tile_terrain);
     }

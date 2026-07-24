@@ -22,6 +22,7 @@
 use std::sync::{Arc, OnceLock};
 
 use bevy::prelude::*;
+use thalos_body_render::tiles::material::{TileShadingParams, TileTerrainMaterial, tile_material};
 use thalos_body_render::tiles::{
     SurfaceQueryProvider, TileEye, TileEyeTarget, TileTerrainRoot,
 };
@@ -76,9 +77,10 @@ impl Plugin for TileTerrainDriverPlugin {
 fn ensure_tile_root(
     anchor: Res<ViewAnchor>,
     surfaces: Res<BodySurfaceRegistry>,
+    sim: Res<crate::solar_system_state::SimulationState>,
     bodies: Query<(Entity, &RealSpaceBody)>,
     existing: Query<(), With<TileTerrainRoot>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut materials: ResMut<Assets<TileTerrainMaterial>>,
     mut rebuild: ResMut<TerrainRebuildRequest>,
     mut commands: Commands,
 ) {
@@ -94,14 +96,26 @@ fn ensure_tile_root(
     let Some((entity, _)) = bodies.iter().find(|(_, rsb)| rsb.body_id == resolved.body) else {
         return;
     };
-    // Vertex colors carry the surface's linear albedo; the material itself
-    // stays neutral. (Hapke/shadow-rig integration is the follow-up slice.)
-    let material = materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        perceptual_roughness: 0.97,
-        metallic: 0.0,
-        ..default()
-    });
+    // Vertex colors carry the surface's linear albedo; the base material
+    // stays neutral. Airless bodies shade through the Hapke regolith branch
+    // (tile_terrain.wgsl) so ground reconverges with the impostor's Hapke
+    // look; atmosphere-bearing bodies keep stock PBR. Both branches receive
+    // the shared `thalos::shadow` cascade via `apply_craft_shadow`.
+    let airless = sim
+        .system
+        .bodies
+        .get(resolved.body)
+        .is_none_or(|body| body.terrestrial_atmosphere.is_none());
+    let params = if airless { TileShadingParams::hapke() } else { TileShadingParams::pbr() };
+    let material = materials.add(tile_material(
+        StandardMaterial {
+            base_color: Color::WHITE,
+            perceptual_roughness: 0.97,
+            metallic: 0.0,
+            ..default()
+        },
+        params,
+    ));
     let radius_m = resolved.radius_m;
     let root = TileTerrainRoot::new(
         radius_m,
