@@ -95,8 +95,17 @@ pub struct BodySkyExtra {
     /// Near-volume march-reach contract for the cloud composite's partition of
     /// unity: x = configured view raymarch step count (f32), so the composite
     /// can reproduce the marcher's per-ray reach analytically and hand every
-    /// texel beyond it to the weather-column orbital estimator. y/z/w spare.
+    /// texel beyond it to the weather-column orbital estimator.
+    /// y = tier diagnostic (−1 near-only / 0 composite / +1 far-only),
+    /// z = far footprint-mip mode, w = far coverage-preserving mode.
     pub cloud_march: Vec4,
+    /// The far tier's opacity response: 16 nodes of expected near-column
+    /// opacity as a function of the profile-weighted strata mean (node `i` at
+    /// `i / 15`), derived per body with the near threshold curve by
+    /// `clouds::fill_lut::derive_fill_calibration`. Rendering this LUT is what
+    /// keeps the far projection's thickness equal to the near volume's — do
+    /// not replace it with a hand-tuned curve (BL-20260723T214730Z).
+    pub fill_response: [Vec4; 4],
 }
 
 impl Default for BodySkyExtra {
@@ -118,6 +127,7 @@ impl Default for BodySkyExtra {
             tile_lookup: Vec4::ZERO,
             tile_atlas_uv: Vec4::ZERO,
             cloud_march: Vec4::ZERO,
+            fill_response: [Vec4::ZERO; 4],
         }
     }
 }

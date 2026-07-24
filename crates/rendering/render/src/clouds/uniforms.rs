@@ -45,6 +45,10 @@ pub(crate) struct CloudsUniform {
     pub inverse_camera_view: Mat4,
     pub inverse_camera_projection: Mat4,
     pub wind_displacement: Vec3,
+    /// Derived formation-threshold curve (8 piecewise-linear nodes over
+    /// strata density, packed x0..w0, x1..w1). See `fill_lut`.
+    pub fill_threshold0: Vec4,
+    pub fill_threshold1: Vec4,
 }
 
 impl Default for CloudsUniform {
@@ -84,6 +88,8 @@ impl Default for CloudsUniform {
             inverse_camera_view: Mat4::IDENTITY,
             inverse_camera_projection: Mat4::IDENTITY,
             wind_displacement: Vec3::new(-11.0, 0.0, 23.0),
+            fill_threshold0: Vec4::new(0.81, 0.757, 0.704, 0.651),
+            fill_threshold1: Vec4::new(0.599, 0.546, 0.493, 0.44),
         }
     }
 }

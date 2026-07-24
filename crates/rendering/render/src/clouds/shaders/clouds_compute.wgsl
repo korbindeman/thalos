@@ -104,6 +104,12 @@ struct Config {
     inverse_camera_view: mat4x4f,
     inverse_camera_projection: mat4x4f,
     wind_displacement: vec3f,
+    // Formation-threshold curve vs strata density: 8 piecewise-linear nodes
+    // (node i at env i/7), derived per body by
+    // `fill_lut::derive_fill_calibration` so the near tier's areal fill
+    // tracks the strata density (the far tier's authority).
+    fill_threshold0: vec4f,
+    fill_threshold1: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -160,6 +166,21 @@ struct RaymarchResult {
 // the canonical planet-fixed weather cubemap.
 fn sample_weather(n: vec3f) -> vec4f {
     return textureSampleLevel(weather_texture, weather_sampler, n, 0.0);
+}
+
+// Derived formation threshold vs strata density (see the Config fields).
+fn formation_threshold(env: f32) -> f32 {
+    // `var`: naga requires a reference (not a value) for dynamic indexing.
+    var nodes = array<f32, 8>(
+        config.fill_threshold0.x, config.fill_threshold0.y,
+        config.fill_threshold0.z, config.fill_threshold0.w,
+        config.fill_threshold1.x, config.fill_threshold1.y,
+        config.fill_threshold1.z, config.fill_threshold1.w,
+    );
+    let t = clamp(env, 0.0, 1.0) * 7.0;
+    let i = u32(min(t, 6.0));
+    let f = t - f32(i);
+    return mix(nodes[i], nodes[i + 1u], f);
 }
 
 // `layer_height` is LAYER-RELATIVE (0 = local base, 1 = local top, from the
@@ -231,6 +252,11 @@ fn weather_phase_offset(weather: vec4f, period: f32) -> vec3f {
 // acceleration must use a truly conservative volume in a future optimization:
 // heuristically resuming at base/top or macro thresholds produced stable
 // horizontal isosurfaces at grazing angles (INC-0011).
+// `soften` (0 = full morphology, 1 = handoff-adjacent): widens the formation
+// edge and retires erosion detail so cells melt into the same soft masses the
+// far estimator renders from the filtered strata — texture continuity through
+// the near→far window, instead of crisp puffs abruptly becoming smooth sheet
+// (BL-20260723T214730Z, transition half).
 fn get_cloud_map_density(
     pos: vec3f,
     shell_height: f32,
@@ -239,6 +265,7 @@ fn get_cloud_map_density(
     detail_weight: f32,
     macro_noise: f32,
     formation: f32,
+    soften: f32,
 ) -> f32 {
     let cov = clamp(weather.r * config.clouds_coverage, 0.0, 1.0);
     let local_base = clamp(weather.b, 0.0, 0.92);
@@ -282,14 +309,16 @@ fn get_cloud_map_density(
     // only as a faint sub-dominant variety term.
     let coupling = clamp(config.surface_density_coupling, 0.0, 1.0);
     // The threshold makes the near tier's COLUMN areal fill (seen from above)
-    // equal the strata density — the contract the far tier reads directly. A
-    // vertical ray takes several decorrelated 3-D samples through the layer,
-    // so column fill is the UNION of per-sample exceedance; per-sample
-    // quantile mapping alone still rendered a 0.1–0.3 field as a ~0.69 deck
-    // (measured, tier A/B 2026-07-23). Curve fitted empirically against the
-    // pixel-measured near-only fill at the spaceport framing.
+    // track the strata density — the contract the far tier reads directly.
+    // The curve is DERIVED at body spawn by a CPU Monte-Carlo mirror of this
+    // exact density math over the real weather cube
+    // (`fill_lut::derive_fill_calibration` — keep the two in lockstep); the
+    // same derivation emits the far tier's opacity response, so the two tiers
+    // pair by construction. Hand-fitted constants here failed twice: the
+    // exceedance distribution is too steep to tune from captures, and the
+    // last fit was against a corrupted cube (INC-20260723T221126Z).
     let env = clamp(surface_density, 0.0, 1.0);
-    let threshold_surface = mix(0.81, 0.44, env) + (0.5 - macro_noise) * 0.05;
+    let threshold_surface = formation_threshold(env) + (0.5 - macro_noise) * 0.05;
     // Capture-only legacy branch (surface_density_coupling = 0): the old
     // Cartesian-organized threshold, kept for A/B attribution.
     let threshold_legacy = mix(0.58, 0.30, cov)
@@ -330,7 +359,8 @@ fn get_cloud_map_density(
     // iso-contour as visible "fingerprint" rings inside big lobes once the
     // softer CLOUD-4 lighting stopped hiding them.
     let edge = 1.0 - smoothstep(0.02, 0.34, mass);
-    if (edge * detail_weight > 1.0e-3) {
+    let detail_weight_soft = detail_weight * (1.0 - soften);
+    if (edge * detail_weight_soft > 1.0e-3) {
         let detail = cloud_volume(
             rotated_domain(pos + boil) + vec3f(270.0, -610.0, 130.0),
             // Channel B contains eight primary Worley cells across the stored
@@ -338,10 +368,12 @@ fn get_cloud_map_density(
             // erosion feature, not the whole tile period.
             max(config.clouds_detail_scale_m, 50.0) * 8.0,
         );
-        mass -= (1.0 - detail.b) * edge * detail_weight * config.clouds_detail_strength * 0.55;
+        mass -= (1.0 - detail.b) * edge * detail_weight_soft
+            * config.clouds_detail_strength * 0.55;
     }
 
-    let shaped = smoothstep(0.0, max(config.clouds_base_edge_softness, 0.015), mass);
+    let edge_softness = mix(max(config.clouds_base_edge_softness, 0.015), 0.30, soften);
+    let shaped = smoothstep(0.0, edge_softness, mass);
     // The surface field owns planet-scale occupancy in every projection. At
     // mip 0 this is a coherent body-fixed envelope; the Cartesian volume only
     // sculpts sub-cell shape inside it. Far consumers sample the same payload
@@ -400,6 +432,7 @@ fn volumetric_sun_depth(
                 0.0,
                 macro_noise,
                 formation,
+                0.0,
             );
         optical_depth += density * ray_step_size;
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
@@ -680,6 +713,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 0.0,
                 macro_noise,
                 formation,
+                0.0,
             );
             if (broad_density > density_threshold) {
                 refining = true;
@@ -701,6 +735,15 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
             MIN_STEP_M,
         );
 
+        // Morphology softening through the handoff: as a sample approaches
+        // either ownership boundary (the reach dissolve, or a far shell
+        // entry), its cell edges widen and erosion retires, so the last
+        // kilometres of near cloud read like the far tier's soft filtered
+        // masses before the occupancy crossfade replaces them.
+        let soften = max(
+            smoothstep(reach_fade_begin, reach_end, dir_length),
+            smoothstep(ENTRY_FADE_START, ENTRY_FADE_END, ray.start),
+        );
         let clouds_density_sampled =
             get_cloud_map_density(
                 world_position,
@@ -710,6 +753,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 detail_weight,
                 macro_noise,
                 formation,
+                soften,
             )
             * (1.0 - smoothstep(reach_fade_begin, reach_end, dir_length));
 

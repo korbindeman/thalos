@@ -36,6 +36,8 @@ mod composite;
 mod compute;
 /// Controls the compute shader which renders the volumetric clouds.
 pub mod config;
+/// CPU-derived shared near/far fill-opacity response (BL-20260723T214730Z).
+pub mod fill_lut;
 mod images;
 mod uniforms;
 
@@ -46,6 +48,7 @@ use bevy::shader::load_shader_library;
 pub use self::composite::CloudCompositeMaterial;
 pub use self::compute::CameraMatrices;
 pub use self::config::CloudsConfig;
+pub use self::fill_lut::{CloudFillCalibration, FillCalibrationInput, derive_fill_calibration};
 pub use self::images::{
     CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS,
     cloud_target_memory, cloud_target_memory_for, cloud_weather_image,

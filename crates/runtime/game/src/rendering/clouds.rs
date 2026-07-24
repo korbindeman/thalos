@@ -31,10 +31,11 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 
 use thalos_body_render::{
-    AU_M, CameraMatrices, CloudCompositeMaterial, CloudDistanceTexture, CloudRenderTexture,
-    CloudSurfaceDensityMap, CloudWeatherMap, CloudsConfig, LIGHT_AT_1AU, WEATHER_FACE_SIZE,
+    AU_M, CameraMatrices, CloudCompositeMaterial, CloudDistanceTexture, CloudFillCalibration,
+    CloudRenderTexture, CloudSurfaceDensityMap, CloudWeatherMap, CloudsConfig,
+    FillCalibrationInput, LIGHT_AT_1AU, WEATHER_FACE_SIZE, derive_fill_calibration,
 };
-use thalos_world::BodyId;
+use thalos_world::{BodyId, CloudClimate};
 
 use crate::camera::ShipCamera;
 use crate::graphics_settings::GraphicsSettings;
@@ -95,6 +96,51 @@ pub struct ActiveCloudBody(pub Option<BodyId>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct ActiveCloudFrame(pub Quat);
 
+/// Per-body derived near/far fill calibration (BL-20260723T214730Z): the near
+/// tier's formation-threshold curve plus the far tier's opacity-response LUT,
+/// derived together at body spawn by a CPU Monte-Carlo mirror of the marcher
+/// over the body's actual weather cube (`fill_lut::derive_fill_calibration`).
+/// `drive_clouds` feeds the threshold to the compute pass;
+/// `ground_terrain::update_body_terrain_atmosphere` feeds the LUT to the
+/// composite. **Sole writer:** `rendering::spawn` (at world spawn).
+#[derive(Resource, Default)]
+pub struct BodyCloudFill(pub std::collections::HashMap<BodyId, CloudFillCalibration>);
+
+/// Derive the shared fill calibration for one body from its runtime weather
+/// field and authored climate. Lives here so the production appearance
+/// constants above stay the single source the calibration mirrors.
+pub(crate) fn derive_body_fill_calibration(
+    field: &crate::solar_system_state::CloudWeatherField,
+    climate: &CloudClimate,
+    planet_radius_m: f32,
+) -> CloudFillCalibration {
+    let bottom_height_m = climate.base_altitude_m.max(0.0);
+    let calibration = derive_fill_calibration(&FillCalibrationInput {
+        weather_texels: &field.texels,
+        strata_texels: &field.surface_density_texels,
+        face_size: field.face_size,
+        coverage_scale: COVERAGE_SCALE,
+        density: DENSITY * climate.density.max(0.0),
+        detail_strength: DETAIL_STRENGTH,
+        base_edge_softness: EDGE_SOFTNESS,
+        bottom_softness: BOTTOM_SOFTNESS,
+        base_shape_scale_m: climate.base_shape_scale_m.max(500.0),
+        detail_scale_m: climate.detail_scale_m.max(50.0),
+        bottom_height_m,
+        top_height_m: (climate.base_altitude_m + climate.thickness_m)
+            .max(bottom_height_m + 1.0),
+        planet_radius_m,
+        seed: field.seed,
+    });
+    info!(
+        target: "thalos::clouds",
+        threshold_nodes = ?calibration.threshold_nodes,
+        far_response = ?calibration.far_response,
+        "derived cloud fill calibration"
+    );
+    calibration
+}
+
 /// Per-body spawn-uploaded weather/strata cube handles (weather, strata).
 /// EVERY consumer — the near-volume compute pass included — must sample these
 /// initial-upload cubes: the runtime re-upload path (both `image.data`
@@ -115,6 +161,7 @@ impl Plugin for CloudsRenderPlugin {
             .init_resource::<ActiveCloudBody>()
             .init_resource::<ActiveCloudFrame>()
             .init_resource::<BodyCloudCubes>()
+            .init_resource::<BodyCloudFill>()
             .add_systems(bevy::app::PostStartup, init_cloud_appearance)
             .add_systems(
                 Update,
@@ -172,8 +219,6 @@ fn sync_cloud_composite_materials(
     frame: Res<ActiveCloudFrame>,
     cloud_layer: Option<Res<CloudRenderTexture>>,
     cloud_distance: Option<Res<CloudDistanceTexture>>,
-    live_weather: Option<Res<CloudWeatherMap>>,
-    live_strata: Option<Res<CloudSurfaceDensityMap>>,
     blanks: Option<Res<super::spawn::BlankCloudTextures>>,
     skies: Query<(
         &super::ground_terrain::BodySky,
@@ -222,13 +267,11 @@ fn sync_cloud_composite_materials(
             if let Some(distance) = cloud_distance.as_deref() {
                 material.cloud_distance = distance.handle.clone();
             }
-            // NOTE (BL-20260723T214730Z): the composite deliberately keeps the
-            // spawn-time cube bindings. Binding the compute pass's live cubes
-            // here is the intended single-authority end state, but the runtime
-            // re-upload path scrambles cube face/mip layout on the GPU, so the
-            // live cubes' content cannot be trusted by mip-sampling consumers
-            // until that is fixed.
-            let _ = (&live_weather, &live_strata);
+            // The composite keeps the spawn-time cube bindings it was built
+            // with — the same spawn-uploaded cubes `sync_cloud_weather_binding`
+            // rebinds the compute pass onto, so every consumer reads the one
+            // correctly-uploaded field (INC-20260723T221126Z: runtime cube
+            // re-upload scrambles face/mip layout on the GPU).
         } else if let Some(blanks) = blanks.as_deref() {
             material.cloud_layer = blanks.layer.clone();
             material.cloud_distance = blanks.distance.clone();
@@ -269,6 +312,7 @@ fn drive_clouds(
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     graphics: Res<GraphicsSettings>,
+    fill: Res<BodyCloudFill>,
     mut active: ResMut<ActiveCloudBody>,
     mut frame: ResMut<ActiveCloudFrame>,
     mut cam_mat: ResMut<CameraMatrices>,
@@ -420,6 +464,18 @@ fn drive_clouds(
     config.clouds_density = DENSITY * climate.density.max(0.0);
     config.clouds_base_shape_scale_m = climate.base_shape_scale_m.max(500.0);
     config.clouds_detail_scale_m = climate.detail_scale_m.max(50.0);
+    // Derived formation-threshold curve (see `BodyCloudFill`). Missing
+    // calibration on a cloudy body means the spawn path skipped derivation —
+    // the near fill would silently fall back to stale constants, so shout.
+    if let Some(calibration) = fill.0.get(&body_id) {
+        config.fill_threshold_nodes = calibration.threshold_vec4s();
+    } else {
+        bevy::log::warn_once!(
+            target: "thalos::clouds",
+            "active cloud body {body_id} has no derived fill calibration; \
+             using default threshold curve"
+        );
+    }
     config.wind_velocity = Vec3::new(climate.wind_m_s[0], climate.wind_m_s[1], 0.0);
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
     let cloud_albedo = Vec3::from_array(climate.albedo).max(Vec3::ZERO);

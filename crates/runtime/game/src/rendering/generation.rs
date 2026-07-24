@@ -38,4 +38,5 @@ pub(super) struct WorldStateAssets<'w> {
     pub(super) cloud_materials: ResMut<'w, Assets<CloudCompositeMaterial>>,
     pub(super) ocean_materials: ResMut<'w, Assets<BodyOceanMaterial>>,
     pub(super) body_cloud_cubes: ResMut<'w, super::clouds::BodyCloudCubes>,
+    pub(super) body_cloud_fill: ResMut<'w, super::clouds::BodyCloudFill>,
 }

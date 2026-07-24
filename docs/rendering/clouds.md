@@ -730,6 +730,73 @@ BL-20260723T214730Z), in-motion surface↔orbit handoff, and the local-view
 morphology verdict (squat puffs vs congestus towers in one horizon) that
 round-2's calibration targets.
 
+### Round 5 — derived fill/opacity pairing + transition morphology (2026-07-24)
+
+The two residuals of BL-20260723T214730Z, re-measured from scratch on the
+fixed cube (every pre-fix number was against corrupted data). New protocol
+artifacts: a CPU cloudy-site probe (`solar_system_state::cloud_site_probe` —
+scans the authored field for broken-moderate sites near the runway's daylight
+longitude, with sun elevation at the boot epoch) because the spaceport column
+is authored clear; tier A/B at `THALOS_RUNWAY_SITE="22.0,153.0"`,
+spaceport-aerial `ELEVATION=70 DISTANCE=25000`, pixel fills vs a
+`CLOUD_COVERAGE=0` baseline (`artifacts/visual/runs/cloud_fill2/`).
+
+**Baseline measurement (the defect, quantified):** near-only fill 0.044 /
+mean amplitude 0.013 vs far-only fill 1.000 / 0.419 over the same
+0.33-coverage authored region — the far tier's saturating resolved curve
+(`smoothstep(0.06, 0.40, mean_c)·0.95`) painted a near-solid veil while the
+near tier under-filled its authored contract by ~8×.
+
+**Fill pairing is now DERIVED, not tuned** (`clouds::fill_lut`,
+ADR-worthy rule: never hand-retune either tier's response):
+
+1. A CPU mirror of the marcher's density math (same 64³ tileable noise
+   volume, domain transforms, thresholds, profiles, erosion — statistical
+   fidelity is sufficient, but WGSL `fract` is floor-based) Monte-Carlo
+   marches ~16 k vertical columns through the body's actual weather cube at
+   spawn (~0.5 s, logged per-bin).
+2. The near tier's formation threshold becomes an 8-node piecewise-linear
+   curve `T(env)` fitted by coordinate descent so simulated column fill
+   tracks the strata mean (identity contract; low bins stay
+   envelope-limited, thin-deck cross-talk keeps mid bins above target —
+   recorded in the fit log). Monotonicity must be enforced BY CONSTRUCTION
+   (top + non-negative deltas): clamp-after-move silently froze the fit.
+3. The far tier renders a 16-node LUT of the *achieved* expected column
+   opacity `E[1−T_column | strata mean]` — far thickness equals near
+   thickness by construction, independent of fit quality. Plumbing:
+   `BodyCloudFill` → `CloudsConfig::fill_threshold_nodes` (compute uniform) +
+   `BodySkyExtra::fill_response` (composite uniform). The mirror was
+   validated against the capture: predicted region fill 0.20 vs measured
+   0.27.
+
+**Transition morphology (the coarse-handoff half):** the residual far excess
+was spatial — per-cloud amplitude matched (0.26 vs 0.31) but the far tier
+covered ~3× the area, from strata-blur halos and no sub-texel gaps. Three
+changes: (a) the far tier perturbs the LUT input with body-fixed value noise
+at the near tier's cell scale, anchored at the occupancy-weighted mean chord
+position (NOT the best-segment position — the argmax flips discontinuously
+between rays and cut "torn seam" lines across every cell), faded out as the
+pixel footprint approaches the noise period so disc framings keep the
+accepted filtered look; (b) the strata fetch's 0.75-mip floor now applies
+only to genuinely unresolved footprints — at handoff ranges it was pure
+magnification blur that widened every cell by kilometres of low-alpha halo;
+(c) the near tier's last kilometres (reach dissolve + far shell entry)
+widen the formation edge and retire erosion detail (`soften` in
+`get_cloud_map_density`), so puffs melt into the same soft masses the far
+tier renders before the occupancy crossfade swaps them.
+
+**Reliability tell (new):** one cold capture in the round rendered zero
+clouds with exit 0 — `ActiveCloudBody` never activated for the entire run
+(no "composite frame override" line in the log); the identical re-run was
+fine. When a capture shows no clouds at a known-cloudy site, check that log
+line before diagnosing shader logic (BL-20's capture-validity gap extends to
+silent cloud-pipeline non-activation).
+
+Remaining: port the derived LUT into `solid_planet.wgsl` (its
+`surface_density × thinness` response is close to the LUT mid-range —
+closer than the old saturating curve — but not identical across the
+composite↔impostor swap), and the user's live gates.
+
 ### Program acceptance matrix
 
 | Scenario | Pass condition |

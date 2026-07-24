@@ -35,7 +35,15 @@ struct CloudCompositeParams {
     tile_atlas_uv:             vec4<f32>,
     // x = near-march view step count; the composite mirrors the marcher's
     // per-ray reach from it (see march_reach) for the near/far partition.
+    // y = tier diagnostic, z = far footprint-mip mode, w = far aggregation.
     cloud_march:               vec4<f32>,
+    // Far-tier opacity response: 16 nodes of expected near-column opacity vs
+    // the profile-weighted strata mean (node i at i/15), derived per body by
+    // `fill_lut::derive_fill_calibration` together with the near threshold
+    // curve. Rendering this LUT is what keeps far thickness equal to the near
+    // volume's — never replace it with a hand-tuned curve
+    // (BL-20260723T214730Z).
+    fill_response:             array<vec4<f32>, 4>,
 }
 @group(3) @binding(1) var<uniform> cloud_params: CloudCompositeParams;
 @group(3) @binding(2) var scene_depth_texture: texture_depth_2d;
@@ -228,16 +236,50 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
 // Weather varies at ≥ ~5 km/texel at the base level, so K samples across even a 500 km chord
 // stay well-sampled (no 3-D noise is touched here).
 const ORBITAL_MARCH_SAMPLES = 6u;
-// The surface payload is the broad selector/envelope. The near estimator still
-// requires an independent 3-D base-shape hit inside that envelope; this is the
-// expected occupied fraction of one resolved envelope cell after that test.
-// Without it, the far tier renders the envelope itself as finished cloud and
-// becomes much denser than the near volume it is supposed to summarize.
-// Raised 0.45 → 0.60 with the surface-authority near threshold (2026-07-23):
-// inside a resolved envelope cell the Cartesian sculptor now passes most of
-// the mass, so the expected sub-cell fill is higher than under the legacy
-// independent-threshold contract.
-const FAR_SUBCELL_MORPHOLOGY_FILL = 0.60;
+
+// Cheap 3-D value noise for the sub-texel morphology modulation. The hash is
+// INTEGER (common.wgsl `hash33` family): the float Hoskins hash degrades at
+// planet-scale lattice coordinates (~±1500 cells) — `fract(n · 0.1031)` is
+// f32-quantized there, and its correlated wrap boundaries traced straight
+// seam lines across every far cell (first two morphology capture rounds).
+fn morph_hash(p: vec3<f32>) -> f32 {
+    var q = vec3<u32>(bitcast<vec3<u32>>(vec3<i32>(floor(p))))
+        * vec3<u32>(1597334673u, 3812015801u, 2798796415u);
+    let n = (q.x ^ q.y ^ q.z) * 1597334673u;
+    return f32(n) * (1.0 / 4294967295.0);
+}
+
+fn morph_value_noise(x: vec3<f32>) -> f32 {
+    let p = floor(x);
+    var f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    let c000 = morph_hash(p);
+    let c100 = morph_hash(p + vec3<f32>(1.0, 0.0, 0.0));
+    let c010 = morph_hash(p + vec3<f32>(0.0, 1.0, 0.0));
+    let c110 = morph_hash(p + vec3<f32>(1.0, 1.0, 0.0));
+    let c001 = morph_hash(p + vec3<f32>(0.0, 0.0, 1.0));
+    let c101 = morph_hash(p + vec3<f32>(1.0, 0.0, 1.0));
+    let c011 = morph_hash(p + vec3<f32>(0.0, 1.0, 1.0));
+    let c111 = morph_hash(p + vec3<f32>(1.0, 1.0, 1.0));
+    let x00 = mix(c000, c100, f.x);
+    let x10 = mix(c010, c110, f.x);
+    let x01 = mix(c001, c101, f.x);
+    let x11 = mix(c011, c111, f.x);
+    return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
+}
+
+// Sample the derived far opacity response (see `fill_response` above):
+// 16 nodes over [0, 1], linear between nodes.
+fn fill_response_sample(strata_mean: f32) -> f32 {
+    // Local copy so dynamic indexing goes through a `var` reference (naga).
+    var lut = cloud_params.fill_response;
+    let t = clamp(strata_mean, 0.0, 1.0) * 15.0;
+    let i = u32(min(t, 14.0));
+    let f = t - f32(i);
+    let a = lut[i / 4u][i % 4u];
+    let b = lut[(i + 1u) / 4u][(i + 1u) % 4u];
+    return mix(a, b, f);
+}
 
 fn sample_orbital_cloud(
     cam_pos: vec3<f32>,
@@ -311,6 +353,9 @@ fn sample_orbital_cloud(
     // 46%-coverage planet into solid overcast.
     var best_c = 0.0;
     var sum_c = 0.0;
+    var sum_t = 0.0;
+    var best_s = 0.0;
+    var sum_s = 0.0;
     var sample_weight = 0.0;
     var best_t = -1.0;
     var best_lod = 7.0;
@@ -355,13 +400,19 @@ fn sample_orbital_cloud(
         let lod = mix(lod_chord, lod_pixel, clamp(cloud_params.cloud_march.z, 0.0, 1.0));
         let weather = textureSampleLevel(weather_texture, weather_sampler, n_l, lod);
         let col = weather_column_from_texel(weather);
-        // Same 0.75 lod floor as sample_weather_soft: raw mip 0 resolves the
-        // 1024-face texel lattice into crunchy cell borders.
+        // The 0.75 lod floor (sample_weather_soft's lattice softener) only
+        // where the footprint is genuinely unresolved: at handoff ranges the
+        // pixel sits deep inside one ~5 km texel (pure magnification, already
+        // bilinear-smooth), and forcing the extra half-mip of blur there
+        // widened every strata cell by kilometres of low-alpha halo — a large
+        // share of the far tier's measured 3× areal excess over the near
+        // volume at the 2026-07-24 A/B framing.
+        let strata_floor = 0.75 * smoothstep(550.0, 1600.0, pixel_world_m);
         let strata = textureSampleLevel(
             surface_density_texture,
             weather_sampler,
             n_l,
-            max(lod, 0.75),
+            max(lod, strata_floor),
         );
         // Analytic per-segment layer overlap, evaluated in LAYER-RELATIVE
         // space: clip the segment's height span against this texel's
@@ -398,48 +449,84 @@ fn sample_orbital_cloud(
         if profile <= 1.0e-4 {
             continue;
         }
-        // Thinness response only: areal occupancy already lives in `profile`
-        // (the strata are prefiltered areal density). Real clouds are almost
-        // always optically thick, so this floors high — only genuinely thin
-        // columns (low stratus veils, storm fringes) stay translucent.
+        // Pure occupancy signal: `mean_c` below must be exactly the variable
+        // the derived `fill_response` LUT was conditioned on (the
+        // profile-weighted strata mean). Thinness/optical-depth response is
+        // already inside the LUT (it stores expected near-column OPACITY),
+        // so multiplying a per-column thinness term here would double-count.
+        let candidate = profile * w_seg;
+        // The legacy stacked A/B path (cloud_march.w = 0) keeps its explicit
+        // thinness multiplier — it predates the derived response.
         let a_col = mix(0.70, 1.0, 1.0 - exp(-col.optical_depth * 1.4));
-        let candidate = profile * a_col * w_seg;
+        let candidate_stacked = candidate * a_col;
         if candidate > best_c {
             best_c = candidate;
             best_t = t_m;
             best_lod = lod;
         }
         sum_c += candidate;
+        sum_t += t_m * candidate;
+        best_s = max(best_s, candidate_stacked);
+        sum_s += candidate_stacked;
     }
-    let stacked_opacity = best_c + 0.35 * (sum_c - best_c) * (1.0 - best_c);
+    let stacked_opacity = best_s + 0.35 * (sum_s - best_s) * (1.0 - best_s);
     let mean_c = sum_c / max(sample_weight, 1.0e-4);
-    // Two footprint regimes (CLOUD-6 round 2, 2026-07-23 verdict):
-    // - UNRESOLVED (pixel footprint ≫ weather texel): the filtered mean is the
-    //   probability this footprint contains cloud, so opacity = areal mean ×
-    //   sub-cell fill. Rendering anything sharper would alias.
-    // - RESOLVED (pixel footprint ≲ texel): the mip-0 strata signal IS the
-    //   cell pattern. Rendering it as a flat sub-unit alpha painted the whole
-    //   planet as a translucent veil; instead sharpen density → opacity so
-    //   cell interiors go near-opaque and gaps go clear, matching the discrete
-    //   morphology the near volume resolves from the same field.
-    let resolved = 1.0 - clamp(best_lod * 0.5, 0.0, 1.0);
-    let areal_opacity = mean_c * FAR_SUBCELL_MORPHOLOGY_FILL;
-    // Resolved-footprint response (the state the accepted planet/cruise
-    // captures used). KNOWN OPEN DEFECT: at mid-altitude this renders a
-    // moderate-strata field ~9× denser than the near tier's quantile fill of
-    // the same cube (measured tier A/B 2026-07-23, near 0.109 vs far 0.989);
-    // the response-pairing needs a derived common fill function — see the
-    // backlog row minted 2026-07-23 before re-tuning constants blind.
-    let resolved_opacity = smoothstep(0.06, 0.40, mean_c) * 0.95;
-    let coverage_opacity = mix(areal_opacity, resolved_opacity, resolved);
-    // DEBUG PROBE (temporary): stage ladder — 0.15 = loop reached,
-    // 0.45 = some segment had far_w > 0, 0.9 = some segment found overlap.
+    if best_t < 0.0 {
+        return CloudOverlay(vec3<f32>(0.0), 0.0);
+    }
+    let p_best = cam_pos + best_t * ray_dir - planet_center;
+
+    // Sub-texel morphology (BL-20260723T214730Z, transition half): the strata
+    // cube's ~5 km texels plus the 0.75-mip floor render as smooth blobs with
+    // wide low-alpha halos, while the near volume resolves discrete cells —
+    // the tier A/B measured matching per-cloud amplitude but ~3× the covered
+    // area on the far side. Perturb the LUT INPUT with body-fixed noise at
+    // the near tier's cell scale, so cell interiors thicken and halos drop
+    // below the response toe — spatial concentration, mean-preserving to
+    // first order. Faded out as the pixel footprint approaches the noise
+    // period (alias guard): planet-disc framings keep the accepted filtered
+    // look, only resolvable ranges gain texture.
+    //
+    // The noise is anchored at the occupancy-weighted mean chord position —
+    // NOT `p_best`: the best-segment argmax flips discontinuously between
+    // adjacent rays, and feeding that into an opacity-bearing term cut
+    // straight "torn seam" lines across every cell (first capture round).
+    // Continuity guard: as occupancy fades to zero the weighted mean would
+    // divide by the epsilon and jump by orders of magnitude — a hard seam in
+    // the noise coordinate exactly along every cell edge. Blend toward the
+    // (continuous) chord midpoint below a small occupancy, where the LUT
+    // renders nothing anyway.
+    let t_occ = sum_t / max(sum_c, 1.0e-4);
+    let t_mid = 0.5 * (t0 + t1);
+    let t_morph = mix(t_mid, t_occ, clamp(sum_c * 64.0, 0.0, 1.0));
+    let p_morph = cam_pos + t_morph * ray_dir - planet_center;
+    let p_body = rotate_quat(cloud_params.world_to_body_orientation, p_morph);
+    let px_morph = t_morph * 2.0
+        / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
+    let morph_resolve = 1.0 - smoothstep(550.0, 1600.0, px_morph);
+    var mean_mod = mean_c;
+    if morph_resolve > 1.0e-3 {
+        let m_broad = morph_value_noise(p_body / 2200.0);
+        let m_fine = morph_value_noise(p_body / 830.0 + vec3<f32>(7.3, 1.9, -4.7));
+        let morph = 0.65 * m_broad + 0.35 * m_fine;
+        mean_mod = clamp(mean_c + (morph - 0.5) * (0.55 * morph_resolve), 0.0, 1.0);
+    }
+
+    // One derived response for every footprint regime: the LUT stores the
+    // expected near-column opacity for this strata mean, so the far tier's
+    // rendered thickness equals the near volume's by construction. The old
+    // resolved/unresolved split existed to compensate two hand-tuned curves
+    // (`mean_c · 0.60` vs `smoothstep(0.06, 0.40, mean_c) · 0.95`); the
+    // saturating resolved branch is what painted a moderate-strata field as a
+    // near-solid veil at mid-altitude (fill 1.00 vs the near tier's 0.04 at
+    // the 2026-07-24 A/B framing).
+    let coverage_opacity = fill_response_sample(mean_mod);
     let march_opacity = clamp(
         mix(stacked_opacity, coverage_opacity, clamp(cloud_params.cloud_march.w, 0.0, 1.0)),
         0.0,
         0.95,
     );
-    if march_opacity <= 1.0e-3 || best_t < 0.0 {
+    if march_opacity <= 1.0e-3 {
         return CloudOverlay(vec3<f32>(0.0), 0.0);
     }
 
@@ -449,7 +536,6 @@ fn sample_orbital_cloud(
     // still spans several pixels; at long range it flickered per-texel through
     // the terminator (amber/white confetti at sunset), so it relaxes toward
     // the smooth sphere normal with distance.
-    let p_best = cam_pos + best_t * ray_dir - planet_center;
     let cloud_alt = length(p_best) - planet_radius;
     let cloud_n_w = normalize(p_best);
     let cloud_n_l = rotate_quat(cloud_params.world_to_body_orientation, cloud_n_w);

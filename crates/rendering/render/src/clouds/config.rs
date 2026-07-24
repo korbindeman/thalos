@@ -71,6 +71,12 @@ pub struct CloudsConfig {
     /// morphology. Production uses 1.0; capture comparisons can set 0.0 to
     /// reproduce the legacy threshold-nudge path.
     pub surface_density_coupling: f32,
+    /// Formation-threshold curve vs strata density: 8 piecewise-linear nodes
+    /// (node `i` at env `i / 7`), packed as two vec4s for the uniform. DERIVED
+    /// per body by `fill_lut::derive_fill_calibration` so the near tier's
+    /// areal fill tracks the strata density the far tier renders; the default
+    /// only covers bodies with no derived calibration.
+    pub fill_threshold_nodes: [Vec4; 2],
     /// Capture diagnostic: -1 = near volume only, 0 = production composite,
     /// 1 = far surface projection only.
     pub tier_diagnostic: f32,
@@ -141,6 +147,12 @@ impl Default for CloudsConfig {
             clouds_base_shape_scale_m: 8_000.0,
             clouds_detail_scale_m: 450.0,
             surface_density_coupling: 1.0,
+            // Linear 0.81 → 0.44 (the last hand-fitted curve) as the
+            // no-calibration fallback.
+            fill_threshold_nodes: [
+                Vec4::new(0.81, 0.757, 0.704, 0.651),
+                Vec4::new(0.599, 0.546, 0.493, 0.44),
+            ],
             tier_diagnostic: 0.0,
             far_pixel_footprint: 1.0,
             far_coverage_preserving: 1.0,
