@@ -797,6 +797,42 @@ Remaining: port the derived LUT into `solid_planet.wgsl` (its
 closer than the old saturating curve — but not identical across the
 composite↔impostor swap), and the user's live gates.
 
+### Round 6 — one representation across the visible range (2026-07-24)
+
+The response to the round-5 verdict (BL-20260724T003705Z; Blackrack/MSFS
+reference study in that row): the near volumetric march now carries ONE cloud
+representation to a 300 km reach, LOD'd by footprint instead of handing off to
+the far estimator mid-view. The march contract (band edges 42/90/180/300 km,
+steps 600/1200/2400/4800 m, refine at 1/5, entry ownership 240–300 km, reach
+dissolve over the last 15 %) lives in `thalos::atmosphere`, imported by BOTH
+`clouds_compute.wgsl` and `cloud_composite.wgsl` — the partition lockstep is
+structural, not a comment. The alias-safety inversion is the load-bearing
+idea: the density field band-limits AHEAD of each step increase (erosion
+retires as the refine cadence outgrows the detail scale; the shape spectrum
+narrows to its low-frequency mix; past ~90 km the Cartesian shape term is
+replaced by the DERIVED homogenized field `E[shaped | env]` — a third LUT
+from the same spawn Monte-Carlo, mean-preserving by construction and cheaper
+per probe than a near-field sample). This satisfies
+ADR-20260721T033055Z's conservative-bounds rule rather than fighting it:
+BL-33's moiré and INC-0011's isosurfaces came from stretching steps over the
+UNFILTERED field. Steep rays clamp to a 350 m radial step (bounded — their
+in-shell segments are geometrically short). Budgets: 112/176/192/224
+(baseline reaches the full 300 km).
+
+Whiteness track: the marcher's ambient now binds the physical F3/F4
+`SkyAmbient` irradiance (`E_sky/π`; 0.45 view factor on undersides; the old
+analytic pair survives only as the space stand-in), with a τ-correlated
+ambient self-occlusion proxy so interiors keep shape — the directional sky
+march (Blackrack-style) remains the CLOUD-5 upgrade. Two capture-round
+fixes: the far tier's morph fine octave needed its own alias gate (dot band
+at the relocated handoff), and the brighter contrast makes the pre-existing
+per-pixel fringe jitter stipple more visible (a temporal-reconstruction
+quality item, not a density defect). Verified: cruise shows one continuous
+deck to the horizon (no ownership arc), mid-altitude composite keeps
+registration with shaded, white cells; limb and disc unchanged. Open:
+far-tier brightness prefactor re-match, GPU budget re-measurement, fringe
+stipple, user live gates.
+
 **User verdict on round 5 (2026-07-24, live screenshots):**
 registration/thickness parity largely pass — "a lot of it is quite
 accurate" — but the transition still fails: the far sheet terminates on the

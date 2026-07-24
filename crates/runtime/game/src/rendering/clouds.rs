@@ -71,10 +71,11 @@ const EDGE_SOFTNESS: f32 = 0.055;
 /// CLOUD-4 keeps this below the pre-coupling 0.48 so stacked volume samples
 /// and the orbital disc no longer clip to pure white before air-mass tinting.
 const SUN_FLUX_SCALE: f32 = 0.36;
-/// Sky-ambient fill. Raised for the CLOUD-4 lighting completion: with the
-/// former ~10:1 sun:ambient ratio, anything the (now multi-octave) shadow
-/// term attenuated fell to near-black and shaded cores read charcoal instead
-/// of soft blue-grey. These also feed the marcher's airlight veil estimate.
+/// Sky-ambient fill — since the SkyAmbient binding (BL-20260724T003705Z,
+/// whiteness track) these analytic constants are only the space/no-sky-LUT
+/// STAND-IN the physical sky irradiance fades in over (`drive_clouds`); on a
+/// surface-adjacent camera the ambient is `E_sky / π` from the F3/F4 LUT.
+/// They also feed the marcher's airlight veil estimate through the same blend.
 const AMBIENT_TOP_SCALE: f32 = 0.085;
 const AMBIENT_BOTTOM_SCALE: f32 = 0.042;
 
@@ -313,6 +314,7 @@ fn drive_clouds(
     exposure: Res<CameraExposure>,
     graphics: Res<GraphicsSettings>,
     fill: Res<BodyCloudFill>,
+    sky_ambient: Res<crate::reflection_probe::SkyAmbient>,
     mut active: ResMut<ActiveCloudBody>,
     mut frame: ResMut<ActiveCloudFrame>,
     mut cam_mat: ResMut<CameraMatrices>,
@@ -469,6 +471,7 @@ fn drive_clouds(
     // the near fill would silently fall back to stale constants, so shout.
     if let Some(calibration) = fill.0.get(&body_id) {
         config.fill_threshold_nodes = calibration.threshold_vec4s();
+        config.shape_response = calibration.shape_response_vec4s();
     } else {
         bevy::log::warn_once!(
             target: "thalos::clouds",
@@ -500,12 +503,28 @@ fn drive_clouds(
     let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
     let sun_rgb = sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
-    // Sky-like ambient: more blue at the top, greyer fill under overcast cores.
+    // Ambient in-scatter. The PHYSICAL source is the F3/F4 sky-view LUT's
+    // hemispherical irradiance (`SkyAmbient`, scene-flux units — the same
+    // authority the surface `GlobalAmbientLight` and env cubemap read):
+    // mean incident sky radiance L ≈ E_sky / π, seen fully by cloud tops and
+    // partially (view factor ~0.45) by shaded undersides. The user-flagged
+    // "uniformly gray clouds" came in large part from the old hand-tuned
+    // flat ambient pair sitting ~2× below the physical sky radiance (and
+    // being far less blue); the reference systems' interiors read luminous
+    // for exactly this reason (Blackrack raymarches ambient toward the sky).
+    // The analytic pair remains only as the space/no-LUT stand-in, faded by
+    // the same altitude blend every other F4 consumer uses.
     let horizon_ambient = 0.28 + 0.72 * day_blend;
-    config.clouds_ambient_color_top =
-        Vec4::new(0.42, 0.58, 0.88, 0.0) * scene_flux * AMBIENT_TOP_SCALE * horizon_ambient;
-    config.clouds_ambient_color_bottom =
-        Vec4::new(0.30, 0.36, 0.48, 0.0) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
+    let analytic_top =
+        Vec3::new(0.42, 0.58, 0.88) * scene_flux * AMBIENT_TOP_SCALE * horizon_ambient;
+    let analytic_bottom =
+        Vec3::new(0.30, 0.36, 0.48) * scene_flux * AMBIENT_BOTTOM_SCALE * horizon_ambient;
+    let sky_radiance = sky_ambient.surface_irradiance / std::f32::consts::PI;
+    let sky_blend = sky_ambient.surface_blend.clamp(0.0, 1.0);
+    let ambient_top = analytic_top.lerp(sky_radiance, sky_blend);
+    let ambient_bottom = analytic_bottom.lerp(sky_radiance * 0.45, sky_blend);
+    config.clouds_ambient_color_top = ambient_top.extend(0.0);
+    config.clouds_ambient_color_bottom = ambient_bottom.extend(0.0);
 }
 
 /// Point the near-volume compute pass at the ACTIVE body's spawn-uploaded

@@ -627,11 +627,14 @@ impl CloudCaptureQuality {
     }
 
     fn view_steps(self) -> u32 {
+        // Banded march budgets (thalos::atmosphere march contract): 176 steps
+        // reach the full 300 km cap; Low's 112 reaches ~92 km — still past
+        // the old 67 km everywhere-600 m reach.
         match self {
-            Self::Low => 64,
-            Self::Baseline => 112,
-            Self::High => 128,
-            Self::Reference => 128,
+            Self::Low => 112,
+            Self::Baseline => 176,
+            Self::High => 192,
+            Self::Reference => 224,
         }
     }
 

@@ -112,6 +112,10 @@ fn prepare_uniforms_bind_group(
     buffer.wind_displacement += time.delta_secs() * clouds_config.wind_velocity;
     buffer.fill_threshold0 = clouds_config.fill_threshold_nodes[0];
     buffer.fill_threshold1 = clouds_config.fill_threshold_nodes[1];
+    buffer.shape_response0 = clouds_config.shape_response[0];
+    buffer.shape_response1 = clouds_config.shape_response[1];
+    buffer.shape_response2 = clouds_config.shape_response[2];
+    buffer.shape_response3 = clouds_config.shape_response[3];
     *frame_index = frame_index.wrapping_add(1);
 
     clouds_uniform_buffer

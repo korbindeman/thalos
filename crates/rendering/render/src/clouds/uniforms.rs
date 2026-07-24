@@ -49,6 +49,12 @@ pub(crate) struct CloudsUniform {
     /// strata density, packed x0..w0, x1..w1). See `fill_lut`.
     pub fill_threshold0: Vec4,
     pub fill_threshold1: Vec4,
+    /// Derived homogenized-field response `E[shaped | env]` (16 nodes) for
+    /// the banded march's coarse LOD. See `fill_lut`.
+    pub shape_response0: Vec4,
+    pub shape_response1: Vec4,
+    pub shape_response2: Vec4,
+    pub shape_response3: Vec4,
 }
 
 impl Default for CloudsUniform {
@@ -90,6 +96,10 @@ impl Default for CloudsUniform {
             wind_displacement: Vec3::new(-11.0, 0.0, 23.0),
             fill_threshold0: Vec4::new(0.81, 0.757, 0.704, 0.651),
             fill_threshold1: Vec4::new(0.599, 0.546, 0.493, 0.44),
+            shape_response0: Vec4::new(0.0, 0.03, 0.07, 0.10),
+            shape_response1: Vec4::new(0.13, 0.17, 0.20, 0.23),
+            shape_response2: Vec4::new(0.27, 0.30, 0.33, 0.37),
+            shape_response3: Vec4::new(0.40, 0.43, 0.47, 0.50),
         }
     }
 }

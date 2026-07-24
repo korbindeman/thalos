@@ -12,6 +12,11 @@
     orbital_cloud_normal_body,
     cloud_surface_density,
     WEATHER_TEXEL_ANGLE,
+    cloud_march_stop_m,
+    CLOUD_MARCH_REACH_M,
+    CLOUD_MARCH_ENTRY_FADE_START_M,
+    CLOUD_MARCH_ENTRY_FADE_END_M,
+    CLOUD_MARCH_FADE_FRACTION,
 }
 #import thalos::lighting::SCENE_FLUX_SCALE
 
@@ -214,17 +219,20 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
         if hit_base && tb0 > 0.0 { seg_end = tb0; } else { seg_end = tt1; }
     }
     seg_start = max(seg_start, 0.0);
-    seg_end = min(seg_end, seg_start + 75000.0);
-    // Mirror the adaptive marcher's maximum clear-air reach. Fine refinement
-    // consumes more iterations only after broad mass is found, where opacity
-    // normally terminates the near ray before the reach frontier matters.
-    let step = 600.0;
-    let span = steps * step;
-    let t_stop = min(seg_start + span, seg_end);
-    let fade_begin = min(seg_start + 0.50 * span, t_stop);
-    // z = the marcher's entry-distance ownership (its ENTRY_FADE window):
+    seg_end = min(seg_end, seg_start + CLOUD_MARCH_REACH_M);
+    // Mirror of the banded marcher via the SHARED thalos::atmosphere march
+    // contract — the lockstep is structural. Fine refinement consumes more
+    // iterations only after broad mass is found, where opacity normally
+    // terminates the near ray before the reach frontier matters.
+    let t_stop = min(cloud_march_stop_m(steps, seg_start), seg_end);
+    let fade_begin = min(
+        mix(seg_start, cloud_march_stop_m(steps, seg_start), CLOUD_MARCH_FADE_FRACTION),
+        t_stop,
+    );
+    // z = the marcher's entry-distance ownership (its entry-fade window):
     // shells entered far away belong wholly to this band march.
-    let near_scale = 1.0 - smoothstep(56000.0, 75000.0, seg_start);
+    let near_scale = 1.0
+        - smoothstep(CLOUD_MARCH_ENTRY_FADE_START_M, CLOUD_MARCH_ENTRY_FADE_END_M, seg_start);
     return vec3<f32>(fade_begin, t_stop, near_scale);
 }
 
@@ -507,8 +515,13 @@ fn sample_orbital_cloud(
     var mean_mod = mean_c;
     if morph_resolve > 1.0e-3 {
         let m_broad = morph_value_noise(p_body / 2200.0);
+        // The fine octave needs its own, tighter alias gate: at the banded
+        // march's 240–300 km handoff the 830 m period is only ~3–4 px, which
+        // stippled a dot band across the horizon (post-band-march cruise
+        // capture). It collapses to its mean instead of shimmering.
+        let fine_resolve = 1.0 - smoothstep(90.0, 300.0, px_morph);
         let m_fine = morph_value_noise(p_body / 830.0 + vec3<f32>(7.3, 1.9, -4.7));
-        let morph = 0.65 * m_broad + 0.35 * m_fine;
+        let morph = 0.65 * m_broad + 0.35 * mix(0.5, m_fine, fine_resolve);
         mean_mod = clamp(mean_c + (morph - 0.5) * (0.55 * morph_resolve), 0.0, 1.0);
     }
 

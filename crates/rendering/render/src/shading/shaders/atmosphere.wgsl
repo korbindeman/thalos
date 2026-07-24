@@ -721,6 +721,80 @@ fn sample_weather_soft(
 /// value forced orbital consumers onto mip 0 and aliased surface cells.
 const WEATHER_TEXEL_ANGLE: f32 = 0.001533981;
 
+// ── Single-representation cloud march contract ──────────────────────────────
+// (BL-20260724T003705Z.) The near volumetric march carries ONE cloud
+// representation across the visible range with footprint-banded LOD: at each
+// band edge the density field's bandwidth shrinks FIRST (erosion retires as
+// the refine step grows; the shape spectrum narrows; beyond ~90 km density
+// converges to the derived homogenized field E[shaped | env]), and only then
+// does the step size grow to match the now band-limited field — alias-free by
+// construction, which is what the conservative-bounds rule
+// (ADR-20260721T033055Z) actually requires. BL-33's dot-grid moiré and
+// INC-0011's isosurfaces both came from stretching steps over the UNFILTERED
+// field. The far/orbital estimator owns only rays ENTERING the shell beyond
+// CLOUD_MARCH_ENTRY_FADE (true orbit-scale geometry).
+//
+// Both `clouds_compute.wgsl` (the marcher) and `cloud_composite.wgsl` (the
+// far tier's partition of unity) read the SAME table below — the lockstep is
+// structural. Steps are per-band clear-air (broad probe) cadences; refine
+// runs at 1/5 of the local broad step throughout.
+const CLOUD_MARCH_BAND_EDGE_M: vec4<f32> =
+    vec4<f32>(42000.0, 90000.0, 180000.0, 300000.0);
+const CLOUD_MARCH_BAND_STEP_M: vec4<f32> = vec4<f32>(600.0, 1200.0, 2400.0, 4800.0);
+/// Hard geometric cap on the marched shell segment (the last band edge).
+const CLOUD_MARCH_REACH_M: f32 = 300000.0;
+/// Rays entering the shell beyond this window dissolve to the far estimator.
+const CLOUD_MARCH_ENTRY_FADE_START_M: f32 = 240000.0;
+const CLOUD_MARCH_ENTRY_FADE_END_M: f32 = 300000.0;
+/// The marcher dissolves its density over the LAST fraction of its reach (the
+/// far tier fades in complementarily). The former half-span dissolve started
+/// washing detail out at 34 km — a large part of the perceived detail cliff.
+const CLOUD_MARCH_FADE_FRACTION: f32 = 0.85;
+
+/// Broad-probe step size at camera distance `t` (metres).
+fn cloud_march_step_m(t: f32) -> f32 {
+    if t < CLOUD_MARCH_BAND_EDGE_M.x { return CLOUD_MARCH_BAND_STEP_M.x; }
+    if t < CLOUD_MARCH_BAND_EDGE_M.y { return CLOUD_MARCH_BAND_STEP_M.y; }
+    if t < CLOUD_MARCH_BAND_EDGE_M.z { return CLOUD_MARCH_BAND_STEP_M.z; }
+    return CLOUD_MARCH_BAND_STEP_M.w;
+}
+
+/// Where a march that ENTERS the shell at `t_entry` with `steps` broad probes
+/// runs out — the analytic mirror the far tier partitions against. Exact for
+/// the clear-air cadence; refinement spends extra steps only after broad mass
+/// is found, where opacity normally terminates the ray before the reach
+/// frontier matters (same approximation the old constant-step mirror made).
+fn cloud_march_stop_m(steps: f32, t_entry: f32) -> f32 {
+    var remaining = steps;
+    var t = max(t_entry, 0.0);
+    // Locals: naga requires a reference for dynamic vector indexing.
+    var edges = CLOUD_MARCH_BAND_EDGE_M;
+    var band_steps = CLOUD_MARCH_BAND_STEP_M;
+    for (var band = 0u; band < 4u; band++) {
+        let edge = edges[band];
+        let step = band_steps[band];
+        if t < edge {
+            let n = (edge - t) / step;
+            if remaining <= n {
+                return t + remaining * step;
+            }
+            remaining -= n;
+            t = edge;
+        }
+    }
+    return CLOUD_MARCH_REACH_M;
+}
+
+/// Field-coarseness driver for the marcher's density LOD, keyed to the same
+/// band edges: 0 = full morphology, 1 = erosion retired / spectrum narrowed /
+/// edges widened, 2 = fully homogenized (derived E[shaped | env] field). Each
+/// filter stage completes BEFORE the step size that needs it kicks in.
+fn cloud_march_coarseness(t: f32) -> f32 {
+    let c1 = smoothstep(30000.0, CLOUD_MARCH_BAND_EDGE_M.x, t);
+    let c2 = smoothstep(70000.0, CLOUD_MARCH_BAND_EDGE_M.y, t);
+    return c1 + c2;
+}
+
 /// Height-moment normal for orbital cloud lighting: finite difference of the
 /// local top/coverage field in the body-fixed tangent plane. Gives soft relief
 /// on storm cells without a pre-baked normal atlas.

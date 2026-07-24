@@ -77,6 +77,10 @@ pub struct CloudsConfig {
     /// areal fill tracks the strata density the far tier renders; the default
     /// only covers bodies with no derived calibration.
     pub fill_threshold_nodes: [Vec4; 2],
+    /// Expected filtered density `E[shaped | env]`: 16 nodes (`i / 15`),
+    /// derived by the same calibration. The banded march's coarse LOD renders
+    /// this in place of the Cartesian shape term (BL-20260724T003705Z).
+    pub shape_response: [Vec4; 4],
     /// Capture diagnostic: -1 = near volume only, 0 = production composite,
     /// 1 = far surface projection only.
     pub tier_diagnostic: f32,
@@ -124,9 +128,12 @@ impl Default for CloudsConfig {
     fn default() -> Self {
         let sun_dir = Vec3::new(-0.7, 0.5, 0.75).normalize();
         Self {
-            // BL-33 adaptive broad probes make the extra clear-air reach cheap;
-            // 112 × 600 m covers 67.2 km without coarsening full-density steps.
-            clouds_raymarch_steps_count: 112,
+            // Banded broad probes (thalos::atmosphere march contract): 176
+            // steps reach the full 300 km geometric cap through the
+            // 600/1200/2400/4800 m distance bands, and band-2+ probes skip the
+            // noise volume entirely (homogenized field), so long clear-air
+            // reach is CHEAPER per step than the old 600 m-everywhere cadence.
+            clouds_raymarch_steps_count: 176,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
             clouds_bottom_height: 1250.0,
@@ -152,6 +159,14 @@ impl Default for CloudsConfig {
             fill_threshold_nodes: [
                 Vec4::new(0.81, 0.757, 0.704, 0.651),
                 Vec4::new(0.599, 0.546, 0.493, 0.44),
+            ],
+            // Mild ramp fallback; every cloudy body derives the real curve at
+            // spawn.
+            shape_response: [
+                Vec4::new(0.0, 0.03, 0.07, 0.10),
+                Vec4::new(0.13, 0.17, 0.20, 0.23),
+                Vec4::new(0.27, 0.30, 0.33, 0.37),
+                Vec4::new(0.40, 0.43, 0.47, 0.50),
             ],
             tier_diagnostic: 0.0,
             far_pixel_footprint: 1.0,

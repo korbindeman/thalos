@@ -53,6 +53,12 @@ pub struct CloudFillCalibration {
     pub threshold_nodes: [f32; THRESHOLD_NODES],
     /// Expected near-column opacity per strata-mean node (`i / 15`).
     pub far_response: [f32; FILL_RESPONSE_ENTRIES],
+    /// Expected per-sample filtered density `E[shaped | env]` (node `i / 15`)
+    /// — the band-limited stand-in for the marcher's Cartesian shape term.
+    /// The long-reach march's coarse bands render this instead of the noise
+    /// volume (BL-20260724T003705Z), so the homogenized field is
+    /// mean-preserving by construction.
+    pub shape_response: [f32; FILL_RESPONSE_ENTRIES],
 }
 
 impl CloudFillCalibration {
@@ -73,6 +79,17 @@ impl CloudFillCalibration {
         [
             Vec4::new(t[0], t[1], t[2], t[3]),
             Vec4::new(t[4], t[5], t[6], t[7]),
+        ]
+    }
+
+    /// Pack the homogenized-field response for the compute uniform.
+    pub fn shape_response_vec4s(&self) -> [Vec4; 4] {
+        let r = &self.shape_response;
+        [
+            Vec4::new(r[0], r[1], r[2], r[3]),
+            Vec4::new(r[4], r[5], r[6], r[7]),
+            Vec4::new(r[8], r[9], r[10], r[11]),
+            Vec4::new(r[12], r[13], r[14], r[15]),
         ]
     }
 }
@@ -253,6 +270,34 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
     }
     fill_gaps_monotone(&mut far_response);
 
+    // Homogenized-field response: expected PER-SAMPLE filtered density vs the
+    // sample's own strata value, with the fitted curve. The long-reach
+    // march's coarse bands render this in place of the Cartesian shape term.
+    let detail_w = detail_weight(input);
+    let edge_soft = input.base_edge_softness.max(0.015);
+    let mut shape_sum = [0.0f64; FILL_RESPONSE_ENTRIES];
+    let mut shape_weight = [0.0f64; FILL_RESPONSE_ENTRIES];
+    for column in &columns {
+        for s in &column.samples {
+            let shaped = sample_shaped(s, input, &nodes, detail_w, edge_soft);
+            let t = s.env.clamp(0.0, 1.0) * (FILL_RESPONSE_ENTRIES - 1) as f32;
+            let i = (t as usize).min(FILL_RESPONSE_ENTRIES - 2);
+            let f = f64::from(t - i as f32);
+            shape_sum[i] += f64::from(shaped) * (1.0 - f);
+            shape_weight[i] += 1.0 - f;
+            shape_sum[i + 1] += f64::from(shaped) * f;
+            shape_weight[i + 1] += f;
+        }
+    }
+    let mut shape_response = [f32::NAN; FILL_RESPONSE_ENTRIES];
+    shape_response[0] = 0.0;
+    for i in 1..FILL_RESPONSE_ENTRIES {
+        if shape_weight[i] >= 32.0 {
+            shape_response[i] = (shape_sum[i] / shape_weight[i]) as f32;
+        }
+    }
+    fill_gaps_monotone(&mut shape_response);
+
     // Convergence record: per strata-mean bin, the identity target vs the
     // fill the fitted curve achieves (and the opacity the LUT will render).
     // Low bins are envelope-limited and cannot reach their target; that is
@@ -283,6 +328,7 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
     CloudFillCalibration {
         threshold_nodes: nodes,
         far_response,
+        shape_response,
     }
 }
 
@@ -413,6 +459,30 @@ fn threshold_loss(
     loss as f32
 }
 
+/// One recorded sample's filtered density factor (`shaped`, pre profile ×
+/// envelope × extinction) under a candidate threshold curve. Mirrors
+/// `get_cloud_map_density`'s post-noise math — the same function feeds the
+/// column-opacity re-evaluation AND the homogenized-field expectation.
+fn sample_shaped(
+    s: &SampleRecord,
+    input: &FillCalibrationInput<'_>,
+    nodes: &[f32; THRESHOLD_NODES],
+    detail_weight: f32,
+    edge_softness: f32,
+) -> f32 {
+    let threshold = threshold_at(nodes, s.env);
+    let mut mass = s.shape - threshold - s.vertical_narrow;
+    if s.anvil_gate > 0.0 {
+        let anvil_shape = s.anvil_base - (threshold - 0.06);
+        mass = mass.max(anvil_shape * s.anvil_gate);
+    }
+    let edge = 1.0 - smoothstep(0.02, 0.34, mass);
+    if edge * detail_weight > 1.0e-3 {
+        mass -= (1.0 - s.detail_b) * edge * detail_weight * input.detail_strength * 0.55;
+    }
+    smoothstep(0.0, edge_softness, mass)
+}
+
 /// Re-evaluate one recorded column's integrated opacity under a candidate
 /// threshold curve. Mirrors `get_cloud_map_density`'s post-noise math.
 fn column_alpha(
@@ -424,17 +494,7 @@ fn column_alpha(
     let edge_softness = input.base_edge_softness.max(0.015);
     let mut optical_depth = 0.0f32;
     for s in &column.samples {
-        let threshold = threshold_at(nodes, s.env);
-        let mut mass = s.shape - threshold - s.vertical_narrow;
-        if s.anvil_gate > 0.0 {
-            let anvil_shape = s.anvil_base - (threshold - 0.06);
-            mass = mass.max(anvil_shape * s.anvil_gate);
-        }
-        let edge = 1.0 - smoothstep(0.02, 0.34, mass);
-        if edge * detail_weight > 1.0e-3 {
-            mass -= (1.0 - s.detail_b) * edge * detail_weight * input.detail_strength * 0.55;
-        }
-        let shaped = smoothstep(0.0, edge_softness, mass);
+        let shaped = sample_shaped(s, input, nodes, detail_weight, edge_softness);
         let density = (shaped * s.profile * s.envelope * input.density).max(0.0);
         optical_depth += density * STEP_M;
     }
