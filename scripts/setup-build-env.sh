@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Provision a fast Thalos build environment on Linux, WSL2, or macOS.
 #
-# Linux/WSL receive clang + mold, the agent-facing CLI tools (just, dx), and a
+# Linux/WSL receive clang + mold, the agent-facing CLI tool (just), and a
 # host-triple-specific Cargo config (fast linker + bounded job budget). Machine-
 # local config stays gitignored. There is no compiler cache: sccache was removed
 # (ADR-20260723T222214Z-abandon-sccache). Use --all-worktrees to write the same
@@ -160,21 +160,10 @@ if [[ "$platform" == "linux" || "$platform" == "wsl" ]]; then
   fi
 fi
 
-# --- persistent capture controller (dx / Subsecond) --------------------------
-# `just screenshot` uses dx/Subsecond. Keep the CLI on the same release as the
-# locked Subsecond runtime; a future CLI is not assumed wire-compatible.
-dx_version="0.7.9"
-installed_dx_version=""
-have dx && installed_dx_version="$(dx --version 2>/dev/null | awk '{print $2}')"
-if [[ "$installed_dx_version" != "$dx_version" ]]; then
-  echo "==> Installing dioxus-cli $dx_version (found: ${installed_dx_version:-none})"
-  if have cargo-binstall; then
-    cargo binstall -y --force "dioxus-cli@$dx_version"
-  else
-    cargo install dioxus-cli --version "$dx_version" --locked --force
-  fi
-fi
-have dx || { echo "dx installation failed." >&2; exit 1; }
+# The persistent capture host needs no extra tooling: it is a plain detached
+# `cargo run` on the same dynamic `dev-renderer` fingerprint as everything else
+# (ADR-20260724T153619Z-retire-hotpatch-single-stable-capture-lane). The former
+# dioxus-cli/Subsecond install lived here; nothing replaces it.
 
 toml_escape() {
   local value="$1"

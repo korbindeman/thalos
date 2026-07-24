@@ -37,15 +37,9 @@ else
   ok "checkout filesystem: $repo_root"
 fi
 
-for command_name in cargo rustc just dx; do
+for command_name in cargo rustc just; do
   if have "$command_name"; then ok "$command_name: $(command -v "$command_name")"; else fail "$command_name is missing"; fi
 done
-if have dx; then
-  dx_version="$(dx --version 2>/dev/null | awk '{print $2}')"
-  [[ "$dx_version" == "0.7.9" ]] \
-    && ok "dx version matches Subsecond: $dx_version" \
-    || fail "dx 0.7.9 required; found ${dx_version:-unknown}"
-fi
 
 rust_host=""
 if have rustc; then
