@@ -40,6 +40,11 @@ pub const MIN_LEVEL: u8 = 3;
 /// Split while camera distance < factor × tile arc.
 const SPLIT_FACTOR: f64 = 3.0;
 const MAX_IN_FLIGHT: usize = 24;
+/// Seconds a despawn-ready tile lingers before removal, covering the GPU
+/// upload latency of the tiles that replaced it (see `TileTerrainRoot::retiring`).
+/// Time-based, not frame-based: at uncapped frame rates a frame count shrinks
+/// to nothing, and under load single frames stretch.
+const DESPAWN_GRACE_S: f32 = 0.15;
 
 // --- cube-sphere addressing (probe tiles.rs, verbatim) -----------------------
 
@@ -411,6 +416,14 @@ pub struct TileTerrainRoot {
     desired: HashSet<TileKey>,
     resident: HashMap<TileKey, Entity>,
     pending: HashMap<TileKey, Task<StreamedTile>>,
+    /// Tiles whose despawn condition holds, counting down a grace period
+    /// (seconds remaining). A freshly-landed covering tile takes a few frames
+    /// to reach the GPU (mesh upload / bind-group prepare); despawning the
+    /// covered parent the same frame its cover lands flashes holes during
+    /// motion (user finding 2026-07-24). The old surface stays up until the
+    /// new one is actually visible; if coverage regresses meanwhile, the
+    /// entry is dropped.
+    retiring: HashMap<TileKey, f32>,
     gen_stats: GenStats,
     /// Latched true the first time the desired set is fully resident. After
     /// that, the hole-free despawn rule keeps coverage complete, so the
@@ -477,6 +490,7 @@ impl TileTerrainRoot {
             desired: HashSet::new(),
             resident: HashMap::new(),
             pending: HashMap::new(),
+            retiring: HashMap::new(),
             gen_stats: GenStats::default(),
             covered_once: false,
         }
@@ -599,6 +613,7 @@ fn covered_by_resident(
 #[allow(clippy::too_many_arguments)]
 fn stream_tile_terrain(
     eye: Res<TileEye>,
+    time: Res<Time>,
     mut roots: Query<(Entity, &mut TileTerrainRoot, &Grid)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
@@ -704,7 +719,7 @@ fn stream_tile_terrain(
     //    through refined crater walls long after its children had landed
     //    (user finding 2026-07-24); releasing per covered level makes
     //    refinement read as gradual sharpening instead of a late swap.
-    let removable: Vec<TileKey> = root_ref
+    let removable: HashSet<TileKey> = root_ref
         .resident
         .keys()
         .filter(|k| !root_ref.desired.contains(k))
@@ -727,7 +742,18 @@ fn stream_tile_terrain(
         })
         .copied()
         .collect();
+    // Grace-period retirement: a removable tile only despawns after its
+    // condition has held continuously for DESPAWN_GRACE_S, so the replacing
+    // meshes are actually on the GPU before the old surface drops.
+    root_ref.retiring.retain(|key, _| removable.contains(key));
+    let dt = time.delta_secs();
     for key in removable {
+        let remaining = root_ref.retiring.entry(key).or_insert(DESPAWN_GRACE_S);
+        if *remaining > 0.0 {
+            *remaining -= dt;
+            continue;
+        }
+        root_ref.retiring.remove(&key);
         if let Some(entity) = root_ref.resident.remove(&key) {
             commands.entity(entity).despawn();
         }
