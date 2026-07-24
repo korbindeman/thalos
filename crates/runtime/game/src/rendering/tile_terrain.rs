@@ -68,7 +68,10 @@ impl Plugin for TileTerrainDriverPlugin {
             return;
         }
         info!("THALOS_TILE_RENDERER=1 — standard-path tile terrain active; udlod ground terrain gated off");
-        app.add_systems(Update, (ensure_tile_root, update_tile_eye).chain());
+        app.add_systems(
+            Update,
+            (ensure_tile_root, update_tile_eye, update_tile_material_params).chain(),
+        );
     }
 }
 
@@ -146,6 +149,35 @@ fn ensure_tile_root(
     // anchor resolved. A rebuild request despawns it; the respawn declines
     // via the `tile_rendered` gate, leaving the tile path sole owner.
     rebuild.request(resolved.body);
+}
+
+/// Per-frame material-layer params for the NTR-X4 tile shader: the body's
+/// world rotation (so the shader can classify slope / build detail normals in
+/// the stable body-fixed frame) and the radial up at the view anchor. The tile
+/// materials are already dirtied every frame by `apply_craft_shadow`'s cascade
+/// fan-in, so this adds no new invalidation.
+fn update_tile_material_params(
+    anchor: Res<ViewAnchor>,
+    roots: Query<(&TileTerrainRoot, &TileTerrainBody, &GlobalTransform)>,
+    mut materials: ResMut<Assets<TileTerrainMaterial>>,
+) {
+    for (root, body, global) in &roots {
+        let orient = global.rotation();
+        let up = anchor
+            .resolved
+            .filter(|resolved| resolved.body == body.body_id)
+            .map(|resolved| resolved.cam_body.normalize().as_vec3());
+        for handle in &root.materials {
+            let Some(mut mat) = materials.get_mut(handle) else {
+                continue;
+            };
+            let params = &mut mat.extension.params;
+            params.orient = Vec4::new(orient.x, orient.y, orient.z, orient.w);
+            if let Some(up) = up {
+                params.up_body = up.extend(0.0);
+            }
+        }
+    }
 }
 
 /// Republish the selection eye from `ViewAnchor` each frame.

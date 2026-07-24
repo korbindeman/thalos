@@ -311,8 +311,12 @@ impl DiffusionSurface {
                 .normalize();
                 // Tangent frame aligned with the export's map axes: east =
                 // +longitude (raster +x), north = +latitude (raster −y).
+                // ENU north is east × up — `up × east` points SOUTH, which
+                // rendered the whole detail window vertically mirrored about
+                // the site (INC-20260724T170955Z: invisible at the window
+                // center, where every X2a verification framed).
                 let east = DVec3::new(-lon_r.sin(), 0.0, lon_r.cos());
-                let north = site_dir.cross(east).normalize();
+                let north = east.cross(site_dir).normalize();
                 detail = Some(DetailWindow {
                     raster,
                     rough: Raster::from_data(rough, side, side, 90.0, false),
@@ -520,6 +524,33 @@ impl SurfaceQuery for DiffusionSurface {
 
     fn landcover_moisture(&self, dir: DVec3) -> f32 {
         self.landcover.landcover_moisture(dir)
+    }
+
+    fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, crate::query::MaterialBands) {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO {
+            return (
+                SurfaceSample {
+                    height_m: 0.0,
+                    albedo_linear: Vec3::ZERO,
+                    roughness: 0.5,
+                    moisture: 0.0,
+                },
+                crate::query::MaterialBands::default(),
+            );
+        }
+        let height_m = self.height(dir, f64::from(lod_m));
+        let (albedo_linear, moisture, _biome, bands) =
+            self.landcover.macro_albedo_bands_for(dir, height_m, lod_m);
+        (
+            SurfaceSample {
+                height_m: height_m as f32,
+                albedo_linear,
+                roughness: 0.92,
+                moisture: moisture as f32,
+            },
+            bands,
+        )
     }
 
     fn radius_m(&self) -> f32 {

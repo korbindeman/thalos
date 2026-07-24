@@ -605,7 +605,7 @@ const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0)
 ///
 /// (Terrain generation is under active iteration; if you are mid-tuning and want
 /// to sidestep this entirely, run with `THALOS_TILE_CACHE=0`.)
-pub const GENERATOR_VERSION: u64 = 17;
+pub const GENERATOR_VERSION: u64 = 18;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProceduralSurface {
@@ -1040,6 +1040,22 @@ impl ProceduralSurface {
     /// (Coherent by construction when the external geometry was conditioned
     /// on this surface's macro band — the continents match.)
     pub fn macro_albedo_for(&self, dir: DVec3, height_m: f64, lod_m: f32) -> (Vec3, f64, MacroBiome) {
+        let (albedo, moisture, biome, _) = self.macro_albedo_bands_for(dir, height_m, lod_m);
+        (albedo, moisture, biome)
+    }
+
+    /// [`Self::macro_albedo_for`] plus the absolute [`MaterialBands`] weights
+    /// from the same band evaluation — the tile renderer's per-vertex
+    /// landcover query (NTR-X4 material layers). One evaluation, so the
+    /// shader's snow line / forest grain can never drift from the palette.
+    ///
+    /// [`MaterialBands`]: crate::query::MaterialBands
+    pub fn macro_albedo_bands_for(
+        &self,
+        dir: DVec3,
+        height_m: f64,
+        lod_m: f32,
+    ) -> (Vec3, f64, MacroBiome, crate::query::MaterialBands) {
         let dir = dir.normalize_or_zero();
         // Climate/orogeny inputs only need the macro evaluation — clamp the
         // LOD coarse so the canonical height composition stays cheap.
@@ -1054,6 +1070,7 @@ impl ProceduralSurface {
             self.albedo_from_bands(&bands, self.macro_tone(p)),
             moisture,
             classify_macro(&bands, height_m),
+            bands.material_bands(),
         )
     }
 
@@ -1187,6 +1204,20 @@ fn macro_band_ts(
     }
 }
 
+impl MacroBandTs {
+    /// Absolute snow / forest weights for the material shader — the same
+    /// nested-mix expansion [`classify_macro`] uses, so the shader's snow
+    /// line / canopy grain track exactly what the macro palette paints.
+    fn material_bands(&self) -> crate::query::MaterialBands {
+        let tail = (1.0 - self.rock) * (1.0 - self.snow) * (1.0 - self.oro_rock);
+        let w_low = self.lowland * (1.0 - self.upland) * (1.0 - self.tundra) * tail;
+        crate::query::MaterialBands {
+            snow: (self.snow * (1.0 - self.oro_rock)) as f32,
+            forest: (w_low * self.forest) as f32,
+        }
+    }
+}
+
 /// Expand the nested `mix` chains into absolute per-class weights (each mix
 /// `t` scales everything blended before it by `1 − t`) and return the argmax.
 fn classify_macro(t: &MacroBandTs, height_m: f64) -> MacroBiome {
@@ -1238,6 +1269,26 @@ impl SurfaceQuery for ProceduralSurface {
 
     fn sample_d(&self, dir: DVec3, lod_m: f32) -> SurfaceSample {
         self.sample_biome_d(dir, lod_m).0
+    }
+
+    fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, crate::query::MaterialBands) {
+        let dir = dir.normalize_or_zero();
+        let (height_m, orogeny, c) = self.height_and_orogeny(dir, lod_m);
+        let p = dir * self.radius_m;
+        let sin_lat = dir.y.abs();
+        let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
+        let cold_lift = climate_cold_lift_m(sin_lat);
+        let warmth = climate_warmth(cold_lift);
+        let bands = macro_band_ts(height_m, orogeny, moisture, cold_lift, warmth);
+        (
+            SurfaceSample {
+                height_m: height_m as f32,
+                albedo_linear: self.albedo_from_bands(&bands, self.macro_tone(p)),
+                roughness: 0.92,
+                moisture: moisture as f32,
+            },
+            bands.material_bands(),
+        )
     }
 
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {

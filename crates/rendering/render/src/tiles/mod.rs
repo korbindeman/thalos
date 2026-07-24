@@ -165,12 +165,15 @@ pub fn face_uv_of_dir(dir: DVec3) -> (u8, f64, f64) {
 
 // --- tile payload + provider ---------------------------------------------------
 
-/// One sampled tile: heights + linear albedo on the halo grid.
+/// One sampled tile: heights + linear albedo + canonical material band
+/// weights (`[snow, forest]`, see `thalos_terrain::MaterialBands`) on the
+/// halo grid.
 pub struct SurfaceTile {
     pub key: TileKey,
     pub sample_spacing_m: f64,
     pub heights_m: Vec<f32>,
     pub albedo_linear: Vec<[f32; 3]>,
+    pub bands: Vec<[f32; 2]>,
 }
 
 impl SurfaceTile {
@@ -202,7 +205,7 @@ impl TerrainTileProvider for SurfaceQueryProvider {
         // across the shared *bounded* eval pool, exactly like udlod's
         // `compute_tile_pixels` (never rayon's implicit global pool; see
         // `ground::tile_synthesis_pool`).
-        let rows: Vec<(Vec<f32>, Vec<[f32; 3]>)> =
+        let rows: Vec<(Vec<f32>, Vec<[f32; 3]>, Vec<[f32; 2]>)> =
             crate::ground::tile_synthesis_pool::tile_eval_pool().install(|| {
                 use rayon::prelude::*;
                 (0..side)
@@ -210,33 +213,52 @@ impl TerrainTileProvider for SurfaceQueryProvider {
                     .map(|j| {
                         let mut h = Vec::with_capacity(side);
                         let mut a = Vec::with_capacity(side);
+                        let mut b = Vec::with_capacity(side);
                         let t = (j as f64 - TILE_HALO as f64) * step;
                         for i in 0..side {
                             let s = (i as f64 - TILE_HALO as f64) * step;
-                            let sample =
-                                self.surface.sample_d(key.dir_at(s, t), spacing as f32);
+                            let (sample, bands) =
+                                self.surface.sample_bands_d(key.dir_at(s, t), spacing as f32);
                             h.push(sample.height_m);
                             a.push([
                                 sample.albedo_linear.x,
                                 sample.albedo_linear.y,
                                 sample.albedo_linear.z,
                             ]);
+                            b.push([bands.snow, bands.forest]);
                         }
-                        (h, a)
+                        (h, a, b)
                     })
                     .collect()
             });
         let mut heights = Vec::with_capacity(side * side);
         let mut albedo = Vec::with_capacity(side * side);
-        for (h, a) in rows {
+        let mut bands = Vec::with_capacity(side * side);
+        for (h, a, b) in rows {
             heights.extend(h);
             albedo.extend(a);
+            bands.extend(b);
         }
-        SurfaceTile { key, sample_spacing_m: spacing, heights_m: heights, albedo_linear: albedo }
+        SurfaceTile {
+            key,
+            sample_spacing_m: spacing,
+            heights_m: heights,
+            albedo_linear: albedo,
+            bands,
+        }
     }
 }
 
 // --- mesher (probe mesher.rs, albedo-driven) ------------------------------------
+
+/// Wrap period (m) of the body-fixed position the mesh carries in its spare
+/// UV channels for the material shader (NTR-X4 layers). Vertices store
+/// `p_body − anchor` where `anchor` is the tile origin snapped down to a
+/// multiple of this, so values are continuous within a tile and agree across
+/// tiles mod the period — every texture wavelength in `tile_terrain.wgsl`
+/// must divide this exactly (same discipline as udlod's wrapped detail
+/// noise). Mirrored as `TILE_WRAP_M` in the shader.
+pub const TILE_WRAP_M: f64 = 8192.0;
 
 /// Skirt depth: chord sag + band-gate allowance (shared probe formula).
 pub fn skirt_drop_m(sample_spacing_m: f64, radius_m: f64) -> f32 {
@@ -286,10 +308,20 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     }
     let origin =
         key.center_dir() * (radius_m + tile.heights_m[(side / 2) * side + side / 2] as f64);
+    // Material-shader position anchor: the origin snapped down to the wrap
+    // period, so `p_body − anchor` is continuous within the tile and agrees
+    // with neighbouring tiles mod TILE_WRAP_M (see the const's docs).
+    let wrap_anchor = DVec3::new(
+        (origin.x / TILE_WRAP_M).floor() * TILE_WRAP_M,
+        (origin.y / TILE_WRAP_M).floor() * TILE_WRAP_M,
+        (origin.z / TILE_WRAP_M).floor() * TILE_WRAP_M,
+    );
 
     let mut positions: Vec<[f32; 3]> = Vec::with_capacity(res * res);
     let mut normals: Vec<[f32; 3]> = Vec::with_capacity(res * res);
     let mut colors: Vec<[f32; 4]> = Vec::with_capacity(res * res);
+    let mut uv0: Vec<[f32; 2]> = Vec::with_capacity(res * res);
+    let mut uv1: Vec<[f32; 2]> = Vec::with_capacity(res * res);
     let mut indices: Vec<u32> = Vec::with_capacity((res - 1) * (res - 1) * 6);
 
     let mut mesh_h = (f32::INFINITY, f32::NEG_INFINITY);
@@ -311,7 +343,14 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
             }
             normals.push([n.x as f32, n.y as f32, n.z as f32]);
             let a = tile.albedo_linear[gj * side + gi];
-            colors.push([a[0], a[1], a[2], 1.0]);
+            // Spare-channel contract with `tile_terrain.wgsl` (NTR-X4):
+            // uv0 + uv1.x = wrapped body-fixed position, uv1.y = canonical
+            // snow band weight, color.a = canonical forest band weight.
+            let b = tile.bands[gj * side + gi];
+            colors.push([a[0], a[1], a[2], b[1]]);
+            let wrapped = p - wrap_anchor;
+            uv0.push([wrapped.x as f32, wrapped.y as f32]);
+            uv1.push([wrapped.z as f32, b[0]]);
         }
     }
     for j in 0..res - 1 {
@@ -370,6 +409,8 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
         ]);
         normals.push(normals[idx as usize]);
         colors.push(colors[idx as usize]);
+        uv0.push(uv0[idx as usize]);
+        uv1.push(uv1[idx as usize]);
     }
     let n_border = border.len() as u32;
     for k in 0..n_border {
@@ -386,6 +427,8 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
     mesh.insert_indices(Indices::U32(indices));
     BuiltTile { mesh, origin, mesh_h }
 }
@@ -535,6 +578,21 @@ impl TileTerrainRoot {
                 .desired
                 .iter()
                 .all(|k| self.resident.contains_key(k))
+    }
+
+    /// Sample spacing (m/vertex) of the finest resident tile containing
+    /// `dir_body`, or `None` while nothing covers that direction yet. The
+    /// tile-path analogue of udlod's `renderer_tile_lod_m_at` — used by the
+    /// surface-settle gate and the capture readiness hold to answer "how
+    /// refined is the streamed ground at this exact spot".
+    pub fn resident_spacing_m_at(&self, dir_body: DVec3) -> Option<f32> {
+        for level in (MIN_LEVEL..=self.max_level).rev() {
+            let key = TileKey::containing_dir(dir_body, level);
+            if self.resident.contains_key(&key) {
+                return Some(key.sample_spacing_m(self.radius_m) as f32);
+            }
+        }
+        None
     }
 }
 

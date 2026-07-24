@@ -13,6 +13,7 @@
 //! The shadow maps are fanned in per-frame by `craft::apply_craft_shadow`,
 //! exactly like the hull and `ShadowedStandardMaterial`.
 
+use bevy::math::Vec4;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension, StandardMaterial};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -30,15 +31,30 @@ pub struct TileShadingParams {
     pub _pad0: u32,
     pub _pad1: u32,
     pub _pad2: u32,
+    /// Body→world rotation as a unit quaternion (xyzw). Written per frame by
+    /// the game's tile driver so the NTR-X4 material layers can classify
+    /// slope / build detail normals in the body-fixed frame (stable under
+    /// planet spin and floating-origin moves), then rotate back to world.
+    pub orient: Vec4,
+    /// Radial "up" at the view anchor, body-fixed (xyz; w unused). Up varies
+    /// ~1° per 50 km, so one uniform serves the whole frame.
+    pub up_body: Vec4,
 }
 
 impl TileShadingParams {
     pub fn pbr() -> Self {
-        Self { style: 0, _pad0: 0, _pad1: 0, _pad2: 0 }
+        Self {
+            style: 0,
+            _pad0: 0,
+            _pad1: 0,
+            _pad2: 0,
+            orient: Vec4::new(0.0, 0.0, 0.0, 1.0),
+            up_body: Vec4::new(0.0, 1.0, 0.0, 0.0),
+        }
     }
 
     pub fn hapke() -> Self {
-        Self { style: 1, _pad0: 0, _pad1: 0, _pad2: 0 }
+        Self { style: 1, ..Self::pbr() }
     }
 }
 

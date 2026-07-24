@@ -121,6 +121,23 @@ pub struct SurfaceSample {
     pub moisture: f32,
 }
 
+/// Canonical landcover band weights for material-layer selection (NTR-X4).
+///
+/// A strict subset of the same macro band evaluation that produces
+/// [`SurfaceSample::albedo_linear`] — same climate model, same thresholds —
+/// exposed as absolute per-class weights so a material shader's snow line and
+/// forest grain can never drift from the palette. Zero for backings without a
+/// landcover model (airless bodies, plain oceans).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct MaterialBands {
+    /// Absolute snow-cover weight in `[0, 1]` (climate-shifted altitude ×
+    /// latitude; the mix weight the macro albedo actually paints snow with).
+    pub snow: f32,
+    /// Absolute closed-canopy forest weight in `[0, 1]` (moisture-driven,
+    /// confined to the lowland band — the treeline is already inside it).
+    pub forest: f32,
+}
+
 // ---------------------------------------------------------------------------
 // Query trait + region
 // ---------------------------------------------------------------------------
@@ -169,6 +186,15 @@ pub trait SurfaceQuery: Send + Sync {
     /// (grass builders, scatter). `0.0` for backings without a landcover model.
     fn landcover_moisture(&self, _dir: DVec3) -> f32 {
         0.0
+    }
+
+    /// Sample plus the canonical [`MaterialBands`] in one evaluation — the
+    /// tile renderer's per-vertex query (NTR-X4 material layers). The default
+    /// returns the plain sample with zero bands; backings with a landcover
+    /// model override this to reuse the band evaluation their albedo already
+    /// performs (one landcover authority, no second biome model).
+    fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, MaterialBands) {
+        (self.sample_d(dir, lod_m), MaterialBands::default())
     }
 
     /// Body reference radius, metres.
@@ -532,6 +558,12 @@ impl SurfaceQuery for FlattenedSurface {
         let mut s = self.inner.sample_d(dir, lod_m);
         s.height_m = self.flatten_height(dir, s.height_m);
         s
+    }
+
+    fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, MaterialBands) {
+        let (mut s, bands) = self.inner.sample_bands_d(dir, lod_m);
+        s.height_m = self.flatten_height(dir, s.height_m);
+        (s, bands)
     }
 
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {

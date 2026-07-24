@@ -33,9 +33,11 @@
 
 use bevy::prelude::*;
 use thalos_body_render::renderer_tile_lod_m_at;
+use thalos_body_render::tiles::{TileEye, TileTerrainRoot};
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 
 use crate::camera::ShipCamera;
+use crate::rendering::tile_terrain::TileTerrainBody;
 use crate::loading::{AppState, LoadingTracker, step};
 use crate::rendering::ground_terrain::BodyTerrain;
 use crate::solar_system_state::SimulationState;
@@ -172,6 +174,8 @@ fn update_surface_settle(
     tile_trees: Res<TerrainViewComponents<TileTree>>,
     terrains: Query<(Entity, &BodyTerrain, &TileAtlas)>,
     camera_q: Query<Entity, With<ShipCamera>>,
+    tile_eye: Res<TileEye>,
+    tile_roots: Query<(&TileTerrainRoot, &TileTerrainBody)>,
 ) {
     if settle.done || !settle.needs_settle {
         return;
@@ -195,7 +199,12 @@ fn update_surface_settle(
     }
     settle.elapsed_s += dt;
 
-    let lod_m = resident_lod_under_view(&sim, &tile_trees, &terrains, &camera_q);
+    let body = sim.simulation.dominant_body();
+    let lod_m = if crate::rendering::tile_terrain::tile_rendered(body) {
+        tile_resident_lod_under_view(body, &tile_eye, &tile_roots)
+    } else {
+        resident_lod_under_view(&sim, &tile_trees, &terrains, &camera_q)
+    };
 
     // Settle diagnostics: a line every few seconds while the gate is active
     // (bounded — at most ~6 per load). The view radius tells whether the tile
@@ -258,7 +267,7 @@ fn update_surface_settle(
 /// ground under the view". (Reading the canonical craft state instead is wrong:
 /// the runway/descent placements install the craft under `OnRails`, so its
 /// canonical translation still reads the placeholder orbit, not the surface.)
-fn resident_lod_under_view(
+pub(crate) fn resident_lod_under_view(
     sim: &SimulationState,
     tile_trees: &TerrainViewComponents<TileTree>,
     terrains: &Query<(Entity, &BodyTerrain, &TileAtlas)>,
@@ -269,6 +278,20 @@ fn resident_lod_under_view(
     let camera = camera_q.iter().next()?;
     let tree = tile_trees.get(&(terrain_entity, camera))?;
     renderer_tile_lod_m_at(atlas, tree, tree.view_position())
+}
+
+/// Tile-renderer analogue of [`resident_lod_under_view`]: the finest resident
+/// tile spacing under the [`TileEye`] on the body's [`TileTerrainRoot`]. The
+/// eye is republished each frame from `ViewAnchor`, so — like udlod's
+/// `view_position` — it is exactly the point the streamer refines around.
+fn tile_resident_lod_under_view(
+    body: thalos_world::BodyId,
+    eye: &TileEye,
+    roots: &Query<(&TileTerrainRoot, &TileTerrainBody)>,
+) -> Option<f32> {
+    let target = eye.target.as_ref()?;
+    let (root, _) = roots.iter().find(|(_, b)| b.body_id == body)?;
+    root.resident_spacing_m_at(target.cam_body.normalize())
 }
 
 /// Distance (km) from the body centre to the tile tree's view position — the
