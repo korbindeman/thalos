@@ -30,7 +30,7 @@
 //! plenty for a smooth output; higher resolution buys nothing visible at this
 //! number of view steps.
 
-use crate::shading::AtmosphereBlock;
+use crate::AtmosphereBlock;
 use glam::Vec3;
 
 const PI: f32 = std::f32::consts::PI;

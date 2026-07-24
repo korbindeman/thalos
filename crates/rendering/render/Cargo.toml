@@ -15,6 +15,7 @@ required-features = ["playground"]
 image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dependencies]
+thalos_body_shading = { path = "../shading" }
 thalos_terrain = { path = "../../domain/terrain" }
 thalos_world = { path = "../../domain/world" }
 thalos_shipyard = { path = "../../domain/construction" }

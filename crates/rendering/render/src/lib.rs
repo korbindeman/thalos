@@ -6,14 +6,18 @@ pub mod clouds;
 pub mod craft;
 pub mod ground;
 pub mod impostor;
-pub mod shading;
 pub mod tiles;
 
 pub use clouds::*;
 pub use craft::*;
 pub use ground::*;
 pub use impostor::*;
-pub use shading::*;
+/// The shared body-surface shading types + WGSL libraries, extracted to the
+/// `thalos_body_shading` leaf crate (ADR-20260724T022732Z) so shading edits
+/// recompile a small crate. Re-exported as the `shading` module and flat at the
+/// crate root so existing `thalos_body_render::{shading::*, SceneLighting, …}`
+/// and internal `crate::shading::…` paths keep resolving unchanged.
+pub use thalos_body_shading::{self as shading, *};
 
 /// The vendored UDLOD terrain renderer, re-exported so the rest of the
 /// workspace depends on it *through* `body_render` — its single consumer —

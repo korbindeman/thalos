@@ -14,6 +14,7 @@ members = [
     "crates/offline/terrain_learned",
     "crates/offline/texgen",
     "crates/rendering/render",
+    "crates/rendering/shading",
     "crates/rendering/udlod",
     "crates/runtime/game",
     "crates/simulation/control",

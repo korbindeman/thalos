@@ -1,0 +1,17 @@
+[package]
+name = "thalos_body_shading"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Bottom-leaf of the body-render stack: the shared body-surface shading types
+# (SceneLighting / AtmosphereBlock / StarLight / the sky-view + multi-scatter
+# LUTs) and the `thalos::{lighting,atmosphere,shadow,landcover,water,foliage,
+# grass_displace}` WGSL shader libraries. Extracted from `thalos_body_render`
+# so a lighting/atmosphere-uniform or shared-library edit recompiles this small
+# crate instead of the 186 MB parent when the capture host rebuilds.
+# See ADR-20260724T022732Z-render-crate-split-for-hot-iteration.
+[dependencies]
+thalos_world = { path = "../../domain/world" }
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+glam = "0.32"

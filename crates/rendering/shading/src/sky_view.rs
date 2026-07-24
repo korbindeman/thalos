@@ -30,8 +30,8 @@
 //! length unit for `planet_radius_render` / `altitude` / the atmosphere block
 //! works — the reflection probe bakes in meters (`meters_per_render_unit = 1`).
 
-use crate::shading::AtmosphereBlock;
-use crate::shading::multi_scatter::{MultiScatterLut, compute_t_exit, sun_optical_depth};
+use crate::AtmosphereBlock;
+use crate::multi_scatter::{MultiScatterLut, compute_t_exit, sun_optical_depth};
 use glam::Vec3;
 
 const PI: f32 = std::f32::consts::PI;

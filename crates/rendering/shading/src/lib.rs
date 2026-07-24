@@ -1,8 +1,8 @@
 //! Shared celestial-body shading types and shader libraries.
 //!
 //! The single source of truth for how a body's surface looks, consumed by
-//! both render backends in this crate: the [`crate::impostor`] billboard and
-//! the [`crate::ground`] udlod terrain LOD. Holds the data structures and WGSL
+//! both render backends in `thalos_body_render`: the `impostor` billboard and
+//! the `ground` udlod terrain LOD. Holds the data structures and WGSL
 //! libraries every body-surface material reads from: scene lighting (stars,
 //! eclipse occluders, planetshine), per-body atmosphere parameters, and the
 //! shared Hapke BRDF helper. A backend chooses its geometry but never its own
