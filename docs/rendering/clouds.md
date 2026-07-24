@@ -797,6 +797,19 @@ Remaining: port the derived LUT into `solid_planet.wgsl` (its
 closer than the old saturating curve — but not identical across the
 composite↔impostor swap), and the user's live gates.
 
+**User verdict on round 5 (2026-07-24, live screenshots):**
+registration/thickness parity largely pass — "a lot of it is quite
+accurate" — but the transition still fails: the far sheet terminates on the
+camera-relative ownership arc (a hard scalloped curtain edge), thin sheet
+skirts show swirl filaments (grazing layer-clip residue), clouds read
+uniformly gray, and the near→far detail loss is a visible cliff. The
+architectural conclusion (with a Blackrack/MSFS reference study) is that the
+residual symptoms are the mid-air representation swap itself; the
+superseding direction is one footprint-LOD'd representation across the
+visible range — see BL-20260724T003705Z-cloud-single-representation-reach.
+The derived `fill_lut` pairing survives as the contract for the remaining
+(true-orbit) representation boundary.
+
 ### Program acceptance matrix
 
 | Scenario | Pass condition |
