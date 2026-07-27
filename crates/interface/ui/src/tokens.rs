@@ -71,34 +71,34 @@ pub const PANEL_SHADOW: Color = Color::srgba(0.0, 0.0, 0.0, 0.30);
 // Spacing / radii / sizes
 // ---------------------------------------------------------------------------
 
-pub const SPACE_XS: f32 = 4.0;
-pub const SPACE_SM: f32 = 8.0;
-pub const SPACE_MD: f32 = 12.0;
-pub const SPACE_LG: f32 = 16.0;
-pub const SPACE_XL: f32 = 24.0;
+pub const SPACE_XS: f32 = 3.0;
+pub const SPACE_SM: f32 = 6.0;
+pub const SPACE_MD: f32 = 10.0;
+pub const SPACE_LG: f32 = 14.0;
+pub const SPACE_XL: f32 = 20.0;
 
 /// Panel corner radius — generous, sheet-like.
-pub const RADIUS_PANEL: f32 = 16.0;
+pub const RADIUS_PANEL: f32 = 14.0;
 /// Control (button/field/row) corner radius.
-pub const RADIUS_CTRL: f32 = 9.0;
+pub const RADIUS_CTRL: f32 = 8.0;
 
 /// Standard control heights: compact rows everywhere.
-pub const CTRL_H: f32 = 26.0;
-pub const CTRL_H_SM: f32 = 22.0;
-pub const CTRL_H_LG: f32 = 34.0;
+pub const CTRL_H: f32 = 23.0;
+pub const CTRL_H_SM: f32 = 19.0;
+pub const CTRL_H_LG: f32 = 30.0;
 
 // ---------------------------------------------------------------------------
 // Type scale
 // ---------------------------------------------------------------------------
 
 /// Logotype / hero display.
-pub const FS_DISPLAY: f32 = 52.0;
+pub const FS_DISPLAY: f32 = 44.0;
 /// Screen titles ("SPACE CENTER").
-pub const FS_TITLE: f32 = 20.0;
+pub const FS_TITLE: f32 = 18.0;
 /// Section headings (caps, semibold, faint).
 pub const FS_HEADING: f32 = 11.0;
 /// Standard interface text.
-pub const FS_BODY: f32 = 13.0;
+pub const FS_BODY: f32 = 12.0;
 /// Secondary text / descriptions.
 pub const FS_SMALL: f32 = 11.0;
 /// Mono readouts.

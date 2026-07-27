@@ -1,5 +1,6 @@
 //! A fixed, flat runway on the Thalos surface, plus the two spawn scenarios
-//! that put the aircraft on it (`just game runway`, `just game runway-approach`).
+//! that put an aircraft on it (`just game runway`, `just game runway-approach`)
+//! or the Saturn rocket on a launchpad (`just game launch`).
 //!
 //! This is a deferred, terrain-aware spawn just like the descent scenarios in
 //! [`crate::spawn`]: `main.rs` parks the ship in the placeholder orbit behind
@@ -364,11 +365,11 @@ struct RunwayVisual {
     center_surface_body: DVec3,
 }
 
-/// Re-armable trigger for the deferred runway placement. Armed at startup
-/// when the boot scenario is a runway start, and again by the start screen
-/// when a runway scenario is picked there ([`crate::main_menu`]).
+/// Re-armable trigger for deferred spaceport placement. Armed at startup
+/// when the boot scenario is a runway/launchpad start, and again by the start
+/// screen when one is picked there ([`crate::main_menu`]).
 /// [`finish_runway_spawn`] consumes it (clears `pending`) once the site is
-/// built and the aircraft placed.
+/// built and the craft placed.
 #[derive(Resource, Debug, Default)]
 pub struct RunwayPlacement {
     pub pending: bool,
@@ -416,7 +417,7 @@ fn arm_boot_runway_placement(
     situation: Res<SpawnSituation>,
     mut placement: ResMut<RunwayPlacement>,
 ) {
-    placement.pending = situation.is_runway();
+    placement.pending = situation.is_spaceport();
 }
 
 /// Deferred finisher: resolve the fixed site, build the flat platform +
@@ -440,6 +441,7 @@ fn finish_runway_spawn(
         ResMut<crate::structures::StructureRegistry>,
         ResMut<ActiveLocalBubble>,
         ResMut<TerrainRebuildRequest>,
+        ResMut<crate::base_editor::PavedFootprints>,
     ),
     root: Res<RealSpaceRoot>,
     ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
@@ -465,10 +467,11 @@ fn finish_runway_spawn(
     mut materials: ResMut<Assets<ShadowedStandardMaterial>>,
     mut images: ResMut<Assets<Image>>,
 ) {
-    if !placement.pending || !situation.is_runway() {
+    if !placement.pending || !situation.is_spaceport() {
         return;
     }
-    let (mut flatten_registry, mut structure_registry, mut active_bubble, mut rebuild) = registries;
+    let (mut flatten_registry, mut structure_registry, mut active_bubble, mut rebuild, mut paved) =
+        registries;
     let body_id = sim.simulation.dominant_body();
     let Some(height_source) = height_sources.get(body_id) else {
         return; // terrain not resident yet — retry next frame
@@ -478,29 +481,46 @@ fn finish_runway_spawn(
     // How far to lift the parked craft so it rests on the surface. Computed
     // before building anything, so a craft whose gear/geometry isn't ready yet
     // just retries instead of double-spawning the spaceport.
-    let park_clearance_m = if matches!(*situation, SpawnSituation::Runway) {
-        let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
-            return; // ship not spawned yet — retry
-        };
-        let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
-        match measure_runway_clearance(
-            &sim,
-            body_id,
-            ship_entity,
-            ship_gt,
-            &children_q,
-            &mesh_q,
-            &meshes,
-            parts,
-            gear_q,
-            host_nodes,
-            gear_tuning,
-        ) {
-            Some(c) => c,
-            None => return, // craft gear/geometry not ready yet — retry
+    let park_clearance_m = match *situation {
+        SpawnSituation::Runway => {
+            let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
+                return; // ship not spawned yet — retry
+            };
+            let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
+            match measure_runway_clearance(
+                &sim,
+                body_id,
+                ship_entity,
+                ship_gt,
+                &children_q,
+                &mesh_q,
+                &meshes,
+                parts,
+                gear_q,
+                host_nodes,
+                gear_tuning,
+            ) {
+                Some(c) => c,
+                None => return, // craft gear/geometry not ready yet — retry
+            }
         }
-    } else {
-        0.0
+        SpawnSituation::Launch => {
+            let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
+                return; // Saturn root not spawned yet — retry
+            };
+            let Some(clearance) = craft_extent_below(
+                ship_entity,
+                ship_gt,
+                &children_q,
+                &mesh_q,
+                &meshes,
+                Vec3::NEG_Y,
+            ) else {
+                return; // part meshes not ready yet — retry
+            };
+            clearance
+        }
+        _ => 0.0,
     };
 
     // Build the spaceport site — basin flatten, both runways (primary + angled
@@ -518,6 +538,7 @@ fn finish_runway_spawn(
         &mut materials,
         &mut images,
         &mut structure_registry,
+        &mut paved,
         &mut flatten_registry,
         &mut rebuild,
         &mut sim,
@@ -544,6 +565,45 @@ fn finish_runway_spawn(
         SpawnSituation::RunwayApproach => {
             place_approach(&mut sim, &body_state, &site, body_radius_m)
         }
+        SpawnSituation::Launch => {
+            let Some(pad) = structure_registry
+                .sites_on(body_id)
+                .iter()
+                .find(|site| {
+                    matches!(
+                        site.kind,
+                        crate::structures::StructureKind::Launchpad { .. }
+                    )
+                })
+                .copied()
+            else {
+                error!("launch: default spaceport contains no launchpad");
+                return;
+            };
+            let elevation_m = pad
+                .parent_site
+                .and_then(|parent| structure_registry.get(parent))
+                .and_then(|parent| match parent.placement {
+                    crate::structures::StructurePlacement::FlattenTo { elevation_m, .. } => {
+                        Some(elevation_m)
+                    }
+                    crate::structures::StructurePlacement::Drape => None,
+                })
+                .unwrap_or(0.0);
+            crate::base_editor::place_on_launchpad(
+                &mut sim,
+                &body_state,
+                body_id,
+                pad.anchor_dir,
+                pad.heading_tangent,
+                body_radius_m,
+                elevation_m,
+                park_clearance_m,
+                &mut commands,
+                &mut active_bubble,
+            );
+            info!("launch: Saturn placed on launchpad {:?}", pad.id);
+        }
         _ => {}
     }
 
@@ -551,7 +611,9 @@ fn finish_runway_spawn(
     // down — `GearState` is a persistent resource, and a respawn after the
     // player retracted gear in flight would otherwise spawn the aircraft
     // belly-down on the strip.
-    commands.insert_resource(crate::local_physics::GearState { down: true });
+    if situation.is_runway() {
+        commands.insert_resource(crate::local_physics::GearState { down: true });
+    }
 
     commands.insert_resource(site);
     placement.pending = false;
@@ -603,6 +665,7 @@ pub(crate) fn build_spaceport(
     materials: &mut Assets<ShadowedStandardMaterial>,
     images: &mut Assets<Image>,
     structure_registry: &mut crate::structures::StructureRegistry,
+    paved: &mut crate::base_editor::PavedFootprints,
     flatten_registry: &mut TerrainFlattenRegistry,
     rebuild: &mut TerrainRebuildRequest,
     sim: &mut SimulationState,
@@ -849,6 +912,7 @@ pub(crate) fn build_spaceport(
         meshes,
         materials,
         structure_registry,
+        paved,
         root_entity,
         body_id,
         basin_id,

@@ -16,12 +16,14 @@ other viewport-dependent inputs while supposedly holding them constant.
 - `just capture <preset>...` captures several scenes in one invocation.
   Presets sharing body + spawn + hub mode + viewport + startup overrides
   amortize one world boot; other boot contexts restart automatically.
-- F8 in a live 3-D view + `just screenshot latest` hands the player's exact
-  body-fixed camera position, orientation, lens, and viewport to an agent.
-- F2 desktop screenshots and F8 perspective handoffs show saved/error toasts
-  only after the capture outcome is known, so F2 feedback is never baked into
-  its own image. Neither appears in F1 photo mode, whose clean frame hides the
-  shared toast container.
+- F8 opens the shared viewpoint manager. Developers can create, inspect, apply,
+  update, rename, and delete exact saved poses and agent-scripted views stored
+  in `assets/viewpoints.json`; agents edit the same file directly.
+- `just screenshot <viewpoint-id>` replays a named catalog point. `just
+  screenshot latest` remains a compatibility alias for the newest entry.
+- F2 desktop screenshots show saved/error toasts only after the capture outcome
+  is known, so feedback is never baked into its own image. Toasts do not appear
+  in F1 photo mode, whose clean frame hides the shared toast container.
 - `just compare <preset> <axis>` captures every live-compatible typed variant in
   that same renderer, then assembles one comparison artifact set.
 - `just screenshot-cold` and `just compare-cold` are the clean-process,
@@ -43,29 +45,79 @@ Ad-hoc framings set `THALOS_SCREENSHOT_OUT` to a path under
 `artifacts/visual/runs/`; they do not mint new names beside the canonical
 views. Comparison matrices always use the run tree automatically.
 
-## Player-saved perspective handoff
+## Shared viewpoint catalog
+
+### F9 — save this view
+
+**F9, Enter** saves what is on screen right now under a name derived from the
+view (`Thalos 340 m`, `Mira 412 km`, numbered when that name is taken); **F9,
+type, Enter** overrides the name, because the suggestion starts fully selected.
+The toast reports the id the entry landed under — that string is what
+`just screenshot <id>` takes. The pose is frozen at the keypress, not at Enter,
+so the world may keep moving (or warping) while the name is typed.
+
+Collisions never block a save: a typed name whose slug is taken gets the next
+free `-2` / `-3` id, and the toast says so. Use F8 when you want to browse,
+re-view, replace, or delete instead.
+
+### F8 — the catalog manager
 
 Press F8 while the ship/free camera, space-center hub, or another 3-D god-view
-is active. Thalos writes a versioned handoff to
-`artifacts/diagnostics/latest_perspective.json` and confirms it with an in-game
-toast. An agent responding to “check my latest perspective” runs:
+is active. The egui manager reads `assets/viewpoints.json`. “Save current as
+new” captures the current body-fixed position, orientation, lens, viewport,
+target body, and canonical boot scene under a stable id. “View” applies a
+selected entry in the running world; “Replace from current” updates its pose.
+Reload rereads agent edits without restarting the game.
+
+“View” always enters freecam and seeds freecam's own body-fixed anchor from the
+resolved pose, including the authored lens. Do not write only the rendered
+`ShipCamera` transform: the normal orbit-camera system owns that transform and
+will restore its focus-derived pose on the next frame.
+
+The catalog is also the public registry for the existing agent views:
+spaceport, atmosphere, ocean, Mira, clouds, plume, and massif framings appear
+in the same F8 list with an `[agent]` badge. Their JSON record selects a
+validated procedural driver so search-driven targets and diagnostics retain
+their behavior. Viewing one live applies its focus and camera framing;
+capture-only state such as false-colour output, forced plume pressure, or a
+temporal slew is applied only by `just screenshot` and is called out in the
+manager status. Replacing an agent view from the current camera converts that
+entry into an exact saved pose.
+
+The manager's primary egui context is attached explicitly to the canonical
+`ShipCamera`; it does not own a second window camera. Do not use egui's implicit
+“first camera” attachment here: Thalos creates the inactive map camera before
+the ship camera. Do not add a dedicated same-window overlay camera either: even
+with a load-preserving clear mode, that extra presentation pass blacked out the
+world on the live renderer.
+
+An agent can add or adjust the JSON with the same versioned schema, then ask the
+developer to press F8, reload, and view it. To capture a named point headlessly:
 
 ```text
-just screenshot latest
+just screenshot mira-ridge-dawn
 ```
 
-The result overwrites `artifacts/visual/latest/latest_perspective.png`. The handoff
-stores the camera in the nearest terrain body's fixed frame, plus vertical FOV,
-viewport, target body, and canonical spawn scene. Headless replay projects that
-pose through the fresh body's current transform and uses the real `ShipCamera`,
-so floating-origin shifts do not change the view and all normal render passes
-remain coupled.
+The CLI also accepts `viewpoint:mira-ridge-dawn` when an explicit namespace is
+useful. The result overwrites
+`artifacts/visual/latest/mira_ridge_dawn.png`. `just screenshot latest` selects
+the catalog entry with the newest `saved_unix_ms` and keeps writing
+`latest_perspective.png`.
 
-This is a camera handoff, not a save game. The recorded simulation time is kept
+The catalog stores cameras in each body's authored surface-fixed frame.
+Headless replay projects the pose through the fresh body's current transform and
+uses the real `ShipCamera`, so floating-origin shifts do not change the view and
+all normal render passes remain coupled.
+
+This is a viewpoint catalog, not a save game. The recorded simulation time is kept
 as provenance, but replay deliberately boots the named canonical spawn instead
 of partially restoring craft dynamics. It therefore reproduces geographic
 framing and scene configuration; a one-off moving-craft state or weather moment
 still needs a normal screenshot or a dedicated deterministic preset.
+
+Procedural drivers remain code when they search for a site, drive time, or
+install a diagnostic mode. Their public identity and metadata do not: those
+live only in the shared catalog.
 
 Atmosphere has two complementary canonical framings: `earth-reference` for the
 space/orbital limb and `runway-atmosphere` for the near-surface sky, long
@@ -87,6 +139,15 @@ Preset changes reuse the process when their boot context matches; body, spawn,
 hub-mode, or viewport changes restart it. Manual `just capture-stop` is optional
 hygiene.
 
+**The host is a singleton, so parallel agent sessions contend for it.** Two
+sessions asking for presets with different boot contexts will restart it out
+from under each other, and the loser reports `capture launcher exited` (or
+`capture server exited`) with no defect of its own — check `just capture-status`
+for whose `preset` is loaded before diagnosing a capture failure as a bug.
+Verification can be blocked this way for a long stretch; that is a scheduling
+problem, not a broken change. Say so in the report rather than marking a visual
+change verified.
+
 Every request reapplies live diagnostic resources and invalidates cloud temporal
 history. The first frame uses the preset's full warm-up; subsequent requests use
 60 settle frames unless `_WARMUP` is explicitly set. This fast lane intentionally
@@ -105,7 +166,8 @@ readback-flush tail. A fixed frame delay is not a readback-completion contract
 |---|---|---|
 | `ssao` | `off`, `on`, `raw` | No AO, normal AO application, and the raw AO field |
 | `shadow` | `cascade-only`, `contact`, `raw` | Isolate the **contact tier** (W18a) from the cascade rig: does the screen-space contact march contribute, and is a defect in the march or in how receivers apply it (ADR-20260722T111848Z) |
-| `terrain-lighting` | `lit`, `fullbright`, `geometric-normal` | Separate raster coverage from lighting, then isolate the terrain normal stack |
+| `terrain-lighting` | `lit`, `fullbright`, `geometric-normal` | Separate raster coverage from lighting, then isolate the terrain normal stack. Honoured by **both** ground renderers (udlod's material and `tile_terrain.wgsl`'s `TileShadingParams::inspect`), so the axis means the same thing whichever one owns the body |
+| `renderer` | `tiles`, `udlod` | The keystone question — the same scene through the **default** standard-path tile renderer and through the **legacy** udlod spine (`THALOS_TILE_RENDERER=0`, an A/B baseline only). Structural (the gate is a boot `OnceLock` deciding which ground streams at all), so it always runs cold |
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
 | `terrain-regolith-filter` | `legacy-unfiltered`, `footprint-filtered` | Matched before/after for airless procedural-detail Nyquist filtering |
 
@@ -121,10 +183,17 @@ the game silently renders the default each time. Any secondary diagnostic held
 fixed during an A/B belongs in `INVARIANT_ENV_KEYS` so the manifest proves it did
 not drift (INC-20260722T182934Z).
 
-`terrain-culling` is structural pipeline specialization, so the normal comparison
-command automatically sends that axis through the cold lane. New axes should be
-runtime resources/material inputs when possible; otherwise mark them cold rather
-than pretending an existing pipeline changed.
+`terrain-culling` and `renderer` are structural — one specializes a pipeline at
+first use, the other decides at boot which ground streams — so the normal
+comparison command automatically sends them through the cold lane. New axes
+should be runtime resources/material inputs when possible; otherwise mark them
+cold rather than pretending an existing pipeline changed.
+
+The scene argument accepts a **saved viewpoint id** as well as a scripted
+preset: the player hands over a framing with F9/F8 (ADR-20260724T211627Z), and
+`just compare <viewpoint-slug> <axis>` runs the matrix at exactly the framing
+they were looking at. That is usually the right scene for a "why does this look
+wrong" A/B — no preset has to be invented to chase a report.
 
 ## Artifact contract
 

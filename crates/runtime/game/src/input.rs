@@ -27,7 +27,8 @@ fn gate_enhanced_input_sources(
     shipyard_editor: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     base_editor: Option<Res<crate::base_editor::BaseEditor>>,
     space_center: Option<Res<crate::space_center::SpaceCenter>>,
-    ui_text: Res<thalos_ui::TextFieldFocus>,
+    viewpoint_manager: Option<Res<crate::viewpoints::ViewpointManager>>,
+    ui_keyboard: Option<Res<crate::hud::UiKeyboardGate>>,
     // Bundled to stay within Bevy's 16-param system limit.
     context_queries: (
         Query<(Entity, &ContextActivity<GameFlightContext>)>,
@@ -47,21 +48,29 @@ fn gate_enhanced_input_sources(
         .unwrap_or(false);
     let freecam_active = freecam.as_deref().map(|f| f.active).unwrap_or(false);
     let editor_open = shipyard_editor.as_deref().map(|e| e.open).unwrap_or(false);
-    // A focused text field (shipyard name, settings HOTAS inputs — every
-    // field is a `thalos_ui::UiTextField` now) swallows the keyboard so raw
-    // keys edit the field instead of tripping flight/system bindings.
-    let editor_text_focused = ui_text.is_focused();
+    // A text-entry surface (the shipyard name, settings HOTAS inputs, the F9
+    // prompt, the egui F8 manager's name/id/notes fields) swallows the
+    // keyboard so raw keys edit the field instead of tripping flight/system
+    // bindings. One gate covers both UI systems — see `hud::input_gate`.
+    let editor_text_focused = ui_keyboard
+        .as_deref()
+        .is_some_and(crate::hud::UiKeyboardGate::text_entry);
     // The start screen owns the frame like the shipyard editor does: every
     // gameplay context deactivates (the system context stays active for
-    // Escape / screenshot / saved perspective). Folded into `editor_open` since the suppression
+    // Escape / screenshot / viewpoint manager). Folded into `editor_open` since the suppression
     // set is identical.
     let editor_open = editor_open || *app_state.get() == crate::loading::AppState::MainMenu;
     let base_editor_open = base_editor.as_deref().map(|e| e.open).unwrap_or(false);
     let space_center_open = space_center.as_deref().map(|s| s.open).unwrap_or(false);
+    let viewpoint_manager_open = viewpoint_manager
+        .as_deref()
+        .map(|manager| manager.open)
+        .unwrap_or(false);
     // The shipyard/base editors, the space-center hub, and the start screen all
     // deactivate every gameplay context; only the shipyard editor / start screen
     // own the `ShipyardContext`, so the two are tracked separately.
-    let gameplay_suppressed = editor_open || base_editor_open || space_center_open;
+    let gameplay_suppressed =
+        editor_open || base_editor_open || space_center_open || viewpoint_manager_open;
 
     thalos_input::gating::set_mouse_sources(&mut action_sources, !bevy_ui_pointer_busy);
     // GameSystemContext stays active for Escape/screenshot/perspective save. Text entry only

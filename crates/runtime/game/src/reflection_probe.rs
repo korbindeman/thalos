@@ -388,16 +388,21 @@ fn refresh_cubemap(
         surface_blend: env.surface_blend,
     };
     // Calibration signal for the F3/F4 physical-sky path (repaint cadence only,
-    // ~every 5 s): the raw irradiance driving the surface ambient. Grep
-    // `thalos::sky` in the console when judging hull/structure brightness.
+    // ~every 5 s): the raw irradiance driving the surface ambient. The
+    // diagnostic tracing target is routed to runtime.jsonl.
     let irr = sky_ambient.surface_irradiance;
     info!(
-        target: "thalos::sky",
-        "sky irradiance ({:.3}, {:.3}, {:.3}) lum {:.3} | surface_blend {:.2} | sun_disc ({:.1}, {:.1}, {:.1})",
-        irr.x, irr.y, irr.z,
-        0.2126 * irr.x + 0.7152 * irr.y + 0.0722 * irr.z,
-        env.surface_blend,
-        env.sun_disc_radiance.x, env.sun_disc_radiance.y, env.sun_disc_radiance.z,
+        target: "thalos::diagnostic::sky",
+        event = "irradiance",
+        irradiance_r = irr.x,
+        irradiance_g = irr.y,
+        irradiance_b = irr.z,
+        luminance = 0.2126 * irr.x + 0.7152 * irr.y + 0.0722 * irr.z,
+        surface_blend = env.surface_blend,
+        sun_disc_r = env.sun_disc_radiance.x,
+        sun_disc_g = env.sun_disc_radiance.y,
+        sun_disc_b = env.sun_disc_radiance.z,
+        "sky irradiance"
     );
     // The radiances actually painted into the reflection cubemap (what the hull's
     // IBL diffuse + specular see): the F3 physical sky at the zenith and at the
@@ -409,12 +414,23 @@ fn refresh_cubemap(
         let zen = lut.sample(env.up) * PHYSICAL_SKY_SCALE;
         let hor = lut.sample(env.up.any_orthonormal_vector()) * PHYSICAL_SKY_SCALE;
         info!(
-            target: "thalos::sky",
-            "env paint: sky zenith ({:.3}, {:.3}, {:.3}) horizon ({:.3}, {:.3}, {:.3}) ground ({:.3}, {:.3}, {:.3}) | inputs: sun_elev {:.3} alt {:.0} m flux {:.2} body {} t {:.0} s",
-            zen.x, zen.y, zen.z, hor.x, hor.y, hor.z,
-            env.ground_radiance.x, env.ground_radiance.y, env.ground_radiance.z,
-            si.up.dot(si.sun_dir), si.altitude_m, si.flux, si.body_id,
-            sim.as_deref().map(|s| s.simulation.sim_time()).unwrap_or(f64::NAN),
+            target: "thalos::diagnostic::sky",
+            event = "environment_paint",
+            zenith_r = zen.x,
+            zenith_g = zen.y,
+            zenith_b = zen.z,
+            horizon_r = hor.x,
+            horizon_g = hor.y,
+            horizon_b = hor.z,
+            ground_r = env.ground_radiance.x,
+            ground_g = env.ground_radiance.y,
+            ground_b = env.ground_radiance.z,
+            sun_elevation = si.up.dot(si.sun_dir),
+            altitude_m = si.altitude_m,
+            flux = si.flux,
+            body_id = si.body_id,
+            sim_time_s = sim.as_deref().map(|s| s.simulation.sim_time()).unwrap_or(f64::NAN),
+            "reflection environment paint"
         );
     }
 

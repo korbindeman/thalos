@@ -1,45 +1,28 @@
 # INC-YYYYMMDDTHHMMSSZ-short-title: <short title>
 
-- **Status:** Investigating | Fixed | Recurred (see INC-YYYYMMDDTHHMMSSZ-short-title)
-- **Date:** YYYY-MM-DD (observed) / YYYY-MM-DD (fixed)
-- **Severity:** crash / hang / visual / behavioral / data-loss / perf
-- **Surface:** which scenario or mode it shows in (`just game hub`, runway boot, map view, …)
+- **Date:** YYYY-MM-DD · **Surface:** where it shows (`just game hub`, runway boot, map view, …)
 
-## Summary
+## Symptom
 
-One paragraph: what was observed, what actually failed, and the fix in plain language.
-
-## Symptoms
-
-- How it manifests (what the screenshot / play session showed)
-- Repro steps, as reliable as you have them (`just game <mode>` / `just screenshot <preset>` + env vars)
-
-## Evidence
-
-Where the diagnosis came from — the minimum needed to re-derive the conclusion. Typical Thalos
-channels: a `just screenshot` preset PNG, `just preview` output, a targeted `info!(target:
-"thalos::…")` / JSONL log the user reproduced, `THALOS_SHADOW_LOG`-style diagnostic dumps, a
-chrome trace via `scripts/analyze_trace.py`, a panic backtrace, or the user's screenshot +
-description.
-
-```
-(paste the decisive log lines / numbers / stack — the "tell")
-```
-
-## Hypotheses considered
-
-The candidate causes laid out per the CLAUDE.md bug-fixing loop, and how each was ruled in/out.
-This is the section that saves the next agent the differential.
+What was observed, and how to reproduce it (`just game <mode>` / `just screenshot <preset>`
++ env vars). Include the decisive evidence — the log line, the number, the "tell" — not the
+whole session.
 
 ## Root cause
 
-The mechanism, precisely.
+The mechanism, precisely. If a plausible hypothesis was wrong in an instructive way, say
+which and how it was ruled out — that's what saves the next agent the differential. If the
+cause was obvious once seen, one sentence is the right length.
 
 ## Fix
 
-What changed, and why it addresses the mechanism (structurally where applicable), not the symptom.
+What changed, and why it removes the mechanism rather than the symptom.
 
-## Prevention & recurrence signals
+## Recurrence signal
 
-- The standing rule this teaches (add/extend a CLAUDE.md gotcha or spec-doc invariant and link it here)
-- The observable "tell" that would identify a recurrence quickly
+The observable that would identify this coming back. If the lesson is a standing rule, put
+the rule in the owning spec doc and link it here — `CLAUDE.md` only if it applies before an
+agent knows what it's working on (ADR-20260724T222409Z-claude-md-is-context-budgeted).
+
+<!-- Delete any section that has nothing real to say. A short post-mortem that exists beats
+     a thorough one that didn't get written. -->

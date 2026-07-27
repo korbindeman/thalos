@@ -17,7 +17,7 @@ use bevy::prelude::*;
 use thalos_body_render::{BodyOceanMaterial, CloudCompositeMaterial};
 use thalos_physics_local::HeightSourceRegistry;
 
-use crate::terrain_registry::{BodySurfaceRegistry, GpuHeightMirrorRegistry};
+use crate::terrain_registry::{BodySurfaceRegistry, RenderedGroundRegistry};
 
 use super::types::PlanetshineTints;
 
@@ -26,7 +26,7 @@ use super::types::PlanetshineTints;
 #[derive(SystemParam)]
 pub(super) struct ProceduralInstallExtras<'w> {
     pub(super) height_sources: ResMut<'w, HeightSourceRegistry>,
-    pub(super) gpu_height_mirrors: ResMut<'w, GpuHeightMirrorRegistry>,
+    pub(super) rendered_ground: ResMut<'w, RenderedGroundRegistry>,
     pub(super) surfaces: Res<'w, BodySurfaceRegistry>,
 }
 

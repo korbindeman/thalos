@@ -20,6 +20,13 @@ pub const RENDER_HEIGHT: u32 = 720;
 // cloud boundaries. This costs 4 MiB but does not add runtime texture fetches.
 pub const VOLUME_SIZE: u32 = 64;
 
+/// Edge resolution of the view-anchored cloud sun-transmittance cascade
+/// (CLOUD-5 / W2 near tier — `docs/rendering/clouds.md` §3.5). 512² against the
+/// game-side extent ladder puts one texel at 23 m on the ground and ~120 m from
+/// cruise altitude; cloud shadow edges are penumbra-soft at those scales, so
+/// resolution buys nothing further, while the march cost is quadratic in it.
+pub const CLOUD_SHADOW_SIZE: u32 = 512;
+
 /// Per-face resolution of the canonical cubemap weather projection. The game
 /// runtime field must use the same face size.
 pub const WEATHER_FACE_SIZE: u32 = 1024;
@@ -41,6 +48,7 @@ pub struct CloudTargetMemory {
     pub worley_bytes: u64,
     pub coverage_bytes: u64,
     pub surface_density_bytes: u64,
+    pub sun_transmittance_bytes: u64,
     pub total_bytes: u64,
 }
 
@@ -54,6 +62,9 @@ pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemo
     let worley_bytes = VOLUME_SIZE as u64 * VOLUME_SIZE as u64 * VOLUME_SIZE as u64 * 16;
     let coverage_bytes = (6 * cube_layer_mip_bytes(WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS)) as u64;
     let surface_density_bytes = coverage_bytes;
+    // RGBA16F cascade (viewport-independent — it is anchored to the view, not
+    // sized by it).
+    let sun_transmittance_bytes = CLOUD_SHADOW_SIZE as u64 * CLOUD_SHADOW_SIZE as u64 * 8;
     let total_bytes = render_bytes
         + distance_bytes
         + history_bytes
@@ -61,7 +72,8 @@ pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemo
         + base_atlas_bytes
         + worley_bytes
         + coverage_bytes
-        + surface_density_bytes;
+        + surface_density_bytes
+        + sun_transmittance_bytes;
     CloudTargetMemory {
         render_bytes,
         distance_bytes,
@@ -71,6 +83,7 @@ pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemo
         worley_bytes,
         coverage_bytes,
         surface_density_bytes,
+        sun_transmittance_bytes,
         total_bytes,
     }
 }
@@ -83,6 +96,7 @@ pub struct CloudImages {
     pub surface_density_image: Handle<Image>,
     pub history_image: Handle<Image>,
     pub history_distance_image: Handle<Image>,
+    pub cloud_shadow_image: Handle<Image>,
 }
 
 pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
@@ -169,6 +183,36 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
     history_distance_image.texture_descriptor.usage =
         TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
 
+    // View-anchored cloud sun-transmittance cascade (r = beam transmittance
+    // toward the sun through the whole deck, 1 = unshadowed). RGBA16F because
+    // it is both a compute STORAGE target and a FILTERED sampled texture on
+    // every surface receiver: R32Float is not filterable without
+    // `Float32Filterable`, and the 8-bit storage formats band a term that gets
+    // multiplied straight into direct sunlight. Cleared to 1 so a receiver that
+    // samples before the first dispatch is fully lit rather than black.
+    let mut cloud_shadow_image = Image::new_fill(
+        Extent3d {
+            width: CLOUD_SHADOW_SIZE,
+            height: CLOUD_SHADOW_SIZE,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        // half-float 1.0 in all four channels.
+        &[0x00, 0x3c, 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x3c],
+        TextureFormat::Rgba16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    cloud_shadow_image.texture_descriptor.usage =
+        TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
+    // Bilinear + clamp: receivers sample it as a smooth world-space field and
+    // fade to "lit" at the border, so edge clamping can never wrap a shadow
+    // around the cascade.
+    cloud_shadow_image.sampler = ImageSampler::Descriptor(ImageSamplerDescriptor {
+        address_mode_u: ImageAddressMode::ClampToEdge,
+        address_mode_v: ImageAddressMode::ClampToEdge,
+        ..ImageSamplerDescriptor::linear()
+    });
+
     // Clear by default: authored `None` is authoritative and the game only
     // uploads a field for a body with `CloudClimate`.
     let weather_image = cloud_weather_image(
@@ -190,6 +234,7 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
         surface_density_image: images.add(surface_density_image),
         history_image: images.add(history_image),
         history_distance_image: images.add(history_distance_image),
+        cloud_shadow_image: images.add(cloud_shadow_image),
     }
 }
 

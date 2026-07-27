@@ -86,10 +86,10 @@ pub fn panel_node() -> Node {
     Node {
         position_type: PositionType::Absolute,
         border: UiRect::all(Val::Px(1.0)),
-        border_radius: BorderRadius::all(Val::Px(8.0)),
-        padding: UiRect::axes(Val::Px(14.0), Val::Px(8.0)),
+        border_radius: BorderRadius::all(Val::Px(7.0)),
+        padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
         flex_direction: FlexDirection::Column,
-        row_gap: Val::Px(4.0),
+        row_gap: Val::Px(3.0),
         ..default()
     }
 }
@@ -113,7 +113,7 @@ pub fn emphasis(theme: &HudTheme, content: impl Into<String>) -> impl Bundle {
         Text::new(content),
         TextFont {
             font: theme.font.clone(),
-            font_size: FontSize::Px(18.0),
+            font_size: FontSize::Px(16.0),
             ..default()
         },
         TextColor(theme.text_primary),

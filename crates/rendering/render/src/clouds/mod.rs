@@ -32,6 +32,9 @@
 //! Remaining work (evolving/advected weather, storms, half-res + temporal
 //! upscale) is tracked in `docs/rendering/atmosphere.md`.
 
+/// CPU mirror of the shared per-place cell morphology field
+/// (`thalos::atmosphere`'s `cloud_cell_*`).
+pub mod cell_field;
 mod composite;
 mod compute;
 /// Controls the compute shader which renders the volumetric clouds.
@@ -39,12 +42,15 @@ pub mod config;
 /// CPU-derived shared near/far fill-opacity response (BL-20260723T214730Z).
 pub mod fill_lut;
 mod images;
+/// Placement of the cloud sun-transmittance cascade (CLOUD-5 / W2).
+pub mod shadow_frame;
 mod uniforms;
 
 use bevy::asset::embedded_asset;
 use bevy::prelude::*;
 use bevy::shader::load_shader_library;
 
+pub use self::cell_field::{CellStyle, cell_style};
 pub use self::composite::CloudCompositeMaterial;
 pub use self::compute::CameraMatrices;
 pub use self::config::CloudsConfig;
@@ -52,9 +58,10 @@ pub use self::fill_lut::{
     CloudFillCalibration, FILL_LUT_VERSION, FillCalibrationInput, derive_fill_calibration,
 };
 pub use self::images::{
-    CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE, WEATHER_MIP_LEVELS,
-    cloud_target_memory, cloud_target_memory_for, cloud_weather_image,
+    CLOUD_SHADOW_SIZE, CloudTargetMemory, RENDER_HEIGHT, RENDER_WIDTH, WEATHER_FACE_SIZE,
+    WEATHER_MIP_LEVELS, cloud_target_memory, cloud_target_memory_for, cloud_weather_image,
 };
+pub use self::shadow_frame::{CloudShadowBlock, CloudShadowFrame};
 
 use self::compute::CloudsComputePlugin;
 use self::images::build_images;
@@ -91,6 +98,67 @@ pub struct CloudWeatherMap {
 #[derive(Resource, Clone)]
 pub struct CloudSurfaceDensityMap {
     pub handle: Handle<Image>,
+}
+
+/// Handle to the cloud sun-transmittance cascade (RGBA16F, `r` = surviving
+/// fraction of the sun beam; 1 = unshadowed) together with the frame it was
+/// marched in. This is the **one** cloud-occlusion field: terrain, foliage,
+/// rock and craft receivers all sample this handle through the block
+/// [`CloudShadowFrame::block`] packs for them, so a second screen-space
+/// approximation that could disagree with the visible volume never exists
+/// (`docs/rendering/clouds.md` §2, principle 4).
+///
+/// **Sole writer:** the game's cloud driver (`rendering::clouds::drive_clouds`).
+#[derive(Resource, Clone)]
+pub struct CloudShadowMap {
+    pub handle: Handle<Image>,
+    /// Where the cascade was marched, body-fixed.
+    pub frame: CloudShadowFrame,
+    /// World render space → the marcher's body-fixed frame. This is
+    /// `ActiveCloudFrame`'s rotation, never a second derivation of it.
+    pub world_to_body: Quat,
+    /// Active cloud body's centre in world render space.
+    pub body_center_ws: Vec3,
+    /// Body-fixed unit direction toward the sun.
+    pub sun_body: Vec3,
+    /// Artistic scale on the whole term (1 = physical extinction, 0 = stand the
+    /// term down without stopping the march).
+    pub strength: f32,
+    /// Diagnostic: receivers paint the raw transmittance instead of shading it
+    /// in (`THALOS_CLOUD_SHADOW=show`). Splits "the cascade is wrong" from "the
+    /// receiver projects into it wrong" in one capture — the split that matters
+    /// most here, because producer and receiver reach the same lookup frame by
+    /// different routes.
+    pub debug_show: bool,
+}
+
+impl CloudShadowMap {
+    /// The uniform block a receiving material embeds. Mirrors
+    /// `thalos::cloud_shadow`'s `CloudShadowBlock` field for field.
+    pub fn block(&self) -> CloudShadowBlock {
+        if !self.frame.active || self.strength <= 0.0 {
+            return CloudShadowBlock::default();
+        }
+        let q = self.world_to_body;
+        CloudShadowBlock {
+            world_to_body: Vec4::new(q.x, q.y, q.z, q.w),
+            body_center_ws: self.body_center_ws.extend(self.strength.clamp(0.0, 1.0)),
+            center: self.frame.center.extend(self.frame.half_extent_m),
+            axis_u: self
+                .frame
+                .axis_u
+                .extend(self.frame.texel_m(CLOUD_SHADOW_SIZE)),
+            // Mode, not a bool: 0 = skip (handled above), 1 = apply, 2 = paint
+            // raw — the same convention `ShadowCascadeBlock::gate.z` uses for
+            // the contact tier, so a receiver reads one lane for both.
+            axis_v: self
+                .frame
+                .axis_v
+                .extend(if self.debug_show { 2.0 } else { 1.0 }),
+            up_sun: self.frame.up.extend(self.frame.sun_elevation_cos),
+            sun_body: self.sun_body.normalize_or_zero().extend(0.0),
+        }
+    }
 }
 
 /// Renders volumetric clouds into [`CloudRenderTexture`] each frame.
@@ -173,6 +241,15 @@ fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
     commands.insert_resource(CloudSurfaceDensityMap {
         handle: built.surface_density_image.clone(),
     });
+    commands.insert_resource(CloudShadowMap {
+        handle: built.cloud_shadow_image.clone(),
+        frame: CloudShadowFrame::default(),
+        world_to_body: Quat::IDENTITY,
+        body_center_ws: Vec3::ZERO,
+        sun_body: Vec3::Y,
+        strength: 1.0,
+        debug_show: false,
+    });
     commands.insert_resource(CloudsImage {
         cloud_render_image: built.cloud_render_image,
         cloud_worley_image: built.cloud_worley_image,
@@ -181,6 +258,7 @@ fn clouds_setup(mut commands: Commands, images: ResMut<Assets<Image>>) {
         surface_density_image: built.surface_density_image,
         history_image: built.history_image,
         history_distance_image: built.history_distance_image,
+        cloud_shadow_image: built.cloud_shadow_image,
     });
     commands.insert_resource(CameraMatrices {
         translation: Vec3::ZERO,

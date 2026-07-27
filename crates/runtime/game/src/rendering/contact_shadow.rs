@@ -191,7 +191,10 @@ impl Plugin for ContactShadowPlugin {
             .add_plugins(ExtractResourcePlugin::<ContactShadowImage>::default())
             .add_plugins(ExtractResourcePlugin::<ContactShadowSun>::default())
             .add_systems(Startup, setup_contact_shadow_image)
-            .add_systems(Update, (resize_contact_shadow_image, sync_contact_shadow_sun));
+            .add_systems(
+                Update,
+                (resize_contact_shadow_image, sync_contact_shadow_sun),
+            );
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app
@@ -368,7 +371,12 @@ fn compute_contact_shadow(
 
     // Render-space → view-space is a pure rotation for a direction, so the
     // floating origin never enters (a direction is translation-invariant).
-    let sun_view = (extracted.world_from_view.compute_transform().rotation.inverse() * sun.dir)
+    let sun_view = (extracted
+        .world_from_view
+        .compute_transform()
+        .rotation
+        .inverse()
+        * sun.dir)
         .normalize_or_zero();
 
     let clip_from_view = extracted.clip_from_view;

@@ -7,6 +7,7 @@
                 "escape": [Key(Escape)],
                 "screenshot": [Key(F2)],
                 "save_perspective": [Key(F8)],
+                "quick_save_viewpoint": [Key(F9)],
                 "toggle_free_cam": [Key(F4)],
             },
         ),

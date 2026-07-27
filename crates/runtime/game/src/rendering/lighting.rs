@@ -307,7 +307,11 @@ pub(super) fn update_solid_planet_params(
 /// and exposure, so a ship at a far body dims like the ground beneath it instead
 /// of staying noon-bright. Tune from a `just game runway` noon screenshot until the
 /// hull reads at the same brightness as the terrain beside it.
-const LUX_PER_SPINE_FLUX: f32 = 1_000.0;
+/// Also the input to [`thalos_body_shading::spine_parity_exposure`], which
+/// derives the camera exposure that makes a Bevy-lit surface render exactly as
+/// bright as the spine's ground for this constant — retune it there and the two
+/// universes stay matched (`camera::spawn_camera`).
+pub(crate) const LUX_PER_SPINE_FLUX: f32 = 1_000.0;
 /// **Space-regime** ambient (sky-fill) day + deep-night brightness, in Bevy lux,
 /// for the Bevy-PBR surfaces (hull, gear, structures, runway). Since **F4** the
 /// *surface* ambient is the physical sky irradiance from the sky-view LUT
@@ -316,8 +320,14 @@ const LUX_PER_SPINE_FLUX: f32 = 1_000.0;
 /// atmosphere out there, so it is a coarse fill for planetshine/zodiacal light that
 /// env-map IBL at photometric intensity (W7/F7) will retire. The day value keeps a
 /// ~7:1 lit:shadow ratio against the 10 000-lux sun. See `docs/roadmap/graphics_fidelity.md` §3.
-const AMBIENT_DAY_BRIGHTNESS: f32 = 700.0;
-const AMBIENT_NIGHT_BRIGHTNESS: f32 = 4.0;
+/// (Both scaled ×2.77 with the NTR-X5 exposure fix — they were eyeball-tuned
+/// against Bevy's uncalibrated default exposure, so carrying the exposure ratio
+/// through keeps the space regime looking exactly as it did.)
+const AMBIENT_DAY_BRIGHTNESS: f32 = 1_940.0;
+/// The deep-night ambient floor (starlight / planetshine). Also read by the
+/// tile-terrain driver, which needs its share of the resolved ambient to gate
+/// the sky/space fill per fragment without touching this floor.
+pub(super) const AMBIENT_NIGHT_BRIGHTNESS: f32 = 11.0;
 /// Sky-blue tint for the **space-regime** ambient fill (see [`AMBIENT_DAY_BRIGHTNESS`]);
 /// the surface tint now comes from the physical sky chroma. Tune alongside it.
 const AMBIENT_DAY_TINT: Color = Color::srgb(0.62, 0.72, 0.95);
@@ -325,15 +335,30 @@ const AMBIENT_DAY_TINT: Color = Color::srgb(0.62, 0.72, 0.95);
 /// into the **surface** `GlobalAmbientLight` brightness (F4), through the flux→lux
 /// mapping shared with the sun ([`LUX_PER_SPINE_FLUX`]).
 ///
-/// **Deliberately ≪ 1:** the env cubemap on the camera (`GeneratedEnvironmentMapLight`,
-/// painted from the same sky-view LUT) already delivers the sky's diffuse
-/// irradiance to every `StandardMaterial` via its prefiltered SH — a full-strength
-/// flat ambient on top counts the sky **twice** (the first F4 cut did exactly that:
-/// washed-out hull by day, buildings glowing at dusk). This term is only a small
-/// residual for what the single-bounce env misses (multi-bounce, ground-to-wall
-/// bleed). Tune from a `just game runway` screenshot; if shadowed faces go too
-/// dark, raise this a little before touching anything else.
-const AMBIENT_SKY_LUX_GAIN: f32 = 0.2;
+/// **1.0 would mean the flat ambient carries the sky's whole diffuse
+/// irradiance**, i.e. the bridge is the one flux→lux constant and nothing
+/// else. Measured against the spine ground it overfills — the spine's own sky
+/// term carries an artistic `SURFACE_SKY_SCALE`, so 0.7 is where the two
+/// universes' shadow fill actually meets (matched by capture on
+/// `massif-valley`: shadowed-ground p05 luminance 0.125 both sides).
+///
+/// It was 0.2 on the theory that the env cubemap
+/// (`GeneratedEnvironmentMapLight`, painted from the same sky-view LUT) already
+/// delivered most of the sky's diffuse irradiance, so a full-strength flat
+/// ambient would count the sky twice. That reasoning does not survive the
+/// NTR-X5 calibration: **the cubemap is painted in scene-flux units** (radiance
+/// ~0.1–1.3) while Bevy consumes it in the same photometric space as the
+/// directional light's lux, so at `PROBE_INTENSITY = 1.0` its diffuse
+/// contribution is three orders of magnitude short of the sky it depicts —
+/// effectively zero. The 0.2 residual was therefore the *entire* sky fill, and
+/// tuned against an uncalibrated exposure at that: with the exposure fixed it
+/// left shadowed ground at a fifth of the spine's, crushing gullies to black
+/// and reading asphalt as a hole in the ground.
+///
+/// **If the env map is ever put on physical units** (W7/F7), this must come
+/// back down by whatever share the env then carries, or the sky *will* be
+/// double-counted — the failure the 0.2 was guarding against.
+const AMBIENT_SKY_LUX_GAIN: f32 = 0.7;
 
 /// `smoothstep`, matching the WGSL builtin the terrain shader uses so the
 /// CPU-side day/night gate lines up with the ground's terminator exactly.
@@ -359,6 +384,28 @@ fn surface_daylight(sun_elevation: f64, altitude_ratio: f64) -> f64 {
     let ratio = altitude_ratio.clamp(0.0, 1.0);
     let threshold = -((1.0 - ratio * ratio).max(0.0)).sqrt();
     smoothstep(threshold - 0.06, threshold + 0.12, sun_elevation)
+}
+
+/// The day/night gate [`update_sun_light`] actually applied this frame, published
+/// so consumers can *undo* it rather than re-derive the terminator (which would
+/// fork [`surface_daylight`] — the whole point of having one definition).
+///
+/// The tile-terrain shader is the consumer: `GlobalAmbientLight` is one value
+/// baked at the craft, `floor + fill·daylight_craft`, and the shader re-spreads
+/// it per fragment as `floor + fill·daylight_fragment`. It needs this divisor to
+/// do that, and getting it exactly right is what makes the near field — where
+/// every fragment shares the craft's horizon — an identity instead of a second
+/// terminator ramp stacked on the first.
+///
+/// **Sole writer:** [`update_sun_light`].
+#[derive(Resource, Debug, Clone, Copy)]
+pub(crate) struct SunDaylight(pub f32);
+
+impl Default for SunDaylight {
+    fn default() -> Self {
+        // No gate applied → dividing by it is a no-op.
+        Self(1.0)
+    }
 }
 
 /// Point the directional sun light from the star toward the camera's focus
@@ -388,6 +435,7 @@ pub(super) fn update_sun_light(
     time: Res<Time<Real>>,
     height_sources: Option<Res<thalos_physics_local::HeightSourceRegistry>>,
     mut ambient: ResMut<GlobalAmbientLight>,
+    mut sun_daylight: ResMut<SunDaylight>,
     mut light_query: Query<(&mut Transform, &mut DirectionalLight), With<SunLight>>,
     mut last_logged_lux: Local<f32>,
 ) {
@@ -502,6 +550,8 @@ pub(super) fn update_sun_light(
     // hand-tuned constant + fixed tint. Out in space (no atmosphere → no sky) it
     // fades by altitude to the unchanged flat stand-in, which env-map IBL at
     // photometric intensity will retire (W7/F7).
+    sun_daylight.0 = daylight;
+
     let flux_norm = (flux / LIGHT_AT_1AU).clamp(0.0, 1.0);
     let space_day = AMBIENT_DAY_BRIGHTNESS * flux_norm;
     let space_ambient =
@@ -533,15 +583,23 @@ pub(super) fn update_sun_light(
     let tint = cur.lerp(target_tint, alpha);
     ambient.color = Color::linear_rgb(tint.x, tint.y, tint.z);
 
-    // Calibration signal (F4): log the resolved ambient when it moves > 5%, so a
-    // "hull too dark/bright" screenshot comes with the number to retune
-    // `AMBIENT_SKY_LUX_GAIN` against. Grep `thalos::sky`.
+    // Calibration signal (F4): record the resolved ambient when it moves > 5%,
+    // so a "hull too dark/bright" screenshot comes with the number to retune
+    // `AMBIENT_SKY_LUX_GAIN` against.
     if (ambient.brightness - *last_logged_lux).abs() > 0.05 * last_logged_lux.max(1.0) {
         info!(
-            target: "thalos::sky",
-            "GlobalAmbientLight {:.0} lux (target {:.0}: sky {:.0} lux × blend {:.2}, space {:.0} lux, sun {:.0} lux) | sun_elev {:.3} daylight {:.2} t {:.0} s",
-            ambient.brightness, target_brightness, sky_lux, blend, space_ambient, illuminance,
-            logged_sun_elev, daylight, sim.simulation.sim_time(),
+            target: "thalos::diagnostic::sky",
+            event = "ambient_light",
+            ambient_lux = ambient.brightness,
+            target_lux = target_brightness,
+            sky_lux,
+            surface_blend = blend,
+            space_lux = space_ambient,
+            sun_lux = illuminance,
+            sun_elevation = logged_sun_elev,
+            daylight,
+            sim_time_s = sim.simulation.sim_time(),
+            "resolved global ambient light"
         );
         *last_logged_lux = ambient.brightness;
     }

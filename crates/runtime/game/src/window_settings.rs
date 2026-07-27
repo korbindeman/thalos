@@ -322,54 +322,27 @@ fn apply_window_settings(
     }
 }
 
-/// Work around a Bevy 0.18 text-rendering bug: at **fractional** window scale
-/// factors (a 150 % HiDPI display reports 1.5, etc.) glyphs rasterise at
-/// inconsistent sizes — text looks broken (non-uniform, "not monospace").
-/// Integer scale factors render cleanly. So we compensate through the UI
-/// scale so the *effective* UI scale (window scale × UI scale) lands on the
-/// nearest integer (≥ 1) once the window's real scale is known, then multiply
-/// the user's [`WindowSettings::ui_scale`] preference on top.
+/// Apply the user's [`WindowSettings::ui_scale`] preference. Bevy UI
+/// rasterises at `window scale × UiScale`, so the OS HiDPI scale already
+/// carries the display's own sizing — this only layers the preference on top.
 ///
-/// An earlier version snapped the *window* scale-factor override instead, but
-/// `bevy_winit::changed_windows` treats a scale-factor change as
-/// logical-size-preserving and physically resizes the window — on a 150 %
-/// display the borderless-fullscreen window grew to 4/3 of the monitor. The
-/// window is left untouched now: `UiScale` covers Bevy UI (rasterised at
-/// `window scale × UiScale`). A `THALOS_SCALE` window-scale pin skips the
-/// compensation (winit honours it from creation) but the user UI scale still
-/// applies.
+/// **History.** Through Bevy 0.18 this system also *snapped* the effective
+/// scale to the nearest integer, working around a cosmic-text bug that
+/// rasterised glyphs at inconsistent sizes on fractional scale factors (text
+/// looked non-uniform, "not monospace"). The snap cost real estate: on a 150 %
+/// display it rounded 1.5 up to 2.0, inflating the whole UI by a third, which
+/// is why the HUD swallowed a 4K screen. Bevy 0.19 replaced cosmic-text with
+/// parley and the bug is gone — verified by rendering the UI kitchen sink at
+/// `THALOS_UI_SCALE=1.5`, whose glyphs are as clean as the 1.0 capture — so
+/// the snap is deleted and a 150 % display now gets a true 1.5.
 ///
-/// Remove the snapping once the upstream Bevy fractional-scale text bug is
-/// fixed; the user-preference multiply stays.
-fn apply_ui_scale(
-    settings: Res<WindowSettings>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    mut ui_scale: ResMut<UiScale>,
-    mut compensated_log: Local<bool>,
-) {
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let base = if window.resolution.scale_factor_override().is_some() {
-        1.0
-    } else {
-        let os = window.resolution.base_scale_factor();
-        if os <= 0.0 {
-            return; // scale not reported by winit yet
-        }
-        let ratio = os.round().max(1.0) / os;
-        if (ratio - 1.0).abs() > 1.0e-4 && !*compensated_log {
-            info!(
-                "compensating fractional window scale {os:.3} with UI scale ×{ratio:.3} \
-                 (crisp-text workaround for Bevy fractional-scale rendering; \
-                 override with THALOS_SCALE)"
-            );
-            *compensated_log = true;
-        }
-        ratio
-    };
-
-    let target = base * settings.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
+/// Note for anyone tempted to reintroduce compensation: snap the *UI* scale,
+/// never the window scale-factor override. `bevy_winit::changed_windows`
+/// treats a scale-factor change as logical-size-preserving and physically
+/// resizes the window — an earlier attempt grew the borderless-fullscreen
+/// window to 4/3 of the monitor.
+fn apply_ui_scale(settings: Res<WindowSettings>, mut ui_scale: ResMut<UiScale>) {
+    let target = settings.ui_scale.clamp(UI_SCALE_MIN, UI_SCALE_MAX);
     if (ui_scale.0 - target).abs() > 1.0e-4 {
         ui_scale.0 = target;
     }

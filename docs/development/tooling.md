@@ -110,15 +110,29 @@ THALOS_SCALE=2                   # optional, pin the UI scale factor
 
 ### HiDPI UI scale factor (`THALOS_SCALE`)
 
-Bevy 0.18 has a text-rendering bug at **fractional** window scale factors: on a
-150 % display (scale 1.5), glyphs rasterise at inconsistent sizes and the UI
-text looks broken (non-uniform, "not monospace"). Integer scale factors render
-cleanly. So `main.rs`'s `snap_window_scale_to_integer` snaps the OS scale to the
-nearest integer (≥ 1) at startup — 1.5 → 2, 1.25 → 1 — which makes text crisp at
-the cost of the UI being slightly larger or smaller than the OS-intended size.
-Set `THALOS_SCALE=<float>` to pin a specific factor instead (e.g. `THALOS_SCALE=1`
-for native-pixel UI on a HiDPI laptop, smaller but sharp). Remove the snap once
-the upstream Bevy fractional-scale text bug is fixed.
+The UI rasterises at `window scale × UiScale`: the OS HiDPI scale carries the
+display's sizing and `WindowSettings::ui_scale` (Settings → Window → UI scale)
+layers the user's preference on top. `THALOS_SCALE=<float>` pins the window
+scale factor instead, for isolating scale-dependent rendering (e.g.
+`THALOS_SCALE=1` for native-pixel UI on a HiDPI laptop, smaller but sharp).
+
+**Historic snap, now removed.** Through Bevy 0.18 the game snapped the
+*effective* scale to the nearest integer, because cosmic-text rasterised glyphs
+at inconsistent sizes on fractional scale factors (text looked non-uniform,
+"not monospace"). That cost real estate — a 150 % display got 2.0, inflating the
+whole UI by a third — which is why the HUD used to swallow a 4K screen. Bevy
+0.19 replaced cosmic-text with parley and the bug is gone, verified by rendering
+the kitchen sink at a fractional scale:
+
+```bash
+THALOS_UI_SCALE=1.5 cargo run -p thalos_ui --features bevy/dynamic_linking,bevy/jpeg --example kitchen_sink
+```
+
+`THALOS_UI_SCALE` is the kitchen sink's own knob (the game reads the settings
+file); use it to re-test glyph quality at fractional scales before reaching for
+any compensation scheme. If one is ever needed again, snap the **UI** scale, not
+the window scale-factor override — `bevy_winit` treats a scale-factor change as
+logical-size-preserving and physically resizes the window.
 
 `THALOS_WGPU_BACKEND` is a Thalos-facing alias for the same class of wgpu
 backend selection that `WGPU_BACKEND` provides, but it is scoped to our game
@@ -151,6 +165,44 @@ collider (see `docs/simulation/surface.md`). The game has no remote-inspection c
 you analyze the artifacts (trace JSON, slow-frame JSONL, console logs), the
 user runs the game.
 
+### Runtime logging contract
+
+The terminal is the human/operator log. An `info!` line should describe a
+concise lifecycle or user-visible state change; `warn!` and `error!` should say
+what went wrong and, when possible, what to do. Do not print periodic gauges,
+large debug values, calibration samples, per-tile counters, or probe output
+there.
+
+Machine-oriented runtime events use tracing's structured fields and a target
+under `thalos::diagnostic::*`:
+
+```rust
+info!(
+    target: "thalos::diagnostic::tile_terrain",
+    event = "residency_gauge",
+    resident = resident_count,
+    resident_mib,
+    "tile residency gauge"
+);
+```
+
+`thalos_runtime` installs one JSONL tracing layer for the whole process, so this
+also works in renderer crates. It writes
+`artifacts/diagnostics/runtime.jsonl`; every line carries the schema, process
+session, wall-clock timestamp, level, target, and the event's typed fields. The
+normal console formatter deliberately omits informational events on this target;
+warnings and errors remain visible. Set
+`THALOS_RUNTIME_DIAGNOSTICS` to a bare filename (resolved under
+`artifacts/diagnostics/`) or an explicit path to override the sink. `RUST_LOG`
+still controls which events exist.
+
+Keep a specialized JSONL recorder when it has a real independent schema or
+lifecycle—capture reports, stage-separation audits, grass churn, GPU-memory
+sampling, shadow traces, and shipyard selection traces are examples. Reuse
+`artifact_paths` so bare names stay under the diagnostics tree. A new
+diagnostic should default to the shared runtime stream; it should not add a new
+file merely to avoid choosing an event name.
+
 ### Generated artifact layout
 
 Generated evidence has three deliberately separate homes:
@@ -161,9 +213,13 @@ Generated evidence has three deliberately separate homes:
 - `artifacts/visual/runs/` is disposable visual working space. Put ad-hoc
   `THALOS_SCREENSHOT_OUT` captures there; `just compare` writes its complete
   matrices under `artifacts/visual/runs/comparisons/` automatically.
-- `artifacts/diagnostics/` contains machine-readable runtime output. F8 writes the
-  latest player-to-agent camera handoff to `latest_perspective.json`; memory and
-  grass diagnostics also default there, and a bare filename supplied through
+- `assets/viewpoints.json` is versioned developer-authored source data shared by
+  the F8 manager, agents, and the headless capture CLI. It does not live under
+  generated artifacts.
+- `artifacts/diagnostics/` contains machine-readable runtime output.
+  `runtime.jsonl` is the shared structured event stream; specialized memory,
+  grass, shadow, capture, staging, and shipyard traces also live there. A bare
+  filename supplied through `THALOS_RUNTIME_DIAGNOSTICS`,
   `THALOS_GRASS_LOG`, `THALOS_SHADOW_LOG`, or
   `THALOS_SHIPYARD_SELECT_LOG` is resolved there. An explicit relative path
   with a parent, or an absolute path, is still honored.

@@ -108,7 +108,9 @@ pub fn update_map_snapshot(
     snapshot.body_states.clone_from(body_states);
     snapshot.body_defs.clone_from(&sim.system.bodies);
     snapshot.crafts.clear();
-    snapshot.crafts.push(sim.simulation.craft_state().clone());
+    snapshot
+        .crafts
+        .extend(sim.simulation.craft_states().cloned());
     snapshot.flight_plan = sim.simulation.prediction().cloned();
     snapshot.branch_stack = sim.simulation.trajectory_branches().cloned();
     snapshot.prediction_version = sim.simulation.prediction_version();

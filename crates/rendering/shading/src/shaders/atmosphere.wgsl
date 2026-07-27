@@ -570,14 +570,47 @@ fn weather_cloud_opacity(raw_coverage: f32) -> f32 {
 /// in-cloud samples, so clamping to them painted a halo above tops.
 /// The payload is authored in body-direction space and therefore has no
 /// Cartesian planet-scale repeat.
+/// Catmull-Rom segment. End tangents are handled by duplicating the end knots
+/// at the call site, which flattens the curve gently into the layer edges
+/// instead of breaking its slope there.
+fn cloud_strata_spline(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    return 0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3);
+}
+
 fn cloud_surface_shape(strata: vec4<f32>, layer_height: f32) -> f32 {
     if layer_height <= -0.04 || layer_height >= 1.04 { return 0.0; }
-    let z = clamp(layer_height, 0.0, 1.0) * 4.0 - 0.5;
-    if z <= 0.0 { return strata.x; }
-    if z < 1.0 { return mix(strata.x, strata.y, z); }
-    if z < 2.0 { return mix(strata.y, strata.z, z - 1.0); }
-    if z < 3.0 { return mix(strata.z, strata.w, z - 2.0); }
-    return strata.w;
+    // Knots at 1/8, 3/8, 5/8, 7/8 of the layer → z = 0..3.
+    let z = clamp(clamp(layer_height, 0.0, 1.0) * 4.0 - 0.5, 0.0, 3.0);
+    let k = clamp(floor(z), 0.0, 2.0);
+    let t = z - k;
+    // C1 reconstruction. This was piecewise LINEAR, and its slope breaks at the
+    // four knots were the "straight artifacts cutting through the clouds"
+    // (2026-07-26): `env` feeds `formation_threshold`, so a slope break in
+    // altitude is a break in the density isosurface, and a deck viewed edge-on
+    // maps altitude straight to screen-y — four horizontal shelves per cloud,
+    // repeated across every cloud in the deck, with the sky showing through
+    // between them. Reference quality reproduced it identically, which is what
+    // ruled out the step budget, sparse scheduling and temporal reconstruction
+    // and pointed here. Nothing masked it before this round because the
+    // periodic Cartesian volume used to vary down the column; the cell field is
+    // constant down a column by construction, so the strata are now the ONLY
+    // vertical structure and their reconstruction is visible directly.
+    var v = 0.0;
+    if k < 1.0 {
+        v = cloud_strata_spline(strata.x, strata.x, strata.y, strata.z, t);
+    } else if k < 2.0 {
+        v = cloud_strata_spline(strata.x, strata.y, strata.z, strata.w, t);
+    } else {
+        v = cloud_strata_spline(strata.y, strata.z, strata.w, strata.w, t);
+    }
+    // Catmull-Rom can overshoot between unequal knots; the payload is an areal
+    // fraction, so clamp rather than let a negative density appear.
+    return clamp(v, 0.0, 1.0);
 }
 
 /// Broad surface-space density contract shared by near and far projections.
@@ -722,77 +755,140 @@ fn sample_weather_soft(
 const WEATHER_TEXEL_ANGLE: f32 = 0.001533981;
 
 // ── Single-representation cloud march contract ──────────────────────────────
-// (BL-20260724T003705Z.) The near volumetric march carries ONE cloud
-// representation across the visible range with footprint-banded LOD: at each
-// band edge the density field's bandwidth shrinks FIRST (erosion retires as
-// the refine step grows; the shape spectrum narrows; beyond ~90 km density
-// converges to the derived homogenized field E[shaped | env]), and only then
-// does the step size grow to match the now band-limited field — alias-free by
-// construction, which is what the conservative-bounds rule
-// (ADR-20260721T033055Z) actually requires. BL-33's dot-grid moiré and
-// INC-0011's isosurfaces both came from stretching steps over the UNFILTERED
-// field. The far/orbital estimator owns only rays ENTERING the shell beyond
-// CLOUD_MARCH_ENTRY_FADE (true orbit-scale geometry).
+// (BL-20260724T003705Z; re-keyed by ADR-20260726T000929Z.) The near volumetric
+// march carries ONE cloud representation across the whole flight envelope, with
+// LOD keyed to the PROJECTED PIXEL FOOTPRINT and the ray's in-shell chord —
+// never to raw camera distance.
 //
-// Both `clouds_compute.wgsl` (the marcher) and `cloud_composite.wgsl` (the
-// far tier's partition of unity) read the SAME table below — the lockstep is
-// structural. Steps are per-band clear-air (broad probe) cadences; refine
-// runs at 1/5 of the local broad step throughout.
-const CLOUD_MARCH_BAND_EDGE_M: vec4<f32> =
-    vec4<f32>(42000.0, 90000.0, 180000.0, 300000.0);
-const CLOUD_MARCH_BAND_STEP_M: vec4<f32> = vec4<f32>(600.0, 1200.0, 2400.0, 4800.0);
-/// Hard geometric cap on the marched shell segment (the last band edge).
+// Distance was the wrong driver and it produced every ascent artifact at once.
+// From orbit the deck is far away but its footprint is TINY: Bevy's default 45°
+// vertical fov on a 1280×720 cloud target is 0.00115 rad/pixel, so at 300 km a
+// pixel covers 345 m and a 5.4 km cell is ~12 pixels across. The old ladder read
+// "300 km" and switched to 4800 m steps (≈10 samples through the whole deck —
+// the horizontal comb on ascent cells) and then handed the frame to the
+// statistical far estimator entirely (clouds simply vanished above 300 km).
+// Footprint keying inverts that: the same orbital ray now marches at the radial
+// floor, because that is what its pixel actually resolves.
+//
+// The alias-safety invariant is unchanged and now has the right driver: the
+// density field band-limits to `filter_m` (this step, or the footprint,
+// whichever is coarser) BEFORE the step grows — `cloud_cell_field` drops
+// octaves, the Cartesian sub-cell sculptor retires, erosion retires. That is
+// what the conservative-bounds rule (ADR-20260721T033055Z) requires; BL-33's
+// moiré and INC-0011's isosurfaces came from stretching steps over the
+// UNFILTERED field.
+//
+// Both `clouds_compute.wgsl` (the marcher) and `cloud_composite.wgsl` (the far
+// tier) read the SAME functions below — the lockstep is structural.
+
+/// Broad probes per projected pixel footprint. Refine runs at 1/5 of the broad
+/// step throughout, so this is ~0.4 fine samples per pixel.
+const CLOUD_MARCH_FOOTPRINT_STEPS: f32 = 2.0;
+/// Near-field floor: a pixel 1 km away covers ~1 m, and marching at 2 m would
+/// be absurd, so the footprint term needs a floor. But this floor is a pure
+/// COST device, and it overrides the physically-correct footprint step at every
+/// range that matters: at 30–60 km a pixel covers 35–70 m, so the honest step
+/// is ~100 m and the floor was forcing 600 m.
+///
+/// At 600 m a grazing ray through a thin deck rendered as a field of horizontal
+/// bricks with the sky showing through between them (user verdict 2026-07-26,
+/// "straight artifacts cutting through" + "we can easily see through them" —
+/// the gaps between the bars ARE the see-through). Measured on the level probe
+/// (`artifacts/visual/runs/cloud-ghost-level/`, camera 700 m, look +3°):
+/// 600 m banded, 300 m clean, 150 m clean. Cruise GPU cost on the development
+/// 4070 Ti at 1280×720: 600 m → 1.98 ms mean / 3.33 p95; 300 m → 2.36 / 4.38;
+/// 150 m → 2.74 / 5.12.
+///
+/// 300 m is the chosen point: the artifact is a correctness defect, and the
+/// 3.5 ms p95 target is explicitly provisional ("adjusted after measurement
+/// rather than treated as dogma", CLOUD-0). This is the knob to move if the
+/// budget is re-tightened — and it must move with a matching capture, because
+/// the failure it guards against is not subtle.
+const CLOUD_MARCH_MIN_STEP_M: f32 = 300.0;
+/// Vertical resolution cap: the step may never exceed this along the RADIAL
+/// direction, or a thin deck is crossed in a handful of samples and renders as
+/// horizontal slabs. Steep rays pay for it in short in-shell segments — this is
+/// what lets an orbital nadir ray march the deck at 350 m.
+const CLOUD_MARCH_MAX_RADIAL_STEP_M: f32 = 350.0;
+/// Horizontal resolution cap, ~1/3 of the cell field's coarsest period: a
+/// grazing ray moves almost nothing vertically per step, so what it must
+/// resolve is the CELL, not the profile.
+const CLOUD_MARCH_MAX_CELL_STEP_M: f32 = 1800.0;
+/// Hard geometric cap on the marched shell segment.
 const CLOUD_MARCH_REACH_M: f32 = 300000.0;
-/// Rays entering the shell beyond this window dissolve to the far estimator.
-const CLOUD_MARCH_ENTRY_FADE_START_M: f32 = 240000.0;
-const CLOUD_MARCH_ENTRY_FADE_END_M: f32 = 300000.0;
-/// The marcher dissolves its density over the LAST fraction of its reach (the
-/// far tier fades in complementarily). The former half-span dissolve started
-/// washing detail out at 34 km — a large part of the perceived detail cliff.
+/// The marcher dissolves its density over the LAST fraction of the reach its
+/// probe budget actually buys; the far tier fades in complementarily.
 const CLOUD_MARCH_FADE_FRACTION: f32 = 0.85;
 
-/// Broad-probe step size at camera distance `t` (metres).
-fn cloud_march_step_m(t: f32) -> f32 {
-    if t < CLOUD_MARCH_BAND_EDGE_M.x { return CLOUD_MARCH_BAND_STEP_M.x; }
-    if t < CLOUD_MARCH_BAND_EDGE_M.y { return CLOUD_MARCH_BAND_STEP_M.y; }
-    if t < CLOUD_MARCH_BAND_EDGE_M.z { return CLOUD_MARCH_BAND_STEP_M.z; }
-    return CLOUD_MARCH_BAND_STEP_M.w;
+/// The far/orbital projection owns a WHOLE ray only once cell-scale morphology
+/// is genuinely SUB-PIXEL — i.e. whole-disc and map framings, where a smooth
+/// projection is correct by construction and no transition can be visible.
+/// Keyed to footprint against the cell field's periods (5.4 km coarsest,
+/// 0.96 km finest). On Thalos that puts the handoff near 1900–4700 km altitude,
+/// so the entire flight envelope is volumetric — the point of the change: the
+/// old 240–300 km entry-DISTANCE window put it in the middle of every ascent,
+/// where a pixel still covers only ~345 m and cells are 12 px across.
+const CLOUD_FAR_OWNERSHIP_START_M: f32 = 2200.0;
+const CLOUD_FAR_OWNERSHIP_END_M: f32 = 5400.0;
+
+fn cloud_far_ownership(footprint_m: f32) -> f32 {
+    return smoothstep(CLOUD_FAR_OWNERSHIP_START_M, CLOUD_FAR_OWNERSHIP_END_M, footprint_m);
 }
 
-/// Where a march that ENTERS the shell at `t_entry` with `steps` broad probes
-/// runs out — the analytic mirror the far tier partitions against. Exact for
-/// the clear-air cadence; refinement spends extra steps only after broad mass
-/// is found, where opacity normally terminates the ray before the reach
-/// frontier matters (same approximation the old constant-step mirror made).
-fn cloud_march_stop_m(steps: f32, t_entry: f32) -> f32 {
+/// Broad-probe step at distance `t`. `radial_rate` is |dot(up, ray_dir)| — the
+/// fraction of a step spent crossing the deck vertically.
+///
+/// The footprint term is a FLOOR (never sample finer than a pixel) and the two
+/// resolution terms are CAPS (always resolve the deck vertically and the cells
+/// horizontally), so the caps win where they disagree. A chord-length budget
+/// floor was tried here instead and is the wrong shape: it makes the step a
+/// function of how long the ray happens to be, which on a ground-level horizon
+/// ray (chord ~600 km) produced ~9.7 km steps through a 1.15 km deck and
+/// rendered the whole distant band as horizontal slabs. Budget belongs in the
+/// REACH (below), not in the step.
+fn cloud_march_step_m(t: f32, pixel_angle: f32, radial_rate: f32) -> f32 {
+    let by_footprint = max(
+        t * pixel_angle * CLOUD_MARCH_FOOTPRINT_STEPS,
+        CLOUD_MARCH_MIN_STEP_M,
+    );
+    let radial_cap = CLOUD_MARCH_MAX_RADIAL_STEP_M / max(radial_rate, 1.0e-3);
+    return min(min(by_footprint, radial_cap), CLOUD_MARCH_MAX_CELL_STEP_M);
+}
+
+/// Where a march entering the shell at `t_entry` with `steps` broad probes runs
+/// out — the frontier the far tier fades in over. Integrates the SAME footprint
+/// law in closed form: uniform at the floor while `a·t < MIN`, geometric while
+/// the footprint governs, uniform again at the cell cap.
+///
+/// The resolution caps are deliberately not mirrored here. They only ever make
+/// the real step SMALLER, and they bind exactly where the frontier is
+/// irrelevant — steep rays, whose in-shell segments are geometrically short and
+/// finish long before the budget does. Where the frontier does matter (grazing
+/// rays at the floor) this is exact. Runs once per ray, so the transcendentals
+/// are outside the per-sample density path.
+fn cloud_march_stop_m(steps: f32, t_entry: f32, pixel_angle: f32) -> f32 {
+    let a = max(pixel_angle * CLOUD_MARCH_FOOTPRINT_STEPS, 1.0e-9);
+    let t_floor = CLOUD_MARCH_MIN_STEP_M / a;
+    let t_cap = CLOUD_MARCH_MAX_CELL_STEP_M / a;
     var remaining = steps;
     var t = max(t_entry, 0.0);
-    // Locals: naga requires a reference for dynamic vector indexing.
-    var edges = CLOUD_MARCH_BAND_EDGE_M;
-    var band_steps = CLOUD_MARCH_BAND_STEP_M;
-    for (var band = 0u; band < 4u; band++) {
-        let edge = edges[band];
-        let step = band_steps[band];
-        if t < edge {
-            let n = (edge - t) / step;
-            if remaining <= n {
-                return t + remaining * step;
-            }
-            remaining -= n;
-            t = edge;
+    if t < t_floor {
+        let n = (t_floor - t) / CLOUD_MARCH_MIN_STEP_M;
+        if remaining <= n {
+            return t + remaining * CLOUD_MARCH_MIN_STEP_M;
         }
+        remaining -= n;
+        t = t_floor;
     }
-    return CLOUD_MARCH_REACH_M;
-}
-
-/// Field-coarseness driver for the marcher's density LOD, keyed to the same
-/// band edges: 0 = full morphology, 1 = erosion retired / spectrum narrowed /
-/// edges widened, 2 = fully homogenized (derived E[shaped | env] field). Each
-/// filter stage completes BEFORE the step size that needs it kicks in.
-fn cloud_march_coarseness(t: f32) -> f32 {
-    let c1 = smoothstep(30000.0, CLOUD_MARCH_BAND_EDGE_M.x, t);
-    let c2 = smoothstep(70000.0, CLOUD_MARCH_BAND_EDGE_M.y, t);
-    return c1 + c2;
+    if t < t_cap {
+        let n = log(t_cap / t) / a;
+        if remaining <= n {
+            return t * exp(a * remaining);
+        }
+        remaining -= n;
+        t = t_cap;
+    }
+    return min(t + remaining * CLOUD_MARCH_MAX_CELL_STEP_M, CLOUD_MARCH_REACH_M);
 }
 
 // ── Shared strata domain warp ────────────────────────────────────────────────
@@ -831,17 +927,408 @@ fn strata_warp_noise(x: vec3<f32>) -> f32 {
     return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 
-/// Shared sub-texel morphology noise (BL-20260724T003705Z): the far tier
-/// perturbs its response-LUT input with this field, and the marcher's
-/// homogenized bands perturb `env` identically — SAME function, SAME
-/// amplitude convention — so the crossfaded fields carry the same mottled
-/// texture instead of smooth-vs-crisp mismatching (user ascent verdict,
-/// 150 km framing). `fine_amount` gates the 830 m octave (alias-prone at
-/// coarse footprints/steps); the broad 2.2 km octave always contributes.
-fn cloud_morph_noise(p_body: vec3<f32>, fine_amount: f32) -> f32 {
-    let broad = strata_warp_noise(p_body / 2200.0);
-    let fine = strata_warp_noise(p_body / 830.0 + vec3<f32>(7.3, 1.9, -4.7));
-    return 0.65 * broad + 0.35 * mix(0.5, fine, fine_amount);
+// ── Cell-scale cloud morphology: the shared aperiodic column field ──────────
+//
+// The planetary weather cube stores 4.9 km texels and its authored content
+// bottoms out around 15–25 km, so nothing it carries can draw the 1–5 km cells
+// that define a real broken deck — at any range. Those cells come from THIS
+// field, and because it is the same function for the near march, the far
+// projection and the CPU calibration mirror, cell identity does not change
+// with distance. That is the answer to the LOD-seam family: the tiers now
+// differ in how they INTEGRATE one field, never in which field they render.
+//
+// Two properties are load-bearing:
+//
+//   * It is parameterized by the body-fixed DIRECTION and evaluated from a
+//     hash lattice, so it is genuinely aperiodic. Every previous attempt to
+//     get cells at this scale drove a stored/periodic Cartesian tile, and the
+//     spherical shell cut that repeat into planet-visible rows or combs —
+//     ADR-20260722T141000Z, ADR-20260722T135123Z, and round 9's rejected
+//     narrow shape period are all that one failure family.
+//   * It is a COLUMN field: one horizontal identity from base to top, which is
+//     what a convective column is. Vertical shape stays where it already
+//     works — the marcher's typed profiles and dome threshold.
+//
+// `filter_m` is the sampling scale: the march step or the projected pixel
+// footprint, whichever is coarser. An octave whose period falls under the
+// sampler fades to its OWN MEAN, so the field band-limits ahead of the sampler
+// and degrades cells → coarser cells → strata. It never collapses to a global
+// mean: mean-preserving is not appearance-preserving, because opacity and
+// lighting are nonlinear in density (E[shade(σ)] ≠ shade(E[σ])), and rendering
+// the mean is exactly what made the old homogenized band a flat sheet with a
+// contrast step at its edge.
+/// Cell period. **Globally constant, and it must stay that way** — a spatially
+/// varying period runs the field finer than the period its own band-limit
+/// assumes, which aliases. Apparent cell size is varied by the octave WEIGHTS
+/// instead; see the rule above `CLOUD_CELL_ROLL_ASPECT`.
+const CLOUD_CELL_PERIOD_M: f32 = 5400.0;
+const CLOUD_CELL_LACUNARITY: f32 = 2.37;
+/// Spread correction about the mean. Smoothstep-interpolated lattice noise is
+/// narrow (std 0.115 for this octave mix, measured over 1.5M directions), and
+/// summing octaves narrows it further — so the raw field is nearly constant at
+/// 0.5 and the formation threshold acts as a CLIFF: 0.40 → 0.60 swings areal
+/// coverage 80 % → 20 %. Everything crossing such a threshold crosses it by
+/// about the same margin, which renders as a carpet of identically-sized puffs
+/// (first capture of this change). The gain restores std ≈ 0.20, so a threshold
+/// selects peaks of genuinely different heights — cells of different sizes with
+/// solid cores — which is the round-9 rule ("apparent cell size comes from the
+/// threshold picking peaks out of a wide period") finally given a distribution
+/// it can work on.
+const CLOUD_CELL_GAIN: f32 = 3.2;
+/// Soft-saturation knee. The gain MUST NOT be applied with a hard clamp: at
+/// gain 2.4 that saturated 9.6 % of the sky (measured) to exactly 1.0, and a
+/// constant region has no isosurface — the height-rising dome threshold then
+/// cut every such core off at one exact altitude and the deck rendered as
+/// flat-topped mesas with vertical sides (second capture of this change).
+/// `x / (k + |x|)` keeps a gradient everywhere, so every core still carves a
+/// rounded top, and is odd-symmetric about 0.5 so the mean is preserved
+/// exactly. No transcendentals — the per-sample density path forbids them.
+const CLOUD_CELL_KNEE: f32 = 0.45;
+/// `E[|2v − 1|]` for `strata_warp_noise`, measured over 4M samples. The billow
+/// octave is re-centred on it so its neutral value is exactly 0.5 and the
+/// octave fade cannot shift the field's mean — a shift there would silently
+/// de-calibrate the derived fill LUT at range.
+const CLOUD_CELL_BILLOW_MEAN: f32 = 0.302816;
+/// Per-octave billow ladder and octave weights. Named because the style's
+/// spread normalization below has to reproduce the same mix analytically.
+/// Weighted toward the low frequency so cells cluster into masses instead of
+/// spreading as one uniform grain size.
+const CLOUD_CELL_WEIGHTS: vec3<f32> = vec3<f32>(0.62, 0.26, 0.12);
+const CLOUD_CELL_BILLOW: vec3<f32> = vec3<f32>(0.0, 0.75, 0.35);
+
+// ── Morphology varies with PLACE (2026-07-26) ───────────────────────────────
+//
+// One planet must not render one cloud. Orbital photography of a terrestrial
+// planet shows, within a single frame: wind-aligned roll streets, round
+// open-cell honeycomb, sparse fair-weather cells over wide clear water, and
+// solid decks split by narrow clear lanes. Until this, the field below had no
+// spatial parameters at all — one period, isotropic, one lobe character
+// everywhere — so the weather cube could vary how MUCH cloud a place had and
+// how TALL it was, but never what KIND it was. Every region rendered the same
+// popcorn carpet (user verdict 2026-07-26, with reference imagery).
+//
+// The style is analytic and direction-parameterized for the same two reasons
+// the cell field is: nothing stored at 4.9 km texels can carry cell-scale
+// morphology, and a stored tile repeats into planet-visible combs
+// (ADR-20260725T222409Z). It varies over ~600 km — two orders above the cell
+// period — so inside any one cell the domain map below is affine.
+//
+// CALIBRATION SAFETY shapes the whole design. The near tier's formation
+// threshold is ONE Monte-Carlo fit over the whole planet (`fill_lut`), so a
+// style that changed the field's DISTRIBUTION would silently make authored
+// coverage mean different things in different places. Every knob here is
+// therefore distribution-preserving by construction:
+//
+//   * anisotropy and tilt are LINEAR domain maps — exactly preserving;
+//   * cell period is a domain rescale — exactly preserving;
+//   * lobe character is NOT (σ swings 0.185 → 0.140 → 0.212 across the billow
+//     range), so the octave mix is renormalized by its own analytic σ before
+//     the gain.
+//
+// Measured over 4M directions per style (scratch harness, 2026-07-26): every
+// style below lands at mean 0.4993–0.4995, σ 0.2031–0.2036, 0.00 % saturated —
+// against the un-styled field's mean 0.4993 / σ 0.2036. The threshold curve
+// therefore keeps its meaning everywhere, which is what lets this ship without
+// a per-region calibration.
+
+// ── The one rule this design exists to obey ─────────────────────────────────
+//
+// **A per-place style may never scale the sampling domain.**
+//
+// The field is sampled at `dir * (radius / period)` — about 590 lattice units on
+// a Thalos-sized body. Let the period vary across the planet and the chain rule
+// adds a second term to the sampling gradient: the field then runs at a LOCAL
+// frequency well above the one its period nominally sets, while the octave fade
+// still band-limits against that nominal period. The octave is under-filtered by
+// exactly that factor, and it renders as fine feathered hatching, worst where
+// the style gradient is steepest.
+//
+// Measured, not argued (`live_style_field_stays_coherent_across_style_boundaries`):
+// the shipped varying period ran the field **1.70×** finer than its nominal
+// period; this design runs at 1.13×, and that residual is the roll variant's
+// genuinely finer across-street spacing, which `cloud_cell_roll_limit` accounts
+// for. A varying `zonal_aspect` has the identical flaw, since it scales the
+// domain by √a.
+//
+// This shipped twice before being isolated (user verdict 2026-07-26: "too
+// distorted", then "strange artificial stripy patterns", then "not much
+// better"). The capture that pinned it: styling the period ALONE, with billow
+// and anisotropy neutral, reproduces the hatching; a constant period is clean.
+//
+// Everything below is therefore built from operations that cannot add a
+// sampling-gradient term:
+//
+//   * **octave weights** — multiply already-sampled values, so apparent cell
+//     size varies with no domain change at all;
+//   * **billow** — blends two values taken at the SAME point;
+//   * **roll blend** — cross-fades two globally CONSTANT domain transforms, so
+//     every sample keeps the frequency its own band-limit assumes.
+//
+// A varying period/aspect is not recoverable by tuning; do not reintroduce one.
+
+/// The fixed anisotropic variant of the arrangement octave. Constant, so the
+/// transform contributes no phase gradient; regional variation comes from
+/// blending toward it, never from moving it.
+///
+/// Anisotropy is applied to the arrangement octave only — a cloud street is a
+/// row of round cumulus, not a ribbon, and stretching the octaves that carry an
+/// individual cloud's silhouette turned every cloud into a tapering comet.
+const CLOUD_CELL_ROLL_ASPECT: f32 = 3.0;
+/// Shear off the exact east–west line. Also constant, and non-zero on purpose:
+/// mixing longitude back into the lattice's y coordinate is what stops a high
+/// aspect degenerating the field into pure latitude bands (circular contours on
+/// a sphere — the fingerprint whorls of round 2).
+const CLOUD_CELL_ROLL_TILT: f32 = 0.35;
+
+/// σ of ONE octave as a function of its billow blend: a quadratic fit to 11
+/// measured points, worst error 0.0023. Non-monotonic — billow first narrows
+/// the distribution (0.4) and then widens it past the plain-noise value.
+const CLOUD_CELL_SIGMA_FIT: vec3<f32> = vec3<f32>(0.184571, -0.200902, 0.230569);
+/// σ of the default octave mix — the spread the derived threshold curve was fit
+/// against, and therefore the target every style is renormalized back onto.
+const CLOUD_CELL_SIGMA_REF: f32 = 0.123275;
+
+/// How a place's clouds are ORGANIZED, as opposed to how much of them there is.
+struct CloudCellStyle {
+    /// Octave weights — the cell-size control. Must sum to 1 so the field's
+    /// mean stays 0.5.
+    weights: vec3<f32>,
+    /// Blend toward the fixed anisotropic variant of the arrangement octave:
+    /// 0 = round cells, 1 = wind-aligned rolls and lanes.
+    roll: f32,
+    /// Scale on the per-octave billow ladder: < 1 smooth sheets, > 1 puffy
+    /// lobes with real gaps between them.
+    billow: f32,
+    /// `CLOUD_CELL_SIGMA_REF / σ(style)` — see the calibration note above.
+    spread_norm: f32,
+}
+
+/// Analytic σ of the weighted octave mix. The octaves sit at decorrelated
+/// offsets and frequencies, so the independent-sum model holds: measured
+/// against direct sampling it is accurate to 0.25 % over the whole billow
+/// range. Both the weights and the billow move it, so both are folded in here
+/// — that is what keeps authored coverage meaning the same thing in every
+/// region under one planet-wide threshold fit.
+fn cloud_cell_spread_norm(weights: vec3<f32>, billow_scale: f32) -> f32 {
+    let b = CLOUD_CELL_BILLOW * billow_scale;
+    let s = CLOUD_CELL_SIGMA_FIT.x + CLOUD_CELL_SIGMA_FIT.y * b
+        + CLOUD_CELL_SIGMA_FIT.z * b * b;
+    return CLOUD_CELL_SIGMA_REF / max(sqrt(dot(weights * weights, s * s)), 1.0e-5);
+}
+
+/// Resolve the local cloud organization from the body-fixed vertical and the
+/// weather cube's type channel.
+///
+/// Two inputs, deliberately: `cloud_type` is the producer's own regime
+/// projection, so morphology agrees with the weather field BY CONSTRUCTION
+/// rather than by a second noise field that would put fair-weather streets
+/// inside a storm. `org` adds the independent degree of freedom type cannot
+/// carry — whether a place's convection is organized into rolls or left as
+/// round cells — and it is ONE low-frequency fetch, which is the entire added
+/// per-sample cost of this feature.
+///
+/// The two axes span the reference imagery: low org + sheet = solid deck; high
+/// org + sheet = deck with clear lanes; low org + cumulus = sparse round
+/// fair-weather cells; high org + cumulus = roll streets; storm = coarse and
+/// round at any org.
+fn cloud_cell_style(dir: vec3<f32>, cloud_type: f32) -> CloudCellStyle {
+    // ~640 km features on a Thalos-sized body: far above cell scale, far below
+    // planetary, so a region holds one organization and neighbouring regions
+    // differ.
+    let org_raw = strata_warp_noise(dir * 5.0 + vec3<f32>(61.0, -23.0, 14.0));
+
+    // Rolls need a sustained shear flow, which is a property of the trade and
+    // mid-latitude belts, not of the deep tropics or the poles. Without this
+    // gate the streets read as a planet-wide corduroy.
+    let abs_lat = abs(clamp(dir.y, -1.0, 1.0));
+    let roll_belt = smoothstep(0.08, 0.30, abs_lat) * (1.0 - smoothstep(0.60, 0.88, abs_lat));
+    // Deep convection destroys roll organization — a storm is a round cluster.
+    let not_storm = 1.0 - smoothstep(0.70, 0.90, cloud_type);
+    let roll = smoothstep(0.44, 0.80, org_raw) * roll_belt * not_storm;
+
+    let storm_w = smoothstep(0.72, 0.88, cloud_type);
+    let sheet_w = 1.0 - smoothstep(0.14, 0.42, cloud_type);
+
+    // ── Cell size, WITHOUT touching the domain ──────────────────────────────
+    // Apparent cell size comes from shifting weight between the octaves, never
+    // from scaling their periods. See `CLOUD_CELL_PERIOD_M`: a varying period is
+    // a phase gradient of ~590 lattice units per unit relative change, which
+    // decorrelates the field wherever the style varies. Weights multiply
+    // already-sampled values, so they can vary as freely as we like.
+    //
+    // Both endpoints sum to 1, so the mix mean stays exactly 0.5 whatever the
+    // blend. Deep convection and sheets organize at a coarser spacing, so they
+    // pull toward the low-frequency end.
+    let size_t = clamp(
+        smoothstep(0.20, 0.80, org_raw) - 0.35 * storm_w - 0.15 * sheet_w,
+        0.0,
+        1.0,
+    );
+    let weights = mix(
+        vec3<f32>(0.78, 0.16, 0.06),
+        vec3<f32>(0.44, 0.34, 0.22),
+        size_t,
+    );
+
+    // Sheets are smooth and continuous; convective fields are lobed with gaps
+    // between the lobes. This is the knob that separates a stratus deck from a
+    // cumulus field at the same coverage. Safe to vary freely: the billow blend
+    // mixes two values taken at the SAME sample point, so it never moves the
+    // domain.
+    let billow = mix(1.15, 0.30, sheet_w);
+
+    // ── Roll blend ──────────────────────────────────────────────────────────
+    // How much of the arrangement octave comes from the FIXED anisotropic
+    // variant rather than the isotropic one. A blend weight, not a transform
+    // parameter — for the same reason the period is gone: a spatially varying
+    // aspect scales the domain and therefore scrambles phase. Two globally
+    // constant transforms, cross-faded, keep every sample coherent.
+    let polar_fade = 1.0 - smoothstep(0.62, 0.90, abs_lat);
+    let roll_blend = clamp(
+        (roll + 0.55 * sheet_w * smoothstep(0.50, 0.86, org_raw)) * polar_fade,
+        0.0,
+        1.0,
+    );
+
+    return CloudCellStyle(weights, roll_blend, billow, cloud_cell_spread_norm(weights, billow));
+}
+
+/// The sampling domain for one octave, at a CONSTANT anisotropy.
+///
+/// Zonal elongation is the diagonal map `diag(1/a, 1, 1/a)` in the body frame:
+/// a step east moves only `1/a` as far through the lattice, so features stretch
+/// by exactly `a` along the wind at every latitude, while a step north is
+/// untouched at the equator. It is linear (distribution preserved exactly),
+/// transcendental-free, and seamless. The three alternatives all fail: scaling
+/// a longitude ANGLE tears at the ±π meridian, a tangent-frame scale degenerates
+/// (every tangent is perpendicular to `dir`, so the map is the identity), and a
+/// stored anisotropic tile repeats — the failure family ADR-20260722T141000Z
+/// already catalogues.
+///
+/// `aspect` and `tilt` are compile-time constants at every call site. Making
+/// them vary per place is the phase-gradient error documented above.
+fn cloud_cell_domain(
+    dir: vec3<f32>,
+    radius: f32,
+    period_m: f32,
+    aspect: f32,
+    tilt: f32,
+) -> vec3<f32> {
+    let a = max(aspect, 1.0);
+    // Constant cell area: across ÷ √a, along × √a, so a higher aspect turns
+    // cells into rolls instead of enlarging everything.
+    let k = radius / (period_m / sqrt(a));
+    let inv = 1.0 / a;
+    let p = vec3<f32>(dir.x * k * inv, dir.y * k, dir.z * k * inv);
+    return vec3<f32>(p.x, p.y + tilt * (p.x + p.z), p.z);
+}
+
+/// The smallest feature dimension the anisotropic variant produces — what the
+/// octave fade must band-limit against, since it is finer than the period.
+fn cloud_cell_roll_limit(period_m: f32) -> f32 {
+    let across = period_m / sqrt(CLOUD_CELL_ROLL_ASPECT);
+    // The shear raises the peak gradient by sqrt(1 + tilt²).
+    return across / sqrt(1.0 + CLOUD_CELL_ROLL_TILT * CLOUD_CELL_ROLL_TILT);
+}
+
+/// Shape one raw lattice sample into an octave value: billow blend, then the
+/// band-limit fade toward the octave's own mean.
+fn cloud_cell_shape(v: f32, billow: f32, fade: f32) -> f32 {
+    let b = 0.5 + (abs(2.0 * v - 1.0) - CLOUD_CELL_BILLOW_MEAN);
+    return mix(0.5, mix(v, b, billow), fade);
+}
+
+/// One isotropic octave, faded to its own mean once its period drops under the
+/// sampler.
+fn cloud_cell_octave(
+    dir: vec3<f32>,
+    radius: f32,
+    period_m: f32,
+    offset: vec3<f32>,
+    filter_m: f32,
+    billow: f32,
+) -> f32 {
+    let fade = 1.0 - smoothstep(0.45 * period_m, period_m, filter_m);
+    if fade <= 1.0e-3 {
+        return 0.5;
+    }
+    let v = strata_warp_noise(cloud_cell_domain(dir, radius, period_m, 1.0, 0.0) + offset);
+    return cloud_cell_shape(v, billow, fade);
+}
+
+/// The arrangement octave: the isotropic sample cross-faded toward the fixed
+/// anisotropic variant by `roll`.
+///
+/// Cross-fading two decorrelated fields costs variance — σ falls by
+/// `sqrt(w² + (1−w)²)`, i.e. to 0.71σ at an even mix — so the blend is
+/// renormalized back onto the isotropic spread. Without that the transition
+/// belts would render as washed-out bands between the round-cell and rolled
+/// regions, which is the same "render the mean" failure the LOD contract
+/// forbids, arriving through a different door.
+fn cloud_cell_arrangement(
+    dir: vec3<f32>,
+    radius: f32,
+    period_m: f32,
+    offset: vec3<f32>,
+    filter_m: f32,
+    billow: f32,
+    roll: f32,
+) -> f32 {
+    let iso = cloud_cell_octave(dir, radius, period_m, offset, filter_m, billow);
+    if roll <= 1.0e-3 {
+        return iso;
+    }
+    let limit = cloud_cell_roll_limit(period_m);
+    let fade = 1.0 - smoothstep(0.45 * limit, limit, filter_m);
+    var rolled = 0.5;
+    if fade > 1.0e-3 {
+        let v = strata_warp_noise(
+            cloud_cell_domain(
+                dir,
+                radius,
+                period_m,
+                CLOUD_CELL_ROLL_ASPECT,
+                CLOUD_CELL_ROLL_TILT,
+            ) + offset,
+        );
+        rolled = cloud_cell_shape(v, billow, fade);
+    }
+    let blended = mix(iso, rolled, roll);
+    let shrink = sqrt(roll * roll + (1.0 - roll) * (1.0 - roll));
+    return 0.5 + (blended - 0.5) / max(shrink, 1.0e-3);
+}
+
+/// Cell-scale occupancy in [0, 1] with mean ≈ 0.5, band-limited to `filter_m`.
+/// `dir` is the body-fixed unit vertical at the sample; `radius` is the body
+/// radius (the field's periods are metres of arc on the surface).
+///
+/// Octave PERIODS are global constants — only the weights vary per place. See
+/// the phase-gradient note above; this is the invariant that makes the field
+/// coherent across a style boundary instead of hatched.
+///
+/// `spread_norm` is applied to the octave mix and NOT to the fade: the fade's
+/// variance loss is the intended band-limiting, and re-inflating it would undo
+/// the aliasing protection the whole LOD contract rests on.
+fn cloud_cell_field(
+    dir: vec3<f32>,
+    radius: f32,
+    filter_m: f32,
+    style: CloudCellStyle,
+) -> f32 {
+    let p0 = CLOUD_CELL_PERIOD_M;
+    let p1 = p0 / CLOUD_CELL_LACUNARITY;
+    let p2 = p1 / CLOUD_CELL_LACUNARITY;
+    let b = CLOUD_CELL_BILLOW * style.billow;
+    // Only the coarse octave carries the arrangement, so only it is elongated.
+    let o0 = cloud_cell_arrangement(
+        dir, radius, p0, vec3<f32>(11.3, -4.1, 27.9), filter_m, b.x, style.roll,
+    );
+    let o1 = cloud_cell_octave(dir, radius, p1, vec3<f32>(-23.7, 8.4, 3.2), filter_m, b.y);
+    let o2 = cloud_cell_octave(dir, radius, p2, vec3<f32>(5.9, 31.2, -17.6), filter_m, b.z);
+    let w = style.weights;
+    let raw = w.x * o0 + w.y * o1 + w.z * o2;
+    let x = (raw - 0.5) * style.spread_norm * CLOUD_CELL_GAIN;
+    return 0.5 + 0.5 * x / (CLOUD_CELL_KNEE + abs(x));
 }
 
 /// Warp a body-fixed strata lookup direction by up to ~0.9 texels of organic

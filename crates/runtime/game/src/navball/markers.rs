@@ -32,10 +32,12 @@ const ICON_SIZE: u32 = 32;
 const ORIENTATION_ICON_WIDTH: u32 = 40;
 const ORIENTATION_ICON_HEIGHT: u32 = 16;
 
-/// Navball image radius and centre in UI pixels. Derived from the UI
-/// root size (256) and the off-screen camera's `ScalingMode::Fixed { 2.4 }`.
-const NAVBALL_DISPLAY_RADIUS_PX: f32 = 256.0 / 2.4;
-const NAVBALL_CENTER_PX: f32 = 128.0;
+/// Navball image radius and centre in UI pixels. Derived from the UI root
+/// size and the off-screen camera's `ScalingMode::Fixed { 2.4 }` — read from
+/// [`NAVBALL_SIZE_PX`] rather than restated, so resizing the navball carries
+/// the markers with it instead of sliding them off the ball.
+const NAVBALL_DISPLAY_RADIUS_PX: f32 = crate::navball::ui::NAVBALL_SIZE_PX / 2.4;
+const NAVBALL_CENTER_PX: f32 = crate::navball::ui::NAVBALL_SIZE_PX * 0.5;
 
 /// Alpha multiplier for the "occluded" variant (direction on back hemisphere).
 const OCCLUDED_ALPHA: f32 = 0.35;

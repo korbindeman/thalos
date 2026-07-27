@@ -302,7 +302,7 @@ fn drive_rock_tiles(
     solar: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
-    gpu_height_mirrors: Res<crate::terrain_registry::GpuHeightMirrorRegistry>,
+    rendered_ground: Res<crate::terrain_registry::RenderedGroundRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     anchor: Res<ViewAnchor>,
     mut commands: Commands,
@@ -360,7 +360,7 @@ fn drive_rock_tiles(
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
-    let mirror = gpu_height_mirrors.get(body_id);
+    let mirror = rendered_ground.get(body_id);
     let Some(lattice) = rocks.lattice else {
         return;
     };
@@ -443,18 +443,18 @@ fn drive_rock_tiles(
         .ok()
         .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
 
-    let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
+    let ground = mirror.as_ref();
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
     for (_, key) in candidates {
         if dispatched >= slots {
             break;
         }
-        if let Some(guard) = &mirror_guard {
+        if let Some(ground) = ground {
             let Some((center, _)) = lattice.frame(key) else {
                 continue;
             };
-            match guard.best_resident_texel_m(center.as_vec3()) {
+            match ground.best_resident_texel_m(center.as_vec3()) {
                 Some(texel) if texel <= ROCK_MAX_TERRAIN_TEXEL_M => {}
                 _ => continue, // terrain not detailed here yet — retry next frame
             }

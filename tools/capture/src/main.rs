@@ -12,7 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thalos_capture_protocol::{
     CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureRequest, CaptureResponse,
-    CaptureServerState,
+    CaptureServerState, ViewpointCatalog,
 };
 use uuid::Uuid;
 
@@ -47,6 +47,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_OCEAN_TIME",
     "THALOS_PLUME_PRESSURE",
     "THALOS_CONTACT_SHADOW",
+    "THALOS_CLOUD_SHADOW",
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
@@ -655,6 +656,7 @@ fn launcher_matches(overrides: &BTreeMap<String, String>) -> bool {
 
 fn canonical_preset(raw: &str) -> Result<String, String> {
     let slug = raw.trim().to_ascii_lowercase().replace('_', "-");
+    let explicit_viewpoint = slug.strip_prefix("viewpoint:");
     let canonical = match slug.as_str() {
         "latest" | "perspective" => "latest-perspective",
         "spaceport" | "aerial" | "base" => "spaceport-aerial",
@@ -683,14 +685,64 @@ fn canonical_preset(raw: &str) -> Result<String, String> {
         "valley" => "massif-valley",
         value => value,
     };
-    if CAPTURE_PRESETS.contains(&canonical) {
+    if let Ok(catalog) = read_viewpoint_catalog() {
+        let viewpoint_id = explicit_viewpoint.unwrap_or(canonical);
+        if let Some(viewpoint) = catalog.find_scripted(viewpoint_id) {
+            Ok(viewpoint.driver.clone())
+        } else if canonical == "latest-perspective" {
+            Ok("latest-perspective".to_owned())
+        } else if catalog.find(viewpoint_id).is_some() {
+            Ok(format!("viewpoint:{viewpoint_id}"))
+        } else {
+            let ids = catalog
+                .scripted_viewpoints
+                .iter()
+                .map(|viewpoint| viewpoint.id.as_str())
+                .collect::<Vec<_>>();
+            let saved_ids = catalog
+                .viewpoints
+                .iter()
+                .map(|viewpoint| viewpoint.id.as_str())
+                .collect::<Vec<_>>();
+            Err(format!(
+                "unknown capture scene {raw:?}; agent views: {}; saved views: {}",
+                if ids.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    ids.join(", ")
+                },
+                if saved_ids.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    saved_ids.join(", ")
+                }
+            ))
+        }
+    } else if CAPTURE_PRESETS.contains(&canonical) {
         Ok(canonical.to_owned())
     } else {
         Err(format!(
-            "unknown capture scene {raw:?}; expected one of {}",
-            CAPTURE_PRESETS.join(", ")
+            "unknown capture scene {raw:?}; expected one of {} or a viewpoint in {}",
+            CAPTURE_PRESETS.join(", "),
+            viewpoint_catalog_path().display()
         ))
     }
+}
+
+fn viewpoint_catalog_path() -> PathBuf {
+    env::var_os("THALOS_VIEWPOINTS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root().join("assets/viewpoints.json"))
+}
+
+fn read_viewpoint_catalog() -> Result<ViewpointCatalog, String> {
+    let path = viewpoint_catalog_path();
+    let bytes =
+        fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    let catalog: ViewpointCatalog = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
+    catalog.validate()?;
+    Ok(catalog)
 }
 
 fn capture_timeout_secs() -> u64 {
@@ -985,7 +1037,8 @@ fn spawn_detached_launcher(
     // shim above. `-PassThru` hands back the shim's pid so `stop` can still
     // kill the whole tree.
     let quoted = script_path.display().to_string().replace('\'', "''");
-    let ps = format!("$p = Start-Process -FilePath '{quoted}' -WindowStyle Hidden -PassThru; $p.Id");
+    let ps =
+        format!("$p = Start-Process -FilePath '{quoted}' -WindowStyle Hidden -PassThru; $p.Id");
     let output = Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &ps])
         .current_dir(workspace_root())

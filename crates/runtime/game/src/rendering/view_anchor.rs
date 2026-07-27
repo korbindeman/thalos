@@ -111,7 +111,9 @@ impl AnchorBody {
     /// The body's surface (body-fixed → world) orientation at the epoch of
     /// `states` — the one orientation authority every surface consumer shares.
     pub fn surface_orientation(&self, states: &[BodyState]) -> DQuat {
-        let lock = self.lock_parent.map(|parent_id| TidallyLocked { parent_id });
+        let lock = self
+            .lock_parent
+            .map(|parent_id| TidallyLocked { parent_id });
         surface_body_to_world_orientation_f64(self.body, lock.as_ref(), states)
             .or_else(|| states.get(self.body).map(|s| s.orientation.normalize()))
             .unwrap_or(DQuat::IDENTITY)

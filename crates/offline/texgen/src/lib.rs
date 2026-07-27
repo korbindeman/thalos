@@ -9,8 +9,8 @@
 //!
 //! Today it generates the **foliage atlas** (leaf clusters + conifer needles +
 //! bark) the tree meshes sample, plus a companion **foliage material atlas**
-//! (bark normal + roughness). Rocks and other procedural textures will live here
-//! too.
+//! (bark normal + roughness), and the **terrain material set** ([`terrain`])
+//! the tile renderer's splat stack samples at contact scale.
 //!
 //! ## Foliage atlas layout
 //! An `ATLAS_N × ATLAS_N` grid of `CELL_PX` cells. A tree vertex carries a packed
@@ -20,8 +20,12 @@
 //! the top / outer rim) so foliage gets natural variation; the mesh's per-species
 //! tint is just a light nudge on top.
 
+pub mod terrain;
+
 /// Bump when generator logic or its asset contract changes.
-pub const GENERATOR_VERSION: u32 = 1;
+///
+/// 2 — added the [`terrain`] material set (NTR-X7 P2).
+pub const GENERATOR_VERSION: u32 = 2;
 
 /// Raw texture: tightly-packed sRGBA8, row-major, `width * height * 4` bytes.
 #[derive(Clone)]

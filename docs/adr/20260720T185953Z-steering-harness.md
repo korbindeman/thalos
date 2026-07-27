@@ -1,6 +1,7 @@
 # ADR-20260720T185953Z-steering-harness: Roadmap steering harness — backlog + steer skill + ADR / incident logs
 
-- **Status:** Accepted
+- **Status:** Accepted — amended by ADR-20260724T223339Z-lean-process-fast-agents (the harness
+  stands; the per-change ceremony it prescribed is cut)
 - **Date:** 2026-07-18
 
 ## Context

@@ -65,10 +65,11 @@ runs all widget interaction/visual systems globally.
   translucent `BackgroundColor` nodes layered on top — one blur per surface.
   Attach glass via `theme.glass()` (regular) / `theme.glass_heavy()`
   (dominant modal dialogs); both share one material asset per style.
-- **Text fields share one focus.** `TextFieldFocus` is the keyboard owner;
-  the game input gate (`crates/runtime/game/src/input.rs`) reads it to suppress
-  keyboard bindings while typing. New editable fields must be
-  `UiTextField`s, not bespoke key readers.
+- **Text fields share one focus.** `TextFieldFocus` is the native keyboard
+  owner. The game folds it together with egui's focus into
+  `hud::UiKeyboardGate`, which is what gameplay reads (see
+  `docs/gameplay/input.md`). New editable fields must be `UiTextField`s, not
+  bespoke key readers.
 - **The loading screen depends on token consts only** (no `UiTheme`
   resource) so it renders on frame 1.
 

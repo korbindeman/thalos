@@ -8,7 +8,7 @@
 //! ```text
 //!   R(s) = R0·lip + tan(theta)·s      free expansion off the nozzle lip
 //!   rho  ∝ (R0/R)²                    mass conservation along the column
-//!   T    ∝ (R0/R)^(2(gamma-1))        adiabatic (expansion) cooling
+//!   T    ∝ T_exit · (R0/R)^(2(g-1))   adiabatic (expansion) cooling
 //!   T   ×= exp(-e·s/R0)               entrainment cooling (atmosphere only)
 //!   S    = exp(-W·(1/T − 1))          visible-band emission, Wien side
 //!   L    = S · (1 − exp(−rho·chord))  emission through an absorbing column
@@ -22,6 +22,14 @@
 //! renders the same model. See `docs/rendering/plume.md`, and INC-0020 before repurposing
 //! any packed lane of [`PlumeParams`].
 //!
+//! **One length authority.** [`visible_length_m`] solves that same chain for the
+//! station where the rendered radiance vanishes, and the billboard is cut
+//! exactly there. Nothing else may shorten it — a cap the fragment stage cannot
+//! see ends the geometry mid-column and renders as a lit rim hanging in mid-air
+//! (INC-20260724T235437Z-plume-ended-on-a-lit-rim). Every input that should shorten a plume (throttle,
+//! back-pressure, propellant opacity, the ignition transient) does so by feeding
+//! the chain, never by trimming its result.
+//!
 //! Pipeline:
 //!
 //! 1. [`update_plume_signals`] reads each firing [`Engine`]'s runtime state
@@ -33,6 +41,8 @@
 //! 2. [`update_plume_visuals`] resolves those signals through the propellant
 //!    preset + the pressure response into [`PlumeParams`] (the flat uniform the
 //!    shader renders) and toggles plume visibility.
+
+use std::f32::consts::FRAC_PI_2;
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
@@ -289,11 +299,23 @@ pub struct PlumeParams {
     /// z = shock-cell wavenumber (rad/m), w = shock strength 0..1.
     pub shock: Vec4,
     /// x = shock decay length (m), y = afterburn 0..1,
-    /// z = turbulence amplitude, w = throttle.
+    /// z = turbulence amplitude, w = **reserved** (throttle; the shader no
+    /// longer reads it — throttle acts through κ, entrainment and flicker).
     pub mixing: Vec4,
     /// x = time (s), y = seed, z = ignition, w = entrainment cooling rate
     /// (per nozzle radius of axial distance; 0 in vacuum).
     pub anim: Vec4,
+    /// Turbulent motion. x = eddy growth per axial metre,
+    /// y = convection rate (eddies/s), z = azimuthal swirl (rad/s),
+    /// w = radial wobble amplitude.
+    pub flow: Vec4,
+    /// x = tail dispersal growth, y = potential-core length (m),
+    /// z = flicker amplitude, w = flicker rate (Hz).
+    pub tail: Vec4,
+    /// x = exit temperature (normalized; the ignition transient),
+    /// y = core turbulence weight, z = tail turbulence boost,
+    /// w = shock-cell lengthening per axial metre.
+    pub therm: Vec4,
 }
 
 impl Default for PlumeParams {
@@ -306,6 +328,9 @@ impl Default for PlumeParams {
             shock: Vec4::new(2.4, 0.5, 0.0, 0.0),
             mixing: Vec4::new(1.0, 0.0, 0.25, 0.0),
             anim: Vec4::new(0.0, 0.0, 0.0, 0.0),
+            flow: Vec4::new(0.10, 6.0, 0.1, 0.06),
+            tail: Vec4::new(1.0, 30.0, 0.05, 8.0),
+            therm: Vec4::new(1.0, 0.2, 1.0, 0.0),
         }
     }
 }
@@ -356,7 +381,6 @@ pub struct PlumeVisual {
     nozzle_radius_m: f32,
     family: PropellantFamily,
 }
-
 
 // ---------------------------------------------------------------------------
 // Systems
@@ -504,7 +528,6 @@ fn update_plume_visuals(
             seed_of(visual.engine),
         );
         mat.params = params;
-
     }
 }
 
@@ -512,11 +535,121 @@ fn update_plume_visuals(
 // Curve evaluation (signals + preset -> uniform)
 // ---------------------------------------------------------------------------
 
-/// Radius growth (in units of the nozzle exit radius) at which the column has
-/// expanded far enough that its emission has fallen out of sight. Sets the
-/// expansion-limited plume length, so the billboard is exactly as long as the
-/// visible plume instead of ending on an authored taper.
-const VISIBLE_RADIUS_GROWTH: f32 = 8.0;
+/// HDR radiance below which the plume's *additive* contribution no longer
+/// survives exposure and tonemapping — i.e. where the column is genuinely gone
+/// from the image, not merely faint relative to its own peak.
+///
+/// It has to be absolute. A fraction-of-peak floor looks safe and is not: the
+/// core saturates at a radiance of order 10, so "0.3 % of peak" is still ~0.04
+/// linear, which the tonemapper lifts back to a clearly visible brown. That is
+/// what left a lit rim across the end of the tail after the first attempt at
+/// this fix.
+const VISIBLE_RADIANCE: f32 = 0.0025;
+
+/// Dimensionless Wien parameter for the visible band — **mirrors `WIEN` in
+/// `plume.wgsl`**. The CPU solves the shader's own emission curve to place the
+/// end of the mesh, so the two constants must stay equal.
+const WIEN: f32 = 3.0;
+
+/// Visible-band emission from a cooling gas, normalised to 1 at chamber
+/// temperature. Mirrors `band_emission` in `plume.wgsl`.
+fn band_emission(temp_norm: f32) -> f32 {
+    (-WIEN * (1.0 / temp_norm.max(1e-3) - 1.0)).exp()
+}
+
+/// The resolved column, evaluated on its own axis — the CPU-side twin of what
+/// `plume.wgsl` renders, minus the shock ripple (a ±10 % modulation, not a
+/// length authority).
+struct Column {
+    r0: f32,
+    lip: f32,
+    tan_theta: f32,
+    spread: f32,
+    gamma_exp: f32,
+    entrainment: f32,
+    temp_exit: f32,
+    kappa_core: f32,
+    kappa_sheath: f32,
+    afterburn: f32,
+    gain: f32,
+}
+
+impl Column {
+    /// On-axis rendered radiance at axial station `s` (metres from the exit
+    /// plane), in the shader's own HDR units: `gain · Σ emission · (1 − e^−τ)`.
+    ///
+    /// **Both layers are here on purpose.** The sheath outlives the core — it is
+    /// wider, so its optical depth saturates long after the core has thinned out,
+    /// and in atmosphere afterburning makes it the brighter of the two by the
+    /// tail. A criterion that watched only the core cut the mesh while the shear
+    /// layer was still glowing, which is a lit rim by another route.
+    ///
+    /// The sheath is evaluated *un-dispersed* (linear spread, `breakup` = 0).
+    /// The dispersal flare only widens a layer whose `1 − e^−τ` is already
+    /// saturated on the axis, so it cannot move the vanishing point — and
+    /// leaving it out keeps this free of the circular dependency on the length
+    /// it is being used to compute.
+    fn radiance(&self, s: f32) -> f32 {
+        let r = (self.r0 * self.lip + self.tan_theta * s).max(1e-6);
+        let er = self.r0 / r;
+        let temp =
+            self.temp_exit * er.powf(self.gamma_exp) * (-self.entrainment * s / self.r0).exp();
+        let density = er * er;
+        // On-axis line integrals of the two radial kernels, matching the
+        // fragment stage exactly: (pi/2)·R for the core, (16/15)·R for the
+        // shear layer, both normalised by 2·R0 as tau is there.
+        let tau_core = self.kappa_core * density * (FRAC_PI_2 * r / (2.0 * self.r0));
+        let rs = r + self.spread * s + 0.05 * self.r0;
+        let tau_sheath = self.kappa_sheath * density * ((16.0 / 15.0) * rs / (2.0 * self.r0));
+        let temp_sheath = temp * lerp(0.62, 0.88, self.afterburn);
+        let core = band_emission(temp) * lerp(1.0, 1.8, self.afterburn) * (1.0 - (-tau_core).exp());
+        let sheath = band_emission(temp_sheath)
+            * lerp(1.0, 2.4, self.afterburn)
+            * (1.0 - (-tau_sheath).exp());
+        self.gain * (core + sheath)
+    }
+}
+
+/// Axial distance at which the column has gone dark: where [`Column::radiance`]
+/// has fallen below [`VISIBLE_RADIANCE`].
+///
+/// **This is the only thing that sets plume length.** Both cooling mechanisms,
+/// the optical depth, and therefore every input that feeds them (throttle,
+/// ambient pressure, propellant opacity, the ignition transient) reach the
+/// length through this one function. Do not cap it afterwards: a limit the
+/// fragment stage cannot see ends the geometry while the column is still
+/// incandescent, which renders as a flat lit rim hanging in mid-air — that is
+/// exactly what the old `len_mixing` cap did (INC-20260724T235437Z-plume-ended-on-a-lit-rim).
+///
+/// The exponential Wien term dominates the far field, so `radiance` is
+/// decreasing wherever it matters and a bisection lands on the vanishing point.
+fn visible_length_m(col: &Column) -> f32 {
+    let target = VISIBLE_RADIANCE;
+    // A column that never reaches the floor (a very dim engine at idle) has no
+    // visible plume at all.
+    if col.radiance(0.0) <= target {
+        return 0.0;
+    }
+    let mut hi = col.r0 * 4.0;
+    // Grow the bracket until the column is dark. Bounded: a perfectly collimated
+    // jet with no entrainment would otherwise run forever.
+    for _ in 0..12 {
+        if col.radiance(hi) <= target {
+            break;
+        }
+        hi *= 2.0;
+    }
+    let mut lo = 0.0_f32;
+    for _ in 0..24 {
+        let mid = 0.5 * (lo + hi);
+        if col.radiance(mid) > target {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
 
 /// Map [`PlumeSignals`] + propellant preset into the flat [`PlumeParams`] the
 /// shader renders. Pressure response is authored over `log2(pressure_ratio)`
@@ -551,8 +684,9 @@ fn resolve_params(
     // Half-angle of the *luminous* core — much narrower than the rarefied outer
     // flow, which is invisible.
     let tan_theta = lerp(0.020, 0.190, vac);
-    // Turbulent shear-layer growth: strong entrainment in atmosphere, almost
-    // none in vacuum (there is nothing to entrain).
+    // Turbulent shear-layer growth *while the potential core survives*: strong
+    // entrainment in atmosphere, almost none in vacuum (there is nothing to
+    // entrain). Past the core it accelerates — see `dispersal` below.
     let spread = lerp(0.155, 0.040, vac);
     // Adiabatic exponent 2(γ−1) for γ ≈ 1.2 combustion products.
     let gamma_exp = 0.40;
@@ -568,30 +702,85 @@ fn resolve_params(
     let cell_len_m = (r0 * (0.6 + 0.35 * q.sqrt())).clamp(1.0 * r0, 3.0 * r0);
     let shock_k = std::f32::consts::TAU / cell_len_m;
     let shock_decay_m = cell_len_m * 3.2;
-
-    // -- length ----------------------------------------------------------
-    // Expansion-limited: where the column has widened past visibility.
-    let len_expansion = r0 * (VISIBLE_RADIUS_GROWTH - lip) / tan_theta.max(1e-4);
-    // Mixing-limited: in atmosphere, entrainment tears the jet apart after a few
-    // tens of diameters however slowly it expands. Vacuum has nothing to mix with.
-    let len_mixing = r0 * lerp(26.0, 400.0, vac);
-    // Throttle sets chamber pressure and with it how far the column carries.
-    let length_m =
-        len_expansion.min(len_mixing) * lerp(0.45, 1.0, sig.ignition) * lerp(0.7, 1.0, sig.throttle);
+    // Cells lengthen as the train weakens: roughly a doubling over the decay
+    // length, so the diamonds spread out downstream instead of marching at a
+    // fixed pitch like a ladder.
+    let cell_growth = 1.0 / (3.0 * shock_decay_m);
 
     // -- colour ----------------------------------------------------------
     let mid = vis.mid_vacuum.lerp(vis.mid_air, afterburn);
     let sheath = vis.sheath_vacuum.lerp(vis.sheath_air, afterburn);
 
-    // -- opacity / turbulence --------------------------------------------
-    let kappa_core = 2.4 * vis.opacity;
-    let kappa_sheath = 0.55 * vis.opacity;
+    // -- density, temperature, mixing ------------------------------------
+    // Throttle is chamber *pressure*, not chamber temperature: a deep-throttled
+    // engine burns the same mixture just as hot, it simply flows less of it. So
+    // throttle acts on the optical depth (mass flow) and on how quickly the
+    // weaker jet is destroyed by mixing — never as a brightness or length trim,
+    // which would be a second authority over both.
+    let mass_flow = lerp(0.45, 1.0, sig.throttle);
+    let kappa_core = 2.4 * vis.opacity * mass_flow;
+    let kappa_sheath = 0.55 * vis.opacity * mass_flow;
+    // Chamber temperature *does* ramp during ignition — that transient is what
+    // makes a start read as a flare rather than a pop, and it shortens the
+    // column through the same law that sizes the mesh.
+    let temp_exit = lerp(0.55, 1.0, sig.ignition);
+
+    // Entrainment cooling is expressed through the **mixing length**: the axial
+    // distance, in nozzle radii, over which a turbulent jet is torn apart by the
+    // ambient air it drags in. Deriving the cooling rate from that — instead of
+    // capping the mesh at it — is what removed the hard lit rim: the column now
+    // actually goes dark where it used to simply stop (INC-20260724T235437Z-plume-ended-on-a-lit-rim).
+    let mix_len_radii = 26.0 * lerp(0.72, 1.0, sig.throttle);
+    // Temperature at which emission has fallen to the visibility floor, given
+    // that the column starts out saturated at a radiance of order `vis.radiance`.
+    let temp_death = 1.0 / (1.0 + (vis.radiance / VISIBLE_RADIANCE).ln() / WIEN);
+    let entrainment = atmo * (1.0 / temp_death).ln() / mix_len_radii;
+
+    // -- length ----------------------------------------------------------
+    // One authority: solve the rendered radiance for its own vanishing point.
+    let length_m = visible_length_m(&Column {
+        r0,
+        lip,
+        tan_theta,
+        spread,
+        gamma_exp,
+        entrainment,
+        temp_exit,
+        kappa_core,
+        kappa_sheath,
+        afterburn,
+        gain: vis.radiance * sig.ignition.clamp(0.0, 1.0),
+    });
+
+    // -- turbulent structure ---------------------------------------------
     let turbulence = lerp(0.22, 0.80, atmo);
-    // Entrainment cooling: the sea-level counterpart to expansion cooling. A
-    // dense-air jet mixes with ambient air and cools along its length even
-    // though it barely widens; in vacuum there is nothing to entrain, so this is
-    // zero and expansion is the only mechanism.
-    let entrainment = lerp(0.0, 0.016, atmo);
+    // Eddies grow linearly along the shear layer; the shader samples noise on
+    // the resulting eddy coordinate, so structures coarsen as they travel.
+    let eddy_growth = lerp(0.09, 0.16, atmo);
+    // Convection rate in eddies/second. Real structures convect at a large
+    // fraction of the exhaust velocity, which at these eddy sizes is far too
+    // fast to read as anything but a blur; this is the legible fraction of it.
+    // It is a *rate*, so — unlike advecting in normalized axial coordinates — a
+    // longer plume does not slow its own motion down.
+    let advect = lerp(4.5, 11.0, sig.throttle) * lerp(1.0, 1.35, atmo);
+    let swirl = lerp(0.05, 0.22, atmo);
+    let wobble = lerp(0.05, 0.18, atmo);
+    // Potential core: the un-mixed cone that survives until the shear layer
+    // reaches the axis — a few exit diameters in air, far longer in vacuum where
+    // there is nothing to mix with. The column is laminar and coherent inside
+    // it and breaks down beyond it.
+    let core_len_m = r0 * lerp(10.0, 30.0, vac);
+    // Past the core the jet disperses instead of continuing as a cone, so the
+    // sheath growth accelerates and the tail opens out. Kept modest: the shear
+    // layer's Gaussian profile is what should read as billowing, and a large
+    // envelope multiplier just inflates a soft halo into a hard-edged trumpet.
+    let dispersal = lerp(0.35, 1.1, atmo);
+    // Combustion roughness: low-frequency brightness/length flicker, worse at
+    // low throttle where the chamber runs rough, and damped in vacuum.
+    let flicker_amp = lerp(0.15, 0.05, sig.throttle) * lerp(0.6, 1.0, atmo);
+    let flicker_rate = lerp(5.0, 13.0, sig.throttle);
+    let core_turbulence = lerp(0.15, 0.45, atmo);
+    let tail_turbulence = lerp(0.6, 1.6, atmo);
 
     PlumeParams {
         core_color: vis.hot.extend(vis.radiance),
@@ -601,6 +790,9 @@ fn resolve_params(
         shock: Vec4::new(kappa_core, kappa_sheath, shock_k, shock_strength),
         mixing: Vec4::new(shock_decay_m, afterburn, turbulence, sig.throttle),
         anim: Vec4::new(time, seed, sig.ignition.clamp(0.0, 1.0), entrainment),
+        flow: Vec4::new(eddy_growth, advect, swirl, wobble),
+        tail: Vec4::new(dispersal, core_len_m, flicker_amp, flicker_rate),
+        therm: Vec4::new(temp_exit, core_turbulence, tail_turbulence, cell_growth),
     }
 }
 

@@ -70,12 +70,12 @@ pub(super) struct PeriapsisTimeText;
 
 /// Width of the orbital-info panel. The left balancer matches this so
 /// the row is symmetric around the altitude panel.
-const ORBITAL_PANEL_WIDTH: f32 = 310.0;
+const ORBITAL_PANEL_WIDTH: f32 = 276.0;
 
 pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
     let wrapper = Node {
         position_type: PositionType::Absolute,
-        top: Val::Px(20.0),
+        top: Val::Px(16.0),
         width: Val::Percent(100.0),
         flex_direction: FlexDirection::Row,
         justify_content: JustifyContent::Center,
@@ -106,7 +106,7 @@ fn spawn_balancer(p: &mut ChildSpawnerCommands<'_>) {
 fn spawn_altitude(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
     let mut root = panel_node();
     root.position_type = PositionType::Relative;
-    root.min_width = Val::Px(180.0);
+    root.min_width = Val::Px(160.0);
     root.align_items = AlignItems::Center;
     let (bg, border) = panel_frame(theme);
 
@@ -186,7 +186,7 @@ fn spawn_orbital_info(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
 fn row_node() -> Node {
     Node {
         flex_direction: FlexDirection::Row,
-        column_gap: Val::Px(10.0),
+        column_gap: Val::Px(8.0),
         align_items: AlignItems::Center,
         ..default()
     }
@@ -197,12 +197,12 @@ fn label_cell(theme: &HudTheme, label_text: &str) -> impl Bundle {
         Text::new(label_text.to_string()),
         TextFont {
             font: theme.font.clone(),
-            font_size: FontSize::Px(14.0),
+            font_size: FontSize::Px(13.0),
             ..default()
         },
         TextColor(theme.text_label_alt),
         Node {
-            min_width: Val::Px(26.0),
+            min_width: Val::Px(23.0),
             ..default()
         },
     )
@@ -213,12 +213,12 @@ fn value_cell(theme: &HudTheme) -> impl Bundle {
         Text::new("—"),
         TextFont {
             font: theme.font.clone(),
-            font_size: FontSize::Px(14.0),
+            font_size: FontSize::Px(13.0),
             ..default()
         },
         TextColor(theme.text_primary),
         Node {
-            min_width: Val::Px(110.0),
+            min_width: Val::Px(98.0),
             ..default()
         },
     )

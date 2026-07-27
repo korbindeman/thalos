@@ -18,7 +18,7 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
-use thalos_capture_protocol::CAPTURE_PRESETS;
+use thalos_capture_protocol::{CAPTURE_PRESETS, ViewpointCatalog};
 
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
 const DIFF_AMPLIFICATION: u16 = 4;
@@ -124,6 +124,25 @@ const TERRAIN_REGOLITH_FILTER_VARIANTS: &[Variant] = &[
     },
 ];
 
+/// Renderer-path axis (NTR-X): the same scene through udlod's custom spine and
+/// through the standard-path tile renderer. The keystone's whole question — "is
+/// the tile path there yet?" — is a matched pair at one framing, so it belongs
+/// in the harness rather than in two hand-run screenshots
+/// (ADR-20260721T192218Z). Structural: the gate is read once at boot and decides
+/// which ground streams, so this axis always runs cold.
+/// Default first: `tiles` is the production ground renderer, `udlod` the
+/// legacy baseline it replaced.
+const RENDERER_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "tiles",
+        value: "1",
+    },
+    Variant {
+        label: "udlod",
+        value: "0",
+    },
+];
+
 const CLOUD_RECONSTRUCTION_VARIANTS: &[Variant] = &[
     Variant {
         label: "raw",
@@ -187,7 +206,33 @@ const CLOUD_FAR_AGGREGATION_VARIANTS: &[Variant] = &[
     },
 ];
 
+/// Cloud sun-transmittance axis (CLOUD-5 / W2). The single factor under test is
+/// whether the deck shadows the ground at all; `raw` paints the transmittance
+/// the cascade actually holds, which separates "the march is wrong" from "the
+/// receiver projects into it wrong" — the same split the contact-shadow axis
+/// makes, and the one that matters most here because producer and receiver
+/// derive the lookup frame independently.
+const CLOUD_SHADOW_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "off",
+        value: "off",
+    },
+    Variant {
+        label: "on",
+        value: "on",
+    },
+    Variant {
+        label: "raw",
+        value: "show",
+    },
+];
+
 const AXES: &[Axis] = &[
+    Axis {
+        name: "cloud-shadow",
+        env_key: "THALOS_CLOUD_SHADOW",
+        variants: CLOUD_SHADOW_VARIANTS,
+    },
     Axis {
         name: "ssao",
         env_key: "THALOS_SSAO",
@@ -212,6 +257,11 @@ const AXES: &[Axis] = &[
         name: "terrain-regolith-filter",
         env_key: "THALOS_TERRAIN_INSPECTION",
         variants: TERRAIN_REGOLITH_FILTER_VARIANTS,
+    },
+    Axis {
+        name: "renderer",
+        env_key: "THALOS_TILE_RENDERER",
+        variants: RENDERER_VARIANTS,
     },
     Axis {
         name: "cloud-reconstruction",
@@ -301,9 +351,17 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
     let workspace = workspace_root();
     // Pipeline specialization reads terrain culling before a material pipeline
     // exists, so this structural axis cannot be changed safely in-process.
-    let cold = args.cold || args.axis.name == "terrain-culling";
-    if args.axis.name == "terrain-culling" && !args.cold {
-        println!("terrain-culling specializes a render pipeline; using isolated cold captures");
+    // Structural axes decide something before (or instead of) a material
+    // pipeline, so they cannot be flipped inside the persistent host: terrain
+    // culling specializes a pipeline at first use, and the renderer gate is a
+    // boot-time `OnceLock` that decides which ground streams at all.
+    let structural = matches!(args.axis.name, "terrain-culling" | "renderer");
+    let cold = args.cold || structural;
+    if structural && !args.cold {
+        println!(
+            "{} is a structural axis; using isolated cold captures",
+            args.axis.name
+        );
     }
     let game = args.game.unwrap_or_else(game_binary_from_current_exe);
     let dynamic_library_path = if cold {
@@ -558,9 +616,13 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Args>, String
     }
 
     let preset = canonical_slug(positional.first().map_or("earth-reference", String::as_str));
-    if !CAPTURE_PRESETS.contains(&preset.as_str()) {
+    // Scenes come from two catalogs and the game resolves both through the same
+    // `THALOS_SCREENSHOT` value: the scripted presets, and the viewpoints the
+    // player saved with F8 (ADR-20260724T211627Z). A handed-over viewpoint is
+    // exactly the framing an A/B is usually wanted at, so accept it here too.
+    if !CAPTURE_PRESETS.contains(&preset.as_str()) && !saved_viewpoint_exists(&preset) {
         return Err(format!(
-            "unknown preset '{preset}'; expected one of {}",
+            "unknown scene '{preset}'; expected a saved viewpoint id or one of {}",
             CAPTURE_PRESETS.join(", ")
         ));
     }
@@ -615,6 +677,19 @@ fn print_axes() {
                 .join(", ")
         );
     }
+}
+
+/// Does `assets/viewpoints.json` carry this id? A missing or unreadable catalog
+/// is not an error here — it just means no viewpoint by that name, and the
+/// caller reports the scene as unknown.
+fn saved_viewpoint_exists(id: &str) -> bool {
+    let path = workspace_root().join("assets").join("viewpoints.json");
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    serde_json::from_str::<ViewpointCatalog>(&text)
+        .map(|catalog| catalog.contains(id))
+        .unwrap_or(false)
 }
 
 fn canonical_slug(raw: &str) -> String {

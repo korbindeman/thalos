@@ -23,6 +23,21 @@ use bevy::tasks::{TaskPool, TaskPoolBuilder};
 /// `TILE_LOAD_SLOTS` in `crates/runtime/game/src/rendering/ground_terrain.rs` so the
 /// streamer's concurrent-tile cap maps one-to-one to a worker; more threads
 /// here would just over-subscribe cores against the renderer / scheduler.
+///
+/// **Widening this was tried and reverted (2026-07-26).** In isolation the
+/// machine does prefer a wide outer stage over per-tile row fan-out —
+/// `cargo run --release -p thalos_terrain --example tile_stream_bench` measures
+/// 1,035 tiles/s at `cores − 2` whole-tile workers against 868 for this 4-wide
+/// row-fanning shape. In the running game it went the other way: mean per-tile
+/// wall time rose from ~6 ms to ~32 ms and the settle took *longer*, because the
+/// bench models an idle machine and the real one is also running the render
+/// thread, Avian, and legacy udlod streaming a second body. That contention is
+/// the entire reason this pool is bounded and separate in the first place, so
+/// the microbenchmark does not get to overrule it.
+///
+/// If this is revisited, the measurement that matters is `total_landed` per
+/// second between `installed` and the first `resident == desired` residency
+/// gauge in `artifacts/diagnostics/runtime.jsonl` — not a standalone harness.
 const TILE_SYNTHESIS_THREADS: usize = 4;
 
 static POOL: OnceLock<TaskPool> = OnceLock::new();

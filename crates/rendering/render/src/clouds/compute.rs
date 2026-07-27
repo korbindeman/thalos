@@ -28,7 +28,7 @@ use std::borrow::Cow;
 use super::config::CloudsConfig;
 
 use super::{
-    images::VOLUME_SIZE,
+    images::{CLOUD_SHADOW_SIZE, VOLUME_SIZE},
     uniforms::{CloudsImage, CloudsUniform, CloudsUniformBuffer},
 };
 
@@ -112,10 +112,11 @@ fn prepare_uniforms_bind_group(
     buffer.wind_displacement += time.delta_secs() * clouds_config.wind_velocity;
     buffer.fill_threshold0 = clouds_config.fill_threshold_nodes[0];
     buffer.fill_threshold1 = clouds_config.fill_threshold_nodes[1];
-    buffer.shape_response0 = clouds_config.shape_response[0];
-    buffer.shape_response1 = clouds_config.shape_response[1];
-    buffer.shape_response2 = clouds_config.shape_response[2];
-    buffer.shape_response3 = clouds_config.shape_response[3];
+    let shadow = clouds_config.shadow_frame;
+    buffer.shadow_origin = shadow.center.extend(shadow.half_extent_m);
+    buffer.shadow_axis_u = shadow.axis_u.extend(shadow.texel_m(CLOUD_SHADOW_SIZE));
+    buffer.shadow_axis_v = shadow.axis_v.extend(f32::from(u8::from(shadow.active)));
+    buffer.shadow_up = shadow.up.extend(shadow.sun_elevation_cos);
     *frame_index = frame_index.wrapping_add(1);
 
     clouds_uniform_buffer
@@ -147,6 +148,7 @@ fn prepare_textures_bind_group(
         .get(&clouds_image.history_distance_image)
         .unwrap();
     let surface_density_view = gpu_images.get(&clouds_image.surface_density_image).unwrap();
+    let cloud_shadow_view = gpu_images.get(&clouds_image.cloud_shadow_image).unwrap();
     let bind_group = render_device.create_bind_group(
         None,
         &pipeline_cache.get_bind_group_layout(&pipeline.texture_bind_group_layout),
@@ -159,6 +161,7 @@ fn prepare_textures_bind_group(
             (5, &history_view.texture_view),
             (6, &history_distance_view.texture_view),
             (7, &surface_density_view.texture_view),
+            (8, &cloud_shadow_view.texture_view),
         )),
     );
     commands.insert_resource(CloudsImageBindGroup(bind_group));
@@ -174,6 +177,11 @@ struct CloudsPipeline {
     uniform_bind_group_layout: BindGroupLayoutDescriptor,
     init_pipeline: CachedComputePipelineId,
     update_pipeline: CachedComputePipelineId,
+    /// Cloud sun-transmittance cascade (CLOUD-5 / W2). Same bind groups as the
+    /// view march by construction: the shadow map must integrate the *same*
+    /// density field, through the same config, or the ground contradicts the
+    /// sky it is standing under.
+    shadow_pipeline: CachedComputePipelineId,
 }
 
 impl FromWorld for CloudsPipeline {
@@ -213,9 +221,21 @@ impl FromWorld for CloudsPipeline {
             ],
             // 0.19 replaced `push_constant_ranges` with `immediate_size: u32`.
             immediate_size: 0,
-            shader,
+            shader: shader.clone(),
             shader_defs: vec![],
             entry_point: Some(Cow::from("update")),
+        });
+        let shadow_pipeline = pipeline_cache.queue_compute_pipeline(ComputePipelineDescriptor {
+            zero_initialize_workgroup_memory: false,
+            label: None,
+            layout: vec![
+                uniform_bind_group_layout.clone(),
+                texture_bind_group_layout.clone(),
+            ],
+            immediate_size: 0,
+            shader,
+            shader_defs: vec![],
+            entry_point: Some(Cow::from("cloud_shadow")),
         });
 
         CloudsPipeline {
@@ -223,6 +243,7 @@ impl FromWorld for CloudsPipeline {
             uniform_bind_group_layout,
             init_pipeline,
             update_pipeline,
+            shadow_pipeline,
         }
     }
 }
@@ -327,6 +348,16 @@ fn run_clouds_compute(
                     size.height.div_ceil(WORKGROUP_SIZE),
                     1,
                 );
+
+                // Sun-transmittance cascade, in the same pass and off the same
+                // bindings. It writes a texture nothing in this pass reads, so
+                // it needs no barrier against the march above.
+                if let Some(shadow) = pipeline_cache.get_compute_pipeline(pipeline.shadow_pipeline)
+                {
+                    pass.set_pipeline(shadow);
+                    let groups = CLOUD_SHADOW_SIZE.div_ceil(WORKGROUP_SIZE);
+                    pass.dispatch_workgroups(groups, groups, 1);
+                }
             }
         }
         pass_span.end(&mut pass);

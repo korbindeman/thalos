@@ -756,15 +756,17 @@ pub(crate) fn spawn_body_terrain(
     tile_trees.insert((terrain_entity, ship_camera), tile_tree);
 
     info!(
-        "spawned ground terrain for '{}' ({} tier, provider {}, radius {:.0} km, height range ±{:.0} m, atlas size {}, lod {}, tile {})",
-        body.name,
-        tier.label(),
-        provider_mode.label(),
-        radius_m / 1000.0,
-        terrain_height_range,
-        tc.atlas_size,
-        tc.lod_count,
-        tc.tile_texture_size,
+        target: "thalos::diagnostic::ground_terrain",
+        event = "spawned",
+        body = %body.name,
+        tier = tier.label(),
+        provider = provider_mode.label(),
+        radius_m,
+        terrain_height_range_m = terrain_height_range,
+        atlas_size = tc.atlas_size,
+        lod_count = tc.lod_count,
+        tile_texture_size = tc.tile_texture_size,
+        "ground terrain spawned"
     );
 
     terrain_entity

@@ -1,5 +1,14 @@
 //! Runtime-provider-first UDLOD terrain rendering for Thalos.
 //!
+//! # Status: LEGACY — end-of-life
+//!
+//! Thalos's default ground renderer is `thalos_body_render::tiles` (terrain as
+//! ordinary `Mesh` + `StandardMaterial` on Bevy's standard path, keystone
+//! ADR-20260723T142945Z). This crate and its WGSL stack are kept as the A/B
+//! baseline (`THALOS_TILE_RENDERER=0`) and for bodies the tile driver has not
+//! installed on yet. **Defect-driven fixes only** — do not build new terrain
+//! features here; the crate is deleted once the remaining `ntr §6` rows close.
+//!
 //! This crate is an in-tree fork of Kurt Kühnert's `bevy_terrain`.
 //! Upstream's offline raster preprocessing path has been removed: Thalos
 //! streams sparse terrain tiles from runtime [`TileProvider`](prelude::TileProvider)

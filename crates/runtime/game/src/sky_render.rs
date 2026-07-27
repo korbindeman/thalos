@@ -91,6 +91,15 @@ impl Material for StarsMaterial {
         AlphaMode::Add
     }
 
+    fn depth_bias(&self) -> f32 {
+        // Backdrop slot: behind every fullscreen composite, so the atmosphere's
+        // transmittance dims the starfield instead of the starfield landing on
+        // top of a lit sky. The mesh sits at the render origin, so its own sort
+        // key is ~0 — without this pin the backdrop would sort as the *nearest*
+        // thing in the frame. See `thalos_body_render::composite_order`.
+        thalos_body_render::composite_order::CELESTIAL_BACKDROP
+    }
+
     fn specialize(
         _: &MaterialPipeline,
         descriptor: &mut RenderPipelineDescriptor,
@@ -409,6 +418,12 @@ impl Material for GalaxyMaterial {
     }
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Add
+    }
+
+    fn depth_bias(&self) -> f32 {
+        // Same backdrop slot as `StarsMaterial` — stars and galaxies are one
+        // celestial layer and must not be separable by camera orientation.
+        thalos_body_render::composite_order::CELESTIAL_BACKDROP
     }
 
     fn specialize(

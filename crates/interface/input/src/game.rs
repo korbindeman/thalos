@@ -55,6 +55,10 @@ pub struct SavePerspectiveAction;
 
 #[derive(InputAction)]
 #[action_output(bool)]
+pub struct QuickSaveViewpointAction;
+
+#[derive(InputAction)]
+#[action_output(bool)]
 pub struct ToggleFreeCamAction;
 
 #[derive(InputAction)]
@@ -218,6 +222,9 @@ pub struct GameInputIntent {
     pub escape: bool,
     pub screenshot: bool,
     pub save_perspective: bool,
+    /// Edge-triggered: save the current view as a named viewpoint (F9), the
+    /// one-keypress path next to the F8 manager's full CRUD.
+    pub quick_save_viewpoint: bool,
     pub toggle_free_cam: bool,
     pub toggle_sas: bool,
     pub warp_to_maneuver: bool,
@@ -340,6 +347,11 @@ fn spawn_game_input_controller(mut commands: Commands, settings: Res<InputSettin
                 Action::<SavePerspectiveAction>::new(),
                 consume_input(),
                 Bindings::spawn(settings.game.system.bindings("save_perspective")),
+            ),
+            (
+                Action::<QuickSaveViewpointAction>::new(),
+                consume_input(),
+                Bindings::spawn(settings.game.system.bindings("quick_save_viewpoint")),
             ),
             (
                 Action::<ToggleFreeCamAction>::new(),
@@ -619,11 +631,13 @@ fn collect_system_intent(
     escape: Query<(&Action<EscapeAction>, &ActionEvents)>,
     screenshot: Query<(&Action<ScreenshotAction>, &ActionEvents)>,
     save_perspective: Query<(&Action<SavePerspectiveAction>, &ActionEvents)>,
+    quick_save_viewpoint: Query<(&Action<QuickSaveViewpointAction>, &ActionEvents)>,
     toggle_free_cam: Query<(&Action<ToggleFreeCamAction>, &ActionEvents)>,
 ) {
     intent.escape = started(&escape);
     intent.screenshot = started(&screenshot);
     intent.save_perspective = started(&save_perspective);
+    intent.quick_save_viewpoint = started(&quick_save_viewpoint);
     intent.toggle_free_cam = started(&toggle_free_cam);
 }
 
@@ -1047,6 +1061,19 @@ mod tests {
         app.update();
 
         assert!(app.world().resource::<GameInputIntent>().save_perspective);
+    }
+
+    #[test]
+    fn f9_emits_quick_save_viewpoint_intent() {
+        let mut app = input_app();
+
+        press_key(&mut app, KeyCode::F9);
+        app.update();
+
+        let intent = app.world().resource::<GameInputIntent>();
+        assert!(intent.quick_save_viewpoint);
+        // The quick save must not also trip the F8 manager toggle.
+        assert!(!intent.save_perspective);
     }
 
     #[test]

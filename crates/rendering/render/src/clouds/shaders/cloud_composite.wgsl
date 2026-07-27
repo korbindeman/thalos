@@ -12,15 +12,28 @@
     orbital_cloud_normal_body,
     cloud_surface_density,
     WEATHER_TEXEL_ANGLE,
-    cloud_march_stop_m,
-    cloud_morph_noise,
+    cloud_cell_field,
+    cloud_cell_style,
     cloud_strata_warp,
-    CLOUD_MARCH_REACH_M,
-    CLOUD_MARCH_ENTRY_FADE_START_M,
-    CLOUD_MARCH_ENTRY_FADE_END_M,
+    cloud_far_ownership,
+    cloud_march_stop_m,
     CLOUD_MARCH_FADE_FRACTION,
 }
-#import thalos::lighting::SCENE_FLUX_SCALE
+#import thalos::lighting::{SCENE_FLUX_SCALE, SURFACE_DIRECT_SCALE}
+
+// Diffusion-limit reflectance of a water cloud. MUST equal `CLOUD_MS_ALBEDO`
+// in clouds_compute.wgsl — it is the single number both tiers are anchored to.
+const FAR_CLOUD_ALBEDO: f32 = 0.80;
+// `orbital_cloud_shade`'s radiance scale for a fully lit, optically thick,
+// storm-free column (lit = 1, core ≈ 0.9): 0.72 · (0.18 + 0.82) · 0.85.
+const FAR_SHADE_LIT: f32 = 0.61;
+// Chroma is the AUTHORED climate albedo (`cloud_albedo_coverage.rgb`) and
+// nothing else. The old extra `(0.90, 0.93, 0.97)` was headroom for phase
+// peaks, but it is per-channel, so stacked on Thalos's authored (0.94, 0.96,
+// 1.0) it gave "white" clouds a 15% blue bias — a second, independent reason
+// they never read white. Peak headroom belongs in the near march's Reinhard
+// white point, which is achromatic.
+const FAR_CLOUD_TINT: vec3<f32> = vec3<f32>(1.0, 1.0, 1.0);
 
 @group(3) @binding(0) var<uniform> cloud_atmosphere: AtmosphereBlock;
 
@@ -41,7 +54,7 @@ struct CloudCompositeParams {
     tile_lookup:               vec4<f32>,
     tile_atlas_uv:             vec4<f32>,
     // x = near-march view step count; the composite mirrors the marcher's
-    // per-ray reach from it (see march_reach) for the near/far partition.
+    // per-ray far ownership from it (see far_ownership).
     // y = tier diagnostic, z = far footprint-mip mode, w = far aggregation.
     cloud_march:               vec4<f32>,
     // Far-tier opacity response: 16 nodes of expected near-column opacity vs
@@ -180,62 +193,51 @@ fn near_visibility(
     return clamp((scene_t - near) / max(band_far - near, 1.0), 0.0, 1.0);
 }
 
-// Mirror of the near marcher's per-ray reach (`get_ray` in
-// clouds_compute.wgsl — keep the two in lockstep). Returns
-// vec2(fade_begin, t_stop): the marcher dissolves its density over
-// [fade_begin, t_stop], so the orbital estimator fades in complementarily and
-// owns everything beyond t_stop. This is the partition of unity that replaced
-// the old camera-altitude branch (which left a cloudless trough between the
-// 50 km march cap and the 22 km altitude gate).
-fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
+// Share of this ray owned by the far/orbital projection. The near marcher now
+// always COMPLETES its in-shell chord (it floors its step on the chord budget
+// instead of stopping at a reach frontier), so there is no partial result to
+// partition against and no mid-view seam to place: ownership is purely a
+// question of whether cell-scale morphology is still resolvable.
+//
+// This replaces a three-component reach mirror (fade_begin, t_stop, entry
+// ownership) that had to track the marcher's banded step law exactly. Keeping
+// two integrators in lockstep on a *distance* ladder is what produced the
+// ownership arc, the entry-window over-count veil, and finally the ascent
+// fade-out where the far tier renders a near-empty wash over regions the near
+// tier drew as solid cells. Footprint is a per-ray scalar both sides can
+// compute independently and cannot drift on.
+fn far_ownership(oc_len_sq: f32, b: f32, pixel_angle: f32) -> vec3<f32> {
     let r_base = cloud_params.cloud_band_radii.x;
     let r_top = cloud_params.cloud_band_radii.y;
-    let steps = max(cloud_params.cloud_march.x, 1.0);
     let cam_r = sqrt(oc_len_sq);
     let disc_top = b * b - (oc_len_sq - r_top * r_top);
     if disc_top <= 0.0 {
-        return vec3<f32>(0.0, 0.0, 0.0);
+        return vec3<f32>(0.0, 0.0, 1.0);
     }
     let sq_top = sqrt(disc_top);
     let tt0 = -b - sq_top;
-    let tt1 = -b + sq_top;
     let disc_base = b * b - (oc_len_sq - r_base * r_base);
     let hit_base = disc_base > 0.0;
-    var tb0 = 0.0;
     var tb1 = 0.0;
     if hit_base {
-        let sq_base = sqrt(disc_base);
-        tb0 = -b - sq_base;
-        tb1 = -b + sq_base;
+        tb1 = -b + sqrt(disc_base);
     }
+    // Shell entry, matching `get_ray`'s three camera regimes.
     var seg_start = 0.0;
-    var seg_end = 0.0;
     if cam_r > r_top {
         seg_start = tt0;
-        if hit_base && tb0 > tt0 { seg_end = tb0; } else { seg_end = tt1; }
     } else if cam_r < r_base {
         if hit_base && tb1 > 0.0 { seg_start = tb1; } else { seg_start = max(tt0, 0.0); }
-        seg_end = tt1;
-    } else {
-        seg_start = 0.0;
-        if hit_base && tb0 > 0.0 { seg_end = tb0; } else { seg_end = tt1; }
     }
     seg_start = max(seg_start, 0.0);
-    seg_end = min(seg_end, seg_start + CLOUD_MARCH_REACH_M);
-    // Mirror of the banded marcher via the SHARED thalos::atmosphere march
-    // contract — the lockstep is structural. Fine refinement consumes more
-    // iterations only after broad mass is found, where opacity normally
-    // terminates the near ray before the reach frontier matters.
-    let t_stop = min(cloud_march_stop_m(steps, seg_start), seg_end);
-    let fade_begin = min(
-        mix(seg_start, cloud_march_stop_m(steps, seg_start), CLOUD_MARCH_FADE_FRACTION),
-        t_stop,
-    );
-    // z = the marcher's entry-distance ownership (its entry-fade window):
-    // shells entered far away belong wholly to this band march.
-    let near_scale = 1.0
-        - smoothstep(CLOUD_MARCH_ENTRY_FADE_START_M, CLOUD_MARCH_ENTRY_FADE_END_M, seg_start);
-    return vec3<f32>(fade_begin, t_stop, near_scale);
+    // z = whole-ray ownership (cells sub-pixel). xy = the marcher's budget
+    // frontier, which only grazing rays reach; beyond it this tier owns the
+    // tail because the near march has run out of probes, not because anything
+    // about the field changed.
+    let steps = max(cloud_params.cloud_march.x, 1.0);
+    let stop = cloud_march_stop_m(steps, seg_start, pixel_angle);
+    let fade_begin = mix(seg_start, stop, CLOUD_MARCH_FADE_FRACTION);
+    return vec3<f32>(fade_begin, stop, cloud_far_ownership(seg_start * pixel_angle));
 }
 
 // Reduced surface-density band march: the far estimator's answer to grazing
@@ -246,6 +248,13 @@ fn march_reach(oc_len_sq: f32, b: f32) -> vec3<f32> {
 // Weather varies at ≥ ~5 km/texel at the base level, so K samples across even a 500 km chord
 // stay well-sampled (no 3-D noise is touched here).
 const ORBITAL_MARCH_SAMPLES = 6u;
+
+/// How hard the shared cell field modulates this tier's response-LUT input.
+/// It is a spatial REDISTRIBUTION of a strata mean the LUT already calibrates,
+/// so it is mean-preserving to first order and must not be reached for when
+/// the far tier looks too thick or too thin — that is the fill pairing's job,
+/// and re-tuning it here is what the derived `fill_lut` exists to prevent.
+const FAR_CELL_AMPLITUDE: f32 = 0.55;
 
 // Sample the derived far opacity response (see `fill_response` above):
 // 16 nodes over [0, 1], linear between nodes.
@@ -314,7 +323,10 @@ fn sample_orbital_cloud(
         return CloudOverlay(vec3<f32>(0.0), 0.0);
     }
 
-    let reach = march_reach(oc_len_sq, b);
+    // One per-pixel angle for the whole tier — the same quantity the marcher
+    // derives from its own projection.
+    let pixel_angle = 2.0 / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
+    let reach = far_ownership(oc_len_sq, b, pixel_angle);
     let base_alt = max(cloud_atmosphere.cloud_shape.x, 0.0);
     let thickness = max(cloud_atmosphere.cloud_shape.y, 1.0);
 
@@ -333,6 +345,12 @@ fn sample_orbital_cloud(
     var best_c = 0.0;
     var sum_c = 0.0;
     var sum_t = 0.0;
+    // Occupancy-weighted cloud type along the chord, for the morphology style
+    // below. Accumulated here rather than re-fetched at `n_morph` because the
+    // loop already has the texel, and because weighting it exactly like `sum_t`
+    // is what makes the style belong to the same column the morphology is
+    // anchored to.
+    var sum_type = 0.0;
     var best_s = 0.0;
     var sum_s = 0.0;
     var sample_weight = 0.0;
@@ -351,8 +369,7 @@ fn sample_orbital_cloud(
         h_prev = h_b;
         let p = cam_pos + t_m * ray_dir - planet_center;
         let n_l = rotate_quat(cloud_params.world_to_body_orientation, normalize(p));
-        let pixel_world_m = t_m * 2.0
-            / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
+        let pixel_world_m = t_m * pixel_angle;
         let lod_pixel = clamp(
             log2(max((pixel_world_m / planet_radius) / WEATHER_TEXEL_ANGLE, 1.0)),
             0.0,
@@ -372,8 +389,10 @@ fn sample_orbital_cloud(
         // Resolved footprints warp the strata lookup (shared contract with
         // the marcher's homogenized bands) so the ~5 km texel lattice reads
         // as organic cells instead of rounded squares (user ascent verdict).
-        let seg_resolve = 1.0 - smoothstep(550.0, 1600.0, pixel_world_m);
-        let n_s = cloud_strata_warp(n_l, seg_resolve);
+        // Unconditional, matching the marcher: the warp is measure-preserving,
+        // and gating it by footprint made the two tiers sample DIFFERENT
+        // directions wherever the gate disagreed across the handoff.
+        let n_s = cloud_strata_warp(n_l, 1.0);
         let strata = textureSampleLevel(
             surface_density_texture,
             weather_sampler,
@@ -432,6 +451,7 @@ fn sample_orbital_cloud(
         }
         sum_c += candidate;
         sum_t += t_m * candidate;
+        sum_type += weather.g * candidate;
         best_s = max(best_s, candidate_stacked);
         sum_s += candidate_stacked;
     }
@@ -442,45 +462,52 @@ fn sample_orbital_cloud(
     }
     let p_best = cam_pos + best_t * ray_dir - planet_center;
 
-    // Sub-texel morphology (BL-20260723T214730Z, transition half): the strata
-    // cube's ~5 km texels plus the 0.75-mip floor render as smooth blobs with
-    // wide low-alpha halos, while the near volume resolves discrete cells —
-    // the tier A/B measured matching per-cloud amplitude but ~3× the covered
-    // area on the far side. Perturb the LUT INPUT with body-fixed noise at
-    // the near tier's cell scale, so cell interiors thicken and halos drop
-    // below the response toe — spatial concentration, mean-preserving to
-    // first order. Faded out as the pixel footprint approaches the noise
-    // period (alias guard): planet-disc framings keep the accepted filtered
-    // look, only resolvable ranges gain texture.
+    // Cell-scale morphology — THE SAME FIELD THE MARCHER FORMS CLOUD FROM
+    // (`cloud_cell_field`, thalos::atmosphere). The strata cube's ~5 km texels
+    // can only render smooth blobs with wide halos; the cells that make a deck
+    // read as a deck live at 1–5 km and are analytic. Perturbing the LUT input
+    // with them concentrates opacity into cell interiors and drops the halos
+    // below the response toe — mean-preserving to first order, because the
+    // field's own mean is 0.5 by construction.
     //
-    // The noise is anchored at the occupancy-weighted mean chord position —
+    // This replaces the earlier value-noise "mottle": a smooth perturbation at
+    // roughly the right scale reads as dither, not as clouds, which is what
+    // the orbital captures showed. Both tiers now perturb by the identical
+    // field at the identical amplitude, so the crossfade is between two
+    // integrators of one morphology rather than two textures that merely have
+    // similar statistics.
+    //
+    // The field is anchored at the occupancy-weighted mean chord position —
     // NOT `p_best`: the best-segment argmax flips discontinuously between
     // adjacent rays, and feeding that into an opacity-bearing term cut
     // straight "torn seam" lines across every cell (first capture round).
     // Continuity guard: as occupancy fades to zero the weighted mean would
     // divide by the epsilon and jump by orders of magnitude — a hard seam in
-    // the noise coordinate exactly along every cell edge. Blend toward the
+    // the coordinate exactly along every cell edge. Blend toward the
     // (continuous) chord midpoint below a small occupancy, where the LUT
     // renders nothing anyway.
+    //
+    // Alias safety is the field's own `filter_m` fade now, fed the projected
+    // pixel footprint: the ad-hoc resolve/fine-resolve gates this code used to
+    // carry are exactly that computation done twice, by hand, per octave.
     let t_occ = sum_t / max(sum_c, 1.0e-4);
     let t_mid = 0.5 * (t0 + t1);
     let t_morph = mix(t_mid, t_occ, clamp(sum_c * 64.0, 0.0, 1.0));
     let p_morph = cam_pos + t_morph * ray_dir - planet_center;
-    let p_body = rotate_quat(cloud_params.world_to_body_orientation, p_morph);
-    let px_morph = t_morph * 2.0
-        / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
-    let morph_resolve = 1.0 - smoothstep(550.0, 1600.0, px_morph);
-    var mean_mod = mean_c;
-    if morph_resolve > 1.0e-3 {
-        // Shared noise (thalos::atmosphere) — the marcher's homogenized bands
-        // apply the same field to `env`, so both sides of the crossfade carry
-        // the same mottle. The fine octave keeps its own tighter alias gate:
-        // at the 240–300 km handoff its 830 m period is only ~3–4 px, which
-        // stippled a dot band across the horizon before it was gated.
-        let fine_resolve = 1.0 - smoothstep(90.0, 300.0, px_morph);
-        let morph = cloud_morph_noise(p_body, fine_resolve);
-        mean_mod = clamp(mean_c + (morph - 0.5) * (0.55 * morph_resolve), 0.0, 1.0);
-    }
+    let n_morph = normalize(rotate_quat(cloud_params.world_to_body_orientation, p_morph));
+    let px_morph = t_morph * pixel_angle;
+    // Same per-place style the marcher forms cloud through, so a region that
+    // rolls into streets up close still rolls into streets from orbit. The
+    // occupancy guard mirrors `t_morph`'s: below it the response LUT renders
+    // nothing, and a type divided by an epsilon would jump discontinuously.
+    let type_morph = mix(0.45, sum_type / max(sum_c, 1.0e-4), clamp(sum_c * 64.0, 0.0, 1.0));
+    let cell = cloud_cell_field(
+        n_morph,
+        planet_radius,
+        px_morph,
+        cloud_cell_style(n_morph, type_morph),
+    );
+    let mean_mod = clamp(mean_c + (cell - 0.5) * FAR_CELL_AMPLITUDE, 0.0, 1.0);
 
     // One derived response for every footprint regime: the LUT stores the
     // expected near-column opacity for this strata mean, so the far tier's
@@ -496,22 +523,22 @@ fn sample_orbital_cloud(
         0.0,
         0.95,
     );
-    // Near/far partition, applied to the CONVERGED OUTPUT opacity. Weighting
-    // the accumulation inputs instead (the old per-segment `far_w`) pushed
-    // the weight through the response's nonlinear toe while the near tier
-    // faded linearly in alpha — the two halves stopped summing to unity and
-    // the whole 240–300 km entry window rendered as a hazy over-count veil
-    // (the sharp ascent "circle", user verdict 2026-07-24). The far-only
-    // diagnostic (tier_diagnostic = +1) still bypasses ownership entirely.
+    // Near/far partition, applied to the CONVERGED OUTPUT opacity — weighting
+    // the accumulation inputs instead pushes the weight through the response
+    // LUT's nonlinear toe while the near tier fades linearly in alpha, so the
+    // two halves stop summing to unity (the 2026-07-24 ascent "circle"). The
+    // far-only diagnostic (tier_diagnostic = +1) bypasses ownership entirely.
     let ownership_active = cloud_params.cloud_march.y < 0.5;
-    if ownership_active && reach.y > 0.0 && reach.z > 0.0 {
-        var near_own = 0.0;
+    if ownership_active {
+        // Near ownership is the union of "cells are resolvable" (whole-ray) and
+        // "the near march still has probes here" (per-distance).
+        var near_own = 1.0 - reach.z;
         if reach.y - reach.x > 1.0 {
-            near_own = 1.0 - smoothstep(reach.x, reach.y, t_morph);
+            near_own *= 1.0 - smoothstep(reach.x, reach.y, t_morph);
         } else {
-            near_own = select(1.0, 0.0, t_morph > reach.y);
+            near_own *= select(1.0, 0.0, t_morph > reach.y);
         }
-        march_opacity *= 1.0 - reach.z * near_own;
+        march_opacity *= 1.0 - near_own;
     }
     if march_opacity <= 1.0e-3 {
         return CloudOverlay(vec3<f32>(0.0), 0.0);
@@ -557,14 +584,30 @@ fn sample_orbital_cloud(
     );
     // Occupancy comes from the band march; `shade.y` would double-count it.
     let opacity = march_opacity * night;
+    // Far-tier radiance prefactor, DERIVED against the near tier's photometric
+    // anchor instead of eyeballed at the handoff.
+    //
+    // The near march's diffusion reservoir (`CLOUD_MS_ALBEDO` in
+    // clouds_compute.wgsl) puts a fully lit, optically thick cell at
+    // `A · flux · SCENE_FLUX_SCALE · SURFACE_DIRECT_SCALE` — exactly a
+    // Lambertian surface of albedo A facing the same sun, which is the anchor
+    // every spine surface already uses. This overlay must land on the same
+    // number for the same cell, so with
+    // `radiance = tint.g · flux · SCENE_FLUX_SCALE · K · shade`:
+    //     K = A · SURFACE_DIRECT_SCALE / (tint.g · FAR_SHADE_LIT)
+    // The former 0.55 → 0.68 pair were hand-matched at the handoff while the
+    // near tier rendered single-scatter-only radiance (~4× too dark), so they
+    // carried that error as compensating brightness. Do not re-tune this by
+    // eye against the near tier; re-derive it if either side's photometry
+    // moves.
+    let far_radiance_k =
+        FAR_CLOUD_ALBEDO * SURFACE_DIRECT_SCALE / (FAR_CLOUD_TINT.g * FAR_SHADE_LIT);
     var radiance = cloud_atmosphere.cloud_albedo_coverage.rgb
-        * vec3<f32>(0.90, 0.93, 0.97)
+        * FAR_CLOUD_TINT
         * sun_chroma
         * cloud_params.sun_dir_flux.w
         * SCENE_FLUX_SCALE
-        // 0.55 → 0.68: far cells read grey next to the near volume's sunlit
-        // white at the handoff (2026-07-23 cruise capture).
-        * 0.68
+        * far_radiance_k
         * shade.x
         * night;
 

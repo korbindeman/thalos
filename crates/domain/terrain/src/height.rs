@@ -24,6 +24,23 @@ pub trait HeightSource: Send + Sync {
         0.0
     }
 
+    /// The slowly-varying climate half of canopy coverage — a pass-through to
+    /// [`SurfaceQuery::canopy_climate`](crate::query::SurfaceQuery::canopy_climate),
+    /// the single authority on where forest is. Vegetation placement and the
+    /// grass canopy cull hoist this **once per tile**, then call
+    /// [`CanopyClimate::coverage`](crate::canopy::CanopyClimate::coverage) per
+    /// candidate, rather than deriving a forest field of their own.
+    fn canopy_climate(&self, _dir: DVec3, _lod_m: f32) -> crate::canopy::CanopyClimate {
+        crate::canopy::CanopyClimate::default()
+    }
+
+    /// Canopy coverage at one point, climate and all. For **one-off** queries
+    /// (a capture site search, a debug probe); a loop over candidates must hoist
+    /// [`Self::canopy_climate`] instead. Not meant to be overridden.
+    fn canopy_coverage(&self, dir: DVec3, height_m: f32, lod_m: f32) -> f32 {
+        self.canopy_climate(dir, lod_m).coverage(dir, height_m)
+    }
+
     /// Build a collider patch from native resident geometry when available.
     /// Sources without such geometry return `None` and callers resample the
     /// height contract onto a tangent grid.

@@ -42,6 +42,7 @@ use std::sync::{Arc, RwLock};
 
 use glam::{DVec3, Vec3};
 
+use crate::canopy::CanopyClimate;
 use crate::cubemap::{Cubemap, dir_to_face_uv};
 use crate::feature_compositor::{compose_runtime_features_m, runtime_feature_height_margin_m};
 use crate::generic_terrestrial_field::{AirlessRegolithParams, RuntimeTerrainDetail};
@@ -121,21 +122,40 @@ pub struct SurfaceSample {
     pub moisture: f32,
 }
 
-/// Canonical landcover band weights for material-layer selection (NTR-X4).
+/// Canonical landcover inputs for material-layer selection (NTR-X4).
 ///
-/// A strict subset of the same macro band evaluation that produces
-/// [`SurfaceSample::albedo_linear`] — same climate model, same thresholds —
-/// exposed as absolute per-class weights so a material shader's snow line and
-/// forest grain can never drift from the palette. Zero for backings without a
-/// landcover model (airless bodies, plain oceans).
+/// Produced by the same macro band evaluation that produces
+/// [`SurfaceSample::albedo_linear`] — same climate model, same fields — so a
+/// material shader's treeline, snow line, and forest grain can never drift
+/// from the palette. Zero for backings without a landcover model (airless
+/// bodies, plain oceans).
+///
+/// The altitude bands travel as the **ecological altitude** they are compared
+/// against rather than as pre-collapsed weights: one interpolated scalar then
+/// yields *every* altitude line (treeline and snowline both, plus whatever a
+/// later layer needs), it interpolates linearly across a triangle where a
+/// smoothstepped weight does not, and the thresholds are already mirrored in
+/// `thalos::landcover` for the shader side. The moisture-driven forest weight
+/// has no such altitude form and stays a weight.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MaterialBands {
-    /// Absolute snow-cover weight in `[0, 1]` (climate-shifted altitude ×
-    /// latitude; the mix weight the macro albedo actually paints snow with).
-    pub snow: f32,
-    /// Absolute closed-canopy forest weight in `[0, 1]` (moisture-driven,
-    /// confined to the lowland band — the treeline is already inside it).
-    pub forest: f32,
+    /// Climate-shifted altitude in metres: geometric height plus the
+    /// latitude cold lift (`procedural::climate_cold_lift_m`). Compare
+    /// against `procedural::{ALPINE_LO_M, ALPINE_HI_M, SNOWLINE_LO_M,
+    /// SNOWLINE_HI_M}` — or their `thalos::landcover` mirrors — for the
+    /// treeline / snowline the macro palette actually paints.
+    pub eco_altitude_m: f32,
+    /// Absolute **canopy coverage** in `[0, 1]` — the single canopy authority
+    /// (see [`crate::canopy`]): climate envelope × stand structure, confined to
+    /// the lowland band (the treeline is already inside it).
+    ///
+    /// This is the exact weight the macro albedo bake mixed its dark canopy
+    /// anchor at, which is what lets a material shader both drive aerial canopy
+    /// grain from it *and* algebraically un-mix the anchor to recover understory
+    /// colour. It is also what [`SurfaceQuery::canopy_coverage`] returns, so
+    /// vegetation placement and the ground palette cannot disagree about where
+    /// the forest is.
+    pub canopy: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,6 +206,45 @@ pub trait SurfaceQuery: Send + Sync {
     /// (grass builders, scatter). `0.0` for backings without a landcover model.
     fn landcover_moisture(&self, _dir: DVec3) -> f32 {
         0.0
+    }
+
+    /// Canopy coverage in `[0, 1]` at unit direction `dir` — the point-query
+    /// companion of [`MaterialBands::canopy`], returning the *same* quantity for
+    /// consumers that need the canopy field without a full sample (tree / shrub
+    /// / ground-cover placement, the grass far-ring cull).
+    ///
+    /// `height_m` is supplied by the caller rather than re-sampled: every real
+    /// consumer is placing something *on the ground* and already holds the
+    /// height from its own gate, and the altitude chain (treeline, snow) needs
+    /// it. Mirrors [`ProceduralSurface::macro_albedo_bands_for`]'s
+    /// caller-supplies-height shape, so alternative height backings get a
+    /// consistent canopy for free.
+    ///
+    /// **This is the one answer to "is there forest here."** Vegetation must not
+    /// derive its own forest field behind this seam: that is exactly what used
+    /// to make the ground palette and the tree scatter disagree from the air
+    /// (see [`crate::canopy`]). `0.0` for backings without a landcover model.
+    ///
+    /// **Per-tile callers want [`Self::canopy_climate`] instead.** This is the
+    /// convenience form for one-off queries: it re-evaluates the expensive
+    /// climate terms every call, which is fine for a site search and ruinous in
+    /// a per-candidate placement loop (grass evaluates coverage thousands of
+    /// times per tile — doing it this way stalled terrain streaming outright).
+    ///
+    /// [`ProceduralSurface::macro_albedo_bands_for`]: crate::procedural::ProceduralSurface::macro_albedo_bands_for
+    fn canopy_coverage(&self, dir: DVec3, height_m: f32, lod_m: f32) -> f32 {
+        self.canopy_climate(dir, lod_m).coverage(dir, height_m)
+    }
+
+    /// The slowly-varying climate half of canopy coverage at `dir` — hoist this
+    /// **once per tile**, then call [`CanopyClimate::coverage`] per candidate.
+    /// See [`CanopyClimate`] for the cost split and why the altitude chain
+    /// deliberately stays per-candidate.
+    ///
+    /// Default is a zero climate, whose coverage is `0.0` — correct for backings
+    /// with no landcover model (airless bodies, plain oceans).
+    fn canopy_climate(&self, _dir: DVec3, _lod_m: f32) -> CanopyClimate {
+        CanopyClimate::default()
     }
 
     /// Sample plus the canonical [`MaterialBands`] in one evaluation — the
@@ -506,27 +565,42 @@ pub fn nearest_flatten(regions: &[FlattenRegion], dir: DVec3) -> Option<TerrainF
 }
 
 /// [`SurfaceQuery`] decorator that overlays an optional [`TerrainFlatten`] on a
-/// wrapped surface. Only the geometric height is modified; albedo/roughness and
-/// all metadata pass through unchanged.
+/// wrapped surface. The geometric height is levelled onto the pad's tangent
+/// plane, and the pad's RAMP band wears the albedo toward bare soil in noise-
+/// broken patches (see [`Self::worn_albedo`]) — the ground around a built site
+/// reads as trafficked margin instead of untouched meadow running to the
+/// asphalt edge. Roughness and all other metadata pass through unchanged.
 pub struct FlattenedSurface {
     inner: Arc<dyn SurfaceQuery>,
     flatten: FlattenHandle,
 }
+
+/// Worn-margin band over the flatten weight: zero on wild ground, peaked on
+/// the ramp, zero again well inside the pad (the levelled interior is the
+/// managed lawn, not dirt).
+const WORN_BAND_LO_W: f64 = 0.04;
+const WORN_BAND_UP_W: f64 = 0.30;
+const WORN_BAND_HI_START_W: f64 = 0.55;
+const WORN_BAND_HI_END_W: f64 = 0.92;
+/// Patch wavelength (m) and strength of the worn breakup. The noise gates the
+/// wear into patches (bare scars between surviving grass) rather than painting
+/// a uniform ring — a solid band reads as a decal, not as use.
+const WORN_PATCH_WL_M: f64 = 22.0;
+const WORN_BASE: f32 = 0.18;
+const WORN_PATCH: f32 = 0.55;
 
 impl FlattenedSurface {
     pub fn new(inner: Arc<dyn SurfaceQuery>, flatten: FlattenHandle) -> Self {
         Self { inner, flatten }
     }
 
-    fn flatten_height(&self, dir: DVec3, natural_m: f32) -> f32 {
-        let Ok(guard) = self.flatten.read() else {
-            return natural_m;
-        };
-        // Apply the single region with the greatest blend weight at this
-        // direction. Pads are assumed not to overlap (runway plus a distant
-        // base site), so max-weight selection avoids stacking two ramps into a
-        // double blend. The common case (zero or one region) costs one cheap
-        // angular reject per region.
+    /// Blend weight + tangent-plane elevation of the single strongest region at
+    /// `dir`, or `None` off-pad. Pads are assumed not to overlap (runway plus a
+    /// distant base site), so max-weight selection avoids stacking two ramps
+    /// into a double blend. The common case (zero or one region) costs one
+    /// cheap angular reject per region.
+    fn flatten_at(&self, dir: DVec3) -> Option<(f64, f64)> {
+        let guard = self.flatten.read().ok()?;
         let mut best_w = 0.0_f64;
         let mut best_elev = 0.0_f64;
         for region in guard.iter() {
@@ -540,29 +614,73 @@ impl FlattenedSurface {
                 best_elev = region.flatten.plane_elevation_m(dir);
             }
         }
-        if best_w <= 0.0 {
-            return natural_m;
-        }
-        (natural_m as f64 * (1.0 - best_w) + best_elev * best_w) as f32
+        (best_w > 0.0).then_some((best_w, best_elev))
     }
+
+    fn flatten_height(&self, dir: DVec3, natural_m: f32) -> f32 {
+        match self.flatten_at(dir) {
+            Some((w, elev)) => (natural_m as f64 * (1.0 - w) + elev * w) as f32,
+            None => natural_m,
+        }
+    }
+
+    /// Wear the albedo toward the shared bare-soil anchor on the pad's ramp
+    /// band, broken into ~[`WORN_PATCH_WL_M`] patches so the margin reads as
+    /// trafficked ground. Pure function of the body-fixed position, so tiles
+    /// and any other albedo consumer agree, and deterministic across sessions.
+    fn worn_albedo(&self, dir: DVec3, w: f64, albedo: Vec3) -> Vec3 {
+        let band = smoothstep64(WORN_BAND_LO_W, WORN_BAND_UP_W, w)
+            * (1.0 - smoothstep64(WORN_BAND_HI_START_W, WORN_BAND_HI_END_W, w));
+        if band <= 0.0 {
+            return albedo;
+        }
+        let p = dir * self.inner.radius_m() as f64 / WORN_PATCH_WL_M;
+        let n = crate::noise::fbm3(
+            p.x as f32,
+            p.y as f32,
+            p.z as f32,
+            0x57EA12, // arbitrary fixed seed — the wear pattern is authored once
+            2,
+            0.5,
+            2.0,
+        );
+        // Positive-tail threshold: roughly the upper half of the noise wears
+        // through; the rest keeps its cover, so the band is patchy.
+        let patchy = ((n - 0.45) * 2.5).clamp(0.0, 1.0);
+        let wear = (band as f32) * (WORN_BASE + WORN_PATCH * patchy);
+        albedo.lerp(crate::procedural::LATERITE_SOIL_ALBEDO, wear.clamp(0.0, 1.0))
+    }
+
+    /// Height levelling + worn margin for one sample, shared by every entry.
+    fn apply(&self, dir: DVec3, s: &mut SurfaceSample) {
+        if let Some((w, elev)) = self.flatten_at(dir) {
+            s.height_m = (s.height_m as f64 * (1.0 - w) + elev * w) as f32;
+            s.albedo_linear = self.worn_albedo(dir, w, s.albedo_linear);
+        }
+    }
+}
+
+fn smoothstep64(e0: f64, e1: f64, x: f64) -> f64 {
+    let t = ((x - e0) / (e1 - e0)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 impl SurfaceQuery for FlattenedSurface {
     fn sample(&self, dir: Vec3, lod_m: f32) -> SurfaceSample {
         let mut s = self.inner.sample(dir, lod_m);
-        s.height_m = self.flatten_height(dir.as_dvec3(), s.height_m);
+        self.apply(dir.as_dvec3(), &mut s);
         s
     }
 
     fn sample_d(&self, dir: DVec3, lod_m: f32) -> SurfaceSample {
         let mut s = self.inner.sample_d(dir, lod_m);
-        s.height_m = self.flatten_height(dir, s.height_m);
+        self.apply(dir, &mut s);
         s
     }
 
     fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, MaterialBands) {
         let (mut s, bands) = self.inner.sample_bands_d(dir, lod_m);
-        s.height_m = self.flatten_height(dir, s.height_m);
+        self.apply(dir, &mut s);
         (s, bands)
     }
 
@@ -570,8 +688,25 @@ impl SurfaceQuery for FlattenedSurface {
         self.flatten_height(dir.as_dvec3(), self.inner.sample_height_m(dir, lod_m))
     }
 
+    // ── Pass-through: everything that is not height ───────────────────────
+    //
+    // A flatten pad displaces **height** and nothing else — landcover, canopy,
+    // climate, and features are all properties of the *place*, unchanged by
+    // levelling the ground there.
+    //
+    // **Add every new [`SurfaceQuery`] method to this block.** A defaulted seam
+    // method that this decorator forgets to forward does not fail loudly: it
+    // silently returns the trait default for the whole body, because Thalos's
+    // surface is wrapped here for the spaceport pad. That is how
+    // `canopy_coverage` shipped as a constant 0.0 on its first run — every tree
+    // vanished planet-wide and the capture site finder fell back to the
+    // sub-stellar point, with nothing in the log to say why.
     fn landcover_moisture(&self, dir: DVec3) -> f32 {
         self.inner.landcover_moisture(dir)
+    }
+
+    fn canopy_climate(&self, dir: DVec3, lod_m: f32) -> CanopyClimate {
+        self.inner.canopy_climate(dir, lod_m)
     }
 
     fn radius_m(&self) -> f32 {

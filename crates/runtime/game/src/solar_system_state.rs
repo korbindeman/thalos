@@ -60,6 +60,11 @@ impl CloudBandEnvironmentState {
 /// the stale ~60 km estimate). CLOUD-3 still supplies finer 3-D shape detail.
 pub const CLOUD_WEATHER_FACE_SIZE: u32 = 1024;
 
+/// Re-export of the one coverage trim so out-of-crate consumers (the
+/// `cloud_weather_probe` example) calibrate against the same value the
+/// renderer uses. Defined in [`crate::rendering::clouds`].
+pub const CLOUD_COVERAGE_SCALE: f32 = crate::rendering::clouds::COVERAGE_SCALE;
+
 /// Mutable, per-body weather and broad-density authority. Both cubemap payloads
 /// are stored face-major in [`CubemapFace::ALL`] order. `texels` carries RGBA8
 /// coverage, cloud type, normalized base, and normalized top;
@@ -98,7 +103,37 @@ impl CloudWeatherField {
                 let v = (y as f32 + 0.5) / face_size as f32;
                 for x in 0..face_size {
                     let u = (x as f32 + 0.5) / face_size as f32;
-                    let dir = face_uv_to_dir(face, u, v).normalize();
+                    let dir_raw = face_uv_to_dir(face, u, v).normalize();
+                    // ── Flow-warped synoptic domain ──────────────────────
+                    // A cloud field is a passive tracer of the atmosphere's
+                    // rotational flow, so every synoptic-scale lookup happens
+                    // in a CURL-WARPED domain. The displacement is the
+                    // tangential curl of a scalar stream function, which is
+                    // divergence-free: it shears masses into filaments,
+                    // fronts and cyclonic commas without creating or
+                    // destroying cloudy area, so authored mean coverage still
+                    // means what it says. Gradient warping (the usual fbm
+                    // domain warp) cannot do this — it only dilates and
+                    // compresses, which is why the un-warped producer rendered
+                    // every system as the same round blob (2026-07-25 verdict).
+                    // Two octaves: cyclone-scale spirals, then frontal-scale
+                    // filaments.
+                    //
+                    // The warp is applied to the SYNOPTIC domain only. Warping
+                    // every scale — the first thing that was tried — advects
+                    // the cellular fields too, and cloud cells stop being cells:
+                    // the planet renders as a marbled fluid, all ribbon and no
+                    // puff. Real weather is exactly this split, an organized
+                    // rotational flow carrying a granular convective texture,
+                    // so the domains are kept separate here: full displacement
+                    // for the fields that draw systems, a fraction of it for
+                    // the mesoscale that those systems drag along, and none at
+                    // all for the cell-scale shape.
+                    let flow = curl_warp(dir_raw, climate.seed ^ 0x57EA_1F10, 1.7, 0.26)
+                        + curl_warp(dir_raw, climate.seed ^ 0xF20D_7A11, 4.1, 0.06)
+                        - 2.0 * dir_raw;
+                    let dir = zonal_shear((dir_raw + flow).normalize(), climate.seed ^ 0x5EA7_0055);
+                    let dir_meso = (dir_raw + 0.40 * flow).normalize();
                     // Meteorological banding is a *bias*, not a paint ring:
                     // warp the latitude the profile reads (so band edges
                     // meander like jet streams) and gate its strength with a
@@ -152,27 +187,30 @@ impl CloudWeatherField {
                     // the near volume and to an orbital projection. Cloud type
                     // remains categorical and must not be abused as a shape
                     // mask: doing so produces conspicuous cubemap-sized blocks.
+                    // Mesoscale is partially advected (`dir_meso`); cell scale
+                    // is not advected at all (`dir_raw`) — see the domain-split
+                    // note at the warp.
                     let mesoscale_warp = fbm3(
-                        dir * 17.0 + Vec3::new(13.0, -4.0, 29.0),
+                        dir_meso * 17.0 + Vec3::new(13.0, -4.0, 29.0),
                         climate.seed ^ 0x5CA1_0A11,
                         3,
                     ) - 0.5;
                     let mesoscale = fbm3(
-                        dir * 52.0
+                        dir_meso * 52.0
                             + Vec3::new(-11.0, 23.0, 7.0)
                             + Vec3::splat(2.4 * mesoscale_warp),
                         climate.seed ^ 0x5CA1_E5CA,
                         4,
                     );
                     let cellular_mass = fbm3(
-                        dir * 128.0
+                        dir_raw * 128.0
                             + Vec3::new(19.0, -5.0, 37.0)
                             + Vec3::splat(-3.1 * mesoscale_warp),
                         climate.seed ^ 0xCE11_C10D,
                         3,
                     );
                     let cellular_cut_raw = fbm3(
-                        dir * 211.0 + Vec3::new(-31.0, 47.0, 5.0),
+                        dir_raw * 211.0 + Vec3::new(-31.0, 47.0, 5.0),
                         climate.seed ^ 0xCE11_5EED,
                         2,
                     );
@@ -193,16 +231,35 @@ impl CloudWeatherField {
                     // Occupancy: threshold the synoptic field at the quantile
                     // matching authored mean coverage; soft edges so systems
                     // thin out rather than shear off.
-                    let system_field = regional
-                        + 0.35 * climate.band_strength * band
-                        + 0.08 * (mesoscale - 0.5);
+                    let system_field =
+                        regional + 0.35 * climate.band_strength * band + 0.08 * (mesoscale - 0.5);
                     let occ_threshold = 0.70 - 0.36 * climate.coverage.clamp(0.0, 1.0);
-                    let occupancy =
-                        smoothstep(occ_threshold - 0.07, occ_threshold + 0.09, system_field);
+                    // The gate's transition has to be wide relative to the
+                    // synoptic field's own spread, or it acts as a binary cut:
+                    // at the original ±0.08 it was narrower than one fbm
+                    // standard deviation, and 43% of the planet came out at
+                    // exactly zero coverage while the rest sat near saturation
+                    // — the "either caked or nothing" verdict. Widening it all
+                    // the way to ±0.21 went too far the other way and left the
+                    // planet with no clear sky at all, so a system now thins
+                    // out over a realistic few-hundred-km margin and no more.
+                    let system_edge =
+                        smoothstep(occ_threshold - 0.13, occ_threshold + 0.15, system_field);
+                    // No part of a real terrestrial planet is empty. Even the
+                    // subtropical highs — the clearest air there is — carry
+                    // broken shallow cumulus, and that is what fills the space
+                    // between systems in the reference imagery. Deliberately a
+                    // SPARSE population (low coverage, full optical depth), so
+                    // it reads as scattered cells rather than the grey wash
+                    // that scaling optical depth would give.
+                    let fair_weather = 0.20
+                        * smoothstep(0.52, 0.84, 0.58 * cellular + 0.42 * mesoscale)
+                        * (0.40 + 0.60 * system_edge);
+                    let occupancy = system_edge.max(fair_weather);
                     // 0 at a system's fringe, 1 deep inside: deep systems are
                     // more developed (storm potential, higher fill).
                     let intensity =
-                        smoothstep(occ_threshold + 0.02, occ_threshold + 0.17, system_field);
+                        smoothstep(occ_threshold + 0.02, occ_threshold + 0.22, system_field);
 
                     // Regime selector: an independent low-frequency partition,
                     // uniformized so the authored type_mix reads as area
@@ -229,23 +286,87 @@ impl CloudWeatherField {
                     // Per-regime coverage texture. `variation` scales how deep
                     // the mesoscale/cellular breakup cuts.
                     let breakup = (0.55 + climate.variation).clamp(0.5, 1.5);
-                    let cell_broken =
-                        smoothstep(0.42, 0.78, 0.62 * cellular + 0.38 * mesoscale);
+                    let cell_broken = smoothstep(0.42, 0.78, 0.62 * cellular + 0.38 * mesoscale);
                     let sheet_holes = smoothstep(0.66, 0.84, cellular);
-                    let storm_core =
-                        smoothstep(0.52, 0.78, 0.66 * mesoscale + 0.34 * cellular);
+                    let storm_core = smoothstep(0.52, 0.78, 0.66 * mesoscale + 0.34 * cellular);
                     let frontal_boost = frontal * occupancy;
-                    let cumulus_cov =
-                        (0.66 - 0.52 * breakup * (1.0 - cell_broken) + 0.10 * intensity)
-                            .clamp(0.0, 1.0);
+                    let cumulus_cov = (0.66 - 0.52 * breakup * (1.0 - cell_broken)
+                        + 0.10 * intensity)
+                        .clamp(0.0, 1.0);
                     let stratus_cov = 0.94 - 0.30 * breakup * sheet_holes;
-                    let storm_cov =
-                        (0.40 + 0.46 * storm_core + 0.10 * intensity).clamp(0.0, 1.0);
+                    let storm_cov = (0.40 + 0.46 * storm_core + 0.10 * intensity).clamp(0.0, 1.0);
                     let cov_regime = stratus_region * stratus_cov
                         + cumulus_region * cumulus_cov
                         + storm_region * storm_cov;
-                    let coverage =
-                        (occupancy * cov_regime + 0.28 * frontal_boost).clamp(0.0, 1.0);
+                    // The coverage channel is a smooth SYNOPTIC field: the local
+                    // probability that a place is cloudy, an areal fraction. It
+                    // is deliberately NOT a realized cloud field — the single
+                    // realization point is `cloud_surface_density_cpu`, which
+                    // thresholds the cell-scale shape noise against exactly
+                    // this value. Realizing it here as well (tried 2026-07-25)
+                    // binarizes the field twice, and stacked thresholds turn
+                    // every partly-cloudy region into harsh salt-and-pepper
+                    // dither instead of broken cloud.
+                    let deck_cov = (occupancy * cov_regime + 0.28 * frontal_boost).clamp(0.0, 1.0);
+
+                    // ── High thin veil (cirrus / cirrostratus) ───────────
+                    // The single largest visual difference between this
+                    // producer and orbital photography of a real terrestrial
+                    // planet: high ice cloud is WIDE, streaky, optically thin,
+                    // and it survives over the very regions where the low deck
+                    // is absent. Without it a planet reads as opaque systems
+                    // scattered on a bare ball.
+                    //
+                    // It carries no new texture channel — the weather cube's
+                    // RGBA is full. A veil is expressible in the channels that
+                    // already exist as exactly what it physically is: a thin
+                    // sheet (stratus-shaped vertical profile) with a HIGH base
+                    // and a small strata amplitude. Amplitude, not opacity, is
+                    // the knob: the far tier converts occupancy to opacity
+                    // through the derived response LUT, so a low-amplitude
+                    // stratum renders as a translucent veil in both tiers
+                    // without anyone multiplying a coverage term into optical
+                    // depth (which is the rejected grey-wash failure — see
+                    // `weather_column_from_texel`).
+                    //
+                    // Cirrus is sheared far harder than the deck: it lives in
+                    // the jet, so its filaments are strongly zonal and it
+                    // trails downstream of frontal ridges.
+                    let veil_dir = zonal_shear(
+                        zonal_shear(dir_raw, climate.seed ^ 0xC144_05EE),
+                        climate.seed ^ 0xC144_1EE5,
+                    );
+                    let veil_field = fbm3(
+                        Vec3::new(veil_dir.x * 2.4, veil_dir.y * 6.0, veil_dir.z * 2.4)
+                            + Vec3::new(-17.0, 41.0, 8.0),
+                        climate.seed ^ 0xC144_1005,
+                        4,
+                    );
+                    // Outflow: real cirrus streams off the tops of deep
+                    // convection and ahead of warm fronts, so the veil is
+                    // biased toward — but deliberately offset from — the
+                    // deck's own systems.
+                    let veil_raw = veil_field + 0.22 * frontal + 0.18 * intensity;
+                    // Strongly selective. A veil is a feature of PARTICULAR
+                    // regions — jet-stream bands, warm-front approaches, storm
+                    // outflow — and the single most damaging thing it can do is
+                    // become a planet-wide film. At a low threshold it covered
+                    // most of the disc, and a thin grey wash over everything
+                    // desaturated the ocean and muted the cloud tops at the same
+                    // time: an A/B with the veil zeroed showed deep blue ocean
+                    // and white cloud tops returning immediately (2026-07-25).
+                    // It has to read as streaks over a clear planet, never as
+                    // atmosphere.
+                    let veil_cov =
+                        0.22 * smoothstep(0.68, 0.92, veil_raw) * (0.55 + 0.45 * band_gate);
+                    // Union the two decks: where the low deck is solid the veil
+                    // is invisible behind it, so it only adds where there is
+                    // sky left to fill.
+                    let veil_add = veil_cov * (1.0 - deck_cov);
+                    let coverage = (deck_cov + veil_add).clamp(0.0, 1.0);
+                    // 1 = this texel is pure veil, 0 = pure low deck. Drives
+                    // the geometry blend and the strata amplitude below.
+                    let veil_share = (veil_add / coverage.max(1.0e-4)).clamp(0.0, 1.0);
 
                     // Cloud type follows the regime: sheets read stratus, storm
                     // clusters read cumulonimbus at their cores, and building
@@ -255,13 +376,16 @@ impl CloudWeatherField {
                     // only deep systems — within-horizon vertical hierarchy is
                     // the main local monotony breaker (2026-07-23 round 2).
                     let congestus = storm_core * (0.30 + 0.70 * intensity);
-                    let cloud_type = (stratus_region * 0.08
+                    let deck_type = stratus_region * 0.08
                         + cumulus_region * (0.42 + 0.30 * congestus)
                         + storm_region * (0.78 + 0.18 * storm_core)
-                        + 0.10 * frontal_boost)
-                        .clamp(0.02, 0.97);
+                        + 0.10 * frontal_boost;
+                    // A veil is a sheet, so it reads as the stratus end of the
+                    // type channel — that is what selects the flat-profile
+                    // vertical response in all three density implementations.
+                    let cloud_type = deck_type.lerp(0.04, veil_share).clamp(0.02, 0.97);
                     let vertical_noise = fbm3(
-                        dir * 34.0 + Vec3::new(31.0, -7.0, 13.0),
+                        dir_meso * 34.0 + Vec3::new(31.0, -7.0, 13.0),
                         climate.seed ^ 0xA11E,
                         3,
                     );
@@ -284,13 +408,20 @@ impl CloudWeatherField {
                         + 0.58 * (0.42 * cell_broken + 0.58 * congestus)
                         + 0.09 * vertical_noise;
                     let top_storm = 0.60 + 0.38 * storm_core;
-                    let base = stratus_region * base_stratus
+                    let deck_base = stratus_region * base_stratus
                         + cumulus_region * base_cumulus
                         + storm_region * base_storm;
-                    let top = (stratus_region * top_stratus
+                    let deck_top = (stratus_region * top_stratus
                         + cumulus_region * top_cumulus
                         + storm_region * top_storm)
-                        .max(base + 0.04);
+                        .max(deck_base + 0.04);
+                    // Veil geometry: a thin sheet high in the shell. It must
+                    // clear the deck's tops or the two would render as one
+                    // fused mass on the limb.
+                    let veil_base = 0.74 + 0.09 * vertical_noise;
+                    let veil_top = veil_base + 0.07 + 0.05 * vertical_noise;
+                    let base = deck_base.lerp(veil_base, veil_share);
+                    let top = deck_top.lerp(veil_top, veil_share).max(base + 0.04);
                     // Canonical surface-space broad shape. These fields live on
                     // the unit direction sphere, so they are seamless across
                     // cubemap faces and never inherit the near volume's small
@@ -298,33 +429,82 @@ impl CloudWeatherField {
                     // and split with height without storing a full 3-D shell.
                     // Coverage/type/base/top remain separate climate controls;
                     // shaders apply their shared threshold/profile contract.
+                    // Cell-scale shape stays in the UNWARPED domain: this is the
+                    // field that has to read as individual puffy cloud bodies,
+                    // and advecting it is what turned round cells into ribbons.
+                    //
+                    // It is also UNSTYLED: see the note on the deleted
+                    // `styled_domain` — a per-place domain transform here has
+                    // the same decorrelating phase gradient that the near
+                    // tier's varying period did.
                     let shape_warp = fbm3(
-                        dir * 41.0 + Vec3::new(43.0, -17.0, 9.0),
+                        dir_raw * 41.0 + Vec3::new(43.0, -17.0, 9.0),
                         climate.seed ^ 0x5A11_FACE,
                         2,
                     ) - 0.5;
                     let shape_mass = fbm3(
-                        dir * 128.0 + Vec3::new(-37.0, 61.0, 23.0) + Vec3::splat(7.5 * shape_warp),
+                        dir_raw * 128.0
+                            + Vec3::new(-37.0, 61.0, 23.0)
+                            + Vec3::splat(7.5 * shape_warp),
                         climate.seed ^ 0xD315_17A1,
                         3,
                     );
                     let shape_cut_raw = fbm3(
-                        dir * 211.0 + Vec3::new(71.0, -29.0, 53.0) + Vec3::splat(-5.0 * shape_warp),
+                        dir_raw * 211.0
+                            + Vec3::new(71.0, -29.0, 53.0)
+                            + Vec3::splat(-5.0 * shape_warp),
                         climate.seed ^ 0xCE11_B0D1,
                         2,
                     );
                     let shape_cut = 1.0 - (2.0 * shape_cut_raw - 1.0).abs();
+                    // Cluster-scale octave. This is the field the one formation
+                    // threshold below cuts against, so it is where a system's
+                    // INTERNAL structure comes from — whether a 500 km cloud
+                    // mass is a featureless slab or a field of distinct cloud
+                    // clusters. Every octave in the producer used to top out at
+                    // 211 cycles (~95 km features) on a cube whose texels are
+                    // 4.9 km, so systems had no interior at all and rendered as
+                    // smooth washes.
+                    //
+                    // The ceiling is a viewing limit, not the cube's: a
+                    // planet-disc pixel is ~6 km, and structure below ~30 km
+                    // lands on 2–3 pixels and reads as dither rather than as
+                    // cloud. Real cumulus fields dodge this by being far
+                    // smaller than a pixel and averaging into smooth haze;
+                    // content sitting exactly at pixel scale is the worst case.
+                    // fbm doubles per octave, so the TOP octave sets the limit
+                    // — this bottoms out at ~31 km.
+                    let shape_cluster = fbm3(
+                        dir_raw * 160.0
+                            + Vec3::new(53.0, -11.0, 29.0)
+                            + Vec3::splat(4.0 * shape_warp),
+                        climate.seed ^ 0xCE11_5CA1,
+                        3,
+                    );
+                    // Weights stay convex per stratum: the formation threshold
+                    // is compared against these levels directly, so a sum that
+                    // drifts off ~0.5 mean silently re-biases planetary
+                    // coverage.
                     let surface_shape = [
-                        0.56 * shape_mass + 0.24 * shape_cut + 0.20 * cellular,
-                        0.48 * shape_mass + 0.25 * shape_cut + 0.17 * regime_x + 0.10 * cellular,
-                        0.39 * shape_mass
-                            + 0.23 * shape_cut
-                            + 0.21 * vertical_noise
-                            + 0.17 * regime_x,
-                        0.31 * shape_mass
+                        0.40 * shape_mass
+                            + 0.24 * shape_cluster
                             + 0.20 * shape_cut
-                            + 0.28 * vertical_noise
-                            + 0.21 * regime_x,
+                            + 0.16 * cellular,
+                        0.34 * shape_mass
+                            + 0.22 * shape_cluster
+                            + 0.21 * shape_cut
+                            + 0.13 * regime_x
+                            + 0.10 * cellular,
+                        0.28 * shape_mass
+                            + 0.18 * shape_cluster
+                            + 0.20 * shape_cut
+                            + 0.19 * vertical_noise
+                            + 0.15 * regime_x,
+                        0.23 * shape_mass
+                            + 0.14 * shape_cluster
+                            + 0.18 * shape_cut
+                            + 0.26 * vertical_noise
+                            + 0.19 * regime_x,
                     ];
                     // Strata are LAYER-RELATIVE: four samples across the local
                     // [base, top] interval, not the whole shell. Fixed shell
@@ -334,15 +514,23 @@ impl CloudWeatherField {
                     // deck (2026-07-23). Consumers map their shell height
                     // through the same weather base/top channels.
                     let top_c = top.max(base + 0.02);
+                    // Ice cloud holds a small fraction of the condensate a
+                    // convective column does. Scaling the stored OCCUPANCY is
+                    // the honest way to say so here: the consumers' response
+                    // curve turns occupancy into opacity, so a veil comes out
+                    // translucent in both tiers without anyone multiplying
+                    // coverage into optical depth.
+                    let amplitude = 1.0_f32.lerp(0.26, veil_share);
                     let surface_density = [0.125, 0.375, 0.625, 0.875].map(|q| {
-                        cloud_surface_density_cpu(
-                            surface_shape,
-                            base + q * (top_c - base),
-                            coverage,
-                            cloud_type,
-                            base,
-                            top_c,
-                        )
+                        amplitude
+                            * cloud_surface_density_cpu(
+                                surface_shape,
+                                base + q * (top_c - base),
+                                coverage,
+                                cloud_type,
+                                base,
+                                top_c,
+                            )
                     });
                     let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                     texels.push([
@@ -439,6 +627,17 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+// NOTE (2026-07-26): a `styled_domain` helper here applied the cell field's
+// per-place anisotropy to the cube's shape lookups, so the far tier's texture
+// would point the same way as the near tier's cells. It is DELETED, not tuned:
+// it carried the same phase-gradient defect as the varying period in
+// `cell_field` — a spatially varying domain scale on a lookup at frequency
+// 128–211 decorrelates the field between neighbouring texels instead of
+// deforming it. Far/near registration of cell ORIENTATION is a nice-to-have on
+// a tier that CLOUD-6 already tracks as a smooth wash; it is not worth
+// reintroducing the defect the near tier just had removed. If it comes back, it
+// must use the same fix the shader uses — blend between constant transforms.
+
 /// CPU producer for the canonical four-stratum density payload. Nonlinear
 /// formation/profile response happens before the mip chain is built, so far
 /// footprints average occupied area instead of thresholding an averaged raw
@@ -452,7 +651,7 @@ fn cloud_surface_density_cpu(
     local_top: f32,
 ) -> f32 {
     let h = (normalized_height - local_base) / (local_top - local_base).max(0.02);
-    let cov = (coverage * 1.25).clamp(0.0, 1.0);
+    let cov = (coverage * crate::rendering::clouds::COVERAGE_SCALE).clamp(0.0, 1.0);
     if h <= 0.0 || h >= 1.0 || cov <= 1.0e-3 {
         return 0.0;
     }
@@ -460,7 +659,14 @@ fn cloud_surface_density_cpu(
     let stratus_w = 1.0 - smoothstep(0.18, 0.38, cloud_type);
     let storm_w = smoothstep(0.72, 0.88, cloud_type);
     let cumulus_w = (1.0 - stratus_w - storm_w).max(0.0);
-    let threshold = 0.58 + (0.30 - 0.58) * cov;
+    // Formation threshold, calibrated so the emitted column occupancy TRACKS
+    // the coverage channel (`cloud_weather_probe` reports the ratio). This
+    // matters because the far tier renders the strata cube, not coverage: the
+    // old 0.58→0.30 line was fitted against the biased-low isosurface below,
+    // and once that became an unbiased areal fraction the same line emitted
+    // ~1.3× the authored coverage — the planet read as an overcast sheet with
+    // holes in it no matter how far the coverage channel was trimmed.
+    let threshold = 1.03 + (0.33 - 1.03) * cov;
     // Round-7 dome sculpting: convective tops are carved by a quadratically
     // height-rising threshold (a per-lobe noise isosurface — strong lobes
     // tower, weak lobes stay squat) instead of the former linear thinning;
@@ -471,21 +677,59 @@ fn cloud_surface_density_cpu(
     let vertical_narrow = h * 0.04 * stratus_w
         + (h * h) * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
 
-    let z = normalized_height.clamp(0.0, 1.0) * 4.0 - 0.5;
-    let shape = if z <= 0.0 {
-        surface_shape[0]
-    } else if z < 1.0 {
-        surface_shape[0] + (surface_shape[1] - surface_shape[0]) * z
-    } else if z < 2.0 {
-        surface_shape[1] + (surface_shape[2] - surface_shape[1]) * (z - 1.0)
-    } else if z < 3.0 {
-        surface_shape[2] + (surface_shape[3] - surface_shape[2]) * (z - 2.0)
-    } else {
-        surface_shape[3]
+    // C1 reconstruction of the four vertical shape samples, matching
+    // `cloud_surface_shape` (thalos::atmosphere) and `surface_shape`
+    // (fill_lut.rs) — keep the three in lockstep. The piecewise-linear form
+    // this replaces broke slope at the knots, and a deck viewed edge-on
+    // rendered those breaks as horizontal shelves (2026-07-26).
+    let z = (normalized_height.clamp(0.0, 1.0) * 4.0 - 0.5).clamp(0.0, 3.0);
+    let k = z.floor().clamp(0.0, 2.0);
+    let t = z - k;
+    let spline = |p0: f32, p1: f32, p2: f32, p3: f32| {
+        let t2 = t * t;
+        let t3 = t2 * t;
+        0.5 * ((2.0 * p1)
+            + (-p0 + p2) * t
+            + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+            + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
     };
+    let shape = if k < 1.0 {
+        spline(
+            surface_shape[0],
+            surface_shape[0],
+            surface_shape[1],
+            surface_shape[2],
+        )
+    } else if k < 2.0 {
+        spline(
+            surface_shape[0],
+            surface_shape[1],
+            surface_shape[2],
+            surface_shape[3],
+        )
+    } else {
+        spline(
+            surface_shape[1],
+            surface_shape[2],
+            surface_shape[3],
+            surface_shape[3],
+        )
+    }
+    .clamp(0.0, 1.0);
     let mut mass = shape - threshold - vertical_narrow;
     let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
     mass = mass.max((shape - (threshold - 0.06)) * anvil_profile * storm_w);
+
+    // NOTE (2026-07-25): surface-space boundary erosion was tried here — fine
+    // noise added to `mass`, gated on proximity to the threshold, to rough up
+    // the smooth oval silhouettes that value-noise fbm produces. It does not
+    // work at this cube resolution, at any strength or gate width tested: the
+    // gate must be narrow relative to `shape`'s spread to stay a boundary
+    // effect, but at 4.9 km texels a narrow band is only 1–2 texels wide, so
+    // the perturbation is at texel frequency and renders as planet-wide
+    // salt-and-pepper stipple rather than ragged edges. It also pushed the
+    // strata/coverage calibration to 1.29. Silhouette detail belongs to the
+    // consumers' sub-texel morphology, not to this cube.
 
     let bottom_softness = 0.16;
     // Thin condensation top skins (the dome term above owns top shape);
@@ -498,7 +742,108 @@ fn cloud_surface_density_cpu(
         smoothstep(0.0, bottom_softness * 0.35, h) * (1.0 - smoothstep(0.94, 1.0, h));
     let vertical_profile =
         stratus_profile * stratus_w + cumulus_profile * cumulus_w + storm_profile * storm_w;
-    smoothstep(0.0, 0.055, mass) * vertical_profile
+    // ── Areal fraction, not an isosurface ────────────────────────────────
+    // This value is what a whole ~5 km weather texel contains, and cloud
+    // cells are 1–8 km across, so the honest answer is a FRACTION: the share
+    // of the texel's area whose shape noise clears the formation threshold.
+    // The former `smoothstep(0.0, 0.055, mass)` asked a different question —
+    // "is the noise above threshold at this one point" — and 0.055 is far
+    // narrower than the sub-texel spread of `shape`, so every texel answered
+    // 0 or 1. That is the whole "either fully caked or no clouds in sight"
+    // failure: coverage moved the threshold (how much AREA is cloudy) but
+    // could never move the amount, so a 30 %-coverage region rendered as 30 %
+    // of texels at full opacity instead of a broken field.
+    //
+    // Widening the transition to the sub-texel RMS of `shape` is the analytic
+    // form of supersampling the threshold test — same expected value, ~1/9th
+    // the noise evaluations of a 3×3 sub-sample, and it stays smooth so the
+    // mip chain has something to filter. Coverage keeps its single meaning
+    // (areal occupancy); optical depth is untouched, so this cannot regress
+    // into the rejected grey-veil look (`weather_column_from_texel`).
+    //
+    // NOT in lockstep with the marcher's `edge_softness`: that one shapes
+    // sub-texel lobes from a point sample and must stay sharp. This one
+    // integrates over the texel. The near tier reads the result through its
+    // spawn-derived formation curve, which re-fits to whatever this emits.
+    // Width is the sub-texel RMS of `shape`, and it wants to stay SMALL.
+    //
+    // A real cloud field is locally high-contrast and globally graded: an
+    // individual cell is optically thick with clear air beside it, while the
+    // cloudy *fraction* varies smoothly over hundreds of km. Both failure
+    // modes seen on 2026-07-25 come from confusing those two scales. The
+    // original 0.055 was fine here — the binariness was never at cell scale,
+    // it was the synoptic occupancy gate upstream. Widening this to 0.12–0.19
+    // to compensate put every texel inside the transition, so nothing was
+    // opaque anywhere and the planet rendered as a flat grey film: the exact
+    // grey-veil signature `weather_column_from_texel` warns about, reached
+    // from the occupancy side instead of the optical-depth side.
+    //
+    // It is not zero, though: at a 5 km texel and 1–8 km cells the honest
+    // answer is still a fraction, and a hard step quantizes the smooth
+    // upstream field back into 5 km blocks (the crumb-edged look). This is
+    // wide enough to keep the mip chain something to filter and no wider.
+    const SUB_TEXEL_RMS: f32 = 0.035;
+    let areal_fraction = smoothstep(-SUB_TEXEL_RMS, SUB_TEXEL_RMS, mass);
+    areal_fraction * vertical_profile
+}
+
+/// Divergence-free domain warp on the unit sphere.
+///
+/// Returns `dir` displaced along the tangential curl of a scalar stream
+/// function `psi = fbm3(dir * freq)`. Because the displacement is a curl it
+/// has (to first order) zero divergence: it shears and folds the field it
+/// warps without dilating or compressing it, so authored mean coverage is
+/// preserved while round noise blobs become the filaments, frontal lines and
+/// cyclonic commas that organized weather actually shows. A gradient warp —
+/// the usual `p + fbm(p)` trick — cannot produce rotation, which is why the
+/// un-warped producer rendered every system as an isotropic blob.
+///
+/// The returned vector is NOT normalized; callers that need a direction
+/// normalize after summing octaves.
+fn curl_warp(dir: Vec3, seed: u64, freq: f32, amplitude: f32) -> Vec3 {
+    // Tangent basis. The `Vec3::Y` reference degenerates at the poles, so
+    // swap axes there — an arbitrary but continuous-enough choice, since the
+    // stream function is isotropic and only the basis orientation changes.
+    let reference = if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
+    let e1 = dir.cross(reference).normalize_or_zero();
+    if e1 == Vec3::ZERO {
+        return dir;
+    }
+    let e2 = dir.cross(e1);
+
+    // Central differences of the stream function in the tangent plane. The
+    // step is comfortably above the noise lattice spacing at these
+    // frequencies, so the gradient is smooth rather than hash-quantized.
+    const EPS: f32 = 0.03;
+    let psi = |p: Vec3| fbm3(p * freq + Vec3::new(5.0, -13.0, 21.0), seed, 3);
+    let d1 = (psi(dir + e1 * EPS) - psi(dir - e1 * EPS)) / (2.0 * EPS);
+    let d2 = (psi(dir + e2 * EPS) - psi(dir - e2 * EPS)) / (2.0 * EPS);
+    // grad psi = d1*e1 + d2*e2; rotating it a quarter turn inside the tangent
+    // plane gives the divergence-free flow.
+    dir + (e1 * d2 - e2 * d1) * amplitude
+}
+
+/// Latitude-dependent rotation about the spin axis.
+///
+/// Zonal wind is the dominant organizing motion of a rotating atmosphere: it
+/// stretches everything east–west and, because it varies with latitude, tilts
+/// features into the leaning bands and trailing fronts of the reference
+/// imagery. Applied as a domain rotation (not a coverage bias) so it deforms
+/// structure instead of painting stripes — the failure mode the band profile
+/// already carries a warning about.
+fn zonal_shear(dir: Vec3, seed: u64) -> Vec3 {
+    let sin_lat = dir.y.clamp(-1.0, 1.0);
+    // Mid-latitude jets in each hemisphere, weaker easterlies at the equator.
+    let jet = 1.35 * sin_lat * (1.0 - sin_lat * sin_lat) - 0.28 * sin_lat.abs();
+    // Meander so the shear itself is not a perfect function of latitude.
+    let meander = 0.35 * (fbm3(dir * 2.3 + Vec3::new(-9.0, 4.0, 17.0), seed, 2) - 0.5);
+    let angle = jet + meander;
+    let (sin_a, cos_a) = angle.sin_cos();
+    Vec3::new(
+        dir.x * cos_a + dir.z * sin_a,
+        dir.y,
+        -dir.x * sin_a + dir.z * cos_a,
+    )
 }
 
 fn latitude_band_profile(lat: f32) -> f32 {
@@ -653,8 +998,7 @@ mod cloud_site_probe {
     #[test]
     #[ignore = "dev probe: prints cloudy THALOS_RUNWAY_SITE candidates"]
     fn print_cloudy_sites() {
-        let assets =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
         let system = thalos_world::parsing::load_solar_system_from_dir(&assets)
             .expect("load authored solar system");
         let thalos_id = system.name_to_id["Thalos"];
@@ -690,8 +1034,7 @@ mod cloud_site_probe {
                     let dir = face_uv_to_dir(face, u, v).normalize();
                     let lat = dir.y.asin().to_degrees();
                     let lon = dir.z.atan2(dir.x).to_degrees().rem_euclid(360.0);
-                    if !(LAT_MIN..LAT_MAX).contains(&lat) || !(LON_MIN..LON_MAX).contains(&lon)
-                    {
+                    if !(LAT_MIN..LAT_MAX).contains(&lat) || !(LON_MIN..LON_MAX).contains(&lon) {
                         continue;
                     }
                     let bin = &mut bins[((lat - LAT_MIN) / BIN_DEG) as usize * lon_bins
@@ -722,13 +1065,17 @@ mod cloud_site_probe {
             let lat = LAT_MIN + (i / lon_bins) as f32 * BIN_DEG + BIN_DEG * 0.5;
             let lon = LON_MIN + (i % lon_bins) as f32 * BIN_DEG + BIN_DEG * 0.5;
             let n = f64::from(bin.n);
-            ranked.push((lat, lon, bin.cov / n, bin.sd_col / n, f64::from(bin.cloudy) / n));
+            ranked.push((
+                lat,
+                lon,
+                bin.cov / n,
+                bin.sd_col / n,
+                f64::from(bin.cloudy) / n,
+            ));
         }
         ranked.sort_by(|a, b| {
             // Broken moderate field wanted: real cloudy texels, mid strata.
-            let score = |r: &(f32, f32, f64, f64, f64)| {
-                (r.3 - 0.42).abs() - 0.6 * r.4.min(0.6)
-            };
+            let score = |r: &(f32, f32, f64, f64, f64)| (r.3 - 0.42).abs() - 0.6 * r.4.min(0.6);
             score(a).total_cmp(&score(b))
         });
 
@@ -743,14 +1090,11 @@ mod cloud_site_probe {
         let sun_elevation_deg = |lat_deg: f32, lon_deg: f32| -> f64 {
             let lat = f64::from(lat_deg).to_radians();
             let lon = f64::from(lon_deg).to_radians();
-            let dir_body = bevy::math::DVec3::new(
-                lat.cos() * lon.cos(),
-                lat.sin(),
-                lat.cos() * lon.sin(),
-            );
+            let dir_body =
+                bevy::math::DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
             let up_world = thalos_state.orientation * dir_body;
-            let to_sun = (star - (thalos_state.position + up_world * thalos_state.radius_m))
-                .normalize();
+            let to_sun =
+                (star - (thalos_state.position + up_world * thalos_state.radius_m)).normalize();
             90.0 - up_world.angle_between(to_sun).to_degrees()
         };
 
@@ -786,8 +1130,7 @@ mod cloud_site_probe {
     fn derive_fill_calibration_probe() {
         let subscriber = tracing_subscriber_fmt();
         let _guard = tracing::subscriber::set_default(subscriber);
-        let assets =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
         let system = thalos_world::parsing::load_solar_system_from_dir(&assets)
             .expect("load authored solar system");
         let thalos_id = system.name_to_id["Thalos"];
@@ -815,17 +1158,13 @@ mod cloud_site_probe {
         // the measurement site (22.0 N, 153.0 E, ~15 km crop).
         let lat = 22.0f32.to_radians();
         let lon = 153.0f32.to_radians();
-        let site = Vec3::new(
-            lat.cos() * lon.cos(),
-            lat.sin(),
-            lat.cos() * lon.sin(),
-        );
+        let site = Vec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
         let climate_bottom = climate.base_altitude_m.max(0.0);
         let input = thalos_body_render::FillCalibrationInput {
             weather_texels: &field.texels,
             strata_texels: &field.surface_density_texels,
             face_size: field.face_size,
-            coverage_scale: 1.25,
+            coverage_scale: crate::rendering::clouds::COVERAGE_SCALE,
             density: 0.0026 * climate.density.max(0.0),
             detail_strength: 0.16,
             base_edge_softness: 0.055,
@@ -833,8 +1172,7 @@ mod cloud_site_probe {
             base_shape_scale_m: climate.base_shape_scale_m.max(500.0),
             detail_scale_m: climate.detail_scale_m.max(50.0),
             bottom_height_m: climate_bottom,
-            top_height_m: (climate.base_altitude_m + climate.thickness_m)
-                .max(climate_bottom + 1.0),
+            top_height_m: (climate.base_altitude_m + climate.thickness_m).max(climate_bottom + 1.0),
             planet_radius_m: body.radius_m as f32,
             seed: field.seed,
         };

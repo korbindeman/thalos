@@ -1,8 +1,9 @@
 # Architecture & code quality cleanup
 
 **Status:** plan drafted 2026-07-05 from a three-track codebase audit (craft
-lifecycle, mode/state machinery, duplication/dead-code inventory). Nothing in
-this doc has been executed yet unless its checkbox says so.
+lifecycle, mode/state machinery, duplication/dead-code inventory). This doc is
+rationale and sequencing only — what has actually landed is in
+[`docs/backlog.md`](../backlog.md).
 
 ## 1. Why
 
@@ -67,7 +68,7 @@ click, EVA drop/teleport). Shared cores exist (`orbit_respawn_state`,
 
 | Assumption | Where | N-craft shape |
 |---|---|---|
-| One canonical craft state | `Simulation` (`ship_state`/`set_ship_state`) | multi-craft API or per-craft records — **decision needed, defer implementation** |
+| One canonical craft state | `Simulation` (`ship_state`/`set_ship_state`) | **resolved + landed 2026-07-25:** ordered `CraftId` → `VesselRecord` registry; existing methods are active-craft wrappers and new mutation seams take an id |
 | One bubble slot | `ActiveLocalBubble.bubble: Option<…>` | per-craft component or map |
 | One authority answer/frame | `AvianAuthority` resource | already derived from per-craft `CraftRegimeState` — finish the projection |
 | One control pipeline | `ControlDemand`/`RealizedControl` resources | per-craft components |
@@ -78,11 +79,11 @@ click, EVA drop/teleport). Shared cores exist (`orbit_respawn_state`,
 
 `CraftRegimeState` (per-bubble-entity, from the regimes A3 port) is the proof
 that per-craft components work here — it is the **template** for migrating the
-rest. The realistic near-term posture: do **not** build multiplayer-grade
-N-craft now, but (a) stop adding new single-craft *resources* — new per-craft
-state goes on the craft entity; (b) route reads through an `ActiveCraft`
-indirection instead of `.single()`; (c) record every knowingly-kept
-single-instance assumption in this doc.
+rest. Canonical N-craft is no longer deferred. Runtime migration remains
+requirements-driven by physical staging: (a) no new single-craft resources —
+new per-craft state goes on the craft root; (b) active-only reads route through
+`ActiveCraft`; (c) world simulation/render/map paths iterate canonical ids; and
+(d) every knowingly-kept singleton stays in the ledger below.
 
 ### 2.3 Mode/state machinery
 
@@ -291,14 +292,29 @@ of E is the **posture**, not the mass migration. So E delivers:
 3. **Kept-singleton ledger** (below) — the single-instance assumptions that stay,
    knowingly, with their accessor boundary.
 
+**Direction update (2026-07-24):** real multi-craft is now a product
+requirement, led by persistent physical stage separation. The 2026-07-05
+"posture only" limit remains useful history but no longer governs scope.
+ADR-20260724T230226Z resolves the canonical shape as a deterministic
+`CraftId`-keyed vessel registry with active craft as a separate selection.
+The executable migration and acceptance contract is
+`docs/simulation/vessels.md`; backlog rows now sequence the fleet kernel,
+runtime identity, shared local scene, physical graph cut, and switching /
+persistence.
+
+**Fleet kernel landed 2026-07-25:** `Simulation` now owns the deterministic
+registry and per-vessel bookkeeping, id-addressed mutation seams, and
+active-selection compatibility wrappers. CL-E2 is unblocked; the remaining
+singletons in this section are runtime/ECS concerns.
+
 **Kept singletons (deliberate, N-craft seams recorded):**
 
 | Singleton | Where | Accessor / boundary | N-craft path |
 |---|---|---|---|
-| One canonical craft state + authority | `Simulation` (`ship_state`/`set_ship_state`/`transition_authority`) | the `place_craft` core (§C) is the sole seat-the-state path | per-craft `CraftState`, or a keyed map, behind the same accessor |
-| One Avian bubble slot | `ActiveLocalBubble.bubble: Option<…>` | `clear_bubble` / `spawn_player_avian_body` | per-craft bubble pool keyed by craft entity |
+| One canonical craft state + authority | `Simulation` (`ship_state`/`set_ship_state`/`transition_authority`) | the `place_craft` core (§C) is the sole seat-the-state path | **resolved:** deterministic `CraftId`-keyed vessel registry; current methods become active-craft wrappers |
+| One Avian bubble slot | `ActiveLocalBubble.bubble: Option<…>` | `clear_bubble` / `spawn_player_avian_body` | **resolved direction:** one dominant-body local scene with N vessel rigid bodies, not one bubble per craft |
 | The active craft entity | `PlayerShip` (+ `.single()` sites) | **`ActiveCraft`** (new) | picks the active craft among many |
-| Per-craft global resources | `GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`, `ManeuverPlan` | still global resources today | move onto the craft entity as components |
+| Per-craft global resources | `GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`, `ManeuverPlan` | still global resources today | move onto each `CraftRoot` as components in CL-E2 |
 | Per-craft regime record | `CraftRegimeState` | **already per-craft component** (the template) | — none, already N-safe |
 
 *Verify (once the workspace builds):* full scenario matrix behaves identically —
@@ -348,6 +364,6 @@ drag / typing / hangar flows).
   at edit time (the Phase-3 "blocked" claim was already stale).
 - **Delete, don't deprecate**, except where a one-package transition mirror is
   explicitly called out (package E).
-- Update this doc's checkboxes + the relevant spec (`ui_flow.md`,
-  `regimes.md`, `base_building.md`, `boot.md`) in the same change that lands a
-  package.
+- Status for these packages lives in `docs/backlog.md`, not here. When a package
+  lands, flip its backlog row and update the spec it changed (`ui_flow.md`,
+  `regimes.md`, `base_building.md`, `boot.md`) — this doc keeps the rationale.

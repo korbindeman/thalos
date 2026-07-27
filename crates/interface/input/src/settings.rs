@@ -494,6 +494,7 @@ pub mod defaults {
                 ("escape", keys([KeyCode::Escape])),
                 ("screenshot", keys([KeyCode::F2])),
                 ("save_perspective", keys([KeyCode::F8])),
+                ("quick_save_viewpoint", keys([KeyCode::F9])),
                 ("toggle_free_cam", keys([KeyCode::F4])),
             ],
             [],

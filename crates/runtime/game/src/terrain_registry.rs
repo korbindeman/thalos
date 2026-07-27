@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::DVec3;
 use bevy::prelude::{Resource, Vec3};
-use thalos_body_render::GpuAtlasMirrorHandle;
+use thalos_body_render::{GpuAtlasMirrorHandle, RenderedGround};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
 use thalos_terrain::{
     BodyArchetype, DynamicSurfaceState, PackageSurface, PlanetSurface, ProceduralSurface,
@@ -31,21 +31,41 @@ use thalos_world::{BodyDefinition, BodyId, BodyKind};
 /// skipping the fine procedural octaves — is both sufficient and cheap.
 const PROPAGATOR_LOD_M: f32 = 1000.0;
 
-/// Runtime-only projection of renderer residency data. The canonical height
+/// Runtime-only projection of renderer residency data — **one entry per body,
+/// whichever renderer currently draws its ground** (udlod's atlas mirror, or
+/// the standard-path tile renderer's height mirror). The canonical height
 /// queries themselves remain in `thalos_physics_local::HeightSourceRegistry`
 /// behind the renderer-independent `thalos_terrain::HeightSource` contract.
+///
+/// Surface-detail consumers (grass / trees / rocks) read the residency gate
+/// from here, so they work on either renderer without knowing which is up.
+/// The tile driver **replaces** a body's entry when it takes the body over.
 #[derive(Resource, Default, Clone)]
-pub struct GpuHeightMirrorRegistry {
-    gpu_mirrors: HashMap<BodyId, GpuAtlasMirrorHandle>,
+pub struct RenderedGroundRegistry {
+    grounds: HashMap<BodyId, RenderedGround>,
 }
 
-impl GpuHeightMirrorRegistry {
-    pub fn insert(&mut self, body_id: BodyId, mirror: GpuAtlasMirrorHandle) {
-        self.gpu_mirrors.insert(body_id, mirror);
+impl RenderedGroundRegistry {
+    pub fn insert(&mut self, body_id: BodyId, ground: RenderedGround) {
+        self.grounds.insert(body_id, ground);
     }
 
-    pub fn get(&self, body_id: BodyId) -> Option<GpuAtlasMirrorHandle> {
-        self.gpu_mirrors.get(&body_id).cloned()
+    /// Drop a body's rendered ground — its renderer has released it (the tile
+    /// root following the view anchor to another body). Consumers fall back to
+    /// the canonical surface, which is the same thing they do for a body that
+    /// never had a rendered ground at all.
+    pub fn remove(&mut self, body_id: BodyId) {
+        self.grounds.remove(&body_id);
+    }
+
+    pub fn get(&self, body_id: BodyId) -> Option<RenderedGround> {
+        self.grounds.get(&body_id).cloned()
+    }
+
+    /// udlod's concrete atlas handle for `body_id`, or `None` when the body is
+    /// unknown or drawn by another renderer.
+    pub fn udlod_handle(&self, body_id: BodyId) -> Option<GpuAtlasMirrorHandle> {
+        self.grounds.get(&body_id)?.udlod_handle()
     }
 }
 
@@ -101,8 +121,11 @@ impl BodySurfaceRegistry {
         for body in bodies.iter().filter(|body| body.terrain.is_some()) {
             if body.name == "Thalos" && thalos_diffusion_enabled() {
                 let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
-                match thalos_terrain::DiffusionSurface::load(dir, body.radius_m as f32, body.id as u32)
-                {
+                match thalos_terrain::DiffusionSurface::load(
+                    dir,
+                    body.radius_m as f32,
+                    body.id as u32,
+                ) {
                     Ok(surface) => {
                         let fingerprint =
                             thalos_terrain::GENERATOR_VERSION ^ surface.content_fingerprint;

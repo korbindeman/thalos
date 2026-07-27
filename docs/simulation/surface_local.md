@@ -324,10 +324,12 @@ decision to replace Avian:
 
 - **Handoff altitude**: keep 20 km AGL, or trigger on dynamic pressure /
   density so vacuum-world descents enter later? Hysteresis width?
-- **Multiple craft in the bubble** (debris, other vehicles, future
-  multiplayer-ish scenarios): the SLF is per-active-craft today
-  (mirroring `ActiveLocalBubble`); a shared per-body frame with
-  per-craft anchors is the likely generalization. Not needed this phase.
+- **Multiple craft in the local scene** (debris and other vehicles): the SLF is
+  per-active-craft today (mirroring `ActiveLocalBubble`), but the target is now
+  resolved rather than open. One dominant-body frame contains N independently
+  authoritative vessel rigid bodies so separated stages share terrain and can
+  collide/fall while another craft stays active. See
+  [vessels.md](vessels.md) and ADR-20260724T230226Z.
 - **Ocean/water contact**: the heightfield is seabed; floating craft
   need a separate water-surface interaction. Out of scope here, but the
   SLF is the right frame for it too.

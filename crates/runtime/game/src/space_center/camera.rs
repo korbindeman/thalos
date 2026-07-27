@@ -82,6 +82,7 @@ fn drive_camera(
     registry: Res<StructureRegistry>,
     homeworld: Res<Homeworld>,
     ui_gate: Res<crate::hud::UiPointerGate>,
+    ui_keyboard: Res<crate::hud::UiKeyboardGate>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
@@ -118,6 +119,7 @@ fn drive_camera(
         &keys,
         GodViewInput {
             over_ui: ui_gate.hovered,
+            text_entry: ui_keyboard.text_entry(),
             orbit_held: mouse_buttons.pressed(MouseButton::Right),
             drag,
             scroll,
@@ -128,8 +130,8 @@ fn drive_camera(
         &mut cell,
     );
 
-    // DIAGNOSTIC (remove once the hub view is verified): periodic snapshot of
-    // where the god-view is pointed vs where the ship actually is.
+    // Periodic JSONL snapshot of where the god-view is pointed vs where the
+    // ship actually is.
     *diag_frames += 1;
     if *diag_frames % 90 == 1 {
         let body_id = homeworld.0;
@@ -141,9 +143,14 @@ fn drive_camera(
             .and_then(|s| s.get(body_id))
             .map(|b| ((ship - b.position).length() - ctx.pad_r) / 1000.0);
         info!(
-            target: "thalos::space_center",
-            "hub view: base_site={} pad_r={:.0}m cam_cell={:?} cam_local={:.0?} ship_alt_km={:?}",
-            has_base, ctx.pad_r, *cell, transform.translation, alt_km
+            target: "thalos::diagnostic::space_center",
+            event = "hub_camera",
+            has_base,
+            pad_radius_m = ctx.pad_r,
+            camera_cell = ?*cell,
+            camera_local = ?transform.translation,
+            ?alt_km,
+            "space-center camera gauge"
         );
     }
 }

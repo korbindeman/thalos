@@ -829,14 +829,14 @@ fn spawn_annunciators(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
 // Mode toggle panel (top-left row, next to the SHIP/MAP selector)
 // ---------------------------------------------------------------------------
 
-const TOGGLE_BUTTON_WIDTH: f32 = 56.0;
-const TOGGLE_BUTTON_HEIGHT: f32 = 32.0;
+const TOGGLE_BUTTON_WIDTH: f32 = 50.0;
+const TOGGLE_BUTTON_HEIGHT: f32 = 28.0;
 
 pub fn setup_toggle(mut commands: Commands, theme: Res<HudTheme>, anchor: Res<TopLeftRowAnchor>) {
     let mut root = panel_node();
     root.position_type = PositionType::Relative;
-    root.padding = UiRect::axes(Val::Px(10.0), Val::Px(8.0));
-    root.row_gap = Val::Px(6.0);
+    root.padding = UiRect::axes(Val::Px(8.0), Val::Px(6.0));
+    root.row_gap = Val::Px(4.0);
     let (bg, border) = panel_frame(&theme);
 
     commands.entity(anchor.0).with_children(|row_parent| {

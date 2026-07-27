@@ -30,9 +30,13 @@ height authority.
   learned production packages use the same contract plus a
   deterministic close-detail reconstructor. Both are sampled into tiles on
   demand and expose the same gameplay height authority.
-- **Rendering** — the in-tree `thalos_udlod` fork: UDLOD on an ellipsoidal
-  cube-sphere, fed tiles through the runtime `TileProvider` seam, shaded with
-  the custom Hapke-family BRDF (`thalos::lighting`), not Bevy PBR. See
+- **Rendering** — `thalos_body_render::tiles`: a camera-driven cube-sphere
+  quadtree of ordinary `Mesh` + `StandardMaterial`/`TileTerrainMaterial`
+  entities on Bevy's standard path, sampling the body's `SurfaceQuery` directly.
+  The in-tree `thalos_udlod` fork (UDLOD on an ellipsoidal cube-sphere via the
+  `TileProvider` seam, custom Hapke BRDF, not Bevy PBR) is the **legacy**
+  renderer it replaced — still wired for bodies the tile driver has not
+  installed on and as the `THALOS_TILE_RENDERER=0` baseline. See
   *Rendering: ground LOD*.
 - **Consumers** — colliders (Avian trimesh from tile height), relief shadows
   (baked horizon attachment), dynamic features (static substrate + cheap
@@ -99,6 +103,18 @@ The one hard rule generation owes its consumers: **the static substrate is the
 expensive, immutable/cached layer; anything time-varying is a cheap additive
 overprint that must not invalidate the static package or base cache.**
 ## Rendering: ground LOD (M3)
+
+> **Status: this section describes the LEGACY renderer.** Since the keystone
+> (ADR-20260723T142945Z) the default surface-scale ground renderer is
+> `thalos_body_render::tiles` — ordinary meshes + `StandardMaterial` on Bevy's
+> standard path, driven from `ViewAnchor` by
+> `thalos_runtime::rendering::tile_terrain`; its anatomy is in
+> [architecture.md](../architecture.md) (*`tiles`*) and its plan in
+> [`ntr §6`](../roadmap/neural_terrain_renderer.md). What follows still applies
+> to bodies the tile driver has not installed on and to the
+> `THALOS_TILE_RENDERER=0` A/B baseline, and is retained because the *contract*
+> (provider-first tiles, cube-sphere addressing, the height authority) carried
+> over. Do not extend the udlod stack; defect-driven fixes only.
 
 Thalos uses the in-tree `thalos_udlod` fork for surface-scale terrain
 rendering. The fork began as Kurt Kühnert's `bevy_terrain`, which was

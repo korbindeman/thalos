@@ -23,6 +23,7 @@ use bevy::math::DVec3;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use thalos_physics_canonical::canonical::CraftId;
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
@@ -125,6 +126,20 @@ impl Plugin for ShipViewPlugin {
 /// material it should mutate.
 #[derive(Component)]
 pub(crate) struct PartVisual;
+
+/// Root of one rendered canonical craft. [`PlayerShip`] marks the selected
+/// root; every other root remains a real visible vessel in the same scene.
+#[derive(Component)]
+pub(crate) struct CraftRoot;
+
+/// Stable link from a rendered craft root or part to canonical fleet state.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CraftIdentity(pub CraftId);
+
+/// Ownership of a flight part. Aggregations that affect player controls and
+/// canonical active-vessel parameters must filter to the active [`CraftId`].
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CraftPart(pub CraftId);
 
 /// Marker on the gear gearbox's rendered mesh child, so
 /// [`sync_gear_visibility`] can hide it when the gear is retracted
@@ -260,13 +275,15 @@ pub(crate) fn build_player_ship(
     });
     sim.simulation.set_ship_mass(stats.wet_mass_kg());
     info!(
-        "ship params: MOI = ({:.0}, {:.0}, {:.0}) kg·m², max torque = {:.0} N·m/axis, m_dry = {:.0} kg, m₀ = {:.0} kg",
-        stats.moment_of_inertia_kg_m2.x,
-        stats.moment_of_inertia_kg_m2.y,
-        stats.moment_of_inertia_kg_m2.z,
-        stats.max_reaction_torque_n_m,
-        stats.dry_mass_kg,
-        stats.wet_mass_kg(),
+        target: "thalos::diagnostic::craft",
+        event = "parameters",
+        inertia_x_kg_m2 = stats.moment_of_inertia_kg_m2.x,
+        inertia_y_kg_m2 = stats.moment_of_inertia_kg_m2.y,
+        inertia_z_kg_m2 = stats.moment_of_inertia_kg_m2.z,
+        max_torque_n_m = stats.max_reaction_torque_n_m,
+        dry_mass_kg = stats.dry_mass_kg,
+        wet_mass_kg = stats.wet_mass_kg(),
+        "craft parameters"
     );
 
     // Whole-body aero config from the blueprint's wing parts (lift + stability
@@ -282,12 +299,14 @@ pub(crate) fn build_player_ship(
                 stats.center_of_mass_m,
             );
             info!(
-                "aero config: {} wing panel(s), ref area {:.1} m², MAC {:.2} m, span {:.1} m, lift_slope {:.1}",
-                panels.len(),
-                config.reference_area_m2,
-                config.reference_chord_m,
-                config.reference_span_m,
-                config.lift_slope,
+                target: "thalos::diagnostic::craft",
+                event = "aero_configuration",
+                wing_panels = panels.len(),
+                reference_area_m2 = config.reference_area_m2,
+                reference_chord_m = config.reference_chord_m,
+                reference_span_m = config.reference_span_m,
+                lift_slope = config.lift_slope,
+                "craft aerodynamic configuration"
             );
             commands.insert_resource(crate::aero::ShipAeroLayout { config });
         }
@@ -322,10 +341,13 @@ pub(crate) fn build_player_ship(
     // so UI surfaces (body tree, focus indicator, debug picker) display
     // it consistently regardless of which entity is the focus target.
     let ship_name = blueprint.name.clone();
+    let craft_id = sim.simulation.active_craft_id();
 
     let player_ship = commands
         .spawn((
             PlayerShip,
+            CraftRoot,
+            CraftIdentity(craft_id),
             HideInMapView,
             Transform::IDENTITY,
             initial_visibility,
@@ -417,30 +439,35 @@ pub(crate) fn build_player_ship(
                 .insert((CellCoord::ZERO, ChildOf(real_root)));
         }
         for part in &to_reparent {
+            world.entity_mut(*part).insert(CraftPart(craft_id));
             world.entity_mut(player_ship).add_child(*part);
         }
     });
 }
 
-/// Sync the [`PlayerShip`] root's cell, local translation, and orientation
-/// to the canonical physics craft state each frame. Attitude is integrated
-/// by [`Simulation`] under player control; map view's billboard ship marker
-/// stays camera-aligned and is unaffected.
+/// Sync every rendered craft root to its canonical fleet state. The active
+/// [`PlayerShip`] gets local-physics render extrapolation; detached OnRails
+/// vessels use their directly propagated canonical pose.
 fn update_player_ship_world_position(
     sim: Res<SimulationState>,
     authority: Res<crate::local_physics::AvianAuthority>,
     clock: Res<crate::sim_clock::SimClock>,
     fixed_time: Res<Time<Fixed>>,
     grid: Query<&Grid, With<BigSpace>>,
-    mut query: Query<(&mut CellCoord, &mut Transform), With<PlayerShip>>,
+    mut query: Query<
+        (
+            &CraftIdentity,
+            Has<PlayerShip>,
+            &mut CellCoord,
+            &mut Transform,
+        ),
+        With<CraftRoot>,
+    >,
 ) {
     let Ok(root_grid) = grid.single() else {
         return;
     };
-    let Ok((mut cell, mut transform)) = query.single_mut() else {
-        return;
-    };
-    let ship = sim.simulation.ship_state();
+    let active_id = sim.simulation.active_craft_id();
 
     // Render extrapolation for the Avian-owned regime (powered descent /
     // landing). Avian integrates the craft at a fixed timestep, but this system
@@ -472,24 +499,33 @@ fn update_player_ship_world_position(
     // so extrapolating a frozen canonical position by an ever-cycling overstep
     // makes the parked craft visibly jitter in the pause menu. When paused, the
     // overstep is meaningless — render the canonical position directly.
-    let position = if authority.owns_translation() && !clock.is_paused() {
-        let body_id = sim.simulation.dominant_body();
-        let body = sim.ephemeris.state(
-            body_id,
-            thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
-        );
-        let surface_velocity =
-            body.velocity + body.angular_velocity.cross(ship.position - body.position);
-        let rel_velocity = ship.velocity - surface_velocity;
-        ship.position + rel_velocity * fixed_time.overstep().as_secs_f64()
-    } else {
-        ship.position
-    };
+    for (identity, is_player_ship, mut cell, mut transform) in query.iter_mut() {
+        let Some(vessel) = sim.simulation.vessel(identity.0) else {
+            continue;
+        };
+        let ship = vessel.state();
+        let mut position = ship.translation.position;
+        if identity.0 == active_id
+            && is_player_ship
+            && authority.owns_translation()
+            && !clock.is_paused()
+        {
+            let body_id = sim.simulation.dominant_body();
+            let body = sim.ephemeris.state(
+                body_id,
+                thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
+            );
+            let surface_velocity =
+                body.velocity + body.angular_velocity.cross(position - body.position);
+            let rel_velocity = ship.translation.velocity - surface_velocity;
+            position += rel_velocity * fixed_time.overstep().as_secs_f64();
+        }
 
-    let (next_cell, local) = root_grid.translation_to_grid(position);
-    *cell = next_cell;
-    transform.translation = local;
-    transform.rotation = sim.simulation.attitude().orientation.as_quat();
+        let (next_cell, local) = root_grid.translation_to_grid(position);
+        *cell = next_cell;
+        transform.translation = local;
+        transform.rotation = ship.attitude.orientation.as_quat();
+    }
 }
 
 /// React to [`ViewMode`] changes: switch the camera focus and snap it to

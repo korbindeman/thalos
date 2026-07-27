@@ -84,9 +84,9 @@ pub(super) struct WarpLevelButton {
 #[derive(Component)]
 pub(super) struct WarpAmountLabel;
 
-const PAUSE_BUTTON_SIZE: f32 = 44.0;
-const WARP_BUTTON_WIDTH: f32 = 26.0;
-const WARP_BUTTON_HEIGHT: f32 = 20.0;
+const PAUSE_BUTTON_SIZE: f32 = 38.0;
+const WARP_BUTTON_WIDTH: f32 = 23.0;
+const WARP_BUTTON_HEIGHT: f32 = 18.0;
 const WARP_BUTTON_GAP: f32 = 3.0;
 
 pub fn setup(
@@ -97,8 +97,8 @@ pub fn setup(
 ) {
     let mut root = panel_node();
     root.position_type = PositionType::Relative;
-    root.padding = UiRect::axes(Val::Px(10.0), Val::Px(8.0));
-    root.row_gap = Val::Px(6.0);
+    root.padding = UiRect::axes(Val::Px(8.0), Val::Px(6.0));
+    root.row_gap = Val::Px(4.0);
 
     let (bg, border) = panel_frame(&theme);
 
@@ -190,8 +190,8 @@ fn spawn_pause_button(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 for _ in 0..2 {
                     bars.spawn((
                         Node {
-                            width: Val::Px(4.0),
-                            height: Val::Px(18.0),
+                            width: Val::Px(3.5),
+                            height: Val::Px(16.0),
                             ..default()
                         },
                         BackgroundColor(theme.text_accent),
@@ -219,33 +219,33 @@ fn spawn_time_readout(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
     let letter = theme.text_subtitle;
     let number = theme.text_primary;
     parent
-        .spawn((Text::new("T+"), text_font(theme, 18.0), TextColor(letter)))
+        .spawn((Text::new("T+"), text_font(theme, 16.0), TextColor(letter)))
         .with_children(|c| {
             c.spawn((
                 TextSpan::new("0"),
-                text_font(theme, 18.0),
+                text_font(theme, 16.0),
                 TextColor(number),
                 TimeYearsSpan,
             ));
             c.spawn((
                 TextSpan::new("y,"),
-                text_font(theme, 18.0),
+                text_font(theme, 16.0),
                 TextColor(letter),
             ));
             c.spawn((
                 TextSpan::new("0"),
-                text_font(theme, 18.0),
+                text_font(theme, 16.0),
                 TextColor(number),
                 TimeDaysSpan,
             ));
             c.spawn((
                 TextSpan::new("d,"),
-                text_font(theme, 18.0),
+                text_font(theme, 16.0),
                 TextColor(letter),
             ));
             c.spawn((
                 TextSpan::new("00:00:00"),
-                text_font(theme, 18.0),
+                text_font(theme, 16.0),
                 TextColor(number),
                 TimeClockSpan,
             ));

@@ -71,15 +71,21 @@ pub fn update_render_origin(
     // In-world god-view modes (space-center hub, base editor) drive the
     // `ShipCamera` — the big_space `FloatingOrigin` — directly, decoupling it
     // from `CameraFocus`: the focus target can sit in a parking orbit (or
-    // resolve to the star) while the camera god-views a surface base. Because
-    // `RenderOrigin` is what every render-space entity *outside* big_space
-    // measures from — the sun-shadow cascade cameras above all — it must mirror
-    // that FloatingOrigin, or those entities land ~heliocentric-scale away from
-    // the big_space-rendered world and render nothing (the "no shadows over the
-    // base in the hub" bug). These contexts freeze the sim, so the one-frame-
-    // stale camera pose read here is coherent: there is no warp motion to jitter
-    // the origin, unlike flight — where the fresh focus-target position below is
-    // required to stay locked to the moving craft.
+    // resolve to the star) while the camera god-views a surface base. Follow the
+    // camera there so this origin's own consumers (map/orbit projections, screen
+    // markers, star flare) keep small render-space coordinates instead of
+    // measuring from a body 200 km away.
+    //
+    // This is NOT the big_space render frame — see `RenderOrigin`'s doc and
+    // `real_space::RealSpaceOrigin`. Real-space entities living outside the
+    // hierarchy (the sun-shadow cascade cameras) read the latter, which is exact
+    // in every context; making this branch approximate it in the frozen contexts
+    // only ever half-fixed them.
+    //
+    // These contexts freeze the sim, so the one-frame-stale camera pose read
+    // here is coherent: there is no warp motion to jitter the origin, unlike
+    // flight — where the fresh focus-target position below is required to stay
+    // locked to the moving craft.
     if crate::game_context::context_freezes_sim(context.as_deref())
         && let Ok((cell, transform)) = god_view_cam.single()
     {
@@ -356,7 +362,7 @@ pub(super) fn surface_body_to_world_orientation(
 /// The authored-data tidal-lock rule — the ONE place that decides which bodies
 /// are surface-locked to a parent. `spawn` inserts the `TidallyLocked` tag
 /// from this, and frame-conversion consumers without ECS access (screenshot
-/// framings, saved-perspective replay) derive the lock from it directly, so
+/// framings, saved-viewpoint replay) derive the lock from it directly, so
 /// the two can never disagree.
 pub fn authored_lock_parent(body: &thalos_world::BodyDefinition) -> Option<usize> {
     matches!(body.kind, thalos_world::BodyKind::Moon)

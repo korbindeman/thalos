@@ -264,12 +264,17 @@ warp-reset in `Simulation::step` and the sub-surface warp-reset in
 ### 3.4 Multi-craft scope
 
 The record, resolver, and executors are written against "a craft"
-(component + query). What is deliberately **not** done now: canonical
-multi-craft (`Simulation` still owns one `CraftState`) and per-craft
-bubbles (`ActiveLocalBubble` stays a singleton; the likely
-generalization — a shared per-body frame with per-craft anchors — is
-sketched in `docs/simulation/surface_local.md` §9). The constraint on new code
-is only that nothing *new* bakes in single-craft assumptions.
+(component + query). **Canonical multiplicity landed 2026-07-25:**
+`Simulation` owns a deterministic `CraftId`-keyed fleet and advances every
+record under one clock; active-craft methods are compatibility wrappers over
+that registry.
+
+Runtime regime resolution and local physics still project only the active
+craft through singleton `ActiveLocalBubble`. [vessels.md](vessels.md) owns the
+remaining migration: run this same resolver independently for each runtime
+vessel and replace the bubble with one dominant-body local scene containing N
+vessel rigid bodies. New executor work takes a `CraftId`; it must not recover
+the old singleton assumption behind the new fleet API.
 
 ## 4. Backend seam — the Avian decision
 

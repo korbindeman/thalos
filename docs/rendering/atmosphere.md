@@ -183,6 +183,36 @@ That split keeps airless terrain vacuum-black while preventing daylight
 terrain under a blue atmosphere from turning pure black on sun-opposed
 nearby slopes.
 
+### Draw order: the composites are pinned, not sorted
+
+The atmosphere, the analytic ocean, the cloud composite and the celestial
+backdrop all ride `Transparent3d`, which sorts by the view-space depth of each
+mesh's centre. **That sort is meaningless for a fullscreen pass and must never
+be relied on.** A composite parented to the body has the planet centre as its
+sort point, and the sort key is not the distance to that centre — it is the
+*projection of the offset onto the view axis*. Standing on the surface it
+collapses through zero and, for any camera pitched above the horizontal, goes
+positive (the centre is behind the eye), which drops the composite to the very
+end of the phase where it paints over world transparency. That erased engine
+plumes against the sky for as long as the rule was geometric
+(INC-20260725T185440Z-plume-erased-by-the-sky).
+
+The stack is therefore declared, in `thalos_body_render::composite_order`:
+
+```text
+celestial backdrop → atmosphere → ocean → clouds → world transparents
+```
+
+Each pass claims a slot as a `Material::depth_bias` (Bevy folds that straight
+into the sort key) far enough out that no camera orientation can reorder the
+stack or lift a composite past ordinary transparency. **A fullscreen composite
+must claim a slot there — never bias 0.** The backdrop sits at the far end
+precisely so the air is drawn over it: that is what lets the atmosphere's
+`(1 − alpha)` transmittance perform the per-pixel star crush.
+
+`just screenshot plume-skyline` is the regression probe — it holds the camera
+pitched above the horizontal, the only regime in which the ordering can fail.
+
 ### Why this approach (not Bruneton)
 
 Bruneton 2008 is the canonical "right" answer for high-fidelity
@@ -355,7 +385,7 @@ flux units.
 
 The fix decouples the two. `crates/runtime/game/src/rendering/ground_terrain.rs`
 holds an `AtmosphereTuning` resource (`#[reflect(Resource)]`)
-with an **absolute** `aerial_perspective_strength` (default `0.15` =
+with an **absolute** `aerial_perspective_strength` (default `0.10` =
 clear weather). Each frame the per-body shader multiplier is computed as
 `aerial_perspective_strength / effective_sky_strength` and passed in
 `BodySkyExtra::cloud_band_radii.z`; `body_sky.wgsl` scales the in-scatter
@@ -383,6 +413,46 @@ column at the limb or along a low horizontal flight path (full veil). The tau
 thresholds (`aerial_tau_near ≈ 0.30`, `aerial_tau_far ≈ 2.40`) are calibrated to
 the old distance ramp *at sea level* (its 8 km onset / 70 km full-veil paths), so
 the on-surface look is unchanged and altitude simply re-grades it correctly.
+
+**Column consistency: the low-τ half of the veil.** The two paragraphs above left
+a gap that read as "the atmosphere is too clear at high altitude". The airlight
+ratio scales only the **additive** in-scatter; the dst-attenuation opacity stays
+physical (`1 − T`). Below `aerial_tau_near` the artistic veil is off, so a surface
+pixel there gets the physical `1 − T` of its own radiance *removed* and only
+`aerial_perspective_strength / sky_strength` of the airlight that should replace
+it handed back. Looking straight down from orbit through one full Thalos column
+that is a ~15% dim against ~1/30th of the light returned: orbital land came out
+**darker and more saturated**, the opposite of aerial perspective, and stayed
+crisp to within a hair of the limb where ISS reference photos show a blue veil
+developing over most of the disc. (The `aerial` ramp itself was never
+inconsistent — it feeds *both* the in-scatter scale and the opacity. Only the
+constant floor underneath it was.)
+
+`body_sky.wgsl` now lifts that floor from the ground-calibrated clear-weather
+value toward `column_airlight_exposure / atmos_geom.z` — `atmos_geom.z` being the
+artistic sky-dome inflation that exists only to crush stars, so dividing it out
+lands on the airlight the in-scatter would carry at `strength: 1`.
+
+The lift is driven by **Rayleigh air mass**, not total τ, and that distinction is
+load-bearing. The sea-level calibration is aerosol-dominated — an 8 km horizontal
+path crosses ~6.7 Mie scale heights but only one Rayleigh one — while an orbital
+ray barely crosses the 1.2 km Mie layer at all. Keying the lift on total τ would
+therefore re-haze exactly the ground distance the Mie cut (0.06 → 0.025) was made
+to keep crisp, and re-haze it with **grey** aerosol veil, which is what washed it
+to a grey-tan band in the first place. The two columns separate cleanly out of the
+**chromatic spread** of the transmittance the integrator already returns: Mie is
+spectrally flat, so it cancels exactly in a channel difference and what survives
+is pure Rayleigh. `rayleigh_air_mass = (τ_b − τ_r) / (τ_v,b − τ_v,r)`, where
+`1.0` = one vertical column = nadir from orbit. The onset sits at a sixth of a
+column so a ground observer's near field is untouched, and the far end well past
+one column because an oblique orbital frame spans ~1–4 columns — a nearer ceiling
+pins most of the frame at one value and reads as a flat wash instead of depth.
+
+`column_airlight_exposure` is the same class of fudge as the two below: the
+ground calibration's own 0.10 correction is far too aggressive once the column is
+thick (applying it is what produced no veil at all), while the uncorrected value
+over-veils orbital land to a flat blue-grey with no biome colour left. It is
+screenshot-calibrated against ISS reference framings and retires with F1/F2.
 
 **Impostor path.** The distant billboard (`solid_planet.wgsl`,
 `SolidPlanetMaterial` body pass) previously added the in-scatter at full sky-dome
@@ -537,8 +607,9 @@ stages:
 3. **Composite (body_render, `cloud_composite.wgsl`).** The cloud texture and
    hit-distance texture are bound to one `CloudCompositeMaterial`, the sole
    fullscreen owner of near-volume and weather-derived orbital clouds. It
-   renders after the canonical `BodySky` atmosphere; an explicit depth bias
-   resolves their otherwise tied transparent sort points. Occlusion against
+   renders after the canonical `BodySky` atmosphere; both take pinned slots from
+   `composite_order` (see "Draw order" above), which fixes their order relative
+   to each other *and* keeps both behind world transparency. Occlusion against
    geometry (ship hull / terrain) ramps `cloud_vis` from the **per-pixel
    nearest cloud-hit distance** to the band exit (ray-shell intersection,
    `cloud_band_radii` in the shared per-body parameters), so geometry under a sparse deck
@@ -650,13 +721,18 @@ foundation (the single terrain height authority):
   terrain reflections. This requires **terrain in the ray-tracing acceleration
   structure (a BLAS)** — there is no shortcut. RT *on the ship only* (terrain
   absent from the BLAS) reflects the sky but **not the ground**, exactly the
-  wrong artifact for a grounded stainless vehicle. Making terrain RT-visible
-  means extending the collider-patch trimesh extraction (see
-  [terrain.md](../world/terrain.md) *The tile contract* / *M5 colliders*) into a BLAS
-  region, accepting raster-vs-RT geometry divergence at LOD seams, and solving
-  acceleration-structure precision under the floating origin. A research
-  project, not a toggle — the single height authority is what keeps the door
-  open.
+  wrong artifact for a grounded stainless vehicle. **Updated 2026-07-24:** the
+  prerequisite is now satisfiable without the research project this paragraph
+  once described. Terrain renders as ordinary meshes through the tile renderer
+  (NTR-X1/X2a), so the BLAS source is those meshes — no collider-trimesh
+  extraction, no separate RT geometry, and therefore no raster-vs-RT divergence
+  beyond LOD seams. What remains open is cost, not feasibility: BLAS build and
+  compaction against the tile streaming rate, and acceleration-structure
+  precision under the floating origin. Scoped as **NTR-RT3** behind the
+  **NTR-RT1** measurement gate; the shape is fixed by
+  [ADR-20260724T224242Z](../adr/20260724T224242Z-solari-scene-half-not-lighting-half.md).
+  The "keep the reflection source behind the material interface" contract above
+  is exactly what lets that land without touching ship materials.
 
 ### Today
 
@@ -744,12 +820,25 @@ ships move far from Thalos.
 
 ### Real-time GI / ray tracing (bevy_solari)
 
-Not wired in (Bevy 0.18). `bevy_solari` builds ray-tracing acceleration
-structures from `Mesh3d`; the terrain has no mesh (GPU-procedural indirect
-draw), so it is invisible to ray tracing without the BLAS-extraction work
-above. Its natural fit is the **near-field mesh scene** — ship, EVA, future
-interiors/stations — where dynamic RT bounce shines; it is experimental and
-hardware-RT-only, so it is **not** a foundation for planet lighting. The
+Not wired in. **Rewritten 2026-07-24** — the previous text ("the terrain has no
+mesh, so it is invisible to ray tracing") described the udlod era and is
+obsolete: terrain renders as ordinary meshes through the tile renderer.
+
+The decision is recorded in
+[ADR-20260724T224242Z](../adr/20260724T224242Z-solari-scene-half-not-lighting-half.md):
+**take Solari's raytracing *scene*, never its raytraced *lighting*.** Verified
+against the 0.19 crate source, `SolariLightingPlugin` forces the opaque path
+deferred app-wide (costing our Hapke BRDF), extracts only plain
+`StandardMaterial` (excluding every surface we ship — all are `ExtendedMaterial`),
+and has **no sky or environment lighting whatsoever**: rays that miss contribute
+nothing. On an atmospheric body that deletes the dominant ambient term, so it is
+a *replacement* for our lighting universe and a worse one. `RaytracingScenePlugin`
+carries none of that — BLAS/TLAS plus scene bindings, with no opinion on shading —
+and surfaces enter it through `Mesh3d`-less proxy entities that share the visible
+entity's mesh handle, keeping their own materials. Consumers: RT sun visibility
+(NTR-RT2) and mirror-hull reflections (NTR-RT3), both behind the NTR-RT1 cost
+gate. It stays experimental and hardware-RT-only, so it is **not** a foundation
+for planet lighting — the raster path remains the baseline. The
 dominant surface indirect is already analytic/baked and more robust at scale:
 **planetshine** (ground bounce), **atmospheric skylight** (in-scatter), and the
 **baked horizon AO** tile attachment. If dynamic bounce that also covers

@@ -60,6 +60,13 @@ use crate::query::{SurfaceQuery, SurfaceSample};
 const WARP_WL_M: f64 = 60_000.0;
 const WARP_AMP_M: f64 = 4_000.0;
 
+/// Rust-red bare lateritic soil, linear RGB — the ONE bare-soil anchor
+/// (mirrors `landcover.wgsl::C_SOIL` / the lore's iron-rich ground). Used by
+/// [`albedo_from_bands`]'s soil step and by [`crate::query::FlattenedSurface`]'s
+/// worn-margin ring, so ground bared by dryness and ground bared by traffic
+/// read as the same dirt.
+pub(crate) const LATERITE_SOIL_ALBEDO: Vec3 = Vec3::new(0.112, 0.074, 0.042);
+
 // --- Continents & oceans (the macro land/sea structure) --------------------
 //
 // A single low-frequency *continentalness* field `c` ([`ProceduralSurface::
@@ -337,9 +344,13 @@ const TONE_AMP: f64 = 0.10;
 // shader and GPU grass evaluate the same curve from the same constants; keep
 // them in lockstep.
 
-/// Full band descent at the poles (m). Snow bands start at 3.1 km, so a full
-/// lift buries the poles under the cap with margin.
-const CLIMATE_COLD_LIFT_MAX_M: f64 = 3_600.0;
+/// Full band descent at the poles (m) — sized to the tropical snowline
+/// (4.6 km, see [`macro_band_ts`]) so a full lift still buries the poles
+/// under the cap with margin. Raised 3 600 → 5 300 in lockstep with the
+/// NTR-X4 band re-anchor: the thresholds keyed off *this* value below scale
+/// with it, so the latitudes at which tundra / cool climate arrive are
+/// unchanged — only the altitudes moved.
+const CLIMATE_COLD_LIFT_MAX_M: f64 = 5_300.0;
 /// `sin(latitude)` where cooling begins (~27°) and the span it ramps over.
 /// The power curve keeps mid-latitudes mild — Earth-ish treeline descent
 /// against Thalos's high-sitting land (platform + interior gain ≈ 0.4–1 km):
@@ -351,8 +362,10 @@ const CLIMATE_LAT_SPAN: f64 = 0.55;
 const CLIMATE_LAT_POW: f64 = 2.6;
 /// Cold-lift band over which `warmth` fades 1 → 0 (hot tropics → cool
 /// temperate). Dry ground reads as hot-desert sand only while warm.
-const CLIMATE_WARM_LO_M: f64 = 500.0;
-const CLIMATE_WARM_HI_M: f64 = 1_600.0;
+/// Scaled with `CLIMATE_COLD_LIFT_MAX_M` (×5300/3600) so the *latitudes* the
+/// fade spans are the authored ones.
+const CLIMATE_WARM_LO_M: f64 = 735.0;
+const CLIMATE_WARM_HI_M: f64 = 2_355.0;
 
 /// Metres the ecological bands descend at `sin_lat = |sin(latitude)|`.
 /// Mirrored as `climate_cold_lift` in landcover.wgsl.
@@ -366,6 +379,31 @@ pub fn climate_cold_lift_m(sin_lat: f64) -> f64 {
 pub fn climate_warmth(cold_lift_m: f64) -> f64 {
     1.0 - smoothstep(CLIMATE_WARM_LO_M, CLIMATE_WARM_HI_M, cold_lift_m)
 }
+
+// --- Ecological altitude lines (treeline, snowline) ------------------------
+//
+// Both are expressed in **ecological altitude** — geometric height plus
+// `climate_cold_lift_m` — so one pair of constants serves every latitude.
+// They are MIRRORED in `thalos::landcover` (landcover.wgsl) and consumed by
+// the tile material shader through `MaterialBands::eco_altitude_m`; keep the
+// three in lockstep.
+//
+// Re-anchored 2026-07-24 (NTR-X4) from 2400/3000 and 3000/3600. The old
+// values were authored against the pre-diffusion generator, whose land topped
+// out near 2–3 km; the diffusion window carries 5.8 km massifs, and at the
+// showcase site's latitude (8.5°, cold lift = 0) the old snowline buried
+// **67 %** of the massif under permanent snow — the white-blob mountain the
+// user flagged. Earth's tropical snowline sits near 4.9 km and its tropical
+// treeline near 3.5–4 km; at those the same massif reads snow on 14 % of its
+// area, i.e. summit fields with rock below, like the Alpine reference.
+
+/// Treeline: above this ecological altitude the surface is alpine rock /
+/// scree rather than vegetated ground.
+pub const ALPINE_LO_M: f64 = 3_400.0;
+pub const ALPINE_HI_M: f64 = 4_100.0;
+/// Snowline: permanent snow saturates above `SNOWLINE_HI_M`.
+pub const SNOWLINE_LO_M: f64 = 4_600.0;
+pub const SNOWLINE_HI_M: f64 = 5_300.0;
 
 // --- Moisture geography (latitude belts + continentality) ------------------
 //
@@ -605,7 +643,14 @@ const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0)
 ///
 /// (Terrain generation is under active iteration; if you are mid-tuning and want
 /// to sidestep this entirely, run with `THALOS_TILE_CACHE=0`.)
-pub const GENERATOR_VERSION: u64 = 18;
+// 22: the macro albedo mixes its dark canopy anchor at canopy *coverage*
+//     (climate envelope × `canopy::canopy_stand`) instead of the bare climate
+//     envelope, so forest-green ground only appears where stands stand.
+// 23: `FlattenedSurface` wears the pad ramp's albedo toward bare soil in
+//     noise-broken patches (worn margins around built sites).
+// 24: the diffusion erosion band rounds the filter's C0 ridge folds at its own
+//     resolution (`EROSION_FOLD_ROUND`) — the "shark fin" blades.
+pub const GENERATOR_VERSION: u64 = 24;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProceduralSurface {
@@ -966,6 +1011,40 @@ impl ProceduralSurface {
         fbm(p / TONE_WL_M, self.seed ^ 0x70E4_0001, 3.0)
     }
 
+    /// The macro-band climate inputs that do **not** require composing terrain
+    /// height: `(orogeny, moisture)`. Both are what
+    /// [`Self::macro_albedo_bands_for`] feeds [`macro_band_ts`], obtained the
+    /// same way from the same helpers — but skipping the relief cascade (hills,
+    /// swell, ridges, detail octaves) that a caller supplying its own
+    /// `height_m` has no use for.
+    ///
+    /// This exists because [`SurfaceQuery::canopy_coverage`] is evaluated **per
+    /// vegetation candidate**, and routing it through the full height
+    /// composition made every tree candidate pay a terrain evaluation — on a
+    /// path whose cost is already field-eval-bound. The warp + orogeny + moisture
+    /// here are a handful of low-frequency octaves at fixed cost.
+    ///
+    /// [`SurfaceQuery::canopy_coverage`]: crate::query::SurfaceQuery::canopy_coverage
+    fn canopy_climate_inputs(&self, dir: DVec3, lod_m: f32) -> (f64, f64) {
+        let p = dir * self.radius_m;
+        // Same relief-scale warp the height path applies before sampling
+        // orogeny — `orogeny` is defined on the warped position, so sampling it
+        // unwarped would give a *different* answer than the vertex path and
+        // reintroduce the two-fields disagreement this seam exists to end.
+        let wp = p / WARP_WL_M;
+        let warp = DVec3::new(
+            fbm(wp, self.seed ^ 0x1111, 2.0),
+            fbm(wp + DVec3::splat(31.4), self.seed ^ 0x2222, 2.0),
+            fbm(wp - DVec3::splat(17.2), self.seed ^ 0x3333, 2.0),
+        ) * WARP_AMP_M;
+        let orogeny = self.orogeny(p + warp) * self.runway_plains_factor(dir);
+        // Same continentalness (incl. the runway-siting bias) the height path
+        // uses, so the moisture matches the baked field.
+        let c = self.continentalness(p) + self.runway_land_bias(dir);
+        let moisture = self.macro_moisture(p, lod_m, c, dir.y.abs());
+        (orogeny, moisture)
+    }
+
     /// Decorrelated montane-orogeny weight in `[0, 1]` at warped position `pw`.
     /// A long-wavelength field independent of the continent field, so mountains
     /// form their own regions rather than tracking base altitude. Kept as one
@@ -986,16 +1065,29 @@ impl ProceduralSurface {
     /// gates sand vs cold steppe. Still a stand-in for the later procedural
     /// material model.
     fn albedo_from_bands(&self, t: &MacroBandTs, tone: f64) -> Vec3 {
+        // (`LATERITE_SOIL_ALBEDO` is the module-level anchor so the flatten
+        // decorator's worn-margin ring in `query.rs` wears toward the exact
+        // soil this palette exposes — one bare-soil colour, not two.)
         // Linear-RGB band anchors.
         let shore = Vec3::new(0.30, 0.27, 0.18); // tan/sand near 0 m
         let lowland_lush = Vec3::new(0.08, 0.16, 0.06); // green
         let lowland_dry = Vec3::new(0.135, 0.140, 0.070); // dry-grass tan
-        let laterite = Vec3::new(0.112, 0.074, 0.042); // rust-red bare soil (= landcover C_SOIL)
+        let laterite = LATERITE_SOIL_ALBEDO; // rust-red bare soil (= landcover C_SOIL)
         let sand = Vec3::new(0.225, 0.190, 0.125); // hot-desert sand
         let forest = Vec3::new(0.040, 0.095, 0.032); // dark canopy green
         let tundra = Vec3::new(0.088, 0.096, 0.078); // cold muted moss/lichen
-        let upland = Vec3::new(0.092, 0.104, 0.082); // grey-green upland (temperate, not brown)
-        let rock = Vec3::new(0.118, 0.120, 0.122); // neutral grey rock
+        // Subalpine belt (between closed forest and the treeline): dry alpine
+        // meadow + krummholz. It was a near-neutral grey-green (0.092, 0.104,
+        // 0.082) — chosen to keep temperate uplands from reading brown, but at
+        // only 0.21 chroma and a luminance within 25 % of the lush green below
+        // it, it read as a *bleached veil* laid over the mountain wherever the
+        // band was partially weighted. Warmer and darker, at twice the chroma,
+        // it reads as ground.
+        let upland = Vec3::new(0.085, 0.090, 0.052);
+        // Rock warmed off neutral: real alpine faces are grey-*brown*, and a
+        // faintly blue rock next to a blue-tinted sky fill is what tipped the
+        // upper massif into looking hazy rather than stony.
+        let rock = Vec3::new(0.112, 0.107, 0.098);
         let snow = Vec3::new(0.62, 0.64, 0.68); // snow
 
         // Lowland palette by regional dryness; the wettest regions skew toward
@@ -1009,7 +1101,16 @@ impl ProceduralSurface {
         let mut lowland = mix(lowland_lush, lowland_dry, t.dry as f32);
         lowland = mix(lowland, laterite, t.soil as f32);
         lowland = mix(lowland, sand, t.sand as f32);
-        lowland = mix(lowland, forest, t.forest as f32);
+        // Canopy coverage, NOT the bare climate envelope: the dark canopy anchor
+        // is what closed forest looks like from orbit, so it may only land where
+        // stands actually stand. Mixing it at `t.forest` painted whole wet
+        // regions canopy-green while the trees clustered on a *different*,
+        // render-side noise field — dark "forest" ground with nothing growing on
+        // it, and pale trees standing on ground the palette called meadow.
+        // `t.stand` is the shared authority that ends that disagreement
+        // (`crate::canopy`); it is also the weight the tile shader un-mixes to
+        // recover understory colour, so the two must stay the same product.
+        lowland = mix(lowland, forest, t.canopy_lowland() as f32);
 
         // Ecological altitude: the bands descend with latitude, so high
         // latitudes go rock/snow at ever-lower ground (polar caps at 0 m).
@@ -1065,7 +1166,7 @@ impl ProceduralSurface {
         let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
         let cold_lift = climate_cold_lift_m(sin_lat);
         let warmth = climate_warmth(cold_lift);
-        let bands = macro_band_ts(height_m, orogeny, moisture, cold_lift, warmth);
+        let bands = macro_band_ts(dir, height_m, orogeny, moisture, cold_lift, warmth);
         (
             self.albedo_from_bands(&bands, self.macro_tone(p)),
             moisture,
@@ -1089,7 +1190,7 @@ impl ProceduralSurface {
         let tone = self.macro_tone(p);
         let cold_lift = climate_cold_lift_m(sin_lat);
         let warmth = climate_warmth(cold_lift);
-        let bands = macro_band_ts(height_m, orogeny, moisture, cold_lift, warmth);
+        let bands = macro_band_ts(dir, height_m, orogeny, moisture, cold_lift, warmth);
         let sample = SurfaceSample {
             height_m: height_m as f32,
             albedo_linear: self.albedo_from_bands(&bands, tone),
@@ -1152,12 +1253,19 @@ impl MacroBiome {
 /// The blend factors of the macro-albedo mix chains, computed once and shared
 /// by [`ProceduralSurface::albedo_from_bands`] (the continuous palette) and
 /// [`classify_macro`] (the discrete class) so the two views cannot drift.
-struct MacroBandTs {
+pub(crate) struct MacroBandTs {
     // Lowland palette chain (regional dryness / climate).
     dry: f64,
     soil: f64,
     sand: f64,
+    /// Climate **envelope** for closed forest: can it grow here at all
+    /// (moisture-driven). This is *not* canopy coverage — multiply by
+    /// [`MacroBandTs::stand`] for that. See [`crate::canopy`].
     forest: f64,
+    /// Canopy **stand structure** in `[0, 1]` from [`crate::canopy::canopy_stand`]:
+    /// where inside the envelope the stands actually sit, with plains and glades
+    /// between them.
+    stand: f64,
     tundra: f64,
     // Altitude band chain (`lowland` keys off raw height — the beach strip
     // stays at the physical coast; the rest off climate-shifted eco altitude).
@@ -1166,19 +1274,25 @@ struct MacroBandTs {
     rock: f64,
     snow: f64,
     oro_rock: f64,
+    /// The climate-shifted altitude the bands above were cut from
+    /// (`height_m + cold_lift_m`) — carried so the material seam can hand the
+    /// shader the altitude itself rather than a collapsed weight.
+    eco_altitude_m: f64,
 }
 
 /// The altitude thresholds MIRROR the ground shader's ecological bands
-/// (`landcover.wgsl` `LUSH_LO/HI` = 1500/2400, `TREELINE_LO/HI` = 2400/3000,
-/// snow above ~3.1 km) so the orbital palette and the ground agree — the
-/// one-world rule. The pre-TM-P3 bands (upland from **120 m**!) painted
-/// nearly all land grey from orbit while the ground below rendered lush, and
-/// crushed the climate palette (59 % of land classified upland, deserts /
-/// steppe / tundra ≈ 0 %). Snow saturates at 3600 m = `CLIMATE_COLD_LIFT_MAX_M`
-/// so the poles cap fully. The dryness thresholds mirror the ground's
+/// (`landcover.wgsl` `LUSH_LO/HI`, `TREELINE_LO/HI` = [`ALPINE_LO_M`] /
+/// [`ALPINE_HI_M`], snowline = [`SNOWLINE_LO_M`] / [`SNOWLINE_HI_M`]) so the
+/// orbital palette and the ground agree — the one-world rule. The pre-TM-P3
+/// bands (upland from **120 m**!) painted nearly all land grey from orbit
+/// while the ground below rendered lush, and crushed the climate palette
+/// (59 % of land classified upland, deserts / steppe / tundra ≈ 0 %). Snow
+/// saturates at `CLIMATE_COLD_LIFT_MAX_M` so the poles cap fully. The
+/// dryness thresholds mirror the ground's
 /// `vegetation_color` transfer (dry-grass 0.55–0.88, soil 0.88–0.98, sand
 /// 0.80–0.95 × warmth, forest below 0.42).
-fn macro_band_ts(
+pub(crate) fn macro_band_ts(
+    dir: DVec3,
     height_m: f64,
     orogeny: f64,
     moisture: f64,
@@ -1192,28 +1306,45 @@ fn macro_band_ts(
         soil: smoothstep(0.88, 0.98, dryness),
         sand: smoothstep(0.80, 0.95, dryness) * warmth,
         forest: 1.0 - smoothstep(0.28, 0.58, dryness),
-        tundra: smoothstep(1_400.0, 2_600.0, cold_lift_m),
+        stand: f64::from(crate::canopy::canopy_stand(dir)),
+        tundra: smoothstep(2_060.0, 3_825.0, cold_lift_m),
         // The tan shore band hugs the physical beach (the +4 m berm face —
         // BL-10), not the first 60 m of elevation: sand is a coastline
         // feature, and the old wide band washed whole coastal plains tan.
         lowland: smoothstep(2.0, 9.0, height_m),
-        upland: smoothstep(1_500.0, 2_400.0, h),
-        rock: smoothstep(2_400.0, 3_000.0, h),
-        snow: smoothstep(3_000.0, 3_600.0, h),
+        // Subalpine: the grey-green belt BETWEEN closed forest and the
+        // treeline. It has to end where `rock` begins, not a kilometre below
+        // it — at 2000/3000 against a 3400 m treeline it greyed out the
+        // forested flanks the reference keeps green all the way up.
+        upland: smoothstep(2_600.0, ALPINE_LO_M, h),
+        rock: smoothstep(ALPINE_LO_M, ALPINE_HI_M, h),
+        snow: smoothstep(SNOWLINE_LO_M, SNOWLINE_HI_M, h),
         oro_rock: 0.35 * orogeny,
+        eco_altitude_m: h,
     }
 }
 
 impl MacroBandTs {
-    /// Absolute snow / forest weights for the material shader — the same
-    /// nested-mix expansion [`classify_macro`] uses, so the shader's snow
-    /// line / canopy grain track exactly what the macro palette paints.
-    fn material_bands(&self) -> crate::query::MaterialBands {
+    /// Canopy coverage **within the lowland palette chain** — climate envelope ×
+    /// stand structure. This is the weight [`ProceduralSurface::albedo_from_bands`]
+    /// mixes the dark canopy anchor at; [`Self::material_bands`] scales it by the
+    /// altitude chain to get the absolute weight.
+    fn canopy_lowland(&self) -> f64 {
+        self.forest * self.stand
+    }
+
+    /// Material-selection inputs for the tile shader: the ecological altitude
+    /// the altitude bands were cut from, plus the **absolute canopy weight** —
+    /// the exact weight the macro palette mixed the canopy anchor at, expanded
+    /// through the same nested mix chain. Because it is the same product, the
+    /// shader can both (a) drive aerial canopy grain from real coverage and
+    /// (b) algebraically un-mix the anchor to recover understory colour.
+    pub(crate) fn material_bands(&self) -> crate::query::MaterialBands {
         let tail = (1.0 - self.rock) * (1.0 - self.snow) * (1.0 - self.oro_rock);
         let w_low = self.lowland * (1.0 - self.upland) * (1.0 - self.tundra) * tail;
         crate::query::MaterialBands {
-            snow: (self.snow * (1.0 - self.oro_rock)) as f32,
-            forest: (w_low * self.forest) as f32,
+            eco_altitude_m: self.eco_altitude_m as f32,
+            canopy: (w_low * self.canopy_lowland()) as f32,
         }
     }
 }
@@ -1227,6 +1358,11 @@ fn classify_macro(t: &MacroBandTs, height_m: f64) -> MacroBiome {
     // Lowland palette chain: lush → dry → soil → sand → forest.
     // Bare laterite soil and hot sand both classify as Desert (hot desert =
     // sand, cold/temperate barrens = soil).
+    // Classification keys off the climate **envelope**, not canopy coverage: a
+    // biome map answers "what region is this" and must not be speckled by the
+    // ~400 m stand structure (`crate::canopy`) that decides where individual
+    // groves sit inside the region. The albedo bake is the opposite case — it
+    // renders what you actually see, so it uses coverage.
     let no_forest = 1.0 - t.forest;
     let low_lush = (1.0 - t.dry) * (1.0 - t.soil) * (1.0 - t.sand) * no_forest;
     let low_dry = t.dry * (1.0 - t.soil) * (1.0 - t.sand) * no_forest;
@@ -1279,7 +1415,7 @@ impl SurfaceQuery for ProceduralSurface {
         let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
         let cold_lift = climate_cold_lift_m(sin_lat);
         let warmth = climate_warmth(cold_lift);
-        let bands = macro_band_ts(height_m, orogeny, moisture, cold_lift, warmth);
+        let bands = macro_band_ts(dir, height_m, orogeny, moisture, cold_lift, warmth);
         (
             SurfaceSample {
                 height_m: height_m as f32,
@@ -1293,6 +1429,15 @@ impl SurfaceQuery for ProceduralSurface {
 
     fn sample_height_m(&self, dir: Vec3, lod_m: f32) -> f32 {
         self.height_and_orogeny(dir.as_dvec3(), lod_m).0 as f32
+    }
+
+    fn canopy_climate(&self, dir: DVec3, lod_m: f32) -> crate::canopy::CanopyClimate {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO {
+            return crate::canopy::CanopyClimate::default();
+        }
+        let (orogeny, moisture) = self.canopy_climate_inputs(dir, lod_m);
+        crate::canopy::CanopyClimate { moisture, orogeny }
     }
 
     fn landcover_moisture(&self, dir: DVec3) -> f32 {

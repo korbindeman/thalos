@@ -140,8 +140,7 @@ pub fn run<B: Backend>(
     // The model works in normalized band space; re-dimensionalize its output
     // by the face/train coarse ratio so detail stays proportional relief.
     let residual_gain = target_scale * (face_coarse_scale / coarse_scale);
-    let scale_condition =
-        ((SLDEM_METRES_PER_PIXEL / 250.0).log2() / 4.0).clamp(-1.0, 1.0);
+    let scale_condition = ((SLDEM_METRES_PER_PIXEL / 250.0).log2() / 4.0).clamp(-1.0, 1.0);
 
     let mut enhanced_faces = Vec::with_capacity(6);
     let mut windows_per_face = 0;
@@ -245,10 +244,7 @@ fn checkpoint_scales(
             .map(|value| value as f32)
             .ok_or_else(|| format!("checkpoint.json missing {name}").into())
     };
-    Ok((
-        scale("target_scale_metres")?,
-        scale("coarse_scale_metres")?,
-    ))
+    Ok((scale("target_scale_metres")?, scale("coarse_scale_metres")?))
 }
 
 /// Generate the learned residual band for one face canvas with overlap fusion.
@@ -449,8 +445,8 @@ fn save_equirect(
     let height = width / 2;
     let mut grid = Grid::zeros(width);
     for y in 0..height {
-        let latitude = std::f32::consts::FRAC_PI_2
-            - (y as f32 + 0.5) / height as f32 * std::f32::consts::PI;
+        let latitude =
+            std::f32::consts::FRAC_PI_2 - (y as f32 + 0.5) / height as f32 * std::f32::consts::PI;
         for x in 0..width {
             let longitude =
                 (x as f32 + 0.5) / width as f32 * std::f32::consts::TAU - std::f32::consts::PI;

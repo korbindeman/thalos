@@ -39,44 +39,45 @@ use crate::target::TargetBody;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 
 /// Diameter of the circular panel (px).
-const PANEL_DIAMETER: f32 = 190.0;
-const PANEL_LEFT_PX: f32 = 40.0 + 256.0 + 14.0;
-/// Vertically centred against the 256-px navball: (256-190)/2 = 33 px lift.
-const PANEL_BOTTOM_PX: f32 = 40.0 + 33.0;
+const PANEL_DIAMETER: f32 = 168.0;
+/// Sits immediately right of the navball, sharing its bottom-left margin.
+const PANEL_LEFT_PX: f32 = NAVBALL_LEFT_PX + NAVBALL_SIZE_PX + 12.0;
+/// Vertically centred against the navball.
+const PANEL_BOTTOM_PX: f32 = NAVBALL_BOTTOM_PX + (NAVBALL_SIZE_PX - PANEL_DIAMETER) * 0.5;
 
-const BUTTON_SIZE: f32 = 36.0;
-const BUTTON_RING_RADIUS: f32 = PANEL_DIAMETER * 0.5 - BUTTON_SIZE * 0.5 - 10.0;
+const BUTTON_SIZE: f32 = 32.0;
+const BUTTON_RING_RADIUS: f32 = PANEL_DIAMETER * 0.5 - BUTTON_SIZE * 0.5 - 9.0;
 
-const CENTER_SIZE: f32 = 64.0;
+const CENTER_SIZE: f32 = 56.0;
 
 const AXIS_LENGTH: f32 = (BUTTON_RING_RADIUS - BUTTON_SIZE * 0.5) * 2.0;
 const AXIS_THICKNESS: f32 = 1.5;
 
-const ASSIST_PANEL_BOTTOM_PX: f32 = PANEL_BOTTOM_PX + PANEL_DIAMETER + 8.0;
-const ASSIST_PANEL_HEIGHT: f32 = 38.0;
-const ASSIST_BUTTON_WIDTH: f32 = 72.0;
-const ASSIST_BUTTON_HEIGHT: f32 = 28.0;
+const ASSIST_PANEL_BOTTOM_PX: f32 = PANEL_BOTTOM_PX + PANEL_DIAMETER + 7.0;
+const ASSIST_PANEL_HEIGHT: f32 = 33.0;
+const ASSIST_BUTTON_WIDTH: f32 = 64.0;
+const ASSIST_BUTTON_HEIGHT: f32 = 25.0;
 
-const TOP_RIGHT_PANEL_RIGHT_PX: f32 = 20.0;
-const AUTOPILOT_PANEL_TOP_PX: f32 = 60.0;
-const AUTOPILOT_PANEL_HEIGHT: f32 = 58.0;
-const AUTOPILOT_BUTTON_WIDTH: f32 = 92.0;
-const AUTOPILOT_BUTTON_HEIGHT: f32 = 30.0;
+const TOP_RIGHT_PANEL_RIGHT_PX: f32 = 16.0;
+const AUTOPILOT_PANEL_TOP_PX: f32 = 52.0;
+const AUTOPILOT_PANEL_HEIGHT: f32 = 51.0;
+const AUTOPILOT_BUTTON_WIDTH: f32 = 82.0;
+const AUTOPILOT_BUTTON_HEIGHT: f32 = 27.0;
 
-const MANEUVER_PANEL_HEIGHT: f32 = 104.0;
+const MANEUVER_PANEL_HEIGHT: f32 = 92.0;
 /// The maneuver editor lives in the bottom-left flight cluster, stacked above
 /// the velocity readout (which itself sits above the navball). The velocity
-/// readout (`HudFlight`) is ~60 px tall; clear it with a small gap.
+/// readout (`HudFlight`) is ~54 px tall; clear it with a small gap.
 const MANEUVER_PANEL_LEFT_PX: f32 = NAVBALL_LEFT_PX;
-const MANEUVER_PANEL_BOTTOM_PX: f32 = NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 10.0 + 60.0 + 8.0;
-const MANEUVER_BAR_HEIGHT: f32 = 8.0;
-const MANEUVER_WARP_BUTTON_WIDTH: f32 = 56.0;
-const MANEUVER_WARP_BUTTON_HEIGHT: f32 = 24.0;
+const MANEUVER_PANEL_BOTTOM_PX: f32 = NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 8.0 + 54.0 + 7.0;
+const MANEUVER_BAR_HEIGHT: f32 = 7.0;
+const MANEUVER_WARP_BUTTON_WIDTH: f32 = 50.0;
+const MANEUVER_WARP_BUTTON_HEIGHT: f32 = 22.0;
 
-const UTILITY_PANEL_BOTTOM_PX: f32 = 20.0;
-const UTILITY_PANEL_HEIGHT: f32 = 44.0;
-const UTILITY_BUTTON_SIZE: f32 = 34.0;
-const UTILITY_ICON_SIZE: u32 = 28;
+const UTILITY_PANEL_BOTTOM_PX: f32 = 16.0;
+const UTILITY_PANEL_HEIGHT: f32 = 39.0;
+const UTILITY_BUTTON_SIZE: f32 = 30.0;
+const UTILITY_ICON_SIZE: u32 = 25;
 
 /// (mode, clockwise-angle-from-12-o'clock). Hex layout at 60° intervals.
 const MODE_LAYOUT: [(NavigationMode, f32); 6] = [
@@ -261,9 +262,9 @@ pub fn setup(
                 height: Val::Px(ASSIST_PANEL_HEIGHT),
                 border: UiRect::all(Val::Px(1.0)),
                 border_radius: BorderRadius::all(Val::Px(4.0)),
-                padding: UiRect::axes(Val::Px(14.0), Val::Px(4.0)),
+                padding: UiRect::axes(Val::Px(10.0), Val::Px(3.0)),
                 flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(10.0),
+                column_gap: Val::Px(8.0),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()
@@ -291,9 +292,9 @@ pub fn setup(
                 height: Val::Px(UTILITY_PANEL_HEIGHT),
                 border: UiRect::all(Val::Px(1.0)),
                 border_radius: BorderRadius::all(Val::Px(4.0)),
-                padding: UiRect::axes(Val::Px(12.0), Val::Px(5.0)),
+                padding: UiRect::axes(Val::Px(9.0), Val::Px(4.0)),
                 flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(12.0),
+                column_gap: Val::Px(10.0),
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 ..default()

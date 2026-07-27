@@ -107,8 +107,12 @@ overrides, readback, and result validation. A request is not successful merely
 because a PNG exists: shader compilation, pipeline validation, missing render
 layers, write failures, and incomplete frame sequences fail the result.
 
-The interactive launcher also installs the shared capture runtime for F2 and F8;
-those are interactive clients of the same capture/perspective types.
+The interactive launcher also installs F2 plus the F8 egui viewpoint manager.
+The portable capture protocol owns the versioned `assets/viewpoints.json` types,
+so the manager, agent edits, CLI, and headless runtime share one schema. Exact
+saved poses and agent-scripted views are both catalog entries. Procedural
+drivers remain runtime behavior for searches and diagnostic setup, but they are
+capabilities selected by catalog data rather than a second public view list.
 
 ## 5. Still, comparison, and video
 

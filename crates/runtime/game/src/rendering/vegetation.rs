@@ -732,7 +732,7 @@ fn drive_veg_tiles(
     solar: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
-    gpu_height_mirrors: Res<crate::terrain_registry::GpuHeightMirrorRegistry>,
+    rendered_ground: Res<crate::terrain_registry::RenderedGroundRegistry>,
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     bake: Res<ImpostorBake>,
     anchor: Res<ViewAnchor>,
@@ -794,13 +794,12 @@ fn drive_veg_tiles(
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
-    let mirror = gpu_height_mirrors.get(body_id);
+    let mirror = rendered_ground.get(body_id);
 
     let cam_dir = view.cam_dir;
     let ground_h = view.ground_h_m;
     let agl = view.agl_m;
-    // DIAGNOSTIC (remove once base-view vegetation is verified): why do trees not
-    // build in the no-ship god-view? Report the scatter centre state each ~1.5 s.
+    // Investigation trace: report the scatter centre state to JSONL each ~1.5 s.
     *diag = diag.wrapping_add(1);
     if *diag % 90 == 1 {
         // Split empty (cleared/wrong-biome) vs tree-bearing tiles, and the
@@ -816,13 +815,17 @@ fn drive_veg_tiles(
             .fold(f64::INFINITY, f64::min)
             / 1000.0;
         info!(
-            target: "thalos::veg",
-            "veg drive: body={body_id} ground_h_m={ground_h:.0} agl_m={agl:.0} tiles={} \
-             nonempty={nonempty} nearest_tree_km={nearest_tree_km:.2} \
-             in_flight={} bake_ready={}",
-            veg.tiles.len(),
-            veg.in_flight.len(),
-            bake.ready,
+            target: "thalos::diagnostic::vegetation",
+            event = "drive_gauge",
+            body_id,
+            ground_height_m = ground_h,
+            agl_m = agl,
+            tiles = veg.tiles.len(),
+            nonempty,
+            nearest_tree_km,
+            in_flight = veg.in_flight.len(),
+            bake_ready = bake.ready,
+            "vegetation drive gauge"
         );
     }
     if agl > TREE_DESPAWN_AGL_M {
@@ -967,7 +970,7 @@ fn drive_veg_tiles(
         .ok()
         .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
 
-    let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
+    let ground = mirror.as_ref();
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
     for (_, rk, desired, want_impostor) in candidates {
@@ -979,11 +982,11 @@ fn drive_veg_tiles(
         // Far rings tolerate coarser terrain (their tiles are large), so the
         // residency threshold scales with tile size (mirrors the grass gate).
         let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
-        if let Some(guard) = &mirror_guard {
+        if let Some(ground) = ground {
             let Some((center, _)) = lat.frame(rk.key) else {
                 continue;
             };
-            match guard.best_resident_texel_m(center.as_vec3()) {
+            match ground.best_resident_texel_m(center.as_vec3()) {
                 Some(texel) if texel <= texel_limit => {}
                 _ => continue,
             }

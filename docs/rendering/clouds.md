@@ -183,6 +183,47 @@ maps and tools.
 Do not start with a full fluid simulation. Slowly advected fields plus analytic
 front/cyclone stamps create far more visible structure per unit of complexity.
 
+**Amount is not kind.** The weather cube answers "how much cloud is here, and
+how tall" — it can never answer "what kind", because the morphology that
+distinguishes roll streets from open-cell honeycomb from a lane-cut sheet lives
+at 1–5 km and the cube's texels are ~5 km. That second question belongs to the
+analytic cell field's **style** (`cloud_cell_style`, `thalos::atmosphere`), which
+takes the cube's type channel plus one low-frequency organization field and
+returns cell period, zonal elongation, roll tilt and lobe character. Two rules
+hold it together, and both are load-bearing:
+
+- **Style must not move the field's distribution.** The near tier's formation
+  threshold is a single Monte-Carlo fit for the whole planet, so a style that
+  changed the cell field's spread would make authored coverage mean different
+  things in different places. Anisotropy, tilt and period are linear domain maps
+  and preserve it exactly; anything that does not (the billow blend) is
+  renormalized by a measured σ fit. `cell_field.rs` guards this with tests.
+- **A style may never scale the sampling DOMAIN.** This is the one that cost
+  three rounds. The field is sampled at `dir·(radius/period)`, so a spatially
+  varying period (or aspect, which scales by √a) adds a second chain-rule term
+  to the sampling gradient: the field runs at a higher local frequency than its
+  period nominally sets, while the octave fade still band-limits against the
+  nominal period. The octave is under-filtered by exactly that factor and it
+  renders as fine feathered hatching — measured at **1.70× finer than nominal**
+  for the version that shipped. Cell size therefore comes from the octave
+  WEIGHTS (they multiply already-sampled values), anisotropy from a BLEND
+  between two globally constant transforms, and billow from mixing two values
+  at the same point. None of those can move a sample.
+- **Constant cell area.** Elongation is applied as across ÷ √a, along × √a, so
+  raising the aspect turns cells into rolls instead of enlarging everything.
+- **Anisotropy belongs to the arrangement, not to the cloud.** A cloud street is
+  a row of round cumulus, not a ribbon, so the aspect grades across octaves and
+  the finest octave — the one carrying the silhouette the eye reads as "is this
+  a cloud" — stays isotropic. Stretching every octave equally renders tapering
+  comets and combed stripes.
+- **Keep the aspect small, and never let the tilt vanish under it.** The
+  diagonal map suppresses longitude by `1/a`, so a large `a` degenerates the
+  field toward a function of latitude alone — and a function of latitude on a
+  sphere has circular contours, which render as fingerprint whorls. Mixing
+  longitude back into the lattice's `y` (the tilt shear) is the direct antidote,
+  which is why the tilt carries a latitude term rather than being free to hit
+  zero exactly where the elongation is strongest.
+
 ### 3.2 Density
 
 The first high-fidelity density domain is one spatially varying water-cloud
@@ -291,6 +332,43 @@ overcast does not retain a sunny belly.
 A coverage-map-only shadow is acceptable as an early debug projection, not as
 the finished W2 implementation: it cannot match convective height or the godray
 field.
+
+**Landed (slice 1, 2026-07-25): the near cascade on the tile renderer.**
+
+- Producer: a `cloud_shadow` entry point in the same compute shader, off the
+  same bind groups, so it integrates `get_cloud_map_density` — the identical
+  field, config, weather cube and strata cube the view march samples. There is
+  no second cloud distribution that could disagree with the visible sky.
+  Extinction is the view march's own primary-beam octave (`exp(-τ)`), so a cell
+  that reads opaque from the air lays an equally opaque shadow.
+- Geometry: 512², parameterised over the tangent plane under the view anchor,
+  body-fixed (`CloudShadowFrame`). A texel holds the transmittance of the beam
+  *passing through that plane point*, so a receiver looks up by intersecting
+  its own sun ray with the plane — the parallax that lays a low sun's shadow
+  kilometres downwind of the cloud casting it, which is exactly what the
+  rejected coverage projection cannot do. Half-extent climbs an octave ladder
+  with anchor altitude (12× altitude, clamped to 8–64 km), keeping the texel
+  between 31 m and 250 m — sized for COVERAGE, not resolution, because every
+  framing that matters is oblique and an oblique camera at 1 km sees ground a
+  hundred kilometres out (measured: at 1.5× altitude the cascade covered only
+  the basin under the camera and the rest of the frame fell outside);
+  every rung oversamples the authored erosion scale, so the map is not
+  texel-snapped and the erosion detail retires through the same footprint fade
+  the view march uses.
+- Receiver: `thalos::cloud_shadow::cloud_sun_transmittance`, one shared sampler,
+  folded into the tile material's existing direct-sun gate. Standing at the
+  gate's `SHADOW_FLOOR` is deliberate on that path: it multiplies the whole lit
+  colour, so a physical `exp(-τ)` would erase the sky fill with it.
+- Capture axis: `just compare <scene> cloud-shadow` (off / on / raw). `raw`
+  paints the transmittance the cascade holds, which is the split that matters
+  here — producer and receiver reach the same lookup frame by different routes.
+
+Not yet built, in priority order: the coarse cube tail (so the term survives
+past the cascade instead of feathering to lit at its border), the overcast
+ambient/IBL response, the atmosphere march's shafts, incremental/temporal
+cascade updates (it currently re-marches every frame), and the scatter/craft
+receivers — terrain darkens under a cloud while the grass and trees standing on
+it do not.
 
 ### 3.6 Orbital representation
 
@@ -907,6 +985,312 @@ Capture script staged at `artifacts/visual/runs/cloud_morph/capture_r7.sh`
 judge dome variety, base wisps, and that stratus regions still read as
 sheets. Carried follow-ups: far prefactor (0.68) re-match, GPU budget
 re-measure.
+
+### Round 8 — cloud radiance: the missing multiple scattering (2026-07-24)
+
+**User verdict on round 7's morphology: still "muddy, and not pure white"**, with MSFS
+references. The defect turned out not to be morphology at all — it is that the near
+march rendered **single-scattering radiance** and called it multiple scattering. Full
+diagnosis, measurements, and the ruled-out hypotheses:
+[INC-20260724T232256Z](../incidents/20260724T232256Z-cloud-multiscatter-octaves-carried-no-energy.md).
+
+In one line: the octave sum was divided by `Σw`, making it a weighted *average* of
+`1/4π`-normalised phase values — three probability densities averaged still carry one
+scattering event's energy. A lit cell returned `0.051·E` where the diffusion limit is
+`A/π ≈ 0.255·E`, so the physically-bound sky ambient out-competed the sun and clouds took
+their chroma from it. Measured on `cloud_cruise`: near-tier clouds at 0.30 display luminance
+against 0.49–0.73 for the sky *behind* them.
+
+The source term is now split as the physics is — exact normalised phase for single
+scattering (forward glare, silver lining), plus an isotropic-equivalent multiple-scatter
+reservoir at the medium's diffusion albedo `CLOUD_MS_ALBEDO = 0.80`, with the wider octaves
+demoted to supplying its depth response and a residual anisotropy. Three compensating
+constants downstream were removed in the same change rather than left carrying the error:
+the far prefactor (hand-raised 0.55 → 0.68 to hide the dark near tier) is now **derived**
+from the same anchor at 0.302; the Reinhard white point moves 2.2 → 10.0 so it bounds the
+glare spike instead of dimming every white top; and both tiers' per-channel "phase headroom"
+tints are deleted, since stacked on the authored albedo they biased sunlit cloud ~12–15%
+blue.
+
+Two standing rules follow (§3.4):
+
+- **A normalised phase function carries one scattering event.** An octave series
+  approximating multiple scattering must SUM energy. Normalising it by `Σw` turns it into a
+  lobe-widening filter with a physical-sounding name.
+- **Both tiers anchor to `CLOUD_MS_ALBEDO`, never to each other.** A fully lit optically
+  thick cell must land at `A · flux · SCENE_FLUX_SCALE · SURFACE_DIRECT_SCALE` — a Lambertian
+  surface of albedo A facing the same sun, the anchor every spine surface already uses.
+  Matching the far tier to the near tier by eye is what let a 4× error hide inside a
+  "handoff continuity" fix.
+
+The `fill_lut` fill/opacity pairing is untouched and needs no re-derivation: it governs how
+much of the frame clouds cover, this governs radiance per covered pixel.
+
+**Verification state: compile-check and captures BLOCKED** — the working tree carries
+unrelated in-progress fleet-kernel work in `physics_canonical/src/simulation.rs` that does not
+build. Run `just capture cloud-cruise cloud-interior cloud-sunset cloud-planet` once it does,
+and check: (a) sunlit tops read white, not blue-grey; (b) cloud tops are brighter than the sky
+beside them; (c) near↔far handoff shows no brightness step at cruise/aerial altitudes — this
+change moves both tiers, so the handoff is the thing most at risk; (d) round 7's dome tops
+now read as volumes under the restored lit/shadow contrast.
+
+### Round 9 — occupancy is not opacity; convective anisotropy (2026-07-25)
+
+**User verdict, with a cumulonimbus reference: "clouds are super ghost-ish… they should be
+realistic, solid appearing clouds"**, plus an explicit ask for vertical development.
+Reproduced first (`cloud-runway`, `massif-ridge`): from a level or below viewpoint the deck
+rendered as flat grey-lavender pancakes *dimmer than the sky behind them*, with the sky
+gradient showing through. Looking straight down (`cloud-cruise`, `massif-aerial`) the same
+deck read acceptably solid — the tell that this was an optical-depth defect, not a shading
+or coverage one.
+
+Two causes, both structural.
+
+**1. The near march scaled extinction by occupancy.** `env` — the strata cube's value — is
+an **areal fraction**: the share of a ~5 km weather texel that is cloudy
+(`cloud_surface_density_cpu`, whose 2026-07-25 rework made this explicit). The marcher spent
+it twice: once correctly, as the input to the derived `formation_threshold(env)` that decides
+*where* cloud forms, and once as `shared_envelope = smoothstep(0.04, 0.42, env)` multiplying
+the returned density. The second use thins every cell in proportion to how sparse its
+*neighbourhood* is, so a 30 %-coverage region renders as one 30 %-opaque film instead of
+solid cells with clear air between them. This is precisely the grey-veil error
+`weather_column_from_texel` warns about, reached from the near tier's side, and it is why
+`E[column alpha] = strata_mean` was being satisfied the wrong way: the fit is indifferent
+between *40 % of columns at alpha 1.0* and *100 % of columns at alpha 0.4*, and the envelope
+multiply pushed it to the latter.
+
+Occupancy now gates formation only — `formation_gate = smoothstep(0.02, 0.08, env)`, a
+clear-air cut so the Cartesian shape noise cannot grow cloud where the producer authored
+none. The toe matters as much as the removal: a gate ramping from *zero* turns a
+3 %-occupancy lane into half-density fog and reintroduces the ghost by another door. The fill
+contract is preserved by construction because the spawn-time Monte-Carlo re-fits the
+threshold curve against this exact math — measured: node 0 moved 0.503 → 0.667, i.e. the
+clear-air suppression the envelope used to do migrated into the threshold, exactly as
+intended, while mid/high-occupancy formation is unchanged and those cells are now several
+times more opaque.
+
+**2. Convective cells were pancakes by construction.** One isotropic 8 km shape period over
+a layer 1.5–6 km deep cannot produce a tower, no matter what round 7's dome threshold carves
+out of it — the cell is wider than the shell is tall. Convective columns now stretch the
+domain's **radial** axis (`CONVECTIVE_STRETCH = 1.9`): a metre of climb moves the sample
+only 1/stretch of a metre through the noise, so one lobe stays coherent from base to top
+instead of decorrelating into a stack of unrelated blobs. Sheets keep the isotropic period —
+a stratus deck genuinely is wide and flat — and `convective_w` is continuous in the type
+channel, so no type boundary pops the volume.
+
+**Rejected in the same round, by capture:** narrowing the convective *horizontal* period to
+0.42× (≈3.4 km cells) to fix the aspect ratio directly. It made the near field beautifully
+solid and painted the cruise deck as a **regular lattice of identical puffs in rows** — the
+64³ volume's Cartesian repeat, planet-visible once many periods fit on screen (the
+ADR-20260722T141000Z "rows" family, arriving from the tile side this time). The standing rule:
+**apparent cell size comes from the formation threshold picking peaks out of a wide period —
+one lobe per period is what broken cumulus looks like — never from shortening the period.**
+Narrower cells require breaking the repeat first (a second octave at a non-commensurate
+period), which is a separate, measurable change.
+
+Three lockstep sites as always: `get_cloud_map_density` (clouds_compute.wgsl) and
+`march_column` / `sample_shaped` (fill_lut.rs); `cloud_surface_density_cpu` is unaffected
+(it authors occupancy and never had the envelope). `FILL_LUT_VERSION` 1 → 5 across the round.
+
+**Verification (agent captures, this repo):** `cloud-runway` — sunlit tops white with defined
+cauliflower silhouettes and shaded undersides, replacing the grey pancakes; `cloud-cruise` —
+broken cumulus streets, solid and white, no lattice; `cloud-interior` — dense interior, no
+regression.
+
+**Residual, NOT closed — the `massif-ridge` veil.** At that framing (camera ~6.8 km, looking
+12° down across the 5.8 km ridge) the massif still reads through a milky film. Established by
+capture, not assumed:
+
+- It **is** cloud, not aerial perspective: `THALOS_SCREENSHOT_CLOUD_COVERAGE=0` renders the
+  massif completely crisp (`artifacts/visual/runs/cloud-ghost/ridge_nocloud.png`).
+- It is the **near** tier, not the far projection: `THALOS_SCREENSHOT_CLOUD_TIER=near-only` is
+  indistinguishable from the production composite.
+- It is **not** march-budget exhaustion on grazing rays: forcing the step limit to 900
+  (diagnostic WGSL edit, reverted) produced a pixel-equivalent image.
+
+Remaining suspects, in order: the far-field edge softening (`edge_softness` widens 0.055 →
+0.30 across the 30–42 km `c1` ramp, keyed to the *broad* band step even though density is
+only ever integrated at the 0.2× refine cadence — i.e. plausibly ~5× over-conservative), and
+the possibility that the camera sits inside a tall column at that site, in which case the
+interior is simply under-dense. Both are measurable; neither was chased in this round.
+
+### Round 10 — cells are an analytic surface field (2026-07-25)
+
+**User verdict on round 9, against the Blackrack/MSFS reference set:
+"incoherent soupy blobby mess, with rough transitions between LOD."** Both
+halves have one cause, and it is structural rather than tuning — full decision,
+measurements, and standing rules in
+[ADR-20260725T222409Z](../adr/20260725T222409Z-cloud-cells-are-an-analytic-surface-field-lod-never-renders-the-mean.md).
+
+Diagnosis, from captures and two measured numbers:
+
+- **Nothing could draw a 1–5 km cell at range.** The weather cube is 4.89 km per
+  texel (~10 km Nyquist) and its authored content bottoms out at 15–25 km
+  (`fbm3(dir_raw · 128, 3)` / `· 211, 2`). Cell morphology lived only in the 8 km
+  periodic Cartesian volume, retired past ~42 km and *replaced* past ~90 km.
+- **The LOD rendered the field's mean.** `E[shaped | env]` is mean-preserving,
+  which was believed sufficient; it is not, because shading is nonlinear
+  (`E[shade(σ)] ≠ shade(E[σ])`). A variance-destroying filter keeps a region's
+  average brightness and deletes every cloud in it — the flat beige sheet from
+  ~40 km to the horizon, with a contrast step at the band edge.
+
+The response is one shared field, `cloud_cell_field` (thalos::atmosphere),
+evaluated identically by the marcher, the far projection, and `fill_lut`'s CPU
+mirror: an aperiodic hash-lattice **column** field in the body-fixed *direction*
+domain (no tile, so no repeat for the shell to cut into rows — the general form
+of ADR-20260722T141000Z). The Cartesian volume is demoted to a mean-preserving
+sub-cell sculptor that retires with range. LOD is octave retirement inside one
+field, so range degrades cells → coarser cells → strata and no tier swaps
+representation.
+
+Three capture rounds, each fixing a defect the previous one exposed:
+
+1. **Uniform popcorn carpet.** The raw octave mix has std **0.115** (measured,
+   1.5M directions) — the threshold is a cliff (0.40 → 0.60 swings coverage
+   80 % → 20 %) and everything crosses it by the same margin.
+   `CLOUD_CELL_GAIN = 3.2` restores std ≈ 0.20.
+2. **Flat-topped mesas with vertical sides.** Applying that gain with a hard
+   clamp saturated **9.6 %** of the sky to exactly 1.0; a constant region has no
+   isosurface, so the dome threshold cut every core at one exact altitude. Fixed
+   with a soft saturation `x / (k + |x|)`, `CLOUD_CELL_KNEE = 0.45` — odd-
+   symmetric about 0.5, so still mean-preserving, and no transcendentals.
+3. **Boxy right-angled silhouettes.** `cloud_strata_warp` was gated to the
+   coarse bands, on the premise that the Cartesian sculptor hid the ~5 km texel
+   lattice near the camera. That premise died here — the cell field is
+   thresholded against `env` directly, so a texel edge cuts a vertical wall
+   through a cloud. Now applied unconditionally in both tiers (measure-
+   preserving, so the calibration is untouched).
+
+Also in the round: the derived `shape_response` LUT is **deleted** (its only
+consumer was the homogenized band) — from `fill_lut`, the compute uniform,
+`CloudsConfig`, and the cache schema; `FILL_LUT_VERSION` 5 → 6. Range-keyed
+edge softening drops 0.30 → 0.075: it was keyed to the *broad* band step
+although density is only integrated at the 0.2× refine cadence (~5×
+over-conservative), and it was round 9's prime remaining suspect for the
+`massif-ridge` milky veil.
+
+**Verification (agent captures, compile- and clippy-clean).** `cloud-cruise`:
+cells resolved to the horizon with real openings — the beige LOD sheet and its
+ring are gone. `cloud-runway`: cumulus with rounded tops and depth replacing the
+milky white wash. `cloud-limb`: thousands of individually resolved cells out to
+the limb, replacing grey dither — the reference-image read, and the clearest
+single result of the round.
+
+**Open, in priority order:**
+
+- **Coverage reads too high** at oblique framings (limb/cruise): near-overcast
+  where the references keep large clear areas. The per-column fill contract is
+  satisfied (the fit log tracks strata mean), so this is the weather producer's
+  authored occupancy plus slant-path overlap, not the fill pairing. Measure
+  before touching either.
+- **Whole-disc framings are unchanged and correctly so** — at ~14 km/pixel every
+  cell octave is below the sampler, so the disc shows the producer's 15–25 km
+  smears. Cell structure at that framing is a producer question, not a renderer
+  one.
+- Faint horizontal banding on some distant cells (suspect: radial march
+  quantization now that the cell field is constant down a column, which removes
+  the sculptor that used to mask it) and the pre-existing per-pixel fringe
+  stipple.
+- GPU budget re-measurement: the cell field adds up to 3 hash-lattice octaves per
+  density sample, offset by the retired noise fetches in the coarse bands.
+
+### Round 11 — footprint LOD, and the impostor question (2026-07-26)
+
+**User verdict on round 10, from a live ascent:** the mid-field is good, but
+mid-ascent cells carry a **horizontal comb**, above ~300 km the volumetrics
+**fade out entirely**, and the impostor that replaces them renders **no clouds
+over the space center** where the volumetric tier had just drawn them — plus the
+direct question, *should we even have an impostor?*
+
+One cause: **the LOD ladder was keyed to camera distance, and from orbit
+distance is not footprint.** Full decision and measurements in
+[ADR-20260726T000929Z](../adr/20260726T000929Z-cloud-lod-is-keyed-to-footprint-not-distance.md).
+At 300 km a pixel covers **345 m** (0.00115 rad/px at Bevy's default 45° fov on
+a 1280×720 target), so a 5.4 km cell is ~12 px across — yet the old ladder read
+"300 km", switched to 4800 m steps (~10 samples through the deck: the comb) and
+then handed the whole ray to the far estimator (`ray.start >
+CLOUD_MARCH_ENTRY_FADE_END_M`, which for a nadir view is just altitude). The far
+estimator renders `E[opacity | occupancy]`, so a 10 %-occupancy region became a
+~0.09 alpha wash — nothing — where the near tier had drawn solid cells. That is
+round 9's "occupancy is not opacity" arriving from the far side.
+
+**Should there be an impostor?** Not in the flight envelope. `get_ray` already
+skips clear air analytically to the shell entry, and a near-nadir orbital ray
+crosses the 10.5 km shell in ~10–15 km of path — the expensive case is *grazing*
+chords, a function of ray angle, not altitude. A projection is only *correct*
+where cells are genuinely sub-pixel (whole-disc/map, ~14 km per pixel), and there
+no transition can be visible. So the far tier survives, demoted to that regime
+plus the per-distance tail past the marcher's probe frontier.
+
+Reference practice, for the record: nobody estimates the far field from
+*statistics*. Either they keep raymarching the same field and LOD by footprint
+(Blackrack's scaled-space clouds re-raymarch the same coverage field; MSFS keeps
+marching through its envelope), or they bake the far tier as a slowly-refreshed
+render of the same field — which is what CLOUD-6 originally planned and what
+ADR-20260722T102639Z requires. A mean-opacity veil is neither.
+
+Landed:
+
+- **Step law** `cloud_march_step_m(t, pixel_angle, radial_rate)`: footprint is a
+  FLOOR (600 m near-field minimum, so runway cost is unchanged); a radial cap
+  (350 m of *vertical* travel) and a cell cap (1800 m ≈ ⅓ of the coarsest cell
+  period) are CAPS and win where they disagree.
+- **Ownership** `cloud_far_ownership(footprint)`, 2.2 → 5.4 km — ~1900–4700 km
+  altitude on Thalos, so the whole flight envelope is volumetric.
+- **One filter scale**: `filter_m` = max(refine step, footprint) is the sole LOD
+  input to `get_cloud_map_density`. The `coarse` ladder is deleted.
+
+**Rejected in the round, by capture:** a chord-length budget floor on the step
+(with the reach raised to 600 km so no frontier existed). It makes the step a
+function of how long the ray happens to be: a ground-level horizon ray (chord
+~600 km) got **~9.7 km steps through a 1.15 km deck** and the whole distant band
+rendered as horizontal slabs — worse than the artifact being fixed. Budget
+belongs in the REACH, not the step; the frontier is retained, now integrating
+the footprint law in closed form.
+
+**Verification (agent captures, compile-clean).** 150 / 400 / 900 km nadir
+probes (`THALOS_SCREENSHOT_CAMERA_ALTITUDE` + `_LOOK_ELEVATION=-35`,
+`artifacts/visual/runs/cloud-footprint-lod/`): individually resolved cells across
+the whole visible hemisphere to the limb — no blanket, no fade-out, no ownership
+seam. Runway and cruise unchanged; whole disc unchanged. GPU on the development
+RTX 4070 Ti at 1280×720: cruise 1.98 ms mean / 3.33 ms p95, 400 km nadir
+**1.31 ms / 1.94 ms** — the orbital framing is *cheaper* than cruise, as the
+chord geometry predicts. Both inside the 3.5 ms target.
+
+**Round 11b — the edge-on deck (2026-07-26).** The user's follow-up verdict
+confirmed orbital ("this approach is working") and flagged the level view:
+clouds "a bit ghost-ish when looking at them straight on… we can easily see
+through them, with straight artifacts cutting through". Two symptoms, one
+cause — the gaps between the artifacts *are* the see-through. Full diagnosis,
+including four falsified hypotheses,
+[INC-20260726T012035Z](../incidents/20260726T012035Z-grazing-ray-step-floor-bricked-the-deck.md).
+
+- **Cause: `CLOUD_MARCH_MIN_STEP_M` was a cost-only floor that overrode the
+  footprint step at the ranges that matter.** At 30–60 km a pixel covers
+  35–70 m, so the honest broad step is ~100 m — the floor forced 600 m, and a
+  grazing ray striding 600 m through a ~1.15 km deck under-resolves density
+  along the ray, with the stride's phase against the deck varying smoothly in
+  screen-y. Measured on the level probe: 600 m banded, **300 m clean**, 150 m
+  clean. Cost at cruise: 1.98 / 3.33 → **2.36 / 4.38** → 2.74 / 5.12 ms
+  (mean / p95). 300 m accepted; the 3.5 ms p95 target is explicitly provisional
+  and the artifact is a correctness defect.
+- **Found and fixed on the way:** `cloud_surface_shape` reconstructed the four
+  strata **piecewise-linearly**, so its slope broke at layer heights 1/8, 3/8,
+  5/8, 7/8; `env` feeds `formation_threshold`, so a deck viewed edge-on rendered
+  four horizontal shelves per cloud. Now a C1 Catmull-Rom reconstruction in all
+  three lockstep sites (`cloud_surface_shape`, `fill_lut::surface_shape`,
+  `cloud_surface_density_cpu`); `FILL_LUT_VERSION` 6 → 7. It cleaned the near
+  field but not the distant band, so it is not the same defect.
+- **Trap worth remembering:** `THALOS_SCREENSHOT_CLOUD_QUALITY=reference` no
+  longer discriminates sampling defects the way it used to. Since round 11 the
+  step *size* comes from the footprint law, so `reference` raises the step
+  COUNT and leaves the stride untouched — it reproduced the artifact identically
+  and nearly sent the investigation the wrong way.
+
+**Open:** coverage still reads high at oblique framings (BL-20260725T042404Z);
+the whole-disc producer smears; and the cloud *underside* still reads flat grey
+from below — that is the lighting budget (round 8's territory), not density,
+and needs the user's eye to judge.
 
 ### Program acceptance matrix
 

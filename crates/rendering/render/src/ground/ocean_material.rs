@@ -84,9 +84,7 @@ impl Material for BodyOceanMaterial {
     }
 
     fn depth_bias(&self) -> f32 {
-        // Stable transparent order for body-centred fullscreen siblings:
-        // BodySky atmosphere (0) < ocean (500) < clouds (1000).
-        500.0
+        crate::composite_order::OCEAN
     }
 
     fn specialize(

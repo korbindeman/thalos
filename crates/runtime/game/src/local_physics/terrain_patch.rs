@@ -107,8 +107,12 @@ pub(crate) fn attach_terrain_patch_when_close(
     bubble.patch_half_extent_m = patch.half_extent_m;
     bubble.terrain_built_at_revision = built_revision;
     info!(
-        "attached terrain collider patch over {} at AGL {:.0} m (height-source revision {})",
-        body.name, agl_m, built_revision,
+        target: "thalos::diagnostic::local_physics",
+        event = "terrain_patch_attached",
+        body = %body.name,
+        agl_m,
+        height_source_revision = built_revision,
+        "terrain collider patch attached"
     );
 }
 
@@ -131,7 +135,12 @@ pub(crate) fn detach_terrain_patch_when_far(
     };
     if matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. }) {
         clear_terrain_patch(&mut commands, bubble);
-        info!("detached terrain collider patch from BodyFixed craft");
+        info!(
+            target: "thalos::diagnostic::local_physics",
+            event = "terrain_patch_detached",
+            reason = "body_fixed",
+            "terrain collider patch detached"
+        );
         return;
     }
     if !craft_q
@@ -140,7 +149,12 @@ pub(crate) fn detach_terrain_patch_when_far(
         && !craft_contacts_terrain(&contact_graph, bubble.craft_entity, terrain_entity)
     {
         clear_terrain_patch(&mut commands, bubble);
-        info!("detached terrain collider patch outside the 1x warp-lock zone");
+        info!(
+            target: "thalos::diagnostic::local_physics",
+            event = "terrain_patch_detached",
+            reason = "outside_warp_lock",
+            "terrain collider patch detached"
+        );
         return;
     }
     let Some(height_source) = height_sources.get(bubble.body_id) else {
@@ -163,8 +177,12 @@ pub(crate) fn detach_terrain_patch_when_far(
     }
     clear_terrain_patch(&mut commands, bubble);
     info!(
-        "detached terrain collider patch from {} at AGL {:.0} m",
-        body.name, agl_m
+        target: "thalos::diagnostic::local_physics",
+        event = "terrain_patch_detached",
+        reason = "altitude",
+        body = %body.name,
+        agl_m,
+        "terrain collider patch detached"
     );
 }
 

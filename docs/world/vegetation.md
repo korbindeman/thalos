@@ -218,6 +218,22 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > change — the harness also exercises all three tree shaders + the shared library
 > as a compile/render smoke test. *Verified by preview; not yet `just game`-verified.*
 >
+> **Canopy ↔ ground colour coupling (2026-07-26,
+> BL-20260726T212240Z-tree-ground-colour-coupling).** The foliage model keeps its
+> own material identity, but its hue *family* now comes from the place the tree
+> grows: every woody `VegInstance` samples the shared landcover field
+> (`sample_landcover`) at its root and carries green-normalized r/b tint ratios
+> (`canopy_landcover_tint`, strength `TREE_LANDCOVER_TINT`) through vertex
+> `COLOR.r/b` on both the batched tile mesh and the impostor card; `tree.wgsl`
+> and `tree_impostor.wgsl` multiply the identical product over
+> `foliage_base_albedo`, so a stand inherits its ground's green (lush ↔ dry tan)
+> the same way grass blades do, across the mesh→impostor handoff. Blades and CPU
+> plant tints use the **understory** palette variant
+> (`vegetation_understory_color` — canopy darkening reduced to a residual),
+> matching the tile ground's near-field understory recovery: near-field, the
+> "dark forest from orbit" paint belongs to the real canopy geometry, not the
+> ground under it.
+>
 > **Still interim (Slice 3+):** the depth/shadow pass is alpha-unaware, so trees
 > cast roughly-solid (un-dappled) shadows; lower mesh LODs read sparser than the
 > LOD0-baked impostor (a *fluffiness*/coverage gap distinct from the colour one —
@@ -411,17 +427,21 @@ Every candidate passes the same gate, factored out of the grass builder:
 Uniform scatter is the number-one tell of procedural vegetation. A
 low-frequency `clump_field(dir, layer, affinity) -> [0,1]` breaks it:
 
-The shipped model splits into a **position-only canopy field** (`forest_coverage`,
-shared by every layer) and a **per-sample terrain coupling** (`woody_terrain_factor`,
-applied in `build_scatter_tile` because it needs the height sample), so the forest
-reads as a real ecosystem rather than a stamped patch:
+The shipped model splits into the **canonical canopy field** (`canopy_coverage`,
+owned by `thalos_terrain` — see §4.4, shared by every layer *and* by the ground
+palette) and a **per-sample terrain coupling** (`woody_terrain_factor`, applied in
+`build_scatter_tile` because it needs the height sample), so the forest reads as a
+real ecosystem rather than a stamped patch:
 
-- **`forest_coverage(dir)` — canopy potential, two scales.** A large-scale stand
-  field with a **wide ecotone ramp** (`smoothstep(FOREST_LO-0.06, FOREST_HI+0.12,
-  mask)`, window `0.52/0.72`) so density *feathers in over a broad band* instead of
-  a hard edge, multiplied by a **medium-scale glade field** (~130 m) that carves
-  real **internal clearings** and breaks the uniform interior. Lower `FOREST_LO`
-  for more forest, raise it for emptier plains; `GLADE_FREQ_MUL` sets clearing size.
+- **`canopy_coverage` — climate envelope × stand structure.** The stand half is a
+  large-scale field with a **wide ecotone ramp** (`smoothstep(STAND_LO-0.06,
+  STAND_HI+0.12, mask)`, window `0.52/0.72`) so density *feathers in over a broad
+  band* instead of a hard edge, multiplied by a **medium-scale glade field**
+  (~130 m) that carves real **internal clearings** and breaks the uniform
+  interior. Lower `STAND_LO` for more forest, raise it for emptier plains;
+  `GLADE_FREQ_MUL` sets clearing size. The envelope half is the macro landcover's
+  moisture-driven forest band confined to the lowland altitude chain, so the
+  treeline and the dry margin are already inside the number.
 - **`woody_terrain_factor(sample)` — clumping tied to the landform.** Trees/shrubs
   thin toward **ridges and steep faces** (`slope_factor`, fading to 0 as slope
   approaches the species limit) and thicken in **sheltered concave hollows**
@@ -436,11 +456,57 @@ reads as a real ecosystem rather than a stamped patch:
   the plain, and share the terrain coupling.
 - **Grass** density dips inside closed canopy and peaks in clearings. The far
   clipmap rings additionally **cull grass under canopy** (`forest_cull ×
-  forest_coverage(dir)`, ramping 0 → 0.95 over rings 2–4): a distant grove's
+  canopy_coverage`, ramping 0 → 0.95 over rings 2–4): a distant grove's
   ground grass is occluded by the trees in front of it, so rendering it is pure
-  overdraw — but because the cull reads the same `forest_coverage`, grass **returns
+  overdraw — but because the cull reads the same canopy field, grass **returns
   in the internal glades**. Near rings (0–1) keep all grass, so the forest floor
   is still grassed where you actually see it.
+
+### 4.4 One canopy field (2026-07-26)
+
+**There is exactly one answer to "is there forest here", and it lives behind the
+terrain seam** — `thalos_terrain::canopy`, surfaced as
+`SurfaceQuery::canopy_climate` + `CanopyClimate::coverage` and carried per-vertex
+as `MaterialBands::canopy`.
+
+It did not used to be one. The ground palette painted its dark closed-canopy
+anchor from a **climate** term in `thalos_terrain` (moisture → forest band), while
+tree placement clumped on an **independent fBM stand field** owned by the render
+crate. Two unrelated fields at two different scales cannot agree, and from the air
+they visibly didn't: whole wet regions rendered canopy-green with nothing growing
+on them, while the trees clustered on ground the palette called meadow. The
+capture harness had even grown a workaround for it — `find_forest_site` scored
+`moisture + 1.2 × stand` specifically because "a wet site in a stand *gap* would
+frame empty ground".
+
+Coverage = **climate envelope × stand structure**, and every consumer is a
+projection of that one number:
+
+| Consumer | Route |
+|---|---|
+| tree / shrub / ground-cover placement | `canopy_climate` per tile → `coverage` per candidate |
+| grass far-ring canopy cull | same |
+| baked macro albedo (the dark canopy anchor) | mixed at exactly this weight |
+| tile material: aerial canopy grain + understory un-mix | per-vertex `MaterialBands::canopy` |
+
+Two rules that keep it that way:
+
+- **Coverage reaches shaders as vertex data, never as re-derived WGSL noise.** One
+  CPU evaluation, no shader-side mirror of the stand hash to drift out of sync.
+  (A stale comment in `scatter.rs` used to claim `body_terrain.wgsl` mirrored that
+  hash "so the far-ground forest tint lines up with where the trees are placed".
+  No such mirror existed in either terrain shader.)
+- **Cost must match call rate.** The climate half (moisture, orogeny — a domain
+  warp plus several fBm octaves, varying over ~100 km) is hoisted **once per
+  tile**; only the altitude chain and the stand noise run per candidate. The
+  altitude chain deliberately stays per-candidate: hoisting it would staircase the
+  treeline and the shoreline to the tile grid. Evaluating the whole thing per
+  candidate stalled terrain streaming outright —
+  INC-20260726T225008Z-defaulted-seam-method-zeroed-by-decorator, which also
+  records how a decorator that forgot to forward the new seam method silently
+  zeroed canopy planet-wide.
+
+Because the anchor weight changed, this bumped `GENERATOR_VERSION` to 22.
 
 **Process-first nuance (CLAUDE.md).** The "no naked macro fBM" rule governs
 visible *terrain height/albedo*. Vegetation *distribution* breakup is exactly
@@ -819,6 +885,16 @@ is the natural home for downwash/player bending done in-shader.
   contract; the generation revamp must be replaceable underneath vegetation.
 - **One placement gate.** All layers accept candidates through the single
   `placement_gate` helper. No per-layer reimplementation.
+- **One canopy field.** "Is there forest here" is answered only by
+  `thalos_terrain::canopy` (§4.4) — the same number the ground palette mixes its
+  canopy anchor at. Vegetation must never derive a forest field of its own, and no
+  shader may re-derive it in WGSL; it travels as vertex data.
+- **Canopy is darker than the meadow around it, and more so with distance.**
+  Closed canopy has a lower albedo than grassland (~0.05–0.10 vs ~0.15–0.20)
+  because a pixel integrates mostly shadowed interior and gaps, and that
+  strengthens as the crown subtends less. Measure it — stand vs open ground at
+  *matched screen distance* in `forest-stand` — rather than eyeballing it; the
+  ratio must sit below 1 and fall with distance.
 - **One tile lattice.** All layers and rings use `TileLattice`; the cube math
   has exactly one definition.
 - **Placement is deterministic and view-independent.** A plant's root position

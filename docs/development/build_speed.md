@@ -557,8 +557,8 @@ in CLAUDE.md).
   contract (INC-0008), env-var launch/window/vsync toggles, artifact layout.
 - [visual_testing.md](visual_testing.md) — the headless screenshot A/B workflow
   agents verify with.
-- `CLAUDE.md` (root) — the operating manual; the "Toolchain" and "Fast iteration
-  invariants" sections point here.
+- `CLAUDE.md` (root) — the operating manual; its "Build & iteration" section
+  carries the load-bearing subset and points here.
 - ADR-20260723T222214Z-abandon-sccache — why the compiler cache was removed.
 - ADR-20260721T212438Z-portable-build-policy-local-acceleration — the portable
   profile / local-config split.

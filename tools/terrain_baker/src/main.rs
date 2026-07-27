@@ -254,9 +254,8 @@ fn print_runtime_height_profile(static_surface: thalos_terrain::StaticSurfaceDat
             }
         }
         residuals.sort_by(f32::total_cmp);
-        let percentile = |fraction: f32| {
-            residuals[((residuals.len() - 1) as f32 * fraction).round() as usize]
-        };
+        let percentile =
+            |fraction: f32| residuals[((residuals.len() - 1) as f32 * fraction).round() as usize];
         let rms = (residuals.iter().map(|r| f64::from(*r * *r)).sum::<f64>()
             / residuals.len() as f64)
             .sqrt();

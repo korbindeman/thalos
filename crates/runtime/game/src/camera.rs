@@ -457,6 +457,13 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
             far: 1.0e11,
             ..default()
         }),
+        // The bridge between the two lighting universes (NTR-X5): without an
+        // explicit `Exposure` the whole StandardMaterial side of the scene —
+        // hull, structures, runway, and the NTR-X1 tile terrain — ran at
+        // Bevy's `EV100_BLENDER` default, ~1.5 stops brighter than the spine
+        // ground beside it. Derived from the spine's own constants so it
+        // cannot drift when either side is retuned.
+        thalos_body_render::spine_parity_exposure(crate::rendering::lighting::LUX_PER_SPINE_FLUX),
         space_camera_post_stack(),
         OrbitCamera,
         ShipCamera,
@@ -529,14 +536,14 @@ fn apply_graphics_msaa(
 /// and while a UI text field is consuming keyboard input.
 fn ship_camera_mode_input(
     input: Res<GameInputIntent>,
-    ui_text: Res<thalos_ui::TextFieldFocus>,
+    ui_keyboard: Res<crate::hud::UiKeyboardGate>,
     view: Res<ViewMode>,
     mut mode: ResMut<ShipCameraMode>,
 ) {
     if *view != ViewMode::Ship || !input.cycle_ship_camera {
         return;
     }
-    if ui_text.is_focused() {
+    if ui_keyboard.text_entry() {
         return;
     }
     *mode = mode.cycle();

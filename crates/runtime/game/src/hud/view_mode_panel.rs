@@ -17,14 +17,14 @@ pub(super) struct ViewModeButton {
     pub target: ViewMode,
 }
 
-const BUTTON_WIDTH: f32 = 56.0;
-const BUTTON_HEIGHT: f32 = 32.0;
+const BUTTON_WIDTH: f32 = 50.0;
+const BUTTON_HEIGHT: f32 = 28.0;
 
 pub fn setup(mut commands: Commands, theme: Res<HudTheme>, anchor: Res<TopLeftRowAnchor>) {
     let mut root = panel_node();
     root.position_type = PositionType::Relative;
-    root.padding = UiRect::axes(Val::Px(10.0), Val::Px(8.0));
-    root.row_gap = Val::Px(6.0);
+    root.padding = UiRect::axes(Val::Px(8.0), Val::Px(6.0));
+    root.row_gap = Val::Px(4.0);
 
     let (bg, border) = panel_frame(&theme);
 
@@ -75,7 +75,7 @@ fn spawn_button(
                 Text::new(label),
                 TextFont {
                     font: theme.font.clone(),
-                    font_size: FontSize::Px(13.0),
+                    font_size: FontSize::Px(12.0),
                     ..default()
                 },
                 TextColor(theme.text_dim),

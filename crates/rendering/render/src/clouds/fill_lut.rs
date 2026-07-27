@@ -18,8 +18,12 @@
 //!    marches vertical columns through texels sampled from the real cube.
 //! 2. The near threshold curve `T(env) = mix(lo, hi, env)` is fitted so the
 //!    simulated column fill tracks the far tier's own conditioning variable
-//!    (the profile-weighted strata mean) — i.e. fill ≈ strata density where
-//!    the envelope makes that reachable.
+//!    (the profile-weighted strata mean) — i.e. fill ≈ strata density.
+//!    Since round 9 the marcher's extinction no longer scales with occupancy
+//!    (see `formation_gate`), so the fit reaches that identity by forming
+//!    FEWER, OPAQUE columns rather than many translucent ones — which is what
+//!    makes the contract mean "this fraction of the sky is cloud" instead of
+//!    "the whole sky is this fraction of a cloud".
 //! 3. With the fitted curve, the expected column opacity `E[1 − T_column]`
 //!    per strata-mean bin is emitted as a 16-entry LUT. The far tier renders
 //!    that LUT directly, so far opacity equals the near tier's expected
@@ -33,6 +37,8 @@
 use bevy::math::{IVec3, Vec3, Vec4};
 use rayon::prelude::*;
 use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
+
+use super::cell_field::{cell_field, cell_style};
 
 /// Entries in the far-tier opacity response LUT (packed as 4 × vec4 in the
 /// composite uniform). Entry `i` is the response at strata mean `i / 15`.
@@ -51,7 +57,7 @@ pub const THRESHOLD_NODES: usize = 8;
 /// of the disk-cache key the game uses to skip the multi-second Monte-Carlo
 /// at boot, and a stale hit silently calibrates yesterday's renderer —
 /// exactly the `GENERATOR_VERSION` rule the terrain tile cache follows.
-pub const FILL_LUT_VERSION: u32 = 1;
+pub const FILL_LUT_VERSION: u32 = 8;
 
 /// Derived near-threshold curve + far opacity response for one body/climate.
 #[derive(Clone, Copy, Debug)]
@@ -61,12 +67,6 @@ pub struct CloudFillCalibration {
     pub threshold_nodes: [f32; THRESHOLD_NODES],
     /// Expected near-column opacity per strata-mean node (`i / 15`).
     pub far_response: [f32; FILL_RESPONSE_ENTRIES],
-    /// Expected per-sample filtered density `E[shaped | env]` (node `i / 15`)
-    /// — the band-limited stand-in for the marcher's Cartesian shape term.
-    /// The long-reach march's coarse bands render this instead of the noise
-    /// volume (BL-20260724T003705Z), so the homogenized field is
-    /// mean-preserving by construction.
-    pub shape_response: [f32; FILL_RESPONSE_ENTRIES],
 }
 
 impl CloudFillCalibration {
@@ -87,17 +87,6 @@ impl CloudFillCalibration {
         [
             Vec4::new(t[0], t[1], t[2], t[3]),
             Vec4::new(t[4], t[5], t[6], t[7]),
-        ]
-    }
-
-    /// Pack the homogenized-field response for the compute uniform.
-    pub fn shape_response_vec4s(&self) -> [Vec4; 4] {
-        let r = &self.shape_response;
-        [
-            Vec4::new(r[0], r[1], r[2], r[3]),
-            Vec4::new(r[4], r[5], r[6], r[7]),
-            Vec4::new(r[8], r[9], r[10], r[11]),
-            Vec4::new(r[12], r[13], r[14], r[15]),
         ]
     }
 }
@@ -149,7 +138,10 @@ struct SampleRecord {
     /// Anvil shape base (`0.72·broad.r + 0.28·broad.a`), macro term folded.
     anvil_base: f32,
     env: f32,
-    envelope: f32,
+    /// Clear-air formation gate, `smoothstep(0.02, 0.08, env)` — the marcher's
+    /// `formation_gate`. It is a gate, NOT an occupancy-proportional
+    /// extinction scale: see the lockstep note in `get_cloud_map_density`.
+    formation_gate: f32,
     /// Height-typed erosion factor: `mix(detail.b, 1 − detail.b,
     /// smoothstep(0.10, 0.32, h)) · (0.80 + 0.55 · h)`, pre-folded because
     /// `h` is fixed per sample (mirrors the marcher's erosion character).
@@ -170,6 +162,17 @@ struct ColumnRecord {
 
 /// March step along the column, mirroring the marcher's full-density cadence.
 const STEP_M: f32 = 120.0;
+/// CPU twin of `SUBCELL_SHAPE_WEIGHT` (clouds_compute.wgsl): how much the
+/// periodic Cartesian volume perturbs the aperiodic cell field. Keep in
+/// lockstep — the threshold curve is fitted against whatever field this mirror
+/// produces, so a divergence calibrates a renderer that does not exist.
+const SUBCELL_SHAPE_WEIGHT: f32 = 0.55;
+/// Convective cell aspect — the CPU twin of `CONVECTIVE_WIDTH_SCALE` /
+/// `CONVECTIVE_STRETCH` in `clouds_compute.wgsl`. Keep the pairs in lockstep:
+/// the derived threshold curve is fitted against whatever shape field this
+/// mirror produces, so a divergence silently calibrates a different renderer.
+const CONVECTIVE_WIDTH_SCALE: f32 = 1.0;
+const CONVECTIVE_STRETCH: f32 = 1.9;
 /// A column "fills" its footprint when its integrated opacity is visible —
 /// aligned with the capture-side fill measurement threshold (~12/255).
 const VISIBLE_ALPHA: f32 = 0.05;
@@ -237,8 +240,7 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
                         continue;
                     }
                     let index = parameter - 1;
-                    candidate_deltas[index] =
-                        (candidate_deltas[index] + direction * step).max(0.0);
+                    candidate_deltas[index] = (candidate_deltas[index] + direction * step).max(0.0);
                     let loss = threshold_loss(
                         &columns,
                         input,
@@ -281,37 +283,9 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
     }
     fill_gaps_monotone(&mut far_response);
 
-    // Homogenized-field response: expected PER-SAMPLE filtered density vs the
-    // sample's own strata value, with the fitted curve. The long-reach
-    // march's coarse bands render this in place of the Cartesian shape term.
-    let detail_w = detail_weight(input);
-    let edge_soft = input.base_edge_softness.max(0.015);
-    let mut shape_sum = [0.0f64; FILL_RESPONSE_ENTRIES];
-    let mut shape_weight = [0.0f64; FILL_RESPONSE_ENTRIES];
-    for column in &columns {
-        for s in &column.samples {
-            let shaped = sample_shaped(s, input, &nodes, detail_w, edge_soft);
-            let t = s.env.clamp(0.0, 1.0) * (FILL_RESPONSE_ENTRIES - 1) as f32;
-            let i = (t as usize).min(FILL_RESPONSE_ENTRIES - 2);
-            let f = f64::from(t - i as f32);
-            shape_sum[i] += f64::from(shaped) * (1.0 - f);
-            shape_weight[i] += 1.0 - f;
-            shape_sum[i + 1] += f64::from(shaped) * f;
-            shape_weight[i + 1] += f;
-        }
-    }
-    let mut shape_response = [f32::NAN; FILL_RESPONSE_ENTRIES];
-    shape_response[0] = 0.0;
-    for i in 1..FILL_RESPONSE_ENTRIES {
-        if shape_weight[i] >= 32.0 {
-            shape_response[i] = (shape_sum[i] / shape_weight[i]) as f32;
-        }
-    }
-    fill_gaps_monotone(&mut shape_response);
-
     // Convergence record: per strata-mean bin, the identity target vs the
     // fill the fitted curve achieves (and the opacity the LUT will render).
-    // Low bins are envelope-limited and cannot reach their target; that is
+    // Low bins are gate-limited and cannot reach their target; that is
     // expected — parity between the tiers holds regardless, because the far
     // tier renders the ACHIEVED response.
     let mut table = vec![(0.0f32, 0.0f32, 0.0f32, 0u32); 16];
@@ -331,15 +305,16 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
         entry.2 /= n;
     }
     bevy::log::info!(
-        target: "thalos::clouds",
+        target: "thalos::diagnostic::clouds",
+        event = "fill_calibration_fit",
         ?nodes,
-        "fill calibration fit: per-bin (strata target, achieved fill, mean opacity, n) = {table:?}"
+        ?table,
+        "cloud fill calibration fit"
     );
 
     CloudFillCalibration {
         threshold_nodes: nodes,
         far_response,
-        shape_response,
     }
 }
 
@@ -371,8 +346,12 @@ pub fn predict_region_fill(
         let face_index = (rng.next_f32() * 6.0) as usize % 6;
         let x = 1.0 + rng.next_f32() * (size as f32 - 2.0);
         let y = 1.0 + rng.next_f32() * (size as f32 - 2.0);
-        let dir = face_uv_to_dir(CubemapFace::ALL[face_index], x / size as f32, y / size as f32)
-            .normalize();
+        let dir = face_uv_to_dir(
+            CubemapFace::ALL[face_index],
+            x / size as f32,
+            y / size as f32,
+        )
+        .normalize();
         if dir.dot(center_dir) < cos_radius {
             continue;
         }
@@ -471,7 +450,7 @@ fn threshold_loss(
 }
 
 /// One recorded sample's filtered density factor (`shaped`, pre profile ×
-/// envelope × extinction) under a candidate threshold curve. Mirrors
+/// formation gate × extinction) under a candidate threshold curve. Mirrors
 /// `get_cloud_map_density`'s post-noise math — the same function feeds the
 /// column-opacity re-evaluation AND the homogenized-field expectation.
 fn sample_shaped(
@@ -506,7 +485,7 @@ fn column_alpha(
     let mut optical_depth = 0.0f32;
     for s in &column.samples {
         let shaped = sample_shaped(s, input, nodes, detail_weight, edge_softness);
-        let density = (shaped * s.profile * s.envelope * input.density).max(0.0);
+        let density = (shaped * s.profile * s.formation_gate * input.density).max(0.0);
         optical_depth += density * STEP_M;
     }
     1.0 - (-optical_depth).exp()
@@ -575,10 +554,21 @@ fn sample_columns(input: &FillCalibrationInput<'_>, volume: &NoiseVolume) -> Vec
             if strata.max_element() < 0.008 {
                 return None;
             }
-            let dir =
-                face_uv_to_dir(CubemapFace::ALL[face_index], x / size as f32, y / size as f32)
-                    .normalize();
-            Some(march_column(input, volume, dir, weather, strata, strata_mean, &mut rng))
+            let dir = face_uv_to_dir(
+                CubemapFace::ALL[face_index],
+                x / size as f32,
+                y / size as f32,
+            )
+            .normalize();
+            Some(march_column(
+                input,
+                volume,
+                dir,
+                weather,
+                strata,
+                strata_mean,
+                &mut rng,
+            ))
         })
         .collect()
 }
@@ -604,13 +594,30 @@ fn march_column(
         let storm_w = smoothstep(0.72, 0.88, weather[1]);
         let cumulus_w = (1.0 - stratus_w - storm_w).max(0.0);
         let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
-        let shape_scale = input.base_shape_scale_m.max(500.0);
-        let macro_period = shape_scale * 2.7;
+        // Convective anisotropy — mirrors `get_cloud_map_density`'s
+        // `CONVECTIVE_WIDTH_SCALE` / `CONVECTIVE_STRETCH`. The macro octave
+        // keeps the authored (sheet) scale in both, as the marcher does.
+        let convective_w = (cumulus_w + storm_w).clamp(0.0, 1.0);
+        let sheet_scale = input.base_shape_scale_m.max(500.0);
+        let shape_scale = sheet_scale * (1.0 + (CONVECTIVE_WIDTH_SCALE - 1.0) * convective_w);
+        let radial_squeeze = (1.0 - 1.0 / CONVECTIVE_STRETCH) * convective_w;
+        let macro_period = sheet_scale * 2.7;
         let bottom_softness = input.bottom_softness.max(0.01);
 
         // Per-column macro context, as the marcher samples it once per ray.
-        let mid_alt =
-            input.bottom_height_m + 0.5 * (local_base + local_top) * shell_thickness;
+        // Cell-scale occupancy is a COLUMN field, so it is constant down this
+        // column — one evaluation, exactly as the marcher gets one value per
+        // (direction, filter) regardless of where along the ray it samples.
+        // The Monte-Carlo's random directions sample its distribution.
+        // Morphology is per-place now, so the calibration must march the SAME
+        // style the renderer will draw: the field's distribution is
+        // style-invariant by construction (`cell_field::spread_norm`), but the
+        // Monte-Carlo still has to see the real styled field or it fits the
+        // threshold against a planet that does not exist.
+        let style = cell_style(dir, weather[1]);
+        let cell = cell_field(dir, input.planet_radius_m, &style);
+
+        let mid_alt = input.bottom_height_m + 0.5 * (local_base + local_top) * shell_thickness;
         let mid_pos = dir * (input.planet_radius_m + mid_alt);
         let macro_sample = volume.trilinear(
             mid_pos + phase_offset(&weather, macro_period) + Vec3::new(-7300.0, 2100.0, 4900.0),
@@ -635,15 +642,23 @@ fn march_column(
             }
 
             let pos = dir * (input.planet_radius_m + alt);
+            // `dir` is the local vertical here, so the marcher's
+            // `pos - up · (alt_local · squeeze)` is exactly this.
+            let shape_domain = pos - dir * ((alt - input.bottom_height_m) * radial_squeeze);
             let broad = volume.trilinear(
-                rotated_domain(pos)
+                rotated_domain(shape_domain)
                     + phase_offset(&weather, shape_scale)
                     + Vec3::new(1800.0, -4200.0, 900.0),
                 shape_scale,
             );
             let shape_squat = broad.x * 0.52 + broad.y * 0.24 + broad.w * 0.24;
             let shape_tall = broad.x * 0.64 + broad.y * 0.06 + broad.w * 0.30;
-            let shape = shape_squat + (shape_tall - shape_squat) * column_tall;
+            let sub = shape_squat + (shape_tall - shape_squat) * column_tall;
+            // Cell field + mean-preserving sub-cell perturbation — the
+            // marcher's `shape = cell + (sub − 0.5) · SUBCELL_SHAPE_WEIGHT`.
+            let shape = cell + (sub - 0.5) * SUBCELL_SHAPE_WEIGHT;
+            let anvil_base =
+                cell + ((broad.x * 0.72 + broad.w * 0.28) - 0.5) * SUBCELL_SHAPE_WEIGHT;
             let detail = volume.trilinear(
                 rotated_domain(pos) + Vec3::new(270.0, -610.0, 130.0),
                 input.detail_scale_m.max(50.0) * 8.0,
@@ -652,29 +667,24 @@ fn march_column(
             // Round-7 dome sculpting + thin top skins + height-typed erosion:
             // exact mirrors of `get_cloud_map_density` — keep in lockstep.
             let vertical_narrow = h * 0.04 * stratus_w
-                + (h * h)
-                    * (0.42 * cumulus_w + 0.30 * storm_w)
-                    * (1.0 - 0.45 * column_tall);
-            let anvil_profile =
-                smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
-            let stratus_profile = smoothstep(0.0, bottom_softness * 0.45, h)
-                * (1.0 - smoothstep(0.72, 1.0, h));
-            let cumulus_profile = smoothstep(0.0, bottom_softness * 0.75, h)
-                * (1.0 - smoothstep(0.93, 1.0, h));
-            let storm_profile = smoothstep(0.0, bottom_softness * 0.35, h)
-                * (1.0 - smoothstep(0.94, 1.0, h));
+                + (h * h) * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
+            let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
+            let stratus_profile =
+                smoothstep(0.0, bottom_softness * 0.45, h) * (1.0 - smoothstep(0.72, 1.0, h));
+            let cumulus_profile =
+                smoothstep(0.0, bottom_softness * 0.75, h) * (1.0 - smoothstep(0.93, 1.0, h));
+            let storm_profile =
+                smoothstep(0.0, bottom_softness * 0.35, h) * (1.0 - smoothstep(0.94, 1.0, h));
             let erode_flip = smoothstep(0.10, 0.32, h);
-            let erode = (detail.z + (1.0 - 2.0 * detail.z) * erode_flip)
-                * (0.80 + 0.55 * h);
-            let profile = stratus_profile * stratus_w
-                + cumulus_profile * cumulus_w
-                + storm_profile * storm_w;
+            let erode = (detail.z + (1.0 - 2.0 * detail.z) * erode_flip) * (0.80 + 0.55 * h);
+            let profile =
+                stratus_profile * stratus_w + cumulus_profile * cumulus_w + storm_profile * storm_w;
 
             samples.push(SampleRecord {
                 shape: shape - macro_term,
-                anvil_base: broad.x * 0.72 + broad.w * 0.28 - macro_term,
+                anvil_base: anvil_base - macro_term,
                 env,
-                envelope: smoothstep(0.04, 0.42, env),
+                formation_gate: smoothstep(0.02, 0.08, env),
                 erode,
                 profile,
                 vertical_narrow,
@@ -690,19 +700,31 @@ fn march_column(
 }
 
 /// `cloud_surface_shape` mirror (linear strata reconstruction, in-layer).
+/// Catmull-Rom segment — mirror of `cloud_strata_spline`.
+fn strata_spline(p0: f32, p1: f32, p2: f32, p3: f32, t: f32) -> f32 {
+    let t2 = t * t;
+    let t3 = t2 * t;
+    0.5 * ((2.0 * p1)
+        + (-p0 + p2) * t
+        + (2.0 * p0 - 5.0 * p1 + 4.0 * p2 - p3) * t2
+        + (-p0 + 3.0 * p1 - 3.0 * p2 + p3) * t3)
+}
+
+/// C1 strata reconstruction — mirror of `cloud_surface_shape`. The former
+/// piecewise-linear form broke slope at the four knots, which a deck viewed
+/// edge-on rendered as horizontal shelves (2026-07-26). Keep in lockstep.
 fn surface_shape(strata: Vec4, layer_height: f32) -> f32 {
-    let z = layer_height.clamp(0.0, 1.0) * 4.0 - 0.5;
-    if z <= 0.0 {
-        strata.x
-    } else if z < 1.0 {
-        strata.x + (strata.y - strata.x) * z
-    } else if z < 2.0 {
-        strata.y + (strata.z - strata.y) * (z - 1.0)
-    } else if z < 3.0 {
-        strata.z + (strata.w - strata.z) * (z - 2.0)
+    let z = (layer_height.clamp(0.0, 1.0) * 4.0 - 0.5).clamp(0.0, 3.0);
+    let k = z.floor().clamp(0.0, 2.0);
+    let t = z - k;
+    let v = if k < 1.0 {
+        strata_spline(strata.x, strata.x, strata.y, strata.z, t)
+    } else if k < 2.0 {
+        strata_spline(strata.x, strata.y, strata.z, strata.w, t)
     } else {
-        strata.w
-    }
+        strata_spline(strata.y, strata.z, strata.w, strata.w, t)
+    };
+    v.clamp(0.0, 1.0)
 }
 
 /// `cloud_surface_shape` mirror including the out-of-layer hard zero.
@@ -726,8 +748,7 @@ fn phase_offset(weather: &[f32; 4], period: f32) -> Vec3 {
         * Vec3::new(
             1.35 * (weather[0] - 0.5) + 0.65 * (weather[2] - 0.5),
             -1.10 * (weather[3] - 0.5) + 0.55 * (weather[0] - 0.5),
-            1.20 * (weather[0] - 0.5) - 0.75 * (weather[2] - 0.5)
-                + 0.45 * (weather[3] - 0.5),
+            1.20 * (weather[0] - 0.5) - 0.75 * (weather[2] - 0.5) + 0.45 * (weather[3] - 0.5),
         )
 }
 
@@ -780,17 +801,13 @@ impl NoiseVolume {
                 let x = i % WORLEY_RESOLUTION;
                 let y = (i / WORLEY_RESOLUTION) % WORLEY_RESOLUTION;
                 let z = i / (WORLEY_RESOLUTION * WORLEY_RESOLUTION);
-                let coord = Vec3::new(
-                    x as f32 + 0.5,
-                    y as f32 + 0.5,
-                    z as f32 + 0.5,
-                ) / WORLEY_RESOLUTION as f32;
+                let coord = Vec3::new(x as f32 + 0.5, y as f32 + 0.5, z as f32 + 0.5)
+                    / WORLEY_RESOLUTION as f32;
                 let perlin = tilable_perlin_fbm(coord, 3, 2.0);
                 let cellular = tilable_voronoi(coord + Vec3::new(0.17, 0.31, 0.07), 2, 3.0);
                 let erosion = tilable_voronoi(coord + Vec3::new(0.53, 0.11, 0.43), 1, 8.0);
                 let macro_noise = tilable_perlin_fbm(coord + Vec3::new(0.29, 0.47, 0.61), 3, 1.0);
-                Vec4::new(perlin, cellular, erosion, macro_noise)
-                    .clamp(Vec4::ZERO, Vec4::ONE)
+                Vec4::new(perlin, cellular, erosion, macro_noise).clamp(Vec4::ZERO, Vec4::ONE)
             })
             .collect();
         Self { texels }
@@ -841,6 +858,11 @@ fn wgsl_rem3(v: Vec3, tile: f32) -> Vec3 {
     Vec3::new(v.x % tile, v.y % tile, v.z % tile)
 }
 
+// The cell-field mirror moved to `super::cell_field` (2026-07-26): the weather
+// producer needs the same per-place style to stretch its own mesoscale breakup
+// along the same axis, and a private copy here would have made three versions
+// of one contract to keep in lockstep instead of two.
+
 fn hash13(p3: Vec3) -> f32 {
     let mut p = wgsl_fract3(p3 * 1031.1031);
     p += Vec3::splat(p.dot(Vec3::new(p.y, p.z, p.x) + 19.19));
@@ -857,9 +879,7 @@ fn hash_based_noise(x: Vec3, tile: f32) -> f32 {
     let p = x.floor();
     let mut f = x - p;
     f = f * f * (Vec3::splat(3.0) - 2.0 * f);
-    let corner = |dx: f32, dy: f32, dz: f32| {
-        value_hash(wgsl_rem3(p + Vec3::new(dx, dy, dz), tile))
-    };
+    let corner = |dx: f32, dy: f32, dz: f32| value_hash(wgsl_rem3(p + Vec3::new(dx, dy, dz), tile));
     let lerp = |a: f32, b: f32, t: f32| a + (b - a) * t;
     let x0 = lerp(
         lerp(corner(0.0, 0.0, 0.0), corner(1.0, 0.0, 0.0), f.x),

@@ -6,14 +6,11 @@
 //! fires its decouplers; firing a decoupler separates everything in its
 //! attach subtree from the controlled vessel.
 //!
-//! For now separation simply **drops the mass**: the jettisoned subtree is
-//! despawned and the craft's aggregate properties heal from the surviving
-//! live parts — mass/thrust via [`crate::fuel`], inertia via
-//! [`recompute_ship_inertia`] here. The separation is modelled as a graph
-//! cut (which parts came off), so the later move to real debris / multi-craft
-//! control (a separated subtree becoming a controllable craft when it
-//! carries a command pod, else uncontrollable debris) reuses this same
-//! computation rather than replacing it.
+//! Separation is a real graph cut. Each jettisoned subtree becomes its own
+//! canonical vessel and rendered craft root, inherits the parent's motion,
+//! receives the decoupler impulse, and remains in the world under OnRails
+//! propagation. A separated subtree containing a command pod is recorded as
+//! controllable; pod-less hardware remains persistent debris.
 //!
 //! Engines start **cold**: every engine is disabled when the plan is built,
 //! and each stage lights its own. So the first stage activation is the launch
@@ -26,49 +23,71 @@
 
 use bevy::ecs::resource::IsResource;
 use bevy::ecs::world::EntityRef;
-use bevy::math::DVec3;
+use bevy::math::{DMat3, DVec3};
 use bevy::prelude::*;
-use std::collections::HashMap;
+use bevy::transform::TransformSystems;
+use big_space::prelude::CellCoord;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
 
 use crate::shipyard_editor::core::EditorPart;
 use thalos_input::game::GameInputIntent;
+use thalos_physics_canonical::canonical::{AuthorityMode, CraftId};
+use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_shipyard::{
     Attachment, CommandPod, Decoupler, Engine, EngineActivation, Part, PartResources, PartRole,
     Resource, ResourceTotals, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,
     SurfaceMount, compute_stage_summaries, derive_stages, live_part_dry_mass_kg,
     live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
 };
+use thalos_world::StateVector;
 
 use crate::SimStage;
 use crate::rendering::{PlayerShip, SimulationState};
+use crate::ship_view::{CraftIdentity, CraftPart, CraftRoot, PartVisual};
+use crate::view::HideInMapView;
 
 pub struct StagingPlugin;
 
 impl Plugin for StagingPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<StagingSummaries>().add_systems(
-            Update,
-            (
-                build_staging_plan,
-                // Staging only acts at 1× live time (the warp check lives in
-                // the system); the Esc pause menu is gated here.
-                activate_stage
-                    .after(build_staging_plan)
-                    .run_if(crate::pause_menu::not_game_paused),
-                // Recompute the aggregate inertia tensor from the live parts
-                // every frame, mirroring how `fuel.rs` recomputes mass/thrust.
-                // This makes attitude authority correct after a stage drops
-                // (and tracks fuel burn) without any ordering dependency on
-                // the staging or fuel systems — `set_ship_params` preserves
-                // the fields each system doesn't own.
-                recompute_ship_inertia,
-                // Publish the per-stage Δv / fuel readout consumed by the
-                // bottom-right HUD. After `activate_stage` so it reflects the
-                // post-staging part set.
-                publish_staging_summaries.after(activate_stage),
+        app.init_resource::<StagingSummaries>()
+            .init_resource::<SeparationVisualAudits>()
+            .add_systems(
+                Update,
+                (
+                    build_staging_plan,
+                    // Staging only acts at 1× live time (the warp check lives in
+                    // the system); the Esc pause menu is gated here.
+                    activate_stage
+                        .after(build_staging_plan)
+                        // A LocalRigidBody craft does not advance canonical
+                        // translation in `Simulation::step`; the Avian
+                        // readback installs its current-epoch inertial pose
+                        // later in this set. Separation must clone that fresh
+                        // pose. Cloning between the clock advance and readback
+                        // seats the detached OnRails vessel one render frame
+                        // behind — hundreds of metres at heliocentric speed.
+                        .after(crate::local_physics::readback_local_craft)
+                        .run_if(crate::pause_menu::not_game_paused),
+                    // Recompute the aggregate inertia tensor from the live parts
+                    // every frame, mirroring how `fuel.rs` recomputes mass/thrust.
+                    // This makes attitude authority correct after a stage drops
+                    // (and tracks fuel burn) without any ordering dependency on
+                    // the staging or fuel systems — `set_ship_params` preserves
+                    // the fields each system doesn't own.
+                    recompute_ship_inertia,
+                    // Publish the per-stage Δv / fuel readout consumed by the
+                    // bottom-right HUD. After `activate_stage` so it reflects the
+                    // post-staging part set.
+                    publish_staging_summaries.after(activate_stage),
+                )
+                    .in_set(SimStage::Physics),
             )
-                .in_set(SimStage::Physics),
-        );
+            .add_systems(
+                PostUpdate,
+                audit_separated_vessel_visuals.after(TransformSystems::Propagate),
+            );
     }
 }
 
@@ -103,10 +122,12 @@ impl StagingPlan {
 /// then the `Without<StagingPlan>` filter retires it.
 fn build_staging_plan(
     mut commands: Commands,
+    sim: Res<SimulationState>,
     ships: Query<Entity, (With<PlayerShip>, Without<StagingPlan>)>,
     parts: Query<
         (
             Entity,
+            &CraftPart,
             Option<&Attachment>,
             Option<&SurfaceMount>,
             Option<&Decoupler>,
@@ -116,7 +137,7 @@ fn build_staging_plan(
         // it must never enter the flight craft's staging topology.
         (With<Part>, Without<EditorPart>),
     >,
-    mut engine_activations: Query<&mut EngineActivation, Without<EditorPart>>,
+    mut engine_activations: Query<(&CraftPart, &mut EngineActivation), Without<EditorPart>>,
 ) {
     let Ok(ship) = ships.single() else {
         return;
@@ -125,14 +146,23 @@ fn build_staging_plan(
         return;
     }
 
-    // Single ship today, so every `Part` belongs to it. Multi-ship will need
-    // to scope this to the ship's own subtree.
-    let entities: Vec<Entity> = parts.iter().map(|(e, ..)| e).collect();
+    let active_id = sim.simulation.active_craft_id();
+    let entities: Vec<Entity> = parts
+        .iter()
+        .filter(|(_, owner, ..)| owner.0 == active_id)
+        .map(|(e, ..)| e)
+        .collect();
+    if entities.is_empty() {
+        return;
+    }
     let index: HashMap<Entity, usize> = entities.iter().enumerate().map(|(i, &e)| (e, i)).collect();
 
     let mut roles = vec![PartRole::Other; entities.len()];
     let mut parent = vec![None; entities.len()];
-    for (e, attachment, surface_mount, decoupler, engine) in parts.iter() {
+    for (e, owner, attachment, surface_mount, decoupler, engine) in parts.iter() {
+        if owner.0 != active_id {
+            continue;
+        }
         let i = index[&e];
         roles[i] = if decoupler.is_some() {
             PartRole::Decoupler
@@ -156,8 +186,10 @@ fn build_staging_plan(
         .collect();
 
     // Engines spawn enabled (for throttle-only flight); staging takes over.
-    for mut activation in engine_activations.iter_mut() {
-        activation.enabled = false;
+    for (owner, mut activation) in engine_activations.iter_mut() {
+        if owner.0 == active_id {
+            activation.enabled = false;
+        }
     }
 
     let stage_count = stages.len();
@@ -191,10 +223,10 @@ fn activate_stage(
     mut commands: Commands,
     intent: Res<GameInputIntent>,
     sim: Res<SimulationState>,
-    mut plans: Query<&mut StagingPlan>,
-    mut engine_activations: Query<&mut EngineActivation>,
-    attachments: Query<(Entity, &Attachment), Without<EditorPart>>,
-    surface_mounts: Query<(Entity, &SurfaceMount), Without<EditorPart>>,
+    mut plans: Query<(Entity, &mut StagingPlan), With<PlayerShip>>,
+    mut engine_activations: Query<(&CraftPart, &mut EngineActivation)>,
+    attachments: Query<(Entity, &Attachment, &CraftPart), Without<EditorPart>>,
+    surface_mounts: Query<(Entity, &SurfaceMount, &CraftPart), Without<EditorPart>>,
 ) {
     if !intent.stage {
         return;
@@ -206,7 +238,8 @@ fn activate_stage(
     if (sim.simulation.warp.speed() - 1.0).abs() > f64::EPSILON {
         return;
     }
-    let Ok(mut plan) = plans.single_mut() else {
+    let active_id = sim.simulation.active_craft_id();
+    let Ok((active_root, mut plan)) = plans.single_mut() else {
         return;
     };
     if plan.is_spent() {
@@ -220,19 +253,33 @@ fn activate_stage(
     };
 
     for engine in engines {
-        if let Ok(mut activation) = engine_activations.get_mut(engine) {
+        if let Ok((owner, mut activation)) = engine_activations.get_mut(engine)
+            && owner.0 == active_id
+        {
             activation.enabled = true;
         }
     }
 
     if !decouplers.is_empty() {
-        let children = child_map(&attachments, &surface_mounts);
+        let children = child_map(active_id, &attachments, &surface_mounts);
+        let mut claimed = HashSet::new();
+        let mut separated = Vec::new();
         for decoupler in decouplers {
-            for dropped in attach_subtree(decoupler, &children) {
-                // `try_despawn` is recursive (drops each part's visual mesh
-                // children) and tolerant of an already-gone entity.
-                commands.entity(dropped).try_despawn();
+            let parts = attach_subtree(decoupler, &children);
+            if parts.iter().any(|entity| claimed.contains(entity)) {
+                continue;
             }
+            claimed.extend(parts.iter().copied());
+            separated.push(SeparatedAssembly { decoupler, parts });
+        }
+        if !separated.is_empty() {
+            for stage in plan.stages.iter_mut().skip(next + 1) {
+                stage.engines.retain(|entity| !claimed.contains(entity));
+                stage.decouplers.retain(|entity| !claimed.contains(entity));
+            }
+            commands.queue(move |world: &mut World| {
+                materialize_separated_vessels(world, active_root, active_id, separated);
+            });
         }
     }
 
@@ -246,15 +293,20 @@ fn activate_stage(
 
 /// Map each part to its attach children, from the live attachment graph.
 fn child_map(
-    attachments: &Query<(Entity, &Attachment), Without<EditorPart>>,
-    surface_mounts: &Query<(Entity, &SurfaceMount), Without<EditorPart>>,
+    active_id: CraftId,
+    attachments: &Query<(Entity, &Attachment, &CraftPart), Without<EditorPart>>,
+    surface_mounts: &Query<(Entity, &SurfaceMount, &CraftPart), Without<EditorPart>>,
 ) -> HashMap<Entity, Vec<Entity>> {
     let mut map: HashMap<Entity, Vec<Entity>> = HashMap::new();
-    for (child, attachment) in attachments.iter() {
-        map.entry(attachment.parent).or_default().push(child);
+    for (child, attachment, owner) in attachments.iter() {
+        if owner.0 == active_id {
+            map.entry(attachment.parent).or_default().push(child);
+        }
     }
-    for (child, mount) in surface_mounts.iter() {
-        map.entry(mount.parent).or_default().push(child);
+    for (child, mount, owner) in surface_mounts.iter() {
+        if owner.0 == active_id {
+            map.entry(mount.parent).or_default().push(child);
+        }
     }
     map
 }
@@ -270,6 +322,464 @@ fn attach_subtree(root: Entity, children: &HashMap<Entity, Vec<Entity>>) -> Vec<
         }
     }
     out
+}
+
+#[derive(Debug)]
+struct SeparatedAssembly {
+    decoupler: Entity,
+    parts: Vec<Entity>,
+}
+
+#[derive(Resource, Default)]
+struct SeparationVisualAudits(Vec<SeparationVisualAudit>);
+
+struct SeparationVisualAudit {
+    craft_id: CraftId,
+    root: Entity,
+    parts: Vec<Entity>,
+    age_frames: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PartAggregate {
+    wet_mass_kg: f64,
+    dry_mass_kg: f64,
+    center_of_mass: DVec3,
+    moment_of_inertia: DVec3,
+    max_torque: f64,
+    controllable: bool,
+}
+
+fn aggregate_world_parts(world: &World, entities: &[Entity]) -> Option<PartAggregate> {
+    let mut wet_mass_kg = 0.0;
+    let mut dry_mass_kg = 0.0;
+    let mut weighted_center = DVec3::ZERO;
+    let mut bodies = Vec::new();
+    let mut max_torque = 0.0;
+    let mut controllable = false;
+
+    for &entity in entities {
+        let Ok(part) = world.get_entity(entity) else {
+            continue;
+        };
+        let position = part
+            .get::<Transform>()
+            .map(|transform| transform.translation.as_dvec3())
+            .unwrap_or(DVec3::ZERO);
+        let wet_mass = live_part_total_mass_kg(part);
+        let dry_mass = live_part_dry_mass_kg(part) as f64;
+        if let Some(pod) = part.get::<CommandPod>() {
+            controllable = true;
+            max_torque += pod.reaction_wheel_torque as f64;
+        }
+        if wet_mass <= 0.0 {
+            continue;
+        }
+        wet_mass_kg += wet_mass;
+        dry_mass_kg += dry_mass;
+        weighted_center += position * wet_mass;
+        bodies.push((wet_mass, position, live_part_self_inertia(part, wet_mass)));
+    }
+
+    if wet_mass_kg <= 0.0 {
+        return None;
+    }
+    let center_of_mass = weighted_center / wet_mass_kg;
+    let moment_of_inertia = bodies
+        .into_iter()
+        .map(|(mass, position, self_inertia)| {
+            self_inertia + parallel_axis_inertia(mass, position - center_of_mass)
+        })
+        .sum();
+
+    Some(PartAggregate {
+        wet_mass_kg,
+        dry_mass_kg,
+        center_of_mass,
+        moment_of_inertia,
+        max_torque,
+        controllable,
+    })
+}
+
+fn vessel_params(aggregate: PartAggregate, inherited: ShipParameters) -> ShipParameters {
+    ShipParameters {
+        moment_of_inertia: aggregate.moment_of_inertia,
+        center_of_mass: aggregate.center_of_mass,
+        max_torque: DVec3::splat(aggregate.max_torque),
+        gimbal_torque_full: DVec3::ZERO,
+        // Separated hardware is deliberately ballistic in this vertical
+        // slice. Engine ownership remains on its parts for a future vessel
+        // switch/control pass, but it cannot borrow the active craft's scalar
+        // propulsion bridge.
+        thrust_n: 0.0,
+        mass_flow_kg_per_s: 0.0,
+        dry_mass_kg: aggregate.dry_mass_kg,
+        impact_tolerance_m_s: inherited.impact_tolerance_m_s,
+        reference_area_m2: inherited.reference_area_m2,
+        drag_coefficient: inherited.drag_coefficient,
+    }
+}
+
+fn separation_delta_velocities(
+    world_impulse: DVec3,
+    remaining_mass_kg: f64,
+    detached_mass_kg: f64,
+) -> (DVec3, DVec3) {
+    (
+        -world_impulse / remaining_mass_kg,
+        world_impulse / detached_mass_kg,
+    )
+}
+
+/// Turn graph-cut part sets into independently propagated canonical vessels
+/// and visible BigSpace roots. Runs as one exclusive deferred command so ECS
+/// ownership and canonical fleet creation become visible atomically.
+fn materialize_separated_vessels(
+    world: &mut World,
+    active_root: Entity,
+    active_id: CraftId,
+    separated: Vec<SeparatedAssembly>,
+) {
+    let dropped: HashSet<Entity> = separated
+        .iter()
+        .flat_map(|assembly| assembly.parts.iter().copied())
+        .collect();
+    let remaining_parts: Vec<Entity> = {
+        let mut query = world.query_filtered::<(Entity, &CraftPart), With<Part>>();
+        query
+            .iter(world)
+            .filter(|(entity, owner)| owner.0 == active_id && !dropped.contains(entity))
+            .map(|(entity, _)| entity)
+            .collect()
+    };
+    let Some(remaining) = aggregate_world_parts(world, &remaining_parts) else {
+        error!("stage separation rejected: no mass remains on active craft");
+        return;
+    };
+
+    let assemblies: Vec<(SeparatedAssembly, PartAggregate, f64)> = separated
+        .into_iter()
+        .filter_map(|assembly| {
+            let aggregate = aggregate_world_parts(world, &assembly.parts)?;
+            let impulse = world
+                .get::<Decoupler>(assembly.decoupler)
+                .map(|decoupler| decoupler.ejection_impulse as f64)
+                .unwrap_or(0.0);
+            Some((assembly, aggregate, impulse))
+        })
+        .collect();
+    if assemblies.is_empty() {
+        return;
+    }
+
+    let root_transform = world
+        .get::<Transform>(active_root)
+        .cloned()
+        .unwrap_or_default();
+    let root_cell = world
+        .get::<CellCoord>(active_root)
+        .cloned()
+        .unwrap_or(CellCoord::ZERO);
+    let root_visibility = world
+        .get::<Visibility>(active_root)
+        .cloned()
+        .unwrap_or(Visibility::Inherited);
+    let real_root = world
+        .get_resource::<crate::rendering::real_space::RealSpaceRoot>()
+        .map(|root| root.entity);
+
+    let mut created = Vec::new();
+    let active_delta_v;
+    {
+        let mut sim = world.resource_mut::<SimulationState>();
+        let Some(active_vessel) = sim.simulation.vessel(active_id) else {
+            error!("stage separation rejected: active canonical vessel {active_id} is missing");
+            return;
+        };
+        let active_state = active_vessel.state().clone();
+        let inherited_params = *active_vessel.parameters();
+        let mut active_velocity = active_state.translation.velocity;
+
+        for (assembly, aggregate, impulse) in &assemblies {
+            let body_direction = (aggregate.center_of_mass - remaining.center_of_mass)
+                .try_normalize()
+                .unwrap_or(-DVec3::Y);
+            let world_impulse = active_state.attitude.orientation * body_direction * *impulse;
+            let (parent_delta_v, detached_delta_v) = separation_delta_velocities(
+                world_impulse,
+                remaining.wet_mass_kg,
+                aggregate.wet_mass_kg,
+            );
+
+            let mut detached_state = active_state.clone();
+            detached_state.translation.velocity += detached_delta_v;
+            detached_state.mass.wet_mass_kg = aggregate.wet_mass_kg;
+            detached_state.mass.dry_mass_kg = aggregate.dry_mass_kg;
+            detached_state.mass.inertia_body_kg_m2 =
+                DMat3::from_diagonal(aggregate.moment_of_inertia);
+            detached_state.mass.center_of_mass_body_m = aggregate.center_of_mass;
+            detached_state.authority = AuthorityMode::OnRails { trajectory: 0 };
+
+            let id = sim.simulation.create_vessel(
+                detached_state,
+                vessel_params(*aggregate, inherited_params),
+                VesselKind::Ship,
+                aggregate.controllable,
+            );
+            active_velocity += parent_delta_v;
+            let relative_speed_m_s = (detached_delta_v - parent_delta_v).length();
+            created.push((
+                id,
+                assembly.decoupler,
+                assembly.parts.clone(),
+                aggregate.wet_mass_kg,
+                *impulse,
+                relative_speed_m_s,
+            ));
+        }
+
+        let mut active_params = vessel_params(remaining, inherited_params);
+        // The surviving stage's active engines are refreshed by `fuel.rs` on
+        // the next frame; zeroing here prevents one stale frame of dropped
+        // thrust from entering canonical state.
+        active_params.thrust_n = 0.0;
+        active_params.mass_flow_kg_per_s = 0.0;
+        sim.simulation.set_ship_params(active_params);
+        sim.simulation.set_ship_mass(remaining.wet_mass_kg);
+        sim.simulation.set_ship_state_for(
+            active_id,
+            StateVector {
+                position: active_state.translation.position,
+                velocity: active_velocity,
+            },
+        );
+        active_delta_v = active_velocity - active_state.translation.velocity;
+    }
+    crate::local_physics::apply_inertial_delta_v(world, active_delta_v);
+
+    for (id, decoupler, parts, mass_kg, impulse_n_s, relative_speed_m_s) in created {
+        let part_count = parts.len();
+        let mut root = world.spawn((
+            CraftRoot,
+            CraftIdentity(id),
+            HideInMapView,
+            root_transform.clone(),
+            root_cell.clone(),
+            root_visibility.clone(),
+            Name::new(format!("Separated stage {id}")),
+        ));
+        if let Some(real_root) = real_root {
+            root.insert(ChildOf(real_root));
+        }
+        let detached_root = root.id();
+
+        for part in parts {
+            let mut part_entity = world.entity_mut(part);
+            part_entity.insert(CraftPart(id));
+            if part == decoupler {
+                part_entity.remove::<Attachment>();
+                part_entity.remove::<SurfaceMount>();
+            }
+            if let Some(mut activation) = part_entity.get_mut::<EngineActivation>() {
+                activation.enabled = false;
+            }
+            drop(part_entity);
+            world.entity_mut(detached_root).add_child(part);
+        }
+        let audit_parts = world
+            .get::<Children>(detached_root)
+            .map(|children| children.iter().collect())
+            .unwrap_or_default();
+        world
+            .resource_mut::<SeparationVisualAudits>()
+            .0
+            .push(SeparationVisualAudit {
+                craft_id: id,
+                root: detached_root,
+                parts: audit_parts,
+                age_frames: 0,
+            });
+        info!(
+            "stage separation created persistent vessel {id}: \
+             {part_count} parts, {mass_kg:.0} kg, {impulse_n_s:.0} N·s, \
+             {relative_speed_m_s:.3} m/s relative separation"
+        );
+    }
+}
+
+/// Short-lived structural trace for a newly separated vessel. The defect this
+/// diagnoses is temporal and cannot be inferred from a later screenshot: the
+/// canonical vessel may exist while its mesh descendants lose their hierarchy,
+/// render layer, or propagated transform on the very next frame.
+///
+/// Samples are appended to `artifacts/diagnostics/stage_separation.jsonl` after
+/// transform propagation. The trace retires after five seconds at 60 fps.
+fn audit_separated_vessel_visuals(world: &mut World) {
+    const SAMPLE_FRAMES: &[u32] = &[1, 2, 10, 60, 300];
+
+    let mut audits = world
+        .remove_resource::<SeparationVisualAudits>()
+        .unwrap_or_default();
+    for audit in &mut audits.0 {
+        audit.age_frames += 1;
+        if !SAMPLE_FRAMES.contains(&audit.age_frames) {
+            continue;
+        }
+
+        let (canonical_position, active_position) = {
+            let sim = world.resource::<SimulationState>();
+            let canonical_position = sim
+                .simulation
+                .vessel(audit.craft_id)
+                .map(|vessel| vessel.state().translation.position);
+            let active_position = sim.simulation.craft_state().translation.position;
+            (canonical_position, active_position)
+        };
+
+        let root = world.get_entity(audit.root).ok();
+        let root_children = root
+            .as_ref()
+            .and_then(|entity| entity.get::<Children>())
+            .map(|children| children.len())
+            .unwrap_or(0);
+        let root_cell = root
+            .as_ref()
+            .and_then(|entity| entity.get::<CellCoord>())
+            .map(|cell| format!("{cell:?}"));
+        let root_transform = root
+            .as_ref()
+            .and_then(|entity| entity.get::<Transform>())
+            .map(|transform| transform.translation.to_array());
+        let root_global = root
+            .as_ref()
+            .and_then(|entity| entity.get::<GlobalTransform>())
+            .map(|transform| transform.translation().to_array());
+        let root_visibility = root
+            .as_ref()
+            .and_then(|entity| entity.get::<Visibility>())
+            .map(|visibility| format!("{visibility:?}"));
+        let root_inherited_visible = root
+            .as_ref()
+            .and_then(|entity| entity.get::<InheritedVisibility>())
+            .map(|visibility| visibility.get());
+        let root_layers = root
+            .as_ref()
+            .and_then(|entity| entity.get::<bevy::camera::visibility::RenderLayers>())
+            .map(|layers| format!("{layers:?}"));
+
+        let part_samples: Vec<_> = audit
+            .parts
+            .iter()
+            .map(|&part| {
+                let entity = world.get_entity(part).ok();
+                let parent = entity
+                    .as_ref()
+                    .and_then(|entity| entity.get::<ChildOf>())
+                    .map(|parent| parent.parent().to_bits());
+                let part_global = entity
+                    .as_ref()
+                    .and_then(|entity| entity.get::<GlobalTransform>())
+                    .map(|transform| transform.translation().to_array());
+                let part_layers = entity
+                    .as_ref()
+                    .and_then(|entity| {
+                        entity.get::<bevy::camera::visibility::RenderLayers>()
+                    })
+                    .map(|layers| format!("{layers:?}"));
+                let low_precision_root = entity.as_ref().is_some_and(|entity| {
+                    entity.contains::<big_space::grid::propagation::LowPrecisionRoot>()
+                });
+                let inherited_visible = entity
+                    .as_ref()
+                    .and_then(|entity| entity.get::<InheritedVisibility>())
+                    .map(|visibility| visibility.get());
+                let view_visible = entity
+                    .as_ref()
+                    .and_then(|entity| entity.get::<ViewVisibility>())
+                    .map(|visibility| visibility.get());
+                let visual_children: Vec<_> = entity
+                    .as_ref()
+                    .and_then(|entity| entity.get::<Children>())
+                    .into_iter()
+                    .flat_map(|children| children.iter())
+                    .filter(|child| {
+                        world
+                            .get_entity(*child)
+                            .ok()
+                            .is_some_and(|entity| entity.contains::<PartVisual>())
+                    })
+                    .map(|child| {
+                        let visual = world.get_entity(child).ok();
+                        serde_json::json!({
+                            "entity": child.to_bits(),
+                            "inherited_visible": visual
+                                .as_ref()
+                                .and_then(|entity| entity.get::<InheritedVisibility>())
+                                .map(|visibility| visibility.get()),
+                            "view_visible": visual
+                                .as_ref()
+                                .and_then(|entity| entity.get::<ViewVisibility>())
+                                .map(|visibility| visibility.get()),
+                            "layers": visual
+                                .as_ref()
+                                .and_then(|entity| entity.get::<bevy::camera::visibility::RenderLayers>())
+                                .map(|layers| format!("{layers:?}")),
+                            "global_translation": visual
+                                .as_ref()
+                                .and_then(|entity| entity.get::<GlobalTransform>())
+                                .map(|transform| transform.translation().to_array()),
+                        })
+                    })
+                    .collect();
+
+                serde_json::json!({
+                    "entity": part.to_bits(),
+                    "exists": entity.is_some(),
+                    "parent": parent,
+                    "expected_parent": audit.root.to_bits(),
+                    "low_precision_root": low_precision_root,
+                    "inherited_visible": inherited_visible,
+                    "view_visible": view_visible,
+                    "layers": part_layers,
+                    "global_translation": part_global,
+                    "visual_children": visual_children,
+                })
+            })
+            .collect();
+
+        let record = serde_json::json!({
+            "event": "separated_vessel_visual_audit",
+            "craft_id": audit.craft_id.to_string(),
+            "age_frames": audit.age_frames,
+            "root": {
+                "entity": audit.root.to_bits(),
+                "exists": root.is_some(),
+                "children": root_children,
+                "cell": root_cell,
+                "translation": root_transform,
+                "global_translation": root_global,
+                "visibility": root_visibility,
+                "inherited_visible": root_inherited_visible,
+                "layers": root_layers,
+            },
+            "canonical_position": canonical_position.map(|position| position.to_array()),
+            "distance_from_active_m": canonical_position
+                .map(|position| position.distance(active_position)),
+            "parts": part_samples,
+        });
+        let path = crate::artifact_paths::default_jsonl_path("stage_separation.jsonl");
+        match crate::artifact_paths::open_jsonl_append(&path) {
+            Ok(mut file) => {
+                if let Err(error) = writeln!(file, "{record}") {
+                    warn!("could not append {}: {error}", path.display());
+                }
+            }
+            Err(error) => warn!("could not open {}: {error}", path.display()),
+        }
+    }
+    audits.0.retain(|audit| audit.age_frames < 300);
+    world.insert_resource(audits);
 }
 
 // ---------------------------------------------------------------------------
@@ -295,6 +805,7 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
     if parts.is_empty() {
         return;
     }
+    let active_id = sim.simulation.active_craft_id();
 
     let mut total_mass = 0.0_f64;
     let mut weighted_center = DVec3::ZERO;
@@ -308,6 +819,12 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
     let mut gimbal_engines: Vec<(f64, f64, f64)> = Vec::new();
 
     for part in parts.iter() {
+        if part
+            .get::<CraftPart>()
+            .is_none_or(|owner| owner.0 != active_id)
+        {
+            continue;
+        }
         if let Some(pod) = part.get::<CommandPod>() {
             max_torque += pod.reaction_wheel_torque as f64;
         }
@@ -382,6 +899,7 @@ pub struct StagingSummaries(pub Vec<StageSummary>);
 fn publish_staging_summaries(
     plans: Query<&StagingPlan>,
     parts: PartQuery,
+    sim: Res<SimulationState>,
     mut summaries: ResMut<StagingSummaries>,
 ) {
     let Ok(plan) = plans.single() else {
@@ -394,8 +912,15 @@ fn publish_staging_summaries(
     let mut index: HashMap<Entity, usize> = HashMap::new();
     let mut summary_parts: Vec<SummaryPart> = Vec::new();
     let mut parents: Vec<Option<Entity>> = Vec::new();
+    let active_id = sim.simulation.active_craft_id();
 
     for part in parts.iter() {
+        if part
+            .get::<CraftPart>()
+            .is_none_or(|owner| owner.0 != active_id)
+        {
+            continue;
+        }
         let surface_mount = part.get::<SurfaceMount>();
         let multiplier = surface_multiplier(surface_mount);
         index.insert(part.id(), summary_parts.len());
@@ -470,4 +995,44 @@ fn part_resource_totals(resources: &PartResources) -> HashMap<Resource, Resource
             )
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use thalos_shipyard::{CatalogEntry, PartCatalog};
+
+    #[test]
+    fn separation_impulse_conserves_linear_momentum() {
+        let parent_mass = 3_000.0;
+        let detached_mass = 1_200.0;
+        let impulse = DVec3::new(40.0, -250.0, 15.0);
+        let (parent_delta_v, detached_delta_v) =
+            separation_delta_velocities(impulse, parent_mass, detached_mass);
+
+        let net_delta_momentum = parent_delta_v * parent_mass + detached_delta_v * detached_mass;
+        assert!(net_delta_momentum.length() < 1.0e-10);
+    }
+
+    #[test]
+    fn tuned_saturn_decoupler_opens_a_visible_gap() {
+        let catalog =
+            PartCatalog::load_from_str(include_str!("../../../../assets/parts.ron")).unwrap();
+        let CatalogEntry::Decoupler(spec) = catalog.resolve("decoupler_std").unwrap() else {
+            panic!("decoupler_std must remain a decoupler");
+        };
+
+        // Use conservative wet Saturn masses: the catalog's 4 m ring must
+        // still open a metre-scale gap within a few seconds instead of
+        // leaving both meshes superimposed.
+        let impulse = DVec3::Y * f64::from(spec.ejection_impulse_per_diameter * 4.0);
+        let (upper_delta_v, booster_delta_v) =
+            separation_delta_velocities(impulse, 42_000.0, 87_000.0);
+        let relative_speed_m_s = (booster_delta_v - upper_delta_v).length();
+
+        assert!(
+            relative_speed_m_s >= 0.25,
+            "relative separation speed was only {relative_speed_m_s:.3} m/s"
+        );
+    }
 }

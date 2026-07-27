@@ -17,6 +17,7 @@ thalos_celestial = { path = "../../domain/celestial" }
 thalos_shipyard = { path = "../../domain/construction" }
 thalos_capture_protocol = { path = "../../capture/protocol" }
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+bevy_egui = "0.41.1"
 big_space = { workspace = true }
 # Persisted user settings (user/settings.ron — window mode, vsync, UI scale).
 ron = "0.12"

@@ -20,6 +20,10 @@
 //! - **Fine band** — sub-model octaves conditioned by the model's own local
 //!   relief energy inside the detail window (rugged model terrain gets rugged
 //!   fine detail, its plains stay smooth), by chart relief outside.
+//! - **Erosion band** — analytic branched-gully carving (`bevy_erosion_filter`)
+//!   below the model's 90 m resolution, oriented by finite-difference slopes of
+//!   the bands above so drainage aligns to the model's own fall lines instead
+//!   of adding isotropic crumple. See [`DiffusionSurface::erosion_band`].
 //!
 //! Landcover stays canonical: albedo / moisture / climate come from the inner
 //! [`ProceduralSurface`]'s own fields via
@@ -34,7 +38,8 @@
 
 use std::path::Path;
 
-use glam::{DVec3, Vec3};
+use bevy_erosion_filter::cpu::{ErosionFilterParams, erosion_filter};
+use glam::{DVec3, Vec2, Vec3};
 
 use crate::procedural::{MacroBiome, ProceduralSurface};
 use crate::query::{Region, SurfaceQuery, SurfaceSample};
@@ -99,8 +104,9 @@ fn footprint_gate(wavelength_m: f64, footprint_m: f64) -> f64 {
 
 // --- rasters -------------------------------------------------------------------
 
-/// A W×H raster with a box-filtered mip chain, bilinear at a footprint-matched
-/// mip. `wrap_x` for the global equirect chart (longitude wraps).
+/// A W×H raster with a box-filtered mip chain, Catmull-Rom at a
+/// footprint-matched mip. `wrap_x` for the global equirect chart (longitude
+/// wraps).
 struct Raster {
     width: usize,
     height: usize,
@@ -131,10 +137,22 @@ impl Raster {
             w = nw;
             h = nh;
         }
-        Self { width, height, px_m, wrap_x, mips }
+        Self {
+            width,
+            height,
+            px_m,
+            wrap_x,
+            mips,
+        }
     }
 
-    fn load(path: &Path, width: usize, height: usize, px_m: f64, wrap_x: bool) -> Result<Self, String> {
+    fn load(
+        path: &Path,
+        width: usize,
+        height: usize,
+        px_m: f64,
+        wrap_x: bool,
+    ) -> Result<Self, String> {
         let raw = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
         if raw.len() != width * height * 4 {
             return Err(format!(
@@ -152,7 +170,22 @@ impl Raster {
         Ok(Self::from_data(data, width, height, px_m, wrap_x))
     }
 
-    /// Bilinear sample at fractional mip-0 pixel coords, footprint-matched.
+    /// Catmull-Rom sample at fractional mip-0 pixel coords, footprint-matched.
+    ///
+    /// **Cubic, not bilinear, and that is load-bearing** (INC-20260727T012304Z).
+    /// Bilinear reconstruction is only C0: its gradient jumps across every cell
+    /// edge, so the raster's own 90 m lattice is a grid of slope creases. That
+    /// is mild in the height itself (measured slope jump 0.096) but the erosion
+    /// band takes its steering slope and base height from this field and
+    /// responds to them nonlinearly, amplifying each crease ~8× into a knife
+    /// ridge — the "shark fin" blades. Catmull-Rom is C1 and cuts the base's
+    /// own fold to 0.002.
+    ///
+    /// Smootherstep-weighted bilinear is the cheap C1 alternative and is
+    /// **wrong here**: it forces the gradient to zero at every cell edge, which
+    /// the same amplification turns into a *worse* artifact (measured: the
+    /// band's fold went to 3.58, 4.5× the bilinear baseline). The reconstruction
+    /// this band needs must be smooth in the derivative, not merely continuous.
     fn sample_px(&self, px: f64, py: f64, footprint_m: f64) -> f64 {
         let mip = if footprint_m <= self.px_m {
             0
@@ -163,21 +196,38 @@ impl Raster {
         let (w, h, data) = &self.mips[mip];
         let fx = px / scale - 0.5;
         let fy = (py / scale - 0.5).clamp(0.0, (*h - 1) as f64);
-        let (y0, ty) = (fy.floor() as usize, fy - fy.floor());
-        let y1 = (y0 + 1).min(h - 1);
-        let (x0f, tx) = (fx.floor(), fx - fx.floor());
-        let (x0, x1) = if self.wrap_x {
-            let m = *w as i64;
-            let a = ((x0f as i64) % m + m) % m;
-            (a as usize, ((a + 1) % m) as usize)
-        } else {
-            let a = x0f.clamp(0.0, (*w - 1) as f64) as usize;
-            (a, (a + 1).min(w - 1))
+        let (y0, ty) = (fy.floor() as i64, fy - fy.floor());
+        let (x0, tx) = (fx.floor() as i64, fx - fx.floor());
+
+        // Longitude wraps on the global chart; latitude and the drape windows
+        // clamp, same edge rule the bilinear tap pair used.
+        let xi = |k: i64| -> usize {
+            if self.wrap_x {
+                let m = *w as i64;
+                (((x0 + k) % m + m) % m) as usize
+            } else {
+                (x0 + k).clamp(0, *w as i64 - 1) as usize
+            }
         };
-        data[y0 * w + x0] as f64 * (1.0 - tx) * (1.0 - ty)
-            + data[y0 * w + x1] as f64 * tx * (1.0 - ty)
-            + data[y1 * w + x0] as f64 * (1.0 - tx) * ty
-            + data[y1 * w + x1] as f64 * tx * ty
+        let yi = |k: i64| -> usize { (y0 + k).clamp(0, *h as i64 - 1) as usize };
+        let cr = |t: f64| -> [f64; 4] {
+            let (t2, t3) = (t * t, t * t * t);
+            [
+                -0.5 * t3 + t2 - 0.5 * t,
+                1.5 * t3 - 2.5 * t2 + 1.0,
+                -1.5 * t3 + 2.0 * t2 + 0.5 * t,
+                0.5 * t3 - 0.5 * t2,
+            ]
+        };
+        let (wx, wy) = (cr(tx), cr(ty));
+        let mut acc = 0.0;
+        for (j, wyj) in wy.iter().enumerate() {
+            let row = yi(j as i64 - 1) * w;
+            for (i, wxi) in wx.iter().enumerate() {
+                acc += data[row + xi(i as i64 - 1)] as f64 * wxi * wyj;
+            }
+        }
+        acc
     }
 }
 
@@ -229,6 +279,78 @@ const SUB_CHART_OCTAVE0: usize = 7;
 /// Sub-model fine band (below the 90 m detail resolution down to mesh scale).
 const FINE_OCTAVES: [(f64, f64); 4] = [(700.0, 7.0), (300.0, 4.0), (130.0, 2.4), (55.0, 1.5)];
 
+// --- erosion band constants --------------------------------------------------
+//
+// The erosion band is the *organized* half of the sub-model spectrum: where the
+// fine octaves add isotropic roughness, this adds branched, fall-line-aligned
+// gully networks (`bevy_erosion_filter`, Johansen's analytic erosion filter) —
+// the structure that makes aerial terrain read as carved rather than crumpled.
+
+/// The filter's `scale` in metres of the 2-D chart. Largest gully spacing is
+/// `scale × cell_scale` (~1.7 km) — just below the 90 m raster's resolvable
+/// relief, running down `EROSION_MAX_OCTAVES` halvings to ~50 m.
+const EROSION_SCALE_M: f32 = 2_400.0;
+/// Carve amplitude: `strength × scale × ~2` bounds the octave ladder (≈ 60 m
+/// realized on steep faces). Round-1 finding at 0.03: the massif carved ~190 m
+/// mean and the inter-gully ridges became a spike-cone field — the filter's
+/// over-carve signature. Keep incision *below* the 90 m band's own relief.
+const EROSION_STRENGTH: f32 = 0.012;
+const EROSION_MAX_OCTAVES: i32 = 6;
+/// Footprint the base-slope finite differences are taken at: the band steers by
+/// the model's own 90 m relief, never by content finer than itself.
+const EROSION_BASE_M: f64 = 90.0;
+/// Cube-face blend half-width in gnomonic units (~25 km on the ground): two
+/// face-local patterns crossfade over this band so the height stays continuous
+/// across chart seams. Must stay well above the largest gully wavelength.
+const EROSION_FACE_BLEND: f64 = 0.008;
+
+/// Fold-rounding radius, as a fraction of the finest octave this sample
+/// actually admits.
+///
+/// The filter builds its ridges by **folding** the field — `phacelle.y.abs()`
+/// and `sign(phacelle.y)` in `bevy_erosion_filter::cpu` — so every octave
+/// leaves a C0 crease along that octave's zero crossing. A slope discontinuity
+/// has unbounded bandwidth, which means the octave ladder above cannot gate it
+/// and **refining the mesh only sharpens it**: measured on the showcase massif,
+/// a ~49° knife at 1 m sampling, 8.8× the worst fold anywhere else in the
+/// terrain, rendering as a field of thin blades ("shark fins") that got worse
+/// the closer the camera came (INC-20260727T012304Z). With the filter's default
+/// gain 0.5 against lacunarity 2.0, `strength × frequency` is constant per
+/// octave, so *every* octave contributes an equally sharp crease — lowering
+/// `EROSION_STRENGTH` shrinks the blades without removing them, which is why
+/// the round-1 retune from 0.03 didn't fix this.
+///
+/// Averaging the filter over a small rosette turns each crease into a rounded
+/// crest whose radius is set by the band's own resolution — the same
+/// footprint discipline every other band already obeys (ADR-20260722T105147Z
+/// part 3). At 0.22 the finest admitted octave loses ~40 % of its amplitude and
+/// everything coarser is untouched; the crease stops being a discontinuity.
+const EROSION_FOLD_ROUND: f64 = 0.22;
+/// Rosette offsets on the unit circle (22.5° phase), deliberately off the
+/// gnomonic chart's axes so the kernel doesn't align with the grid it samples.
+/// With the centre tap this approximates a disc average of radius ~1.26×.
+const EROSION_FOLD_TAPS: [(f64, f64); 4] = [
+    (0.923_88, 0.382_68),
+    (-0.382_68, 0.923_88),
+    (-0.923_88, -0.382_68),
+    (0.382_68, -0.923_88),
+];
+
+/// Six gnomonic face frames `(normal, s, t)` for the erosion band's 2-D chart.
+/// Deliberately local: the pattern only needs a self-consistent
+/// parameterisation, not agreement with `pipeline::cubesphere` (which is f32
+/// and pipeline-internal); metres-scale chart coords want f64 up front.
+fn erosion_face_basis(face: usize) -> (DVec3, DVec3, DVec3) {
+    match face {
+        0 => (DVec3::X, DVec3::Z, DVec3::Y),
+        1 => (DVec3::NEG_X, DVec3::NEG_Z, DVec3::Y),
+        2 => (DVec3::Y, DVec3::X, DVec3::Z),
+        3 => (DVec3::NEG_Y, DVec3::X, DVec3::NEG_Z),
+        4 => (DVec3::Z, DVec3::NEG_X, DVec3::Y),
+        _ => (DVec3::NEG_Z, DVec3::X, DVec3::Y),
+    }
+}
+
 /// Geometry from the diffusion bands, landcover from the canonical
 /// [`ProceduralSurface`]. See the module docs.
 pub struct DiffusionSurface {
@@ -254,7 +376,13 @@ impl DiffusionSurface {
         let width = json_num(&chart_json, "width").ok_or("chart sidecar: width")? as usize;
         let height = json_num(&chart_json, "height").ok_or("chart sidecar: height")? as usize;
         let px_m = json_num(&chart_json, "px_m_equator").unwrap_or(23_040.0);
-        let chart = Raster::load(&dir.join("thalos_chart_elev.f32"), width, height, px_m, true)?;
+        let chart = Raster::load(
+            &dir.join("thalos_chart_elev.f32"),
+            width,
+            height,
+            px_m,
+            true,
+        )?;
 
         let mask: Vec<f32> = chart.mips[0]
             .2
@@ -283,13 +411,8 @@ impl DiffusionSurface {
                     .map_err(|e| format!("detail sidecar: {e}"))?;
                 let lon = json_num(&json, "site_lon_deg").ok_or("detail sidecar: site_lon_deg")?;
                 let lat = json_num(&json, "site_lat_deg").ok_or("detail sidecar: site_lat_deg")?;
-                let raster = Raster::load(
-                    &json_path.with_extension("f32"),
-                    side,
-                    side,
-                    90.0,
-                    false,
-                )?;
+                let raster =
+                    Raster::load(&json_path.with_extension("f32"), side, side, 90.0, false)?;
                 // Relief-energy conditioning raster (probe field.rs recipe).
                 let mut rough = vec![0f32; side * side];
                 {
@@ -364,14 +487,24 @@ impl DiffusionSurface {
         )
     }
 
-    fn octave_sum(&self, dir: DVec3, footprint_m: f64, first: usize, scale: f64, ridged_w: f64) -> f64 {
+    fn octave_sum(
+        &self,
+        dir: DVec3,
+        footprint_m: f64,
+        first: usize,
+        scale: f64,
+        ridged_w: f64,
+    ) -> f64 {
         let mut h = 0.0;
         for (i, (wavelength, amp)) in OCTAVES.iter().enumerate().skip(first) {
             let gate = footprint_gate(*wavelength, footprint_m);
             if gate <= 0.0 {
                 break;
             }
-            let n = grad_noise(dir * (self.radius_m / wavelength), self.seed.wrapping_add(i as u64 * 977));
+            let n = grad_noise(
+                dir * (self.radius_m / wavelength),
+                self.seed.wrapping_add(i as u64 * 977),
+            );
             let ridged = (1.0 - n.abs()) * 2.0 - 1.0;
             let shaped = n + (ridged - n) * ridged_w.clamp(0.0, 1.0);
             h += shaped * amp * scale * gate;
@@ -385,7 +518,9 @@ impl DiffusionSurface {
     /// global).
     fn planetary(&self, dir: DVec3, footprint_m: f64) -> f64 {
         let (px, py) = self.chart_px(dir);
-        let chart_h = self.chart.sample_px(px, py, footprint_m.max(self.chart.px_m));
+        let chart_h = self
+            .chart
+            .sample_px(px, py, footprint_m.max(self.chart.px_m));
         let shelf = self
             .landmask
             .sample_px(px, py, footprint_m.max(self.chart.px_m * 2.0));
@@ -422,14 +557,14 @@ impl DiffusionSurface {
     }
 
     /// Regional band: the model's detail output as a residual against the
-    /// planetary band, mip-matched and edge-feathered; plus the roughness-
-    /// conditioned fine band.
-    fn regional(&self, dir: DVec3, footprint_m: f64, planetary_h: f64) -> f64 {
+    /// planetary band, mip-matched and edge-feathered. Returns the residual and
+    /// the relief-energy conditioning (`rough_scale`) the sub-model bands share.
+    fn detail_residual(&self, dir: DVec3, footprint_m: f64, planetary_h: f64) -> (f64, f64) {
         let Some(d) = &self.detail else {
-            return self.fine_band(dir, footprint_m, self.chart_rough_scale(dir));
+            return (0.0, self.chart_rough_scale(dir));
         };
         let Some((dx, dy)) = self.detail_px(dir) else {
-            return self.fine_band(dir, footprint_m, self.chart_rough_scale(dir));
+            return (0.0, self.chart_rough_scale(dir));
         };
         let detail_h = d.raster.sample_px(dx, dy, footprint_m.max(90.0));
         let side = d.raster.width as f64;
@@ -439,8 +574,18 @@ impl DiffusionSurface {
             .min((side - 1.0 - dy) / (side * 0.08))
             .clamp(0.0, 1.0);
         let residual = (detail_h - planetary_h) * smootherstep(f);
-        let rough_scale = (d.rough.sample_px(dx, dy, footprint_m.max(90.0)) / 18.0).clamp(0.15, 2.2);
-        residual + self.fine_band(dir, footprint_m, rough_scale)
+        let rough_scale =
+            (d.rough.sample_px(dx, dy, footprint_m.max(90.0)) / 18.0).clamp(0.15, 2.2);
+        (residual, rough_scale)
+    }
+
+    /// Planetary band + regional residual — everything *above* the sub-model
+    /// bands. This is the height the erosion band differentiates for its base
+    /// slopes, so the carving steers by the model's relief, never by itself or
+    /// by the fine noise.
+    fn band_base(&self, dir: DVec3, footprint_m: f64) -> f64 {
+        let planetary = self.planetary(dir, footprint_m);
+        planetary + self.detail_residual(dir, footprint_m, planetary).0
     }
 
     /// Fine-band amplitude conditioning outside the detail window: chart
@@ -469,9 +614,184 @@ impl DiffusionSurface {
         h
     }
 
+    /// Erosion band: analytic branched gullies below the model's resolution,
+    /// slope-steered by [`Self::band_base`] finite differences.
+    ///
+    /// Chart: gnomonic cube faces in arc-length metres (`R·atan` per axis keeps
+    /// the worst-case feature stretch ~1.3×). Near a face edge the two faces'
+    /// patterns crossfade over `EROSION_FACE_BLEND`, which keeps the *height*
+    /// continuous while each face's gully network stays internally coherent —
+    /// the pattern itself is aperiodic and face-local by construction.
+    ///
+    /// Footprint discipline (ADR-20260722T105147Z part 3): the whole band gates
+    /// on its largest wavelength, and the filter's internal octave count adapts
+    /// so no octave below `2·footprint` is evaluated — refinement adds
+    /// bandwidth only, and coarse tiles never pay for the filter at all.
+    fn erosion_band(&self, dir: DVec3, footprint_m: f64, rough_scale: f64, base_h: f64) -> f64 {
+        let largest_wl = f64::from(EROSION_SCALE_M) * 0.7; // × default cell_scale
+        let gate = footprint_gate(largest_wl, footprint_m);
+        if gate <= 0.0 {
+            return 0.0;
+        }
+        // Land gate: the shore datum (height 0) and the sea floor stay uncarved
+        // — a gully network running into the waterline would break the "one
+        // signed sea field" coast model.
+        let land = smootherstep(((base_h - 10.0) / 80.0).clamp(0.0, 1.0));
+        if land <= 1.0e-3 {
+            return 0.0;
+        }
+
+        // 3× footprint, not the Nyquist-marginal 2×: an octave admitted right
+        // at the sampling limit renders as sparkle/moiré at aerial m/px
+        // (round-3 finding on the volcano flank).
+        let mut octaves = 0i32;
+        let mut wl = largest_wl;
+        while octaves < EROSION_MAX_OCTAVES && wl >= 3.0 * footprint_m.max(1.0) {
+            octaves += 1;
+            wl *= 0.5;
+        }
+        if octaves == 0 {
+            return 0.0;
+        }
+        // `wl` now sits one halving past the finest admitted octave.
+        let round_m = wl * 2.0 * EROSION_FOLD_ROUND;
+        // Only pay for the rosette where the mesh can actually resolve the
+        // rounding. Where the octave cap doesn't bind, `round_m` lands within
+        // ~1 footprint by construction and the extra taps would buy nothing.
+        let round_folds = round_m > footprint_m;
+
+        // Base height + FD slope at the band's own reference footprint. When
+        // the caller is already at/above it, its base height IS that sample.
+        let base_fp = footprint_m.max(EROSION_BASE_M);
+        let h_c = if footprint_m >= EROSION_BASE_M {
+            base_h
+        } else {
+            self.band_base(dir, base_fp)
+        };
+        let eps = base_fp * 0.5;
+
+        let defaults = ErosionFilterParams::default();
+        let params = ErosionFilterParams {
+            scale: EROSION_SCALE_M,
+            strength: EROSION_STRENGTH,
+            octaves,
+            // Round-1 findings: default gully_weight (0.5) left cone fields
+            // between gullies, and the default onset ramp let the base-octave
+            // wave through on gentle ground, where its periodicity reads as a
+            // dot grid from altitude. Softer weight + slower onset, and the
+            // explicit slope gate below zeroes sub-carving ground entirely.
+            gully_weight: 0.34,
+            onset: defaults.onset * 0.6,
+            // The 90 m mesh understates true grades (see the tile shader's
+            // slope-threshold note), so the assumed-slope blend leans on the
+            // normalised direction more than the raw magnitude.
+            assumed_slope: Vec2::new(0.35, 0.85),
+            ..defaults
+        };
+
+        let mut sum = 0.0;
+        let mut wsum = 0.0;
+        for face in 0..6 {
+            let (n, s, t) = erosion_face_basis(face);
+            let dn = dir.dot(n);
+            if dn <= 0.35 {
+                continue;
+            }
+            let a = dir.dot(s) / dn;
+            let b = dir.dot(t) / dn;
+            let margin = 1.0 - a.abs().max(b.abs());
+            if margin <= -2.0 * EROSION_FACE_BLEND {
+                continue;
+            }
+            let w = smootherstep(
+                ((margin + EROSION_FACE_BLEND) / (2.0 * EROSION_FACE_BLEND)).clamp(0.0, 1.0),
+            );
+            if w <= 0.0 {
+                continue;
+            }
+
+            // Arc-length chart coords; FD neighbours stepped along the chart
+            // axes so the slope lives in the same frame the filter's `p` does.
+            let pa = self.radius_m * a.atan();
+            let pb = self.radius_m * b.atan();
+            let a_e = ((pa + eps) / self.radius_m).tan();
+            let b_n = ((pb + eps) / self.radius_m).tan();
+            let dir_e = (n + s * a_e + t * b).normalize();
+            let dir_n = (n + s * a + t * b_n).normalize();
+            let slope = Vec2::new(
+                ((self.band_base(dir_e, base_fp) - h_c) / eps) as f32,
+                ((self.band_base(dir_n, base_fp) - h_c) / eps) as f32,
+            );
+            // Outer slope gate: drainage carving needs a fall line. The
+            // filter's own onset masks approach zero smoothly but never quite
+            // reach it, and the residual base-octave wave on near-flat ground
+            // reads as a periodic dot grid from altitude (round-1 finding).
+            let slope_gate =
+                smootherstep(((f64::from(slope.length()) - 0.05) / 0.13).clamp(0.0, 1.0));
+            if slope_gate <= 0.0 {
+                wsum += w;
+                continue;
+            }
+
+            // Per-face pattern decorrelation (kept small: f32 chart precision).
+            let off = splitmix(self.seed ^ (face as u64).wrapping_mul(0x9e37));
+            // Low-frequency domain warp: on kilometres of uniform fall line (a
+            // volcano cone) the phacelle wave stays phase-coherent and its cell
+            // lattice reads as a periodic dot grid from altitude (round-2
+            // finding). Warping the chart breaks the coherence into irregular
+            // rills without touching the carve amplitude.
+            // 900 m over 5.6 km ≈ 0.3 displacement strain — round-3's 450 m
+            // (~0.15) still left a legible lattice on the volcano cone.
+            let wx = grad_noise(dir * (self.radius_m / 5_600.0), self.seed ^ 0xA51D);
+            let wy = grad_noise(dir * (self.radius_m / 5_600.0), self.seed ^ 0x3C7B);
+            let p = Vec2::new(
+                (pa + 900.0 * wx) as f32 + (off & 0xffff) as f32,
+                (pb + 900.0 * wy) as f32 + ((off >> 16) & 0xffff) as f32,
+            );
+            let fade = ((h_c / 3_000.0) as f32).clamp(-1.0, 1.0);
+            // Where the slope-onset masks zero the carving, the filter still
+            // advances height by `fade_target · strength` per octave (its
+            // fade-anchor ramp), so `delta.x` carries a pure `fade · magnitude`
+            // bias. Subtracting it makes the band exactly zero on inert ground
+            // (measured: an un-subtracted band lifted a 0.2 %-grade plain by a
+            // flat ~5 m with no structure).
+            let carve_at = |dx: f64, dy: f64| -> f64 {
+                let pt = Vec2::new(p.x + dx as f32, p.y + dy as f32);
+                let res =
+                    erosion_filter(pt, Vec3::new(h_c as f32, slope.x, slope.y), fade, &params);
+                f64::from(res.delta.x - fade * res.magnitude)
+            };
+            // Fold rounding (see `EROSION_FOLD_ROUND`). The base height, base
+            // slope and domain warp are shared by every tap: they vary on the
+            // 90 m / 5.6 km scales, not the rounding radius, so re-deriving
+            // them per tap would cost the expensive half of this band for no
+            // change in the result.
+            let carve = if round_folds {
+                let mut acc = carve_at(0.0, 0.0);
+                for (ox, oy) in EROSION_FOLD_TAPS {
+                    acc += carve_at(ox * round_m, oy * round_m);
+                }
+                acc / (1.0 + EROSION_FOLD_TAPS.len() as f64)
+            } else {
+                carve_at(0.0, 0.0)
+            };
+            sum += carve * w * slope_gate;
+            wsum += w;
+        }
+        if wsum <= 0.0 {
+            return 0.0;
+        }
+        // Relief-energy conditioning like the fine band, capped so the most
+        // rugged windows don't carve at double depth.
+        gate * land * rough_scale.min(1.4) * (sum / wsum)
+    }
+
     fn height(&self, dir: DVec3, footprint_m: f64) -> f64 {
         let planetary = self.planetary(dir, footprint_m);
-        planetary + self.regional(dir, footprint_m, planetary)
+        let (residual, rough_scale) = self.detail_residual(dir, footprint_m, planetary);
+        let base = planetary + residual;
+        base + self.fine_band(dir, footprint_m, rough_scale)
+            + self.erosion_band(dir, footprint_m, rough_scale, base)
     }
 
     /// Sample + dominant biome class — the `world_map` export's view, mirroring
@@ -526,7 +846,17 @@ impl SurfaceQuery for DiffusionSurface {
         self.landcover.landcover_moisture(dir)
     }
 
-    fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, crate::query::MaterialBands) {
+    /// Delegated to the shared landcover model, so a diffusion-height body keeps
+    /// the *same* canopy authority as a procedural one — one palette, one forest.
+    fn canopy_climate(&self, dir: DVec3, lod_m: f32) -> crate::canopy::CanopyClimate {
+        self.landcover.canopy_climate(dir, lod_m)
+    }
+
+    fn sample_bands_d(
+        &self,
+        dir: DVec3,
+        lod_m: f32,
+    ) -> (SurfaceSample, crate::query::MaterialBands) {
         let dir = dir.normalize_or_zero();
         if dir == DVec3::ZERO {
             return (

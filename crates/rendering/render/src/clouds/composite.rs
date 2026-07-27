@@ -61,13 +61,7 @@ impl Material for CloudCompositeMaterial {
     }
 
     fn depth_bias(&self) -> f32 {
-        // `BodySkyMaterial` and this fullscreen mesh share the body centre as
-        // their transparent sort point. Break that otherwise unstable tie in
-        // view-depth units so the custom atmosphere always draws first and
-        // clouds composite over it. A kilometre is negligible beside the
-        // planet-centre distance, so ordinary surface transparents remain in
-        // front of both passes.
-        1_000.0
+        crate::composite_order::CLOUDS
     }
 
     fn specialize(

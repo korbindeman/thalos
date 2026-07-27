@@ -59,6 +59,13 @@ impl Default for WorldScale {
 /// The physics-space position (metres, f64) that maps to the map render-space
 /// origin. Updated every frame to the camera focus body's (or player ship's)
 /// position so map-view objects near the camera have small f32 coordinates.
+///
+/// **Map/orbit space only.** This tracks the camera *focus pivot*, not the view:
+/// in flight it is the craft, so it drifts from the actual render frame by the
+/// whole camera↔craft separation whenever the view leaves the craft (freecam,
+/// god view). Metre-scale placement among big_space content — the sun-shadow
+/// cascade cameras and anything else outside the hierarchy — must use
+/// [`RealSpaceOrigin`](crate::rendering::real_space::RealSpaceOrigin) instead.
 #[derive(Resource, Default)]
 pub struct RenderOrigin {
     pub position: DVec3,

@@ -18,7 +18,7 @@
 use std::sync::Arc;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::math::{DVec3, Quat, Vec3};
+use bevy::math::{DVec3, Quat, Vec2, Vec3};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use thalos_terrain::TerrainFlatten;
 
@@ -305,6 +305,14 @@ pub struct VegInstance {
     pub scale: f32,
     /// Small lean off local-up (radians), for natural variation.
     pub tilt: f32,
+    /// Landcover canopy tint, green-normalized (`g ≡ 1`, so only the r/b
+    /// ratios travel): the shared landcover field's colour family at this
+    /// root, pulled toward white by [`TREE_LANDCOVER_TINT`]. Multiplied over
+    /// the foliage albedo by BOTH the mesh shader and the impostor, so a
+    /// stand inherits its ground's green the same way grass blades do —
+    /// lush green over wet ground, warm tan over dry steppe. `(1, 1)` for
+    /// layers that don't tint (rocks).
+    pub tint_rb: Vec2,
 }
 
 /// A finished scatter tile: the instances plus the f64 anchor + staleness
@@ -452,6 +460,14 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
     let center_height_m = source.sample_height_m(center_dir.as_vec3(), PLACEMENT_LOD_M)?;
     let center_surface_body_m = center_dir * (input.radius_m + center_height_m as f64);
 
+    // Canopy climate for this tile, hoisted once: the moisture / orogeny half of
+    // canopy coverage costs a domain warp plus several fBm octaves and varies over
+    // ~100 km, so evaluating it per Poisson candidate is pure waste (doing exactly
+    // that stalled terrain streaming hard enough to time the capture client out).
+    // The per-candidate call below keeps the cheap, genuinely local half — the
+    // altitude chain off each candidate's own height, and the stand noise.
+    let canopy_climate = source.canopy_climate(center_dir, PLACEMENT_LOD_M);
+
     let (u_lo, u_hi, v_lo, v_hi) = input.lattice.uv_span(input.key);
     let face = input.key.face;
 
@@ -586,19 +602,35 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     // Woody: grass-mask-correlated, forest-clumped, and tied to
                     // the landform — thinner toward ridges/steeps, denser in
                     // sheltered hollows (the real ecotones, not a noise patch).
-                    let clump = clump_field(dir, sp.layer, sp.clump_affinity);
+                    // Canopy coverage from the ONE authority behind the terrain
+                    // seam — the same number the ground palette mixed its canopy
+                    // anchor at (`thalos_terrain::canopy`). Placement used to
+                    // derive its own forest noise here, which is what made the
+                    // trees stand on ground the palette called meadow while
+                    // canopy-green ground grew nothing. The expensive climate half
+                    // is hoisted once per tile (`canopy_climate` above); only the
+                    // cheap altitude chain + stand noise runs per candidate.
+                    let canopy = canopy_climate.coverage(dir, sample.height_m);
+                    let clump = clump_field(canopy, dir, sp.layer, sp.clump_affinity);
                     let terrain = woody_terrain_factor(sp.layer, &sample, sp.slope_limit);
-                    // Biome coupling: fold in the macro landcover the ground
-                    // already paints, so woody plants thin out on the dry-tan
-                    // steppe and vanish on the bare-soil / sand desert (moisture)
-                    // and above the latitude-descended treeline (cold lift),
-                    // instead of standing in the desert / at the poles. Mirrors
-                    // the ground's `vegetation_color` transfer — one world.
-                    let sin_lat = dir.y.abs();
-                    let eco_altitude_m =
-                        sample.height_m + thalos_terrain::climate_cold_lift_m(sin_lat) as f32;
-                    let biome =
-                        woody_biome_gate(sp.layer, source.landcover_moisture(dir), eco_altitude_m);
+                    // Climate gate — only for layers whose density is NOT already
+                    // canopy-derived. `canopy` is the palette's own weight, so it
+                    // carries moisture and the latitude-descended treeline
+                    // already; applying `woody_biome_gate` on top of it for trees
+                    // would square the same falloff and thin the stands twice.
+                    // Shrubs still need it: they are mostly lone individuals on
+                    // the open plain (the `lone` term in `clump_field`), which is
+                    // uncorrelated with canopy and would otherwise put bushes in
+                    // the desert — the INC-0005 failure shape. They also tolerate
+                    // a little more dryness than trees, which only this gate knows.
+                    let biome = if sp.layer == VegLayer::Tree {
+                        1.0
+                    } else {
+                        let sin_lat = dir.y.abs();
+                        let eco_altitude_m =
+                            sample.height_m + thalos_terrain::climate_cold_lift_m(sin_lat) as f32;
+                        woody_biome_gate(sp.layer, source.landcover_moisture(dir), eco_altitude_m)
+                    };
                     sample.grass_w * alt * clump * terrain * biome
                 };
                 // Clearing around a flatten pad (e.g. the runway / spaceport
@@ -639,6 +671,25 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     0.12
                 };
                 let root_body = dir * (input.radius_m + sample.height_m as f64);
+                // Canopy ↔ ground colour coupling: sample the SAME landcover
+                // field the ground and the grass blades read, at this root, and
+                // carry its green-normalized ratios as the instance tint. This
+                // is the tree half of the shared-palette rule — foliage keeps
+                // its own material model (`thalos::foliage`), but its hue
+                // family comes from the place it grows.
+                let tint_rb = if sp.layer == VegLayer::Rock {
+                    Vec2::ONE
+                } else {
+                    canopy_landcover_tint(
+                        crate::ground::landcover::sample_landcover(
+                            root_body,
+                            sample.height_m,
+                            source.landcover_moisture(dir),
+                            dir.y.abs() as f32,
+                        )
+                        .veg_color,
+                    )
+                };
                 instances.push(VegInstance {
                     species: chosen as u16,
                     root_offset_body_m: (root_body - center_surface_body_m).as_vec3(),
@@ -646,6 +697,7 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     yaw: (rng(SALT_YAW) * std::f64::consts::TAU) as f32,
                     scale: lerp(sp.scale_range.0, sp.scale_range.1, rng(SALT_SCALE) as f32),
                     tilt: (rng(SALT_TILT) * tilt_range) as f32,
+                    tint_rb,
                 });
             }
         }
@@ -673,7 +725,10 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
 /// mesh, for f64 anchoring). The tree's **base** (its root offset from the tile
 /// centre) is baked into `UV_0.xy` + `UV_1.x` so the shader can scale-fade each
 /// tree about its own root and hash a stable per-tree wind/tint seed from it.
-/// `COLOR` carries the species tint (`rgb`) + per-vertex wind weight (`a`).
+/// `COLOR` carries the per-instance landcover tint ratios in `r`/`b` (see
+/// [`VegInstance::tint_rb`]), the species mesh's baked crown AO in `g`
+/// (species set `canopy_color.g == 1.0`, so the baked green channel IS the
+/// AO the foliage model reads), and the per-vertex wind weight in `a`.
 ///
 /// Returns `None` if nothing was emitted.
 pub fn combine_tree_tile_mesh(
@@ -703,7 +758,15 @@ pub fn combine_tree_tile_mesh(
             let wp = base + rot * (p * inst.scale);
             positions.push(wp.to_array());
             normals.push((rot * n).normalize_or_zero().to_array());
-            colors.push(data.colors[i]);
+            // r/b carry the instance landcover tint; g (baked AO) and a (wind
+            // weight) pass through from the species mesh. The fragment shader
+            // never read the species r/b tint, so no information is lost.
+            colors.push([
+                inst.tint_rb.x,
+                data.colors[i][1],
+                inst.tint_rb.y,
+                data.colors[i][3],
+            ]);
             uv0.push(base_uv0);
             // UV_1 = (base.z for the per-tree scale-fade/seed, atlas leaf code).
             uv1.push([base.z, data.leaf_code[i]]);
@@ -837,7 +900,9 @@ pub fn combine_impostor_tile_mesh(
         for corner in CORNERS {
             positions.push(base);
             normals.push(up);
-            colors.push([1.0, 1.0, 1.0, yaw01]);
+            // Same landcover tint as the mesh rings (g normalized to 1), so
+            // the stand keeps its ground-family hue across the LOD handoff.
+            colors.push([inst.tint_rb.x, 1.0, inst.tint_rb.y, yaw01]);
             uv0.push(corner);
             uv1.push([inst.scale * grove_scale.max(0.0), *layer as f32]);
         }
@@ -865,71 +930,22 @@ pub fn combine_impostor_tile_mesh(
 // Clumping field
 // ---------------------------------------------------------------------------
 
-/// Angular frequency of the forest-patch mask. At planet radius this sets the
-/// patch scale: `~ radius / FREQ` metres per lattice cell (≈ a few hundred m on
-/// a ~3000 km body), so groves read as patches the player can walk between — not
-/// the near-constant ~100 km blanket a low frequency gives.
-const FOREST_PATCH_FREQ: f64 = 8000.0;
+/// Angular frequency of the lone-bush scatter field. Expressed against the
+/// canonical stand scale ([`thalos_terrain::canopy::STAND_FREQ`]) because it is
+/// deliberately *finer than a stand* — individual bushes on the open plain, not
+/// a second opinion about where forest is.
+const SHRUB_PATCH_FREQ: f64 = thalos_terrain::canopy::STAND_FREQ * 2.5;
 
-/// Forest-stand window over the raw fBM mask — the centre of the ecotone ramp
-/// in [`forest_coverage`] (which widens it by ±0.06/0.12 for a soft transition).
-/// Deliberately **high**: only the upper part of the noise carries forest, so
-/// groves read as *stands over mostly-open ground* (large grassy plains between
-/// them) instead of the near-continuous blanket a centred `smoothstep(0.40,
-/// 0.60)` gives. Lower `FOREST_LO` for more forest, raise it for emptier plains.
-const FOREST_LO: f32 = 0.52;
-const FOREST_HI: f32 = 0.72;
-
-/// Raw domain-warped value-noise fBM forest field (≈ `[0, 1]`, centred near
-/// 0.5), before the [`FOREST_LO`]/[`FOREST_HI`] contrast. Warp-then-sample so
-/// patch edges aren't grid-aligned. Shared by [`forest_coverage`] and
-/// [`clump_field`] so they agree on where the groves are.
-fn forest_mask_raw(dir: DVec3) -> f32 {
-    let warp = fbm(dir * (FOREST_PATCH_FREQ * 0.45), 2) as f64;
-    fbm(dir * FOREST_PATCH_FREQ + DVec3::splat(warp * 5.0), 4)
-}
-
-/// Glade noise frequency (multiple of [`FOREST_PATCH_FREQ`]): the medium-scale
-/// field that opens internal clearings inside a stand. ~130 m glades on a
-/// ~3000 km body — clearing-sized, so the canopy interior isn't a solid fill.
-const GLADE_FREQ_MUL: f64 = 3.0;
-
-/// Position-only **canopy potential** in `[0, 1]`: how much closed forest a spot
-/// would carry from large-scale climate + stand structure alone, *before* the
-/// per-sample terrain-form coupling ([`woody_terrain_factor`]). Two scales give
-/// a forest that reads naturally instead of as a stamped patch:
-///
-/// - a **wide ecotone ramp** on the large-scale stand field (no hard edge, no
-///   flat plateau) so density feathers in over a broad transition band, and
-/// - a **medium-scale glade field** that carves real internal clearings and
-///   breaks the uniform interior.
-///
-/// Shared by tree/shrub/ground-cover placement *and* by the grass driver's
-/// far-ring cull (grass is occluded under closed canopy but should return in the
-/// glades), so all four agree on where the forest actually is.
-pub fn forest_coverage(dir: DVec3) -> f32 {
-    let mask = forest_mask_raw(dir);
-    // Wide ecotone: the stand ramps in gradually over a broad band around the
-    // FOREST_LO/HI window, so edges thin out instead of cutting off.
-    let stand = smoothstep(FOREST_LO - 0.06, FOREST_HI + 0.12, mask);
-    // Glades: medium-scale dips open clearings within the stand. Closed canopy
-    // is the majority (most of the field is above the upper edge), glades the
-    // minority — but they break the solid interior and feather the margins.
-    let glade = fbm(dir * (FOREST_PATCH_FREQ * GLADE_FREQ_MUL), 3);
-    let canopy = smoothstep(0.30, 0.60, glade);
-    stand * canopy
-}
-
-/// Forest-patch clumping in `[0, 1]`. Built from [`forest_coverage`] (ecotone +
-/// internal glades) — noise is legitimate here because this is placement
-/// *breakup*, not visible terrain height/albedo (CLAUDE.md's process-first
-/// rule). The per-sample terrain coupling (denser hollows, thinner ridges) is
-/// applied separately in [`build_scatter_tile`] via [`woody_terrain_factor`],
-/// because it needs the height sample this position-only field doesn't see.
-/// Shrubs hug the stand margins; ground cover is full in clearings and sparser
-/// under closed canopy.
-pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
-    let canopy = forest_coverage(dir);
+/// Forest-patch clumping in `[0, 1]` from the canonical canopy coverage at this
+/// position (`canopy`, read through
+/// [`HeightSource::canopy_coverage`](thalos_terrain::height::HeightSource::canopy_coverage)
+/// — see [`thalos_terrain::canopy`] for why placement must not derive its own
+/// forest field). The per-sample terrain coupling (denser hollows, thinner
+/// ridges) is applied separately in [`build_scatter_tile`] via
+/// [`woody_terrain_factor`], because it needs a height sample this position-only
+/// field doesn't see. Shrubs hug the stand margins; ground cover is full in
+/// clearings and sparser under closed canopy.
+pub fn clump_field(canopy: f32, dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
     match layer {
         // affinity 0 = uniform cover everywhere; 1 = patches only (plains truly
         // clear). Trees run near affinity 1 so the plains stay open; the ecotone
@@ -942,7 +958,7 @@ pub fn clump_field(dir: DVec3, layer: VegLayer, affinity: f32) -> f32 {
             // terms (`edge`, `canopy`) are deliberately small so bush density drops
             // considerably around and inside forests rather than crowding them.
             let edge = 1.0 - (canopy - 0.5).abs() * 2.0;
-            let lone = fbm(dir * (FOREST_PATCH_FREQ * 2.5), 2);
+            let lone = fbm(dir * SHRUB_PATCH_FREQ, 2);
             lerp(
                 lone * 0.35,
                 (edge * 0.45 + canopy * 0.12).clamp(0.0, 1.0),
@@ -1033,6 +1049,23 @@ fn woody_biome_gate(layer: VegLayer, moisture: f32, eco_altitude_m: f32) -> f32 
         eco_altitude_m,
     );
     moist * below_treeline
+}
+
+/// How strongly the canopy inherits the local landcover hue: 0 = the atlas
+/// foliage colour untouched, 1 = fully re-hued to the ground family. A partial
+/// pull keeps species identity while ending the "one yellow-green everywhere"
+/// canopy that ignored what it stood on.
+const TREE_LANDCOVER_TINT: f32 = 0.55;
+
+/// Green-normalized landcover tint for a woody instance: the r/b ratios of the
+/// local `veg_color` (its colour *family*, independent of the ground's much
+/// lower albedo level), pulled toward white by [`TREE_LANDCOVER_TINT`].
+/// Clamped to a sane band so a degenerate sample can't paint a red tree.
+fn canopy_landcover_tint(veg_color: Vec3) -> Vec2 {
+    let g = veg_color.y.max(1.0e-4);
+    let ratio = Vec2::new(veg_color.x / g, veg_color.z / g)
+        .clamp(Vec2::splat(0.2), Vec2::splat(1.6));
+    Vec2::ONE.lerp(ratio, TREE_LANDCOVER_TINT)
 }
 
 /// Slope at which woody density starts thinning, as a fraction of the species

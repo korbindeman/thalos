@@ -28,7 +28,7 @@ use big_space::prelude::Grid;
 use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
     AtmosphereBlock, CloudCompositeMaterial, GasGiantLayers, GasGiantMaterial, GasGiantParams,
-    GpuAtlasMirrorHeightSource, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RingLayers,
+    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RenderedGroundHeightSource, RingLayers,
     RingMaterial, RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial,
     SolidPlanetParams, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
     bake_multi_scatter_lut, bake_ocean_slope_texture, blank_coast_cube, blank_impostor_cube,
@@ -306,11 +306,7 @@ pub(super) fn spawn_bodies(
             // LUT, so the two tiers render the same thickness by construction.
             world_state.body_cloud_fill.0.insert(
                 body.id,
-                super::clouds::derive_body_fill_calibration(
-                    &field,
-                    climate,
-                    body.radius_m as f32,
-                ),
+                super::clouds::derive_body_fill_calibration(&field, climate, body.radius_m as f32),
             );
             solar.install_cloud_weather(body.id, field);
             // Registry for the near-marcher handle rebind: the compute pass
@@ -365,7 +361,8 @@ pub(super) fn spawn_bodies(
                 let (low_speeds, high_speeds) =
                     ocean_packet_phase_speeds(body.surface_gravity_m_s2());
                 info!(
-                    target: "thalos::ocean",
+                    target: "thalos::diagnostic::ocean",
+                    event = "authored_state",
                     body = %body.name,
                     wind_m_s = ocean_state.wind_speed_10m_m_s,
                     wave_height_m = ocean_state.significant_wave_height_m,
@@ -373,7 +370,7 @@ pub(super) fn spawn_bodies(
                     swell_energy = ocean_state.swell_energy,
                     ?low_speeds,
                     ?high_speeds,
-                    "authored ocean state and representative packet phase speeds"
+                    "authored ocean state"
                 );
             }
 
@@ -717,10 +714,10 @@ pub(super) fn spawn_bodies(
             // `Option`), which is the truthful answer when the surface could
             // not be constructed.
             if let Some(surface) = &body_surface {
-                let height_source = GpuAtlasMirrorHeightSource::new(Arc::clone(surface));
+                let height_source = RenderedGroundHeightSource::new_udlod(Arc::clone(surface));
                 procedural_install
-                    .gpu_height_mirrors
-                    .insert(body.id, height_source.mirror());
+                    .rendered_ground
+                    .insert(body.id, height_source.rendered_ground());
                 procedural_install
                     .height_sources
                     .insert(body.id, Arc::new(height_source));

@@ -6,6 +6,7 @@
 //! [`ShipPropagator`], so "where the ship is" and "where it is predicted to
 //! be" cannot drift numerically.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use glam::{DMat3, DVec3};
@@ -13,7 +14,7 @@ use glam::{DMat3, DVec3};
 use crate::body_fixed::evaluate_body_fixed_pose;
 use crate::body_trajectory_provider::BodyTrajectoryProvider;
 use crate::canonical::{
-    AuthorityMode, CraftAuthorityBook, CraftState, Epoch, MassState, ResourceState,
+    AuthorityMode, CraftAuthorityBook, CraftId, CraftState, Epoch, MassState, ResourceState,
     TranslationalState,
 };
 use crate::gravity_mode::GravityImpls;
@@ -24,6 +25,7 @@ use crate::trajectory::{
 };
 use crate::types::{
     AttitudeState, BodyDefinition, BodyId, BodyKind, ControlInput, ShipParameters, StateVector,
+    VesselKind,
 };
 
 /// Forward-looking orbit trail for a single body, relative to its parent.
@@ -467,9 +469,82 @@ impl PredictionState {
 // Simulation
 // ---------------------------------------------------------------------------
 
-pub struct Simulation {
-    craft: CraftState,
+/// All canonical and transient state owned by one vessel.
+///
+/// The fields that used to sit beside the single `CraftState` on
+/// [`Simulation`] live here so selecting another craft cannot leak controls,
+/// maneuver plans, fuel counters, prediction caches, or damage state between
+/// vessels. Runtime entity identity deliberately does not appear here.
+pub struct VesselRecord {
+    state: CraftState,
     authority_book: CraftAuthorityBook,
+    maneuvers: ManeuverSequence,
+    target_body: Option<BodyId>,
+    delivered_dv: f64,
+    propellant_burned_kg: f64,
+    ship_params: ShipParameters,
+    control: ControlInput,
+    vessel_kind: VesselKind,
+    controllable: bool,
+    hull_destroyed: bool,
+    last_impact_speed_m_s: f64,
+    prediction_state: PredictionState,
+}
+
+impl VesselRecord {
+    fn new(
+        state: CraftState,
+        ship_params: ShipParameters,
+        vessel_kind: VesselKind,
+        controllable: bool,
+        prediction_config: PredictionConfig,
+        prediction_stale_after: f64,
+    ) -> Self {
+        let authority_book = CraftAuthorityBook::new(state.id, state.authority);
+        Self {
+            state,
+            authority_book,
+            maneuvers: ManeuverSequence::new(),
+            target_body: None,
+            delivered_dv: 0.0,
+            propellant_burned_kg: 0.0,
+            ship_params,
+            control: ControlInput::default(),
+            vessel_kind,
+            controllable,
+            hull_destroyed: false,
+            last_impact_speed_m_s: 0.0,
+            prediction_state: PredictionState::new(prediction_config, prediction_stale_after),
+        }
+    }
+
+    pub fn state(&self) -> &CraftState {
+        &self.state
+    }
+
+    pub fn parameters(&self) -> &ShipParameters {
+        &self.ship_params
+    }
+
+    pub fn kind(&self) -> VesselKind {
+        self.vessel_kind
+    }
+
+    pub fn is_controllable(&self) -> bool {
+        self.controllable
+    }
+
+    pub fn is_destroyed(&self) -> bool {
+        self.hull_destroyed
+    }
+}
+
+pub struct Simulation {
+    /// Canonical fleet, iterated in stable `CraftId` order.
+    vessels: BTreeMap<CraftId, VesselRecord>,
+    /// Control/presentation selection. This never controls which vessels step.
+    active_craft: CraftId,
+    next_craft_id: CraftId,
     sim_time: f64,
     propagator: Arc<dyn ShipPropagator>,
 
@@ -478,50 +553,87 @@ pub struct Simulation {
 
     ephemeris: Arc<dyn BodyTrajectoryProvider>,
     bodies: Vec<BodyDefinition>,
-    maneuvers: ManeuverSequence,
-    target_body: Option<BodyId>,
-
-    /// Lifetime cumulative magnitude of Δv applied through
-    /// [`Self::apply_external_mass_flow`], in m/s. Sums
-    /// `|throttle · F/m · dt|` over every frame the engine fires (Avian
-    /// owns the thrust impulse itself; the simulation only tracks the
-    /// scalar). Read by the game-side autopilot (see
-    /// `crates/runtime/game/src/autopilot.rs`) to detect when a finite burn has
-    /// delivered its planned Δv — magnitude rather than projection
-    /// because magnitude tracks the same scalar that fuel exhaustion
-    /// clamps, so a propellant-starved burn stops accumulating without
-    /// special-casing.
-    delivered_dv: f64,
-
-    /// Lifetime cumulative propellant mass burned through
-    /// [`Self::apply_external_mass_flow`], in kg. Monotonic. The game-side
-    /// tank reconciliation (`crates/runtime/game/src/fuel.rs`) drains tank pools by
-    /// this counter's per-frame delta — **not** by the raw change in
-    /// [`Self::ship_mass_kg`], which is also rewritten by staging drops,
-    /// respawns, and relaunches via [`Self::set_ship_mass`] and must never
-    /// be mistaken for a burn.
-    propellant_burned_kg: f64,
-
-    ship_params: ShipParameters,
-    control: ControlInput,
-    vessel_kind: crate::types::VesselKind,
-
-    /// Whole-craft structural failure. Set by the game's terrain-impact
-    /// detector (`detect_terrain_impact`) when a contact exceeds
-    /// [`ShipParameters::impact_tolerance_m_s`], cleared by [`Self::repair`]
-    /// on a respawn teleport. A destroyed craft is inert debris: the game
-    /// gates thrust, torque, and input on [`Self::is_destroyed`]. Transient
-    /// (not part of `CraftState`) because there is no save/load yet and it
-    /// would otherwise ripple through every `CraftState` constructor. See
-    /// `docs/simulation/surface.md`.
-    hull_destroyed: bool,
-    /// Surface-relative approach speed (m/s) of the impact that destroyed
-    /// the craft, for the HUD readout / log. Meaningless unless
-    /// `hull_destroyed`.
-    last_impact_speed_m_s: f64,
 
     pub warp: WarpController,
-    pub prediction_state: PredictionState,
+}
+
+fn advance_vessel(
+    vessel: &mut VesselRecord,
+    start_time: f64,
+    target_time: f64,
+    max_transitions: u32,
+    propagator: &dyn ShipPropagator,
+    ephemeris: &dyn BodyTrajectoryProvider,
+    bodies: &[BodyDefinition],
+) -> Option<f64> {
+    match vessel.state.authority {
+        AuthorityMode::BodyFixed { body, pose } => {
+            let body_state = ephemeris.state(body, Epoch(target_time));
+            let (translation, attitude) = evaluate_body_fixed_pose(&body_state, pose);
+            vessel.state.translation = translation;
+            vessel.state.attitude = attitude;
+            vessel.state.epoch = Epoch(target_time);
+            return None;
+        }
+        AuthorityMode::LocalRigidBody { .. } => {
+            // The runtime writes translation and attitude back separately.
+            // Advancing the epoch keeps this record synchronized with the
+            // shared world clock without inventing a second local integrator.
+            vessel.state.epoch = Epoch(target_time);
+            return None;
+        }
+        AuthorityMode::OnRails { .. } => {}
+    }
+
+    let mut vessel_time = start_time;
+    let mut transitions = 0u32;
+    let mut collision_time = None;
+
+    while vessel_time < target_time {
+        if transitions >= max_transitions {
+            break;
+        }
+
+        let soi_body = propagator.soi_body_of(
+            vessel.state.translation.position,
+            vessel_time,
+            ephemeris,
+            bodies,
+        );
+        let result = propagator.coast_segment(CoastRequest {
+            state: StateVector::from(vessel.state.translation),
+            time: vessel_time,
+            soi_body,
+            target_time,
+            stop_on_stable_orbit: false,
+            sample_count_hint: 32,
+            ephemeris,
+            bodies,
+        });
+
+        vessel.state.translation = TranslationalState::from(result.end_state);
+        let made_progress = result.end_time > vessel_time;
+        vessel_time = result.end_time;
+
+        match result.terminator {
+            SegmentTerminator::Collision { time, .. } => {
+                collision_time = Some(time);
+                break;
+            }
+            SegmentTerminator::SoiEnter { .. } | SegmentTerminator::SoiExit { .. } => {
+                transitions += 1;
+            }
+            SegmentTerminator::Horizon | SegmentTerminator::StableOrbit => {
+                if !made_progress {
+                    break;
+                }
+            }
+            SegmentTerminator::BurnEnd { .. } => break,
+        }
+    }
+
+    vessel.state.epoch = Epoch(target_time);
+    collision_time
 }
 
 impl Simulation {
@@ -548,56 +660,49 @@ impl Simulation {
 
         let ship_params = ShipParameters::default();
         let authority = AuthorityMode::OnRails { trajectory: 0 };
-        Self {
-            craft: CraftState {
-                id: 0,
-                epoch: Epoch::ZERO,
-                translation: TranslationalState::from(ship_state),
-                attitude: AttitudeState::default(),
-                mass: MassState {
-                    wet_mass_kg: ship_params.dry_mass_kg,
-                    dry_mass_kg: ship_params.dry_mass_kg,
-                    inertia_body_kg_m2: DMat3::IDENTITY,
-                    center_of_mass_body_m: DVec3::ZERO,
-                },
-                resources: ResourceState,
-                authority,
+        let craft = CraftState {
+            id: 0,
+            epoch: Epoch::ZERO,
+            translation: TranslationalState::from(ship_state),
+            attitude: AttitudeState::default(),
+            mass: MassState {
+                wet_mass_kg: ship_params.dry_mass_kg,
+                dry_mass_kg: ship_params.dry_mass_kg,
+                inertia_body_kg_m2: DMat3::IDENTITY,
+                center_of_mass_body_m: DVec3::ZERO,
             },
-            authority_book: CraftAuthorityBook::new(0, authority),
+            resources: ResourceState,
+            authority,
+        };
+        let vessel = VesselRecord::new(
+            craft,
+            ship_params,
+            VesselKind::default(),
+            true,
+            config.prediction_config,
+            config.prediction_stale_after,
+        );
+        Self {
+            vessels: BTreeMap::from([(0, vessel)]),
+            active_craft: 0,
+            next_craft_id: 1,
             sim_time: 0.0,
             propagator,
             max_real_delta: config.max_real_delta,
             max_transitions_per_frame: config.max_transitions_per_frame,
             ephemeris,
             bodies,
-            maneuvers: ManeuverSequence::new(),
-            target_body: None,
-            delivered_dv: 0.0,
-            propellant_burned_kg: 0.0,
-            ship_params,
-            control: ControlInput::default(),
-            vessel_kind: crate::types::VesselKind::default(),
-            hull_destroyed: false,
-            last_impact_speed_m_s: 0.0,
             warp: WarpController::new(config.warp_levels, config.warp_min_altitude_radii),
-            prediction_state: PredictionState::new(
-                config.prediction_config,
-                config.prediction_stale_after,
-            ),
         }
     }
 
-    /// Advance the simulation by `real_dt` seconds of wall-clock time.
+    /// Advance every vessel by `real_dt` seconds of wall-clock time.
     ///
-    /// Thrust and attitude no longer integrate here — they are owned by
-    /// the Avian rigid body that the game crate spins up for every player
-    /// craft, at every regime (deep space, orbit, surface). `step` keeps
-    /// canonical state coherent under warp: `BodyFixed` evaluates pose at
-    /// `sim_time`; `LocalRigidBody` is a no-op for translation (Avian
-    /// reads back into canonical separately); `OnRails` /
-    /// propagates the ship's coast across the
-    /// warp-scaled time interval, breaking on SOI transitions until the
-    /// cap is reached or the target time is hit.
+    /// Thrust and attitude no longer integrate here — local rigid bodies own
+    /// them. `step` advances one world clock, then evaluates every canonical
+    /// vessel over the same `[start_time, target_time]` interval in stable
+    /// `CraftId` order. Active selection is deliberately absent from the
+    /// propagation path.
     pub fn step(&mut self, real_dt: f64) {
         let _span = tracing::info_span!("Simulation::step").entered();
         let real_delta = real_dt.min(self.max_real_delta);
@@ -605,124 +710,184 @@ impl Simulation {
 
         let warp_speed = self.warp.speed();
         let sim_delta = real_delta * warp_speed;
-
-        match self.craft.authority {
-            AuthorityMode::BodyFixed { body, pose } => {
-                if sim_delta > 0.0 {
-                    self.sim_time += sim_delta;
-                }
-                self.craft.epoch = Epoch(self.sim_time);
-                let body_state = self.ephemeris.state(body, Epoch(self.sim_time));
-                let (translation, attitude) = evaluate_body_fixed_pose(&body_state, pose);
-                self.craft.translation = translation;
-                self.craft.attitude = attitude;
-                return;
-            }
-            AuthorityMode::LocalRigidBody { .. } => {
-                if sim_delta > 0.0 {
-                    self.sim_time += sim_delta;
-                }
-                self.craft.epoch = Epoch(self.sim_time);
-                return;
-            }
-            AuthorityMode::OnRails { .. } => {}
-        }
-
         if sim_delta <= 0.0 {
             return;
         }
 
-        let target_time = self.sim_time + sim_delta;
-        let mut transitions = 0u32;
+        let start_time = self.sim_time;
+        let target_time = start_time + sim_delta;
+        let before: Vec<_> = self
+            .vessels
+            .iter()
+            .map(|(&id, vessel)| (id, vessel.state.clone()))
+            .collect();
+        let mut first_collision: Option<f64> = None;
 
-        while self.sim_time < target_time {
-            if transitions >= self.max_transitions_per_frame {
-                break;
-            }
-
-            let soi_body = self.propagator.soi_body_of(
-                self.craft.translation.position,
-                self.sim_time,
+        for vessel in self.vessels.values_mut() {
+            if let Some(collision_time) = advance_vessel(
+                vessel,
+                start_time,
+                target_time,
+                self.max_transitions_per_frame,
+                self.propagator.as_ref(),
                 self.ephemeris.as_ref(),
                 &self.bodies,
-            );
-
-            let result = self.propagator.coast_segment(CoastRequest {
-                state: StateVector::from(self.craft.translation),
-                time: self.sim_time,
-                soi_body,
-                target_time,
-                stop_on_stable_orbit: false,
-                // Enough samples to catch SOI crossings reliably at
-                // typical warp rates without paying for big allocations
-                // on every step. Samples are discarded immediately —
-                // only the end state matters for live stepping.
-                sample_count_hint: 32,
-                ephemeris: self.ephemeris.as_ref(),
-                bodies: &self.bodies,
-            });
-
-            self.craft.translation = TranslationalState::from(result.end_state);
-            self.sim_time = result.end_time;
-            self.craft.epoch = Epoch(self.sim_time);
-
-            match result.terminator {
-                SegmentTerminator::Collision { .. } => {
-                    // Surface impact. Freeze the propagated state and
-                    // drop warp back to 1× so the player sees the
-                    // collision and can respond — at high warp the same
-                    // tick can re-enter `coast_segment` immediately and
-                    // chew through several seconds of "stuck on the
-                    // ground" before the next frame's HUD even paints.
-                    // 1× is the lowest live regime; the throttle gate
-                    // forces engines off at any non-1× warp anyway, so
-                    // dropping here cleanly hands control back.
-                    self.warp.reset_immediate();
-                    break;
-                }
-                SegmentTerminator::SoiEnter { .. } | SegmentTerminator::SoiExit { .. } => {
-                    transitions += 1;
-                }
-                SegmentTerminator::Horizon | SegmentTerminator::StableOrbit => {}
-                SegmentTerminator::BurnEnd { .. } => {
-                    // Coast segments don't fire BurnEnd; defensive only.
-                    break;
-                }
+            ) {
+                first_collision =
+                    Some(first_collision.map_or(collision_time, |t| t.min(collision_time)));
             }
+        }
+
+        if let Some(event_time) = first_collision {
+            // Collision is a world event: no vessel may end this tick at an
+            // epoch later than the contact. Restore and replay the fleet to
+            // the earliest event so active selection cannot affect either
+            // trajectories or the shared clock.
+            for (id, state) in before {
+                self.vessels
+                    .get_mut(&id)
+                    .expect("saved CraftId must still exist during step")
+                    .state = state;
+            }
+            for vessel in self.vessels.values_mut() {
+                advance_vessel(
+                    vessel,
+                    start_time,
+                    event_time,
+                    self.max_transitions_per_frame,
+                    self.propagator.as_ref(),
+                    self.ephemeris.as_ref(),
+                    &self.bodies,
+                );
+            }
+            self.sim_time = event_time;
+            self.warp.reset_immediate();
+        } else {
+            self.sim_time = target_time;
         }
     }
 
+    fn active_vessel(&self) -> &VesselRecord {
+        self.vessels
+            .get(&self.active_craft)
+            .expect("active CraftId must name a canonical vessel")
+    }
+
+    fn active_vessel_mut(&mut self) -> &mut VesselRecord {
+        self.vessels
+            .get_mut(&self.active_craft)
+            .expect("active CraftId must name a canonical vessel")
+    }
+
+    /// Stable identity of the craft currently receiving player-facing input.
+    pub fn active_craft_id(&self) -> CraftId {
+        self.active_craft
+    }
+
+    /// Canonical vessel lookup. New multi-craft consumers should use this
+    /// instead of changing the active selection to inspect another vessel.
+    pub fn vessel(&self, id: CraftId) -> Option<&VesselRecord> {
+        self.vessels.get(&id)
+    }
+
+    pub fn ship_state_for(&self, id: CraftId) -> Option<StateVector> {
+        self.vessels
+            .get(&id)
+            .map(|vessel| StateVector::from(vessel.state.translation))
+    }
+
+    /// Every vessel in deterministic `CraftId` order.
+    pub fn vessels(&self) -> impl ExactSizeIterator<Item = &VesselRecord> {
+        self.vessels.values()
+    }
+
+    /// Canonical craft states in deterministic `CraftId` order.
+    pub fn craft_states(&self) -> impl ExactSizeIterator<Item = &CraftState> {
+        self.vessels.values().map(VesselRecord::state)
+    }
+
+    /// Add an independently simulated canonical vessel.
+    ///
+    /// The caller supplies the already-partitioned aggregate state and
+    /// parameters; the fleet owns identity allocation and seats the new record
+    /// at the current world epoch. Physical stage separation will build on
+    /// this boundary after the runtime can host multiple craft roots.
+    pub fn create_vessel(
+        &mut self,
+        mut state: CraftState,
+        ship_params: ShipParameters,
+        vessel_kind: VesselKind,
+        controllable: bool,
+    ) -> CraftId {
+        let id = self.next_craft_id;
+        self.next_craft_id = self
+            .next_craft_id
+            .checked_add(1)
+            .expect("CraftId space exhausted");
+        state.id = id;
+        state.epoch = Epoch(self.sim_time);
+
+        let prediction_config = self.active_vessel().prediction_state.config().clone();
+        let prediction_stale_after = self.active_vessel().prediction_state.stale_after();
+        let vessel = VesselRecord::new(
+            state,
+            ship_params,
+            vessel_kind,
+            controllable,
+            prediction_config,
+            prediction_stale_after,
+        );
+        let replaced = self.vessels.insert(id, vessel);
+        debug_assert!(replaced.is_none());
+        id
+    }
+
+    /// Select a controllable vessel without changing simulation state.
+    ///
+    /// Returns `false` for an unknown id or pod-less debris.
+    pub fn set_active_craft(&mut self, id: CraftId) -> bool {
+        if !self
+            .vessels
+            .get(&id)
+            .is_some_and(VesselRecord::is_controllable)
+        {
+            return false;
+        }
+        self.active_craft = id;
+        true
+    }
+
     pub fn attitude(&self) -> &AttitudeState {
-        &self.craft.attitude
+        &self.active_vessel().state.attitude
     }
 
     pub fn set_attitude(&mut self, attitude: AttitudeState) {
-        self.craft.attitude = attitude;
+        self.active_vessel_mut().state.attitude = attitude;
     }
 
     pub fn ship_params(&self) -> &ShipParameters {
-        &self.ship_params
+        &self.active_vessel().ship_params
     }
 
-    pub fn vessel_kind(&self) -> crate::types::VesselKind {
-        self.vessel_kind
+    pub fn vessel_kind(&self) -> VesselKind {
+        self.active_vessel().vessel_kind
     }
 
-    pub fn set_vessel_kind(&mut self, kind: crate::types::VesselKind) {
-        self.vessel_kind = kind;
+    pub fn set_vessel_kind(&mut self, kind: VesselKind) {
+        self.active_vessel_mut().vessel_kind = kind;
     }
 
     /// True once the craft has suffered a destroying terrain impact. The
     /// game gates thrust, torque, and player input on this. Cleared by
     /// [`Self::repair`].
     pub fn is_destroyed(&self) -> bool {
-        self.hull_destroyed
+        self.active_vessel().hull_destroyed
     }
 
     /// Surface-relative approach speed (m/s) of the destroying impact, for
     /// the HUD / log. Zero unless [`Self::is_destroyed`].
     pub fn last_impact_speed_m_s(&self) -> f64 {
-        self.last_impact_speed_m_s
+        self.active_vessel().last_impact_speed_m_s
     }
 
     /// Mark the craft destroyed by a terrain impact at `impact_speed_m_s`.
@@ -731,38 +896,41 @@ impl Simulation {
     /// settling. Invalidates the cached prediction so the map view drops
     /// the now-meaningless trajectory.
     pub fn mark_destroyed(&mut self, impact_speed_m_s: f64) {
-        if self.hull_destroyed {
+        let vessel = self.active_vessel_mut();
+        if vessel.hull_destroyed {
             return;
         }
-        self.hull_destroyed = true;
-        self.last_impact_speed_m_s = impact_speed_m_s;
-        self.prediction_state.mark_dirty();
+        vessel.hull_destroyed = true;
+        vessel.last_impact_speed_m_s = impact_speed_m_s;
+        vessel.prediction_state.mark_dirty();
     }
 
     /// Clear structural failure — used by respawn teleports to hand the
     /// player a fresh craft.
     pub fn repair(&mut self) {
-        self.hull_destroyed = false;
-        self.last_impact_speed_m_s = 0.0;
+        let vessel = self.active_vessel_mut();
+        vessel.hull_destroyed = false;
+        vessel.last_impact_speed_m_s = 0.0;
     }
 
     pub fn set_ship_params(&mut self, params: ShipParameters) {
-        self.ship_params = params;
-        self.craft.mass.dry_mass_kg = params.dry_mass_kg;
-        self.craft.mass.inertia_body_kg_m2 = DMat3::from_diagonal(params.moment_of_inertia);
+        let vessel = self.active_vessel_mut();
+        vessel.ship_params = params;
+        vessel.state.mass.dry_mass_kg = params.dry_mass_kg;
+        vessel.state.mass.inertia_body_kg_m2 = DMat3::from_diagonal(params.moment_of_inertia);
         // Re-floor mass at the new dry-mass invariant. Only raises mass
         // when the previous value was below `dry_mass_kg` (e.g. the
         // post-`new()` sentinel state); a partially-drained ship keeps
         // its current mass.
-        if self.craft.mass.wet_mass_kg < self.ship_params.dry_mass_kg {
-            self.craft.mass.wet_mass_kg = self.ship_params.dry_mass_kg;
+        if vessel.state.mass.wet_mass_kg < vessel.ship_params.dry_mass_kg {
+            vessel.state.mass.wet_mass_kg = vessel.ship_params.dry_mass_kg;
         }
     }
 
     /// Current ship mass at `sim_time`, kg. Decreases as fuel burns,
     /// floored at `ship_params.dry_mass_kg`.
     pub fn ship_mass_kg(&self) -> f64 {
-        self.craft.mass.wet_mass_kg
+        self.active_vessel().state.mass.wet_mass_kg
     }
 
     /// Push the ship's current mass — called by
@@ -770,7 +938,8 @@ impl Simulation {
     /// `crates/runtime/game/src/fuel.rs` so the integrator runs on tank-derived
     /// truth, not its own internal estimate. Floored at `dry_mass_kg`.
     pub fn set_ship_mass(&mut self, mass_kg: f64) {
-        self.craft.mass.wet_mass_kg = mass_kg.max(self.ship_params.dry_mass_kg);
+        let vessel = self.active_vessel_mut();
+        vessel.state.mass.wet_mass_kg = mass_kg.max(vessel.ship_params.dry_mass_kg);
     }
 
     /// Tsiolkovsky-aware estimate of the burn time required to deliver
@@ -778,28 +947,29 @@ impl Simulation {
     /// Returns 0 when the ship has no thrust configured (the HUD treats
     /// that as "no engine") or when propellant is exhausted.
     pub fn estimated_burn_duration(&self, delta_v_magnitude: f64) -> f64 {
+        let vessel = self.active_vessel();
         burn_duration(
             delta_v_magnitude,
-            self.ship_params.thrust_n,
-            self.craft.mass.wet_mass_kg,
-            self.ship_params.mass_flow_kg_per_s,
-            self.ship_params.dry_mass_kg,
+            vessel.ship_params.thrust_n,
+            vessel.state.mass.wet_mass_kg,
+            vessel.ship_params.mass_flow_kg_per_s,
+            vessel.ship_params.dry_mass_kg,
         )
     }
 
     pub fn set_control(&mut self, control: ControlInput) {
-        self.control = control;
+        self.active_vessel_mut().control = control;
     }
 
     /// Update only the throttle field of the current [`ControlInput`].
     /// Attitude and throttle are produced by independent bridge
     /// systems; granular setters keep them from stomping each other.
     pub fn set_throttle(&mut self, throttle: f64) {
-        self.control.throttle = throttle.clamp(0.0, 1.0);
+        self.active_vessel_mut().control.throttle = throttle.clamp(0.0, 1.0);
     }
 
     pub fn control(&self) -> &ControlInput {
-        &self.control
+        &self.active_vessel().control
     }
 
     /// Drain propellant mass and accumulate delivered Δv for an external
@@ -815,43 +985,56 @@ impl Simulation {
             return;
         }
         let throttle = throttle.clamp(0.0, 1.0);
-        if self.ship_params.mass_flow_kg_per_s > 0.0 {
-            let drained = self.ship_params.mass_flow_kg_per_s * throttle * real_dt;
-            let prev_wet = self.craft.mass.wet_mass_kg;
-            self.craft.mass.wet_mass_kg =
-                (self.craft.mass.wet_mass_kg - drained).max(self.ship_params.dry_mass_kg);
+        let vessel = self.active_vessel_mut();
+        if vessel.ship_params.mass_flow_kg_per_s > 0.0 {
+            let drained = vessel.ship_params.mass_flow_kg_per_s * throttle * real_dt;
+            let prev_wet = vessel.state.mass.wet_mass_kg;
+            vessel.state.mass.wet_mass_kg =
+                (vessel.state.mass.wet_mass_kg - drained).max(vessel.ship_params.dry_mass_kg);
             // Record what was *actually* drained (the dry-mass floor can
             // clip the request) so the tank reconciliation stays exact.
-            self.propellant_burned_kg += prev_wet - self.craft.mass.wet_mass_kg;
+            vessel.propellant_burned_kg += prev_wet - vessel.state.mass.wet_mass_kg;
         }
-        if self.ship_params.thrust_n > 0.0 && self.craft.mass.wet_mass_kg > 0.0 {
-            let accel_mag = self.ship_params.thrust_n / self.craft.mass.wet_mass_kg;
-            self.delivered_dv += throttle * accel_mag * real_dt;
+        if vessel.ship_params.thrust_n > 0.0 && vessel.state.mass.wet_mass_kg > 0.0 {
+            let accel_mag = vessel.ship_params.thrust_n / vessel.state.mass.wet_mass_kg;
+            vessel.delivered_dv += throttle * accel_mag * real_dt;
         }
     }
 
     // -- Accessors ----------------------------------------------------------
 
     pub fn ship_state(&self) -> StateVector {
-        StateVector::from(self.craft.translation)
+        self.ship_state_for(self.active_craft)
+            .expect("active CraftId must name a canonical vessel")
     }
 
     pub fn craft_state(&self) -> &CraftState {
-        &self.craft
+        &self.active_vessel().state
     }
 
     pub fn authority(&self) -> AuthorityMode {
-        self.craft.authority
+        self.active_vessel().state.authority
     }
 
     pub fn authority_log(&self) -> &[crate::canonical::AuthorityChanged] {
-        &self.authority_book.log
+        &self.active_vessel().authority_book.log
     }
 
     pub fn transition_authority(&mut self, next: AuthorityMode) {
-        self.authority_book
-            .transition_to(Epoch(self.sim_time), next);
-        self.craft.authority = self.authority_book.mode;
+        let changed = self.transition_authority_for(self.active_craft, next);
+        debug_assert!(changed);
+    }
+
+    /// Transition one vessel's authority without changing active selection.
+    /// Returns `false` when `id` is not in the fleet.
+    pub fn transition_authority_for(&mut self, id: CraftId, next: AuthorityMode) -> bool {
+        let epoch = Epoch(self.sim_time);
+        let Some(vessel) = self.vessels.get_mut(&id) else {
+            return false;
+        };
+        vessel.authority_book.transition_to(epoch, next);
+        vessel.state.authority = vessel.authority_book.mode;
+        true
     }
 
     /// Replace the ship's state vector wholesale and invalidate the
@@ -859,9 +1042,21 @@ impl Simulation {
     /// paths advance the ship through [`Self::step`] so that live and
     /// predicted trajectories stay numerically aligned.
     pub fn set_ship_state(&mut self, state: StateVector) {
-        self.craft.translation = TranslationalState::from(state);
-        self.craft.epoch = Epoch(self.sim_time);
-        self.prediction_state.mark_dirty();
+        let changed = self.set_ship_state_for(self.active_craft, state);
+        debug_assert!(changed);
+    }
+
+    /// Replace one vessel's translational state without changing active
+    /// selection. Returns `false` when `id` is not in the fleet.
+    pub fn set_ship_state_for(&mut self, id: CraftId, state: StateVector) -> bool {
+        let epoch = Epoch(self.sim_time);
+        let Some(vessel) = self.vessels.get_mut(&id) else {
+            return false;
+        };
+        vessel.state.translation = TranslationalState::from(state);
+        vessel.state.epoch = epoch;
+        vessel.prediction_state.mark_dirty();
+        true
     }
 
     /// Install a state sampled from local physics. This is the canonical
@@ -871,10 +1066,28 @@ impl Simulation {
         translation: TranslationalState,
         attitude: AttitudeState,
     ) {
-        self.craft.translation = translation;
-        self.craft.attitude = attitude;
-        self.craft.epoch = Epoch(self.sim_time);
-        self.prediction_state.mark_dirty();
+        let changed =
+            self.install_local_rigid_body_state_for(self.active_craft, translation, attitude);
+        debug_assert!(changed);
+    }
+
+    /// Canonical writeback boundary for one local rigid body. Returns `false`
+    /// when `id` is not in the fleet.
+    pub fn install_local_rigid_body_state_for(
+        &mut self,
+        id: CraftId,
+        translation: TranslationalState,
+        attitude: AttitudeState,
+    ) -> bool {
+        let epoch = Epoch(self.sim_time);
+        let Some(vessel) = self.vessels.get_mut(&id) else {
+            return false;
+        };
+        vessel.state.translation = translation;
+        vessel.state.attitude = attitude;
+        vessel.state.epoch = epoch;
+        vessel.prediction_state.mark_dirty();
+        true
     }
 
     pub fn sim_time(&self) -> f64 {
@@ -885,12 +1098,14 @@ impl Simulation {
     /// spawn placements that want to seat the craft at a specific time of day —
     /// e.g. the runway scenario boots at a morning epoch so the fixed surface
     /// site is lit by a low, climbing sun rather than the epoch-0 noon sun. Keeps
-    /// `craft.epoch` in lockstep and marks prediction dirty so the next rebuild
-    /// re-propagates from the new clock.
+    /// every vessel epoch in lockstep and marks each prediction dirty so the
+    /// next rebuild re-propagates from the new clock.
     pub fn set_sim_time(&mut self, sim_time: f64) {
         self.sim_time = sim_time;
-        self.craft.epoch = Epoch(sim_time);
-        self.prediction_state.mark_dirty();
+        for vessel in self.vessels.values_mut() {
+            vessel.state.epoch = Epoch(sim_time);
+            vessel.prediction_state.mark_dirty();
+        }
     }
 
     /// SOI body the ship is currently inside — the innermost body whose
@@ -899,7 +1114,7 @@ impl Simulation {
     /// so they always point relative to "what we're orbiting now."
     pub fn dominant_body(&self) -> BodyId {
         self.propagator.soi_body_of(
-            self.craft.translation.position,
+            self.active_vessel().state.translation.position,
             self.sim_time,
             self.ephemeris.as_ref(),
             &self.bodies,
@@ -909,12 +1124,13 @@ impl Simulation {
     // -- Maneuvers ----------------------------------------------------------
 
     pub fn maneuvers(&self) -> &ManeuverSequence {
-        &self.maneuvers
+        &self.active_vessel().maneuvers
     }
 
     pub fn maneuvers_mut(&mut self) -> &mut ManeuverSequence {
-        self.prediction_state.mark_dirty();
-        &mut self.maneuvers
+        let vessel = self.active_vessel_mut();
+        vessel.prediction_state.mark_dirty();
+        &mut vessel.maneuvers
     }
 
     /// Lifetime cumulative magnitude of Δv accumulated through
@@ -922,7 +1138,7 @@ impl Simulation {
     /// reads this at burn-start (anchor) and each subsequent frame to
     /// compute "Δv delivered since burn start = current − anchor".
     pub fn delivered_dv(&self) -> f64 {
-        self.delivered_dv
+        self.active_vessel().delivered_dv
     }
 
     /// Lifetime cumulative propellant mass burned through
@@ -931,49 +1147,59 @@ impl Simulation {
     /// pools by this counter's per-frame delta; unlike [`Self::ship_mass_kg`]
     /// it is untouched by staging drops / respawn mass rewrites.
     pub fn propellant_burned_kg(&self) -> f64 {
-        self.propellant_burned_kg
+        self.active_vessel().propellant_burned_kg
     }
 
     // -- Target body --------------------------------------------------------
 
     pub fn target_body(&self) -> Option<BodyId> {
-        self.target_body
+        self.active_vessel().target_body
     }
 
     pub fn set_target_body(&mut self, body: Option<BodyId>) {
-        if self.target_body != body {
-            self.target_body = body;
-            self.prediction_state.mark_dirty();
+        let vessel = self.active_vessel_mut();
+        if vessel.target_body != body {
+            vessel.target_body = body;
+            vessel.prediction_state.mark_dirty();
         }
     }
 
     // -- Prediction ---------------------------------------------------------
 
     pub fn prediction_stale_after(&self) -> f64 {
-        self.prediction_state.stale_after()
+        self.active_vessel().prediction_state.stale_after()
     }
 
     pub fn prediction_version(&self) -> u64 {
-        self.prediction_state.version()
+        self.active_vessel().prediction_state.version()
+    }
+
+    /// Invalidate the active vessel's prediction without exposing its cache as
+    /// a world-global field.
+    pub fn mark_prediction_dirty(&mut self) {
+        self.active_vessel_mut().prediction_state.mark_dirty();
     }
 
     pub fn recompute_prediction(&mut self) {
+        let vessel = self.active_vessel();
         let req = PredictionRequest {
-            ship_state: StateVector::from(self.craft.translation),
+            ship_state: StateVector::from(vessel.state.translation),
             sim_time: self.sim_time,
-            maneuvers: self.maneuvers.clone(),
+            maneuvers: vessel.maneuvers.clone(),
             ephemeris: Arc::clone(&self.ephemeris),
             propagator: Arc::clone(&self.propagator),
             bodies: self.bodies.clone(),
-            prediction_config: self.prediction_state.config().clone(),
-            ship_thrust_n: self.ship_params.thrust_n,
-            ship_mass_kg: self.craft.mass.wet_mass_kg,
-            ship_mass_flow_kg_per_s: self.ship_params.mass_flow_kg_per_s,
-            ship_dry_mass_kg: self.ship_params.dry_mass_kg,
-            target_body: self.target_body,
+            prediction_config: vessel.prediction_state.config().clone(),
+            ship_thrust_n: vessel.ship_params.thrust_n,
+            ship_mass_kg: vessel.state.mass.wet_mass_kg,
+            ship_mass_flow_kg_per_s: vessel.ship_params.mass_flow_kg_per_s,
+            ship_dry_mass_kg: vessel.ship_params.dry_mass_kg,
+            target_body: vessel.target_body,
         };
         let branches = propagate_branch_stack(&req, None);
-        self.prediction_state.install(branches, req.sim_time);
+        self.active_vessel_mut()
+            .prediction_state
+            .install(branches, req.sim_time);
     }
 
     /// Drop the cached trajectory prediction and mark it dirty. Used when
@@ -982,19 +1208,21 @@ impl Simulation {
     /// Keplerian propagation produces a wobbling line that doesn't
     /// reflect what the ship will actually do, so the gate hides it.
     pub fn clear_prediction(&mut self) {
-        self.prediction_state.clear();
+        self.active_vessel_mut().prediction_state.clear();
     }
 
     pub fn prediction_needs_refresh(&self) -> bool {
-        self.prediction_state.needs_refresh(self.sim_time)
+        self.active_vessel()
+            .prediction_state
+            .needs_refresh(self.sim_time)
     }
 
     pub fn prediction(&self) -> Option<&FlightPlan> {
-        self.prediction_state.prediction()
+        self.active_vessel().prediction_state.prediction()
     }
 
     pub fn trajectory_branches(&self) -> Option<&TrajectoryBranchStack> {
-        self.prediction_state.branch_stack()
+        self.active_vessel().prediction_state.branch_stack()
     }
 
     // -- Body orbit trails --------------------------------------------------
@@ -1200,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn simulation_exposes_one_canonical_craft_with_one_authority() {
+    fn active_craft_wrappers_expose_one_vessel_authority() {
         let mut sim = minimal_simulation();
 
         assert_eq!(sim.craft_state().id, 0);
@@ -1215,6 +1443,108 @@ mod tests {
 
         assert_eq!(sim.craft_state().authority, next);
         assert_eq!(sim.authority_log().len(), 1);
+    }
+
+    #[test]
+    fn fleet_steps_every_vessel_independently_of_active_selection() {
+        fn two_vessel_simulation(active_second: bool) -> (Simulation, CraftId) {
+            let mut sim = minimal_simulation();
+            let mut second = sim.craft_state().clone();
+            second.translation.position += DVec3::Y * 2.0e7;
+            second.translation.velocity += DVec3::X * 250.0;
+            let second_id =
+                sim.create_vessel(second, ShipParameters::default(), VesselKind::Ship, true);
+            if active_second {
+                assert!(sim.set_active_craft(second_id));
+            }
+            sim.warp.set_speed(1.0);
+            (sim, second_id)
+        }
+
+        let (mut first_active, second_id) = two_vessel_simulation(false);
+        let (mut second_active, matching_second_id) = two_vessel_simulation(true);
+        assert_eq!(second_id, matching_second_id);
+
+        let before: Vec<_> = first_active
+            .craft_states()
+            .map(|craft| (craft.id, craft.translation))
+            .collect();
+        first_active.step(0.05);
+        second_active.step(0.05);
+
+        let ids: Vec<_> = first_active.craft_states().map(|craft| craft.id).collect();
+        assert_eq!(ids, vec![0, second_id]);
+        assert_eq!(first_active.sim_time(), 0.05);
+
+        for (id, initial) in before {
+            let a = first_active.vessel(id).unwrap().state();
+            let b = second_active.vessel(id).unwrap().state();
+            assert_ne!(a.translation.position, initial.position);
+            assert_eq!(a.epoch, Epoch(0.05));
+            assert_eq!(a.translation, b.translation);
+            assert_eq!(a.attitude, b.attitude);
+        }
+    }
+
+    #[test]
+    fn switching_active_craft_changes_wrappers_not_vessel_state() {
+        let mut sim = minimal_simulation();
+        sim.set_throttle(0.25);
+        sim.maneuvers_mut()
+            .nodes
+            .push(crate::maneuver::ManeuverNode {
+                id: Some(1),
+                time: 10.0,
+                delta_v: DVec3::Z,
+                reference_body: 0,
+            });
+
+        let mut second = sim.craft_state().clone();
+        second.translation.position += DVec3::Y * 1.0e6;
+        let second_translation = second.translation;
+        let second_id = sim.create_vessel(
+            second.clone(),
+            ShipParameters::default(),
+            VesselKind::Ship,
+            true,
+        );
+        let debris_id =
+            sim.create_vessel(second, ShipParameters::default(), VesselKind::Ship, false);
+
+        assert!(!sim.set_active_craft(debris_id));
+        assert_eq!(sim.active_craft_id(), 0);
+        assert!(sim.set_active_craft(second_id));
+        assert_eq!(sim.craft_state().id, second_id);
+        assert_eq!(sim.control().throttle, 0.0);
+        assert!(sim.maneuvers().nodes.is_empty());
+
+        sim.set_throttle(0.75);
+        sim.maneuvers_mut()
+            .nodes
+            .push(crate::maneuver::ManeuverNode {
+                id: Some(2),
+                time: 20.0,
+                delta_v: DVec3::X,
+                reference_body: 0,
+            });
+        let second_authority = AuthorityMode::LocalRigidBody {
+            bubble: 9,
+            root_entity: crate::canonical::EntityRef(99),
+        };
+        assert!(sim.transition_authority_for(second_id, second_authority));
+        assert!(sim.set_active_craft(0));
+        assert_eq!(sim.craft_state().id, 0);
+        assert_eq!(sim.control().throttle, 0.25);
+        assert_eq!(sim.maneuvers().nodes.len(), 1);
+        assert_eq!(sim.authority(), AuthorityMode::OnRails { trajectory: 0 });
+        assert_eq!(
+            sim.vessel(second_id).unwrap().state().authority,
+            second_authority
+        );
+        assert_eq!(
+            sim.vessel(second_id).unwrap().state().translation,
+            second_translation
+        );
     }
 
     #[test]

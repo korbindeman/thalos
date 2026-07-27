@@ -25,6 +25,39 @@ pub const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 const THALOS_NAME: &str = "Thalos";
 const DEBUG_DROP_KEY: KeyCode = KeyCode::F9;
 
+/// Apply an inertial-frame velocity kick to the active local rigid body.
+///
+/// Stage separation owns the canonical momentum transaction, but only this
+/// executor boundary may name Avian components. Mirroring the parent's
+/// reaction impulse here prevents the next local-physics readback from
+/// overwriting the canonical velocity change.
+pub(crate) fn apply_inertial_delta_v(world: &mut World, delta_v: DVec3) {
+    if delta_v.length_squared() <= f64::EPSILON {
+        return;
+    }
+    let Some((body_id, craft_entity, frame)) = world
+        .get_resource::<ActiveLocalBubble>()
+        .and_then(|active| active.bubble.as_ref())
+        .map(|bubble| (bubble.body_id, bubble.craft_entity, bubble.frame.clone()))
+    else {
+        return;
+    };
+    let Some(sim) = world.get_resource::<SimulationState>() else {
+        return;
+    };
+    let body = sim.ephemeris.state(
+        body_id,
+        thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time()),
+    );
+    let body_fixed_delta = body.orientation.inverse() * delta_v;
+    let surface_local_delta = frame.rotation_body_to_frame * body_fixed_delta;
+    if let Some(mut velocity) =
+        world.get_mut::<thalos_physics_local::avian::LinearVelocity>(craft_entity)
+    {
+        velocity.0 += surface_local_delta;
+    }
+}
+
 /// Position discontinuity above which a take-translation handoff is logged as
 /// anomalous (see [`snap::readback_local_craft`]). A healthy handoff residual
 /// is the distance Avian's integrator drifts from the snap source in one step

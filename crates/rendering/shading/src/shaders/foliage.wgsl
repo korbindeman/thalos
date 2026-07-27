@@ -25,8 +25,22 @@
 // surface). Grading the atlas colour (rather than replacing it) keeps each
 // leaf's tone variation, so the leaf cards still break up instead of reading as
 // flat sheets.
+// The lit end stays bright on purpose — a sunlit leaf really is a high-albedo
+// surface, and that highlight is what reads as foliage rather than paint. What
+// was wrong is the SHADED end: at 0.40/0.54/0.45 the darkest recess of a crown
+// sat only ~1.8× below the sunlit top, so a crown had almost no interior depth
+// (it read as a flat blob — the "canopies look thin" report) and its *mean*
+// landed at the brightness of open meadow. Measured against the `forest-stand`
+// preset, stand-vs-open-ground luma at matched distance ran 0.97 near / 1.01 mid
+// / 1.04 far — i.e. canopy the same as or BRIGHTER than the meadow it should be
+// clearly darker than, inverting further with distance. Real closed canopy is
+// darker than grassland (albedo ~0.05–0.10 vs ~0.15–0.20) because most of what a
+// pixel integrates is shadowed interior and gaps, and that only strengthens as
+// the crown subtends less. Deepening the recess restores both the intra-crown
+// depth and the aggregate value, in ONE place — the near mesh and the
+// startup-baked impostor atlas both read this, so they move together.
 fn canopy_grade(e: f32) -> vec3<f32> {
-    let shaded = vec3<f32>(0.40, 0.54, 0.45); // deep muted green (cool recess)
+    let shaded = vec3<f32>(0.14, 0.20, 0.16); // deep shadowed interior (cool recess)
     let lit = vec3<f32>(1.38, 1.26, 0.80);    // gentle brighten + mild yellow (sunlit)
     return mix(shaded, lit, e);
 }

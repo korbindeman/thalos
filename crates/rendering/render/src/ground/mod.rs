@@ -1,5 +1,18 @@
 //! Thalos integration of the forked `thalos_udlod` UDLOD renderer.
 //!
+//! # Status: LEGACY
+//!
+//! The UDLOD terrain half of this module is **end-of-life** (keystone
+//! ADR-20260723T142945Z): [`crate::tiles`] is the default ground renderer, and
+//! udlod now streams only bodies the tile driver has not installed on, or the
+//! whole world under the `THALOS_TILE_RENDERER=0` A/B baseline. Defect-driven
+//! fixes only — new ground work goes on the tile path.
+//!
+//! **Not legacy:** the analytic [`BodySkyMaterial`] / [`BodyOceanMaterial`]
+//! projections and the shared ground-patch utilities that live here are the
+//! carve-out composites both renderers use; they outlive udlod and will move
+//! out of this module when it is deleted.
+//!
 //! M3 staging ([docs/world/terrain.md](../../docs/world/terrain.md), "Rendering: ground
 //! LOD"):
 //!
@@ -63,8 +76,8 @@ pub use gpu_grass::{
 pub use ground_patch::{GroundPatchMaterial, GroundPatchMaterialPlugin};
 pub use height_source::{
     ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,
-    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, GpuAtlasMirrorHeightSource, HeightSource,
-    horizon_sun_visibility,
+    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, HeightSource, RenderedGround,
+    RenderedGroundHeightSource, horizon_sun_visibility,
 };
 pub use landcover::{LandcoverSample, sample_landcover};
 pub use ocean_material::BodyOceanMaterial;

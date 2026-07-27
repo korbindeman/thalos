@@ -63,6 +63,11 @@ Carried from the probe design (user, 2026-07-21) and the keystone ADR:
 - **Solari is evaluated, never assumed.** Baseline is standard PBR + CSM
   (+ 0.19 contact shadows / SSR where they fit). RT-hardware gating and BLAS
   rebuild cost on streamed tiles are open measurements, not settled costs.
+  **Narrowed 2026-07-24** (ADR-20260724T224242Z): what is on the table is the
+  raytracing *scene* used as a visibility service inside our own shading —
+  never Solari's raytraced *lighting*, which would be a third lighting universe
+  with no sky. RT stays permanently additive: the raster path is what every
+  machine gets.
 
 ## §3 The probe (renderer workstream)
 
@@ -206,6 +211,14 @@ Nothing downstream of L2 starts.
 
 ## §6 Thalos integration sequencing (post-M5, provisional)
 
+> **Status 2026-07-25: the tile renderer is the default ground.** Steps 1–3 are
+> in, and step 5's scatter half landed; the flip inverted the gate, so
+> `THALOS_TILE_RENDERER=0` now *forces the legacy udlod path* as an A/B baseline
+> instead of tiles being opt-in. udlod keeps streaming bodies the tile driver
+> has not installed on (one body per session today) — that per-body install, the
+> remaining composites, and the open `NTR-X*` rows are what stand between here
+> and step 6.
+
 Order of re-entry, to be finalized by the M5 extraction plan:
 
 1. **Tile contract lands in Thalos** (the probe's `TerrainTileProvider` shape
@@ -229,10 +242,10 @@ Order of re-entry, to be finalized by the M5 extraction plan:
 | Fork | Gates | Notes |
 |---|---|---|
 | Bevy/`big_space`/Solari revisions to pin together for the probe | probe M0 | probe-repo decision; report back |
-| Patch resolution + screen-space-error rule | probe M2 (distance-only placeholder shipped) → sharpen at M4/M5 | 33² vs 65² measured. The target rule is **relief-aware screen-space geometric error**, not distance: split only when refinement would move the surface by > τ px, so smooth terrain (ocean floor, plains) spends far less of the tile budget at equal distance. The error term comes from provider metadata — the package lineage already stores per-node max declared error (MIRA-0), and at M4 the neural residual band's amplitude *is* the refinement error; `HeightTile` min/max is the interim proxy. udlod precedent: `TileProvider::subdivision_scale` ≤ 1 — relief-awareness may only *remove* detail below the distance cap, never add it (scale-consistency invariant) |
+| Patch resolution + screen-space-error rule | probe M2 (distance-only placeholder shipped) → **relief-aware rule shipped in-game 2026-07-25** (`tiles::tile_ruggedness_weight`) → sharpen when provider error metadata lands | 33² vs 65² measured. The target rule is **relief-aware screen-space geometric error**, not distance: split only when refinement would move the surface by > τ px, so smooth terrain (ocean floor, plains) spends far less of the tile budget at equal distance. The error term comes from provider metadata — the package lineage already stores per-node max declared error (MIRA-0), and at M4 the neural residual band's amplitude *is* the refinement error; `HeightTile` min/max is the interim proxy. udlod precedent: `TileProvider::subdivision_scale` ≤ 1 — relief-awareness may only *remove* detail below the distance cap, never add it (scale-consistency invariant). **Shipped shape (2026-07-25):** exactly that, with the cap re-based from "everywhere" to "rugged" — `SPLIT_FACTOR` 6 is the floor, `SPLIT_FACTOR_RUGGED` 18 the cap, and ruggedness (relief ÷ arc, scale-invariant so it inherits down the tree unscaled) removes the difference on smooth ground. Error proxy is the `h_range` the mesher already measures; swap in per-node declared error / the neural residual amplitude when the package carries it. A source-detail floor (45 m ≈ Nyquist on the 90 m band) stops the boost re-meshing signal that is not there — measured, it was 2.7× the tiles for no visible change |
 | Collision at M2 or after multiscale | probe M2/M4 | leaning after-M4 per probe non-goals |
 | Q10 — package storage: pixel heights vs latent + on-device decode | §4.5 package emission; MIRA-2/3 schema freeze | carried over from *Decisions pending* |
 | Unified model architecture across body classes | after the earth-like fine-tune produces accepted Thalos terrain | companion ADR end state; resist architecture (not just stack) divergence meanwhile |
 | Learned climate channels as landcover conditioning | §4.4 evaluation | could retire TM-P2r/TM-P3b-style authored climate growth |
 | Q11 — single-source field kernel (CubeCL `#[cube]`, one Rust source compiled to GPU + CPU) vs hand-maintained WGSL/Rust pairs for the post-model cascade | opens at probe M4 (residual bands), binding at M5/extraction when collision joins as a height consumer | §4 *Candidate mechanism* |
-| Solari adoption | probe M5 measurements | RT gating + BLAS churn on streamed tiles are the questions |
+| Solari adoption — **shape resolved 2026-07-24** by [ADR-20260724T224242Z](../adr/20260724T224242Z-solari-scene-half-not-lighting-half.md): the *scene* half (`RaytracingScenePlugin`) yes, the *lighting* half (`SolariLightingPlugin`) never — it forces the opaque path deferred, extracts only `StandardMaterial`, and has **no sky/environment lighting at all**, which deletes the dominant surface ambient on an atmospheric body. Surfaces enter the RT scene through `Mesh3d`-less proxy entities so they keep their `ExtendedMaterial`/Hapke | **NTR-RT1** — BLAS/TLAS cost against our tile streaming rate, in-game on Mira (not the probe: it has no crafts, so mirror steel is unmeasurable there). Deferred behind NTR-X4 | Consumers gated on it: NTR-RT2 (RT sun visibility → `thalos::shadow`, closing NTR-X6) and NTR-RT3 (stainless-hull reflections, the atmosphere.md mirror tier whose BLAS prerequisite the tile renderer now satisfies) |

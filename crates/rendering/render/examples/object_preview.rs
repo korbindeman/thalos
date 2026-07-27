@@ -748,6 +748,7 @@ fn rock_field_mesh() -> Mesh {
             yaw: h(i, 0x3) * std::f32::consts::TAU,
             scale: 0.7 + 0.8 * h(i, 0x4),
             tilt: h(i, 0x6) * 0.5,
+            tint_rb: Vec2::ONE,
         });
     }
     combine_rock_tile_mesh(&instances, &species).unwrap_or_else(|| build_rock_mesh(&pebble()))
@@ -926,6 +927,7 @@ fn setup_scene(
                     yaw: 0.0,
                     scale: 1.0,
                     tilt: 0.0,
+                    tint_rb: Vec2::ONE,
                 };
                 if let Some(card) = combine_impostor_tile_mesh(&[inst], &[Some(0)], 1.0) {
                     commands.spawn((

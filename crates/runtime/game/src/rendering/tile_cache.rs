@@ -36,6 +36,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bevy::prelude::*;
+use thalos_body_render::tiles::{
+    CachedTileProvider, SurfaceTileCache, TerrainTileProvider, TileNamespaceFn,
+};
 use thalos_body_render::udlod::prelude::{
     AttachmentConfig, DiskTileCacheProvider, MemoryTileCacheProvider, NamespaceFn, SharedTileCache,
     TerrainConfig, TileProvider, prune_tile_cache, static_namespace,
@@ -57,24 +60,57 @@ const MEMORY_CACHE_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 /// re-address the same few hundred tiles every run.
 const DISK_CACHE_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
+/// RAM budget for retained tile-renderer payloads, across all bodies.
+///
+/// A tile-renderer payload is ~107 KB (67² halo grid × heights + albedo + bands),
+/// so this retains ~1,800 tiles. It only has to smooth churn — the disk tier is
+/// what makes a revisit or a second boot cheap, and the OS page cache backs that
+/// at no cost in this process's footprint. Deliberately modest: the box has
+/// already OOM'd once on tile residency (INC-20260725T012104Z) and the user runs
+/// concurrent instances.
+const SURFACE_MEMORY_CACHE_BUDGET_BYTES: usize = 192 * 1024 * 1024;
+
+/// Ceiling for the tile-renderer's on-disk cache. Larger than udlod's because
+/// its payloads are ~50× smaller per tile while a surface view wants thousands
+/// of them (~790 MB for one settled spaceport view).
+const SURFACE_DISK_CACHE_BUDGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
+
 /// Per-body in-memory tile caches, plus the disk-cache location.
 ///
-/// Held as a resource — *outside* the `TileAtlas` — precisely so the retained
-/// payloads outlive the terrain entity. `TerrainRebuildRequest` despawns and
-/// respawns a body's whole terrain to apply a flatten; without this handle
-/// living out here, that would throw away every synthesized tile.
+/// Held as a resource — *outside* the `TileAtlas` / `TileTerrainRoot` — precisely
+/// so the retained payloads outlive the terrain entity. `TerrainRebuildRequest`
+/// despawns and respawns a body's whole terrain to apply a flatten; without this
+/// handle living out here, that would throw away every synthesized tile.
+///
+/// One registry serves **both** ground renderers. The tiers are separate (the
+/// payloads are different types with different formats) but the namespace
+/// discipline that makes them safe is shared, which is the part worth having one
+/// home for.
 #[derive(Resource)]
 pub struct TileCacheRegistry {
     memory: HashMap<BodyId, SharedTileCache>,
     /// `None` disables disk caching (`THALOS_TILE_CACHE=0`).
     disk_root: Option<PathBuf>,
+    /// Tile-renderer (`body_render::tiles`) equivalents of the two above.
+    surface_memory: HashMap<BodyId, Arc<SurfaceTileCache>>,
+    surface_disk_root: Option<PathBuf>,
 }
 
 impl Default for TileCacheRegistry {
     fn default() -> Self {
+        // One resolution, so `THALOS_TILE_CACHE=0` logs once and can never end up
+        // disabling one renderer's cache but not the other's.
+        let disk_root = disk_cache_root();
+        let surface_disk_root = disk_root.as_ref().map(|root| {
+            root.parent()
+                .map(|parent| parent.join("surfacetilecache"))
+                .unwrap_or_else(|| PathBuf::from("user/surfacetilecache"))
+        });
         Self {
             memory: HashMap::new(),
-            disk_root: disk_cache_root(),
+            disk_root,
+            surface_memory: HashMap::new(),
+            surface_disk_root,
         }
     }
 }
@@ -122,6 +158,77 @@ impl TileCacheRegistry {
             capacity_tiles,
             self.memory_cache(body_id),
         ))
+    }
+
+    /// Wrap the **tile renderer's** provider in the memory + disk tiers.
+    ///
+    /// Same contract as [`Self::wrap_provider`]: `flatten` is the body's live
+    /// handle, not a snapshot, because the provider samples through
+    /// `FlattenedSurface` per tile *vertex* — a pad installed after the ground
+    /// spawned changes what subsequent tiles bake, and freezing the key would
+    /// file those flattened tiles under the un-flattened namespace.
+    ///
+    /// `radius_m` is not part of the namespace: it is validated by the payload
+    /// itself on read (a rescaled model is a different body's tile, and the disk
+    /// tier rejects it as a miss rather than trusting the key).
+    pub fn wrap_tile_provider(
+        &mut self,
+        body_id: BodyId,
+        inner: Arc<dyn TerrainTileProvider>,
+        flatten: Option<FlattenHandle>,
+        surface_fingerprint: u64,
+    ) -> Arc<dyn TerrainTileProvider> {
+        let namespace = self.tile_namespace_fn(body_id, flatten, surface_fingerprint);
+        let memory = Arc::clone(self.surface_memory.entry(body_id).or_default());
+        Arc::new(CachedTileProvider::new(
+            inner,
+            namespace,
+            memory,
+            SURFACE_MEMORY_CACHE_BUDGET_BYTES,
+            self.surface_disk_root.clone(),
+        ))
+    }
+
+    /// [`Self::namespace_fn`] for the tile renderer.
+    ///
+    /// Deliberately **not** shared with udlod's: that one folds in
+    /// `config.model.scale()` and is consumed by a cache whose payloads have a
+    /// different shape entirely. Sharing the hash would make the two renderers'
+    /// tiles collide in name while differing in content — the one failure this
+    /// design exists to make impossible. What *is* shared is the discipline and
+    /// the flatten hash below.
+    ///
+    /// **If you add an input to tile synthesis, add it here.** A missing input
+    /// means stale tiles get served as if fresh.
+    fn tile_namespace_fn(
+        &self,
+        body_id: BodyId,
+        flatten: Option<FlattenHandle>,
+        surface_fingerprint: u64,
+    ) -> TileNamespaceFn {
+        let mut hasher = DefaultHasher::new();
+        "tiles".hash(&mut hasher);
+        GENERATOR_VERSION.hash(&mut hasher);
+        surface_fingerprint.hash(&mut hasher);
+        (body_id as u64).hash(&mut hasher);
+        let static_hash = hasher.finish();
+
+        let Some(flatten) = flatten else {
+            return Arc::new(move || static_hash);
+        };
+
+        Arc::new(move || {
+            let mut hasher = DefaultHasher::new();
+            static_hash.hash(&mut hasher);
+            match flatten.read() {
+                Ok(regions) => hash_flatten_regions(&regions).hash(&mut hasher),
+                // A poisoned lock collapsing to "no pads" would be a *wrong* key
+                // rather than a missing one; the sentinel keeps a flattened tile
+                // from ever landing under the un-flattened namespace.
+                Err(_) => u64::MAX.hash(&mut hasher),
+            }
+            hasher.finish()
+        })
     }
 
     /// Build the per-request namespace resolver.
@@ -258,16 +365,27 @@ fn disk_cache_root() -> Option<PathBuf> {
 /// Cap the disk cache at boot. Cheap (a shallow directory walk) and keeps the
 /// cache from growing without bound across sessions and bodies.
 fn prune_disk_cache(registry: Res<TileCacheRegistry>) {
-    let Some(root) = &registry.disk_root else {
-        return;
-    };
-    let freed = prune_tile_cache(root, DISK_CACHE_BUDGET_BYTES);
-    if freed > 0 {
-        info!(
-            "pruned {:.1} MB from the ground-LOD tile disk cache at {}",
-            freed as f64 / (1024.0 * 1024.0),
-            root.display(),
-        );
+    let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    if let Some(root) = &registry.disk_root {
+        let freed = prune_tile_cache(root, DISK_CACHE_BUDGET_BYTES);
+        if freed > 0 {
+            info!(
+                "pruned {:.1} MB from the ground-LOD tile disk cache at {}",
+                mib(freed),
+                root.display(),
+            );
+        }
+    }
+    if let Some(root) = &registry.surface_disk_root {
+        let freed =
+            thalos_body_render::tiles::cache::prune_disk_cache(root, SURFACE_DISK_CACHE_BUDGET_BYTES);
+        if freed > 0 {
+            info!(
+                "pruned {:.1} MB from the surface tile disk cache at {}",
+                mib(freed),
+                root.display(),
+            );
+        }
     }
 }
 

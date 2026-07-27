@@ -158,6 +158,7 @@ fn drive_gpu_grass(
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
     structures: Res<StructureRegistry>,
+    paved: Res<crate::base_editor::PavedFootprints>,
     graphics: Res<GraphicsSettings>,
     view_anchor: Res<ViewAnchor>,
     time: Res<Time>,
@@ -244,7 +245,7 @@ fn drive_gpu_grass(
 
     // Window rebuild triggers: none yet, drifted too far, or stale data.
     state.check_timer += time.delta_secs();
-    let regions = grass_scatter_regions(&structures, body_id, radius_m);
+    let regions = grass_scatter_regions(&structures, &paved, body_id, radius_m);
     let mut want_refill = false;
     match state.window_anchor {
         None => want_refill = true,

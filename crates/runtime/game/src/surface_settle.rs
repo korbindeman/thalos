@@ -37,9 +37,9 @@ use thalos_body_render::tiles::{TileEye, TileTerrainRoot};
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 
 use crate::camera::ShipCamera;
-use crate::rendering::tile_terrain::TileTerrainBody;
 use crate::loading::{AppState, LoadingTracker, step};
 use crate::rendering::ground_terrain::BodyTerrain;
+use crate::rendering::tile_terrain::TileTerrainBody;
 use crate::solar_system_state::SimulationState;
 use crate::spawn::SpawnSituation;
 
@@ -144,10 +144,10 @@ fn init_surface_settle(situation: Res<SpawnSituation>, mut commands: Commands) {
         total_elapsed_s: 0.0,
     };
     settle.arm(
-        // Only the parked `Runway` start is gated (see module docs): it installs
-        // a flatten pad and sits still at the surface, so the ground there can
-        // settle to a fixed flush state behind the screen.
-        matches!(*situation, SpawnSituation::Runway),
+        // Parked runway and launchpad starts install the spaceport flatten and
+        // sit still at the surface, so the ground can settle flush behind the
+        // loading screen before either craft is revealed.
+        matches!(*situation, SpawnSituation::Runway | SpawnSituation::Launch),
         // Scenarios without a deferred placement install their surface state in
         // `main.rs`, so they're "placed" from frame 0; the settle then just
         // waits on the tiles.
@@ -206,17 +206,22 @@ fn update_surface_settle(
         resident_lod_under_view(&sim, &tile_trees, &terrains, &camera_q)
     };
 
-    // Settle diagnostics: a line every few seconds while the gate is active
-    // (bounded — at most ~6 per load). The view radius tells whether the tile
-    // streamer's view actually reached the surface site; a stall at a coarse
-    // LOD with an orbital view radius means the camera never got there.
+    // Settle diagnostics: a JSONL event every few seconds while the gate is
+    // active (bounded — at most ~6 per load). The view radius tells whether the
+    // tile streamer's view actually reached the surface site; a stall at a
+    // coarse LOD with an orbital view radius means the camera never got there.
     let log_bucket = (settle.elapsed_s / 5.0) as u32;
     let prev_bucket = ((settle.elapsed_s - dt).max(0.0) / 5.0) as u32;
     if log_bucket != prev_bucket {
         let view_r_km = view_radius_km(&sim, &tile_trees, &terrains, &camera_q);
         info!(
-            "surface settle: t={:.0}s lod={:?} m/texel (best {:.1}), view radius {:.1} km",
-            settle.elapsed_s, lod_m, settle.best_lod_m, view_r_km
+            target: "thalos::diagnostic::surface_settle",
+            event = "progress",
+            elapsed_s = settle.elapsed_s,
+            ?lod_m,
+            best_lod_m = settle.best_lod_m,
+            view_radius_km = view_r_km,
+            "surface settle progress"
         );
     }
 

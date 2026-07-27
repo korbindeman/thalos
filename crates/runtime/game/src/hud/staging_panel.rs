@@ -72,12 +72,12 @@ pub fn setup(mut commands: Commands, theme: Res<HudTheme>) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                right: Val::Px(20.0),
-                bottom: Val::Px(20.0),
+                right: Val::Px(16.0),
+                bottom: Val::Px(16.0),
                 // Active stage (card 0) sits at the bottom, like KSP.
                 flex_direction: FlexDirection::ColumnReverse,
                 align_items: AlignItems::End,
-                row_gap: Val::Px(6.0),
+                row_gap: Val::Px(5.0),
                 ..default()
             },
             HudPanel,
@@ -98,9 +98,9 @@ fn spawn_stage_card(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme, ind
                 align_items: AlignItems::Stretch,
                 border: UiRect::all(Val::Px(1.0)),
                 border_radius: BorderRadius::all(Val::Px(4.0)),
-                padding: UiRect::axes(Val::Px(12.0), Val::Px(7.0)),
-                min_width: Val::Px(200.0),
-                row_gap: Val::Px(4.0),
+                padding: UiRect::axes(Val::Px(9.0), Val::Px(5.0)),
+                min_width: Val::Px(178.0),
+                row_gap: Val::Px(3.0),
                 display: Display::None,
                 ..default()
             },

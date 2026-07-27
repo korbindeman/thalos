@@ -14,6 +14,8 @@
 //!   dry patch of Thalos.
 //! - `cruise`: the Meridian aircraft at ~15,000 ft (~4,600 m AGL), flying
 //!   level at cruise speed over dry land.
+//! - `launch`: the Saturn rocket standing vertically on the default spaceport's
+//!   launchpad, engines cold and ready for staging.
 //!
 //! `orbit`, `polar`, and `eva` resolve fully in `main.rs` from the body state
 //! alone.
@@ -140,6 +142,9 @@ pub enum SpawnSituation {
     /// Aircraft airborne on short final, lined up with the runway centerline
     /// and descending toward it. Placed by [`crate::runway`].
     RunwayApproach,
+    /// Saturn rocket standing vertically on a default-spaceport launchpad.
+    /// Placed by [`crate::runway`] through the shared launchpad placement core.
+    Launch,
     /// Meridian aircraft at ~15,000 ft (~4,600 m AGL), flying level at cruise
     /// speed over dry land. Placed by [`refine_descent_spawn`].
     Cruise,
@@ -157,6 +162,7 @@ impl SpawnSituation {
             "runway-approach" | "runway_approach" | "rwy-approach" | "approach-runway" => {
                 Self::RunwayApproach
             }
+            "launch" | "launchpad" | "pad" => Self::Launch,
             "cruise" | "cruising" => Self::Cruise,
             "polar" | "polar-orbit" | "polar_orbit" => Self::PolarOrbit,
             "" | "orbit" | "ship" => Self::ShipOrbit,
@@ -184,6 +190,12 @@ impl SpawnSituation {
         matches!(self, Self::Runway | Self::RunwayApproach)
     }
 
+    /// True for starts that build the canonical spaceport before placing the
+    /// craft: the two runway starts and the launchpad rocket start.
+    pub fn is_spaceport(self) -> bool {
+        self.is_runway() || matches!(self, Self::Launch)
+    }
+
     /// True for scenarios that fly the Meridian aircraft (runway + cruise).
     pub fn is_aircraft(self) -> bool {
         matches!(self, Self::Runway | Self::RunwayApproach | Self::Cruise)
@@ -195,16 +207,16 @@ impl SpawnSituation {
     /// directly in `main.rs`. The settle gate must wait for that placement
     /// before judging whether tiles at the (then-known) site have settled.
     pub fn has_deferred_placement(self) -> bool {
-        self.is_runway() || self.descent_profile().is_some()
+        self.is_spaceport() || self.descent_profile().is_some()
     }
 
     /// Ship blueprint to load for this scenario. Aircraft scenarios fly the
     /// Meridian jetliner; everything else flies the default rocket.
     pub fn ship_blueprint_path(self) -> &'static str {
-        if self.is_aircraft() {
-            "ships/meridian.ron"
-        } else {
-            "ships/apollo.ron"
+        match self {
+            Self::Launch => "ships/saturn.ron",
+            _ if self.is_aircraft() => "ships/meridian.ron",
+            _ => "ships/apollo.ron",
         }
     }
 
@@ -217,7 +229,8 @@ impl SpawnSituation {
             | Self::PolarOrbit
             | Self::Eva
             | Self::Runway
-            | Self::RunwayApproach => None,
+            | Self::RunwayApproach
+            | Self::Launch => None,
         }
     }
 }
@@ -797,6 +810,17 @@ mod tests {
             gm: 1.0,
             radius_m,
         }
+    }
+
+    #[test]
+    fn launch_request_selects_saturn_and_deferred_spaceport_placement() {
+        let situation = SpawnSituation::from_request("launch");
+        assert_eq!(situation, SpawnSituation::Launch);
+        assert_eq!(situation.ship_blueprint_path(), "ships/saturn.ron");
+        assert!(situation.is_spaceport());
+        assert!(situation.has_deferred_placement());
+        assert!(!situation.is_runway());
+        assert!(!situation.is_aircraft());
     }
 
     #[test]

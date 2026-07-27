@@ -113,6 +113,10 @@ impl HeightSource for CpuPipelineHeightSource {
     fn landcover_moisture(&self, dir: DVec3) -> f32 {
         self.surface.landcover_moisture(dir)
     }
+
+    fn canopy_climate(&self, dir: DVec3, lod_m: f32) -> thalos_terrain::canopy::CanopyClimate {
+        self.surface.canopy_climate(dir, lod_m)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -138,40 +142,144 @@ impl HeightSource for ConstantHeightSource {
 
 pub type GpuAtlasMirrorHandle = Arc<RwLock<GpuAtlasHeightMirror>>;
 
-pub struct GpuAtlasMirrorHeightSource {
-    mirror: GpuAtlasMirrorHandle,
+/// **The rendered ground, whichever renderer drew it.**
+///
+/// The udlod atlas and the standard-path tile renderer both stream height data
+/// and both must answer the same three questions for everything that sits on
+/// the ground — scatter, colliders, the camera floor, HUD altitude:
+///
+/// - *how high is the drawn surface here* ([`Self::sample_height_m`]),
+/// - *how refined is it here* ([`Self::best_resident_texel_m`] — the gate that
+///   stops grass being seeded onto a kilometre-coarse tile),
+/// - *has it shifted* ([`Self::revision`]).
+///
+/// Keeping this one type (rather than a per-renderer query in each consumer) is
+/// what lets terrain detail work unchanged on either path: consumers ask the
+/// registry, not the renderer. An enum rather than a trait object because there
+/// are exactly two renderers and one consumer — udlod's residency planner —
+/// legitimately needs the concrete atlas handle back out.
+#[derive(Clone)]
+pub enum RenderedGround {
+    /// udlod's GPU tile atlas, mirrored on the CPU.
+    Udlod(GpuAtlasMirrorHandle),
+    /// The standard-path tile renderer's resident tile grids.
+    Tiles(crate::tiles::TileHeightMirrorHandle),
+}
+
+impl RenderedGround {
+    /// Rendered height (m above the reference radius) at `dir`, or `None` while
+    /// nothing is resident there.
+    pub fn sample_height_m(&self, dir: Vec3) -> Option<f32> {
+        match self {
+            Self::Udlod(m) => m.read().ok()?.sample_height_m(dir),
+            Self::Tiles(m) => m.read().ok()?.sample_height_m(dir),
+        }
+    }
+
+    /// Metric sample spacing of the finest resident data at `dir`, or `None` if
+    /// nothing is resident. Note udlod's pinned LOD-0 tile is *always* resident
+    /// but kilometres-coarse, so callers that need genuinely detailed ground
+    /// must check this, not mere presence.
+    pub fn best_resident_texel_m(&self, dir: Vec3) -> Option<f32> {
+        match self {
+            Self::Udlod(m) => m.read().ok()?.best_resident_texel_m(dir),
+            Self::Tiles(m) => m.read().ok()?.best_resident_texel_m(dir),
+        }
+    }
+
+    pub fn revision(&self) -> u64 {
+        match self {
+            Self::Udlod(m) => m.read().map(|m| m.revision()).unwrap_or(0),
+            Self::Tiles(m) => m.read().map(|m| m.revision()).unwrap_or(0),
+        }
+    }
+
+    pub fn build_collider_patch(
+        &self,
+        center_dir: Vec3,
+        max_resolution: u32,
+    ) -> Option<TerrainPatchMesh> {
+        match self {
+            Self::Udlod(m) => m
+                .read()
+                .ok()?
+                .build_collider_patch(center_dir, max_resolution),
+            Self::Tiles(m) => m
+                .read()
+                .ok()?
+                .build_collider_patch(center_dir, max_resolution),
+        }
+    }
+
+    /// The concrete udlod atlas mirror, for the one consumer that owns it
+    /// (`spawn_body_terrain`'s [`GpuAtlasHeightMirrorComponent`]).
+    pub fn udlod_handle(&self) -> Option<GpuAtlasMirrorHandle> {
+        match self {
+            Self::Udlod(m) => Some(Arc::clone(m)),
+            Self::Tiles(_) => None,
+        }
+    }
+}
+
+/// The body's near-surface [`HeightSource`]: the rendered ground where it is
+/// resident, the canonical analytic surface everywhere else.
+///
+/// Reading the *rendered* ground first is the whole point — a consumer that
+/// sampled the analytic surface directly would seat objects on detail the mesh
+/// does not carry (see [`crate::tiles::height_mirror`]).
+pub struct RenderedGroundHeightSource {
+    mirror: RenderedGround,
     fallback: CpuPipelineHeightSource,
 }
 
-impl GpuAtlasMirrorHeightSource {
-    pub fn new(surface: Arc<dyn SurfaceQuery>) -> Self {
+impl RenderedGroundHeightSource {
+    /// A source backed by udlod's atlas mirror. Creates the mirror; hand
+    /// [`Self::rendered_ground`] to the registry and `mirror()` to the terrain
+    /// entity.
+    pub fn new_udlod(surface: Arc<dyn SurfaceQuery>) -> Self {
         Self {
-            mirror: Arc::new(RwLock::new(GpuAtlasHeightMirror::default())),
+            mirror: RenderedGround::Udlod(Arc::new(RwLock::new(GpuAtlasHeightMirror::default()))),
             fallback: CpuPipelineHeightSource::new(surface),
         }
     }
 
-    pub fn mirror(&self) -> GpuAtlasMirrorHandle {
-        Arc::clone(&self.mirror)
+    /// A source backed by an already-constructed rendered-ground mirror — the
+    /// tile renderer's, published when its root is installed.
+    pub fn new(mirror: RenderedGround, surface: Arc<dyn SurfaceQuery>) -> Self {
+        Self {
+            mirror,
+            fallback: CpuPipelineHeightSource::new(surface),
+        }
+    }
+
+    pub fn rendered_ground(&self) -> RenderedGround {
+        self.mirror.clone()
+    }
+
+    /// The udlod atlas handle, when this source is udlod-backed.
+    pub fn mirror(&self) -> Option<GpuAtlasMirrorHandle> {
+        self.mirror.udlod_handle()
     }
 }
 
-impl HeightSource for GpuAtlasMirrorHeightSource {
+impl HeightSource for RenderedGroundHeightSource {
     fn sample_height_m(&self, dir: Vec3, tile_lod_m: f32) -> Option<f32> {
-        if let Ok(mirror) = self.mirror.read()
-            && let Some(height) = mirror.sample_height_m(dir)
-        {
+        if let Some(height) = self.mirror.sample_height_m(dir) {
             return Some(height);
         }
         self.fallback.sample_height_m(dir, tile_lod_m)
     }
 
     fn revision(&self) -> u64 {
-        self.mirror.read().map(|m| m.revision()).unwrap_or(0)
+        self.mirror.revision()
     }
 
     fn landcover_moisture(&self, dir: DVec3) -> f32 {
         self.fallback.landcover_moisture(dir)
+    }
+
+    fn canopy_climate(&self, dir: DVec3, lod_m: f32) -> thalos_terrain::canopy::CanopyClimate {
+        self.fallback.canopy_climate(dir, lod_m)
     }
 
     fn build_collider_patch(
@@ -179,10 +287,7 @@ impl HeightSource for GpuAtlasMirrorHeightSource {
         center_dir: Vec3,
         max_resolution: u32,
     ) -> Option<TerrainPatchMesh> {
-        self.mirror
-            .read()
-            .ok()?
-            .build_collider_patch(center_dir, max_resolution)
+        self.mirror.build_collider_patch(center_dir, max_resolution)
     }
 }
 

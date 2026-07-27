@@ -3,6 +3,7 @@
 //! `impostor` = distant billboard materials; `ground` = udlod terrain LOD;
 //! `clouds` = body-fixed volumetric and temporal cloud render mechanism.
 pub mod clouds;
+pub mod composite_order;
 pub mod craft;
 pub mod ground;
 pub mod impostor;
@@ -28,7 +29,8 @@ pub use thalos_udlod as udlod;
 use bevy::prelude::*;
 
 /// Adds the full body-render stack: shared shader libraries, impostor
-/// materials, and the udlod ground-terrain pipeline.
+/// materials, the standard-path tile ground renderer, and the legacy udlod
+/// ground-terrain pipeline it is replacing.
 pub struct BodyRenderPlugin;
 impl Plugin for BodyRenderPlugin {
     fn build(&self, app: &mut App) {
@@ -41,10 +43,11 @@ impl Plugin for BodyRenderPlugin {
         }
         app.add_plugins(impostor::PlanetRenderingPlugin);
         app.add_plugins(clouds::CloudsPlugin);
+        // Legacy udlod ground (still the owner of the analytic BodySky/ocean
+        // projections, which are NOT legacy — see `ground`'s module docs).
         app.add_plugins(ground::ThalosTerrainPlugin);
-        // NTR-X1: the probe-extracted standard-path tile renderer. Inert
-        // until the game inserts a `tiles::TileTerrainRoot` (behind its
-        // `THALOS_TILE_RENDERER` toggle).
+        // NTR-X1: the standard-path tile renderer — the default ground.
+        // Inert until the game inserts a `tiles::TileTerrainRoot`.
         app.add_plugins(tiles::TileTerrainPlugin);
     }
 }

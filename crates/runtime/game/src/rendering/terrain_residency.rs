@@ -52,7 +52,7 @@ use thalos_body_render::AtmosphereBlock;
 use thalos_body_render::BodyTerrainMaterial;
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileTree};
 
-use crate::terrain_registry::{BodySurfaceRegistry, GpuHeightMirrorRegistry};
+use crate::terrain_registry::{BodySurfaceRegistry, RenderedGroundRegistry};
 use thalos_world::BodyId;
 
 use super::ground_terrain::{TerrainTier, spawn_body_terrain};
@@ -202,6 +202,7 @@ const RESIDENT_SCREEN_MARGIN: f32 = 0.5;
 fn compute_wanted_residency(
     sim: Res<SimulationState>,
     config: Res<TerrainResidencyConfig>,
+    tracker: Res<LoadingTracker>,
     ship_cam_q: Query<&GlobalTransform, With<ShipCamera>>,
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     mut wanted: ResMut<WantedResidencySet>,
@@ -218,7 +219,25 @@ fn compute_wanted_residency(
     // (2) Predicted encounters + close approaches within the preload lead-time
     // window, at full detail. `prediction()` is `None` when the craft is landed
     // or in contact — that's fine, we still keep the dominant body resident.
-    if let Some(plan) = sim.simulation.prediction() {
+    //
+    // Gated on the craft actually being where the scenario says it is. Deferred
+    // placement scenarios (`launch`, the runway family, descents) seed a debug
+    // *parking orbit* as a placeholder behind the loading screen and only install
+    // the real state once terrain is available — so during that window the
+    // prediction describes a trajectory the player is never going to fly, and
+    // rule 2 will happily promote whatever body that fictional orbit passes near
+    // to `Near`. That is an ~890 MB udlod atlas per body (see
+    // `ground_terrain`'s atlas constants), for a body the session never visits.
+    //
+    // Observed: the 2026-07-25 20:08 UTC `DeviceLost` had Pelagos spawned at the
+    // near tier in *both* live instances of a `just game launch` on Thalos.
+    // Because `despawn_debounce_s` counts **sim** time — which does not advance
+    // at the warp 0× every scenario starts at — the stranded atlas could then
+    // never time out. Not spawning it is the fix; the debounce was never the
+    // problem (BL-20260725T012104Z).
+    if placement_settled(&tracker)
+        && let Some(plan) = sim.simulation.prediction()
+    {
         for enc in plan.encounters() {
             if enc.closest_epoch - now < config.preload_lead_time_s {
                 wanted.0.insert(enc.body, TerrainTier::Near);
@@ -258,6 +277,23 @@ fn compute_wanted_residency(
     }
 }
 
+/// Whether the craft's canonical state is the one the scenario actually means,
+/// rather than the parking-orbit placeholder a deferred-placement scenario boots
+/// behind its loading screen.
+///
+/// `step::PLACEMENT` is registered **only** for scenarios that defer placement
+/// (`loading::steps_for`), so a scenario without it — plain orbit, EVA — is
+/// settled from frame one and keeps the pre-existing behaviour exactly.
+///
+/// This is deliberately the loading step and not, say, `CraftRegimeState`: the
+/// regime resolver classifies the *placeholder* orbit perfectly happily. The
+/// question here is not "what is the craft doing" but "is this state real yet",
+/// and the placement step is the one thing in the codebase that answers it.
+fn placement_settled(tracker: &LoadingTracker) -> bool {
+    !tracker.has_step(crate::loading::step::PLACEMENT)
+        || tracker.is_step_complete(crate::loading::step::PLACEMENT)
+}
+
 /// SystemParam bundle for the spawn / despawn path. Spawning needs the terrain
 /// material registry, the tile-tree resource, the GPU-atlas height-mirror
 /// registry (for the collider), the flatten registry, the body's real-space
@@ -266,7 +302,7 @@ fn compute_wanted_residency(
 struct ResidencySpawnParams<'w, 's> {
     body_terrain_materials: ResMut<'w, Assets<BodyTerrainMaterial>>,
     tile_trees: ResMut<'w, TerrainViewComponents<TileTree>>,
-    gpu_height_mirrors: Res<'w, GpuHeightMirrorRegistry>,
+    rendered_ground: Res<'w, RenderedGroundRegistry>,
     flatten: ResMut<'w, super::ground_terrain::TerrainFlattenRegistry>,
     /// Per-body tile caches. Held in a resource so retained tile payloads survive
     /// the despawn/respawn this module performs on every tier change.
@@ -316,8 +352,11 @@ fn apply_residency_changes(
                 {
                     residency.entries.insert(body_id, new_entry);
                     info!(
-                        "re-tiered ground terrain for body_id {} -> {:?} tier",
-                        body_id, tier
+                        target: "thalos::diagnostic::ground_terrain",
+                        event = "retiered",
+                        body_id,
+                        tier = ?tier,
+                        "ground terrain retiered"
                     );
                 }
             }
@@ -351,8 +390,11 @@ fn apply_residency_changes(
         residency.last_wanted_at.remove(&body_id);
         despawn_entry(&mut commands, &mut params, entry, ship_camera);
         info!(
-            "despawned ground terrain for body_id {} (unwanted for ≥{:.0}s)",
-            body_id, config.despawn_debounce_s
+            target: "thalos::diagnostic::ground_terrain",
+            event = "despawned",
+            body_id,
+            unwanted_s = config.despawn_debounce_s,
+            "ground terrain despawned"
         );
     }
 }
@@ -386,8 +428,11 @@ fn apply_terrain_rebuild_requests(
         if let Some(new_entry) = try_spawn(body_id, entry.tier, &sim, &mut params, &mut commands) {
             residency.entries.insert(body_id, new_entry);
             info!(
-                "rebuilt ground terrain for body_id {} (flatten changed)",
-                body_id
+                target: "thalos::diagnostic::ground_terrain",
+                event = "rebuilt",
+                body_id,
+                reason = "flatten_changed",
+                "ground terrain rebuilt"
             );
         }
     }
@@ -427,12 +472,29 @@ fn try_spawn(
 ) -> Option<ResidencyEntry> {
     let body = sim.system.bodies.get(body_id)?;
 
-    // NTR-X1: bodies owned by the standard-path tile renderer stand down
-    // here — every OTHER body keeps the full udlod stack (terrain + sky dome
-    // + ocean), so flying from the tile body to Thalos still gets atmosphere
-    // and ground detail (user finding 2026-07-24: the original all-body gate
-    // left Thalos with neither renderer).
+    // NTR-X1: bodies owned by the standard-path tile renderer (the default)
+    // stand down here — every OTHER body keeps the LEGACY udlod stack
+    // (terrain + sky dome + ocean), so flying from the tile body to a body the
+    // tile driver has not installed on still gets atmosphere and ground detail
+    // (user finding 2026-07-24: the original all-body gate left Thalos with
+    // neither renderer). This whole module goes away with udlod once the tile
+    // driver installs per body (`ntr §6`).
     if crate::rendering::tile_terrain::tile_rendered(body_id) {
+        return None;
+    }
+
+    // Same gate, one boot-frame earlier. The claim resolves ~1.2 s in, and
+    // spawning here meanwhile allocated the near-tier atlas array (~890 MB of
+    // VRAM, `depth_or_array_layers: atlas_size`, allocated upfront) only for the
+    // rebuild request at claim time to drop it. Holding the *dominant* body's
+    // near-tier spawn until the claim resolves means it is never allocated;
+    // `try_spawn` retries every frame, so this costs nothing but the wait, and
+    // the hold self-releases if no claim ever comes
+    // (INC-20260725T012104Z-tile-residency-had-no-budget).
+    if tier == TerrainTier::Near
+        && body_id == sim.simulation.dominant_body()
+        && crate::rendering::tile_terrain::tile_claim_pending()
+    {
         return None;
     }
 
@@ -464,7 +526,7 @@ fn try_spawn(
     // touch). Distant scenery bodies skip it: nothing queries their height, and
     // their tiny low-res atlas would only waste readback work mirroring it.
     let height_mirror = match tier {
-        TerrainTier::Near => params.gpu_height_mirrors.get(body_id),
+        TerrainTier::Near => params.rendered_ground.udlod_handle(body_id),
         // `Distant` scenery and `Map` (orbital-map focus, spawned by its own
         // path and never routed here) carry no collider/HUD height queries.
         TerrainTier::Distant | TerrainTier::Map => None,
@@ -517,6 +579,7 @@ fn initial_residency_loading_gate(
     wanted: Res<WantedResidencySet>,
     residency: Res<BodyTerrainResidency>,
     sim: Res<SimulationState>,
+    tile_roots: Query<&thalos_body_render::tiles::TileTerrainRoot>,
 ) {
     // No-op once complete, and on runtime re-loads that don't register the
     // step (the start screen's runway pass — the world is already up).
@@ -536,6 +599,21 @@ fn initial_residency_loading_gate(
     // `Distant` scenery bodies are intentionally not gated on — the loading
     // screen waits for the ground under the player's feet, not distant terrain
     // that streams in lazily behind a perfectly good icon dot.
+    //
+    // A body owned by the **tile** renderer never becomes udlod-resident at all
+    // — `try_spawn` stands the legacy stack down for it (NTR-X1) — so waiting on
+    // `is_resident` for the tile body is waiting for something that cannot
+    // happen. Before this was handled, every boot on the default renderer hung
+    // here until the 120 s `LOADING_HARD_TIMEOUT_S` backstop revealed the world
+    // with `Surface terrain` incomplete, long after the ground was actually up
+    // (observed 2026-07-26 01:23: full tile coverage at t+21 s, timeout at
+    // t+120 s). For those bodies the equivalent condition is the tile path's own
+    // handoff criterion, `coverage_ready` — the desired selection has been fully
+    // resident at least once.
+    let tile_covered = |body_id: BodyId| {
+        crate::rendering::tile_terrain::tile_rendered(body_id)
+            && tile_roots.iter().any(|r| r.coverage_ready())
+    };
     for (body_id, tier) in &wanted.0 {
         if *tier != TerrainTier::Near {
             continue;
@@ -546,9 +624,50 @@ fn initial_residency_loading_gate(
             .bodies
             .get(*body_id)
             .is_some_and(|b| !b.terrain.is_some());
-        if !resident && !no_terrain {
+        if !resident && !no_terrain && !tile_covered(*body_id) {
             return;
         }
     }
     tracker.complete(crate::loading::step::TERRAIN);
+}
+
+#[cfg(test)]
+mod placement_gate_tests {
+    use super::*;
+    use crate::loading::{LoadingTracker, step, steps_for};
+    use crate::spawn::SpawnSituation;
+
+    /// A deferred-placement scenario boots on a debug parking orbit. Until the
+    /// real state is installed, its prediction is fiction — and acting on it
+    /// costs ~890 MB of udlod atlas for a body the session never visits
+    /// (BL-20260725T012104Z).
+    #[test]
+    fn deferred_placement_scenarios_gate_the_prediction_rule() {
+        let mut tracker = LoadingTracker::default();
+        tracker.begin(steps_for(SpawnSituation::Launch, true));
+        assert!(
+            tracker.has_step(step::PLACEMENT),
+            "`launch` is a deferred-placement scenario"
+        );
+        assert!(
+            !placement_settled(&tracker),
+            "the craft is still on the placeholder parking orbit"
+        );
+
+        tracker.complete(step::PLACEMENT);
+        assert!(
+            placement_settled(&tracker),
+            "once placed, predictions describe the flight the player will fly"
+        );
+    }
+
+    /// The gate must not change scenarios that were never deferred: they have no
+    /// placeholder window, so rule 2 has to stay live from the first frame.
+    #[test]
+    fn immediate_scenarios_are_settled_from_frame_one() {
+        let mut tracker = LoadingTracker::default();
+        tracker.begin(steps_for(SpawnSituation::ShipOrbit, true));
+        assert!(!tracker.has_step(step::PLACEMENT));
+        assert!(placement_settled(&tracker));
+    }
 }

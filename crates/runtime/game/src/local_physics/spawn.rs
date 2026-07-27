@@ -219,11 +219,13 @@ pub(crate) fn spawn_player_avian_body(
                 .insert((CenterOfMass(com), NoAutoCenterOfMass));
             if !wheels.is_empty() {
                 info!(
-                    "landing gear: {} wheel(s) on player ship, CoM = ({:.2}, {:.2}, {:.2}) m",
-                    wheels.len(),
-                    com.x,
-                    com.y,
-                    com.z,
+                    target: "thalos::diagnostic::local_physics",
+                    event = "landing_gear",
+                    wheel_count = wheels.len(),
+                    center_of_mass_x_m = com.x,
+                    center_of_mass_y_m = com.y,
+                    center_of_mass_z_m = com.z,
+                    "landing gear configuration"
                 );
                 // Gear is the sole ground interface for a wheeled craft: filter
                 // the hull compound collider out of solver contact with the
@@ -294,8 +296,12 @@ pub(crate) fn spawn_player_avian_body(
         terrain_built_at_revision: 0,
     });
     info!(
-        "spawned player vessel bubble={} body_id={} kind={:?}",
-        bubble_id, body_id, vessel_kind,
+        target: "thalos::diagnostic::local_physics",
+        event = "bubble_spawned",
+        bubble_id,
+        body_id,
+        vessel_kind = ?vessel_kind,
+        "player vessel local bubble spawned"
     );
 }
 
@@ -376,8 +382,11 @@ pub(crate) fn rebase_bubble_to_dominant_body(
     let old_body_id = bubble.body_id;
     bubble.body_id = new_body_id;
     info!(
-        "rebased local bubble across SOI transit: body_id {} -> {}",
-        old_body_id, new_body_id
+        target: "thalos::diagnostic::local_physics",
+        event = "bubble_rebased",
+        old_body_id,
+        new_body_id,
+        "local bubble rebased across SOI transit"
     );
 }
 

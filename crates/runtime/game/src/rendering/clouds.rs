@@ -32,8 +32,8 @@ use bevy::transform::TransformSystems;
 
 use thalos_body_render::{
     AU_M, CameraMatrices, CloudCompositeMaterial, CloudDistanceTexture, CloudFillCalibration,
-    CloudRenderTexture, CloudSurfaceDensityMap, CloudWeatherMap, CloudsConfig,
-    FillCalibrationInput, LIGHT_AT_1AU, WEATHER_FACE_SIZE, derive_fill_calibration,
+    CloudRenderTexture, CloudShadowFrame, CloudShadowMap, CloudSurfaceDensityMap, CloudWeatherMap,
+    CloudsConfig, FillCalibrationInput, LIGHT_AT_1AU, WEATHER_FACE_SIZE, derive_fill_calibration,
 };
 use thalos_world::{BodyId, CloudClimate};
 
@@ -53,7 +53,17 @@ pub(super) struct BodyClouds {
 /// Global scale on the planet-fixed weather coverage map (which carries the
 /// local overcast fraction, mean ≈ `CloudWeatherField::coverage_mean`).
 /// 1.0 = trust the weather field; global trim.
-const COVERAGE_SCALE: f32 = 1.25;
+///
+/// This is the ONE definition. The CPU strata producer
+/// (`solar_system_state::cloud_surface_density_cpu`) and the fill-calibration
+/// input both read it from here — it used to be hand-copied into four places,
+/// so trimming coverage moved the near tier and the far tier by different
+/// amounts and the two stopped agreeing on how cloudy the planet was.
+///
+/// Held at 1.0: the producer's own occupancy already means areal cloud
+/// fraction, so boosting it here just re-inflated coverage after the
+/// distribution was fixed (2026-07-25).
+pub(crate) const COVERAGE_SCALE: f32 = 1.0;
 /// Extinction density multiplier. Some core contrast, but not so high that the
 /// flat deck base reads as a hard sliced edge.
 const DENSITY: f32 = 0.0026;
@@ -78,6 +88,56 @@ const SUN_FLUX_SCALE: f32 = 0.36;
 /// They also feed the marcher's airlight veil estimate through the same blend.
 const AMBIENT_TOP_SCALE: f32 = 0.085;
 const AMBIENT_BOTTOM_SCALE: f32 = 0.042;
+
+/// Whether the cloud deck shadows the ground, and how — the receiving half of
+/// CLOUD-5 / W2. Mirrors [`ContactShadowConfig`](super::contact_shadow) in
+/// shape so the `cloud-shadow` capture axis behaves like the `shadow` one:
+/// per-shot on the persistent host, not a boot-time `OnceLock`.
+///
+/// `THALOS_CLOUD_SHADOW`: `off`/`0`/`false` stands the term down (the cascade
+/// still marches, so the only factor under test is whether receivers apply it);
+/// `show` paints the raw transmittance on receivers; anything else applies it.
+#[derive(Resource, Clone, Copy)]
+pub struct CloudShadowConfig {
+    pub enabled: bool,
+    pub debug_show: bool,
+}
+
+impl Default for CloudShadowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            debug_show: false,
+        }
+    }
+}
+
+impl CloudShadowConfig {
+    fn from_env() -> Self {
+        let mut config = Self::default();
+        config.apply_capture_mode(std::env::var("THALOS_CLOUD_SHADOW").ok().as_deref());
+        config
+    }
+
+    pub(crate) fn apply_capture_mode(&mut self, mode: Option<&str>) {
+        *self = match mode
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" | "0" | "false" | "no" => Self {
+                enabled: false,
+                debug_show: false,
+            },
+            "show" | "raw" | "debug" => Self {
+                enabled: true,
+                debug_show: true,
+            },
+            _ => Self::default(),
+        };
+    }
+}
 
 /// Which body the volumetric cloud raymarch is currently rendered for — the
 /// authored cloudy body the camera is closest to, or `None` when no such body
@@ -128,8 +188,7 @@ pub(crate) fn derive_body_fill_calibration(
         base_shape_scale_m: climate.base_shape_scale_m.max(500.0),
         detail_scale_m: climate.detail_scale_m.max(50.0),
         bottom_height_m,
-        top_height_m: (climate.base_altitude_m + climate.thickness_m)
-            .max(bottom_height_m + 1.0),
+        top_height_m: (climate.base_altitude_m + climate.thickness_m).max(bottom_height_m + 1.0),
         planet_radius_m,
         seed: field.seed,
     };
@@ -149,10 +208,11 @@ pub(crate) fn derive_body_fill_calibration(
     }
     let calibration = derive_fill_calibration(&input);
     info!(
-        target: "thalos::clouds",
+        target: "thalos::diagnostic::clouds",
+        event = "fill_calibration_derived",
         threshold_nodes = ?calibration.threshold_nodes,
         far_response = ?calibration.far_response,
-        "derived cloud fill calibration"
+        "cloud fill calibration derived"
     );
     fill_lut_cache::store(&key, &calibration);
     calibration
@@ -173,7 +233,6 @@ mod fill_lut_cache {
     struct CachedCalibration {
         threshold_nodes: Vec<f32>,
         far_response: Vec<f32>,
-        shape_response: Vec<f32>,
     }
 
     pub(super) fn key(input: &thalos_body_render::FillCalibrationInput<'_>) -> String {
@@ -228,7 +287,6 @@ mod fill_lut_cache {
         Some(CloudFillCalibration {
             threshold_nodes: cached.threshold_nodes.try_into().ok()?,
             far_response: cached.far_response.try_into().ok()?,
-            shape_response: cached.shape_response.try_into().ok()?,
         })
     }
 
@@ -240,7 +298,6 @@ mod fill_lut_cache {
         let cached = CachedCalibration {
             threshold_nodes: calibration.threshold_nodes.to_vec(),
             far_response: calibration.far_response.to_vec(),
-            shape_response: calibration.shape_response.to_vec(),
         };
         let write = || -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
@@ -271,6 +328,7 @@ impl Plugin for CloudsRenderPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<CloudsConfig>()
             .register_type::<CameraMatrices>()
+            .insert_resource(CloudShadowConfig::from_env())
             .init_resource::<ActiveCloudBody>()
             .init_resource::<ActiveCloudFrame>()
             .init_resource::<BodyCloudCubes>()
@@ -296,20 +354,25 @@ impl Plugin for CloudsRenderPlugin {
     }
 }
 
-/// Match the cloud compositor's lifecycle to the resident terrain projection,
-/// independently of `BodySky`.
+/// Match the cloud compositor's lifecycle to the body's near-surface
+/// projection, by mirroring its `BodySky` visibility.
+///
+/// `BodySky` — not the udlod `BodyTerrain` entity — is the right authority:
+/// `sync_body_render_lod` owns the single surface-LOD handoff (is ground
+/// resident, and is the camera inside the swap radius) and already answers it
+/// for *both* renderers, udlod atlas and NTR-X1 tiles. Keying the composite off
+/// `BodyTerrain` instead meant that on the tile path — where udlod stands down
+/// and no `BodyTerrain` entity exists — the composite never left `Hidden` and
+/// the body had no clouds at all, while its sky and ocean rendered normally.
+/// Every body that spawns a cloud composite also spawns a `BodySky` (both live
+/// in the has-atmosphere branch of `spawn`), so the mirror is total.
 fn sync_cloud_composite_visibility(
-    terrains: Query<(&super::ground_terrain::BodyTerrain, &Visibility), Without<BodyClouds>>,
-    mut composites: Query<
-        (&BodyClouds, &mut Visibility),
-        Without<super::ground_terrain::BodyTerrain>,
-    >,
+    skies: Query<(&super::ground_terrain::BodySky, &Visibility), Without<BodyClouds>>,
+    mut composites: Query<(&BodyClouds, &mut Visibility), Without<super::ground_terrain::BodySky>>,
 ) {
-    let visible_bodies: std::collections::HashSet<BodyId> = terrains
+    let visible_bodies: std::collections::HashSet<BodyId> = skies
         .iter()
-        .filter_map(|(terrain, visibility)| {
-            (*visibility != Visibility::Hidden).then_some(terrain.body_id)
-        })
+        .filter_map(|(sky, visibility)| (*visibility != Visibility::Hidden).then_some(sky.body_id))
         .collect();
     for (clouds, mut visibility) in &mut composites {
         let want = if visible_bodies.contains(&clouds.body_id) {
@@ -368,10 +431,11 @@ fn sync_cloud_composite_materials(
             // independently derived rotation (see `ActiveCloudFrame`).
             let q = frame.0;
             bevy::log::info_once!(
-                target: "thalos::clouds",
-                "composite frame override: marcher q_bw={:?}, ground_terrain q={:?}",
-                q,
-                material.params.world_to_body_orientation,
+                target: "thalos::diagnostic::clouds",
+                event = "composite_frame_override",
+                marcher_orientation = ?q,
+                ground_orientation = ?material.params.world_to_body_orientation,
+                "cloud composite frame override"
             );
             material.params.world_to_body_orientation = Vec4::new(q.x, q.y, q.z, q.w);
             if let Some(layer) = cloud_layer.as_deref() {
@@ -434,7 +498,20 @@ fn drive_clouds(
     time: Res<Time>,
     mut wind_angle: Local<f32>,
     mut history_continuity: Local<Option<(BodyId, u32, f64)>>,
+    // Bundled: `drive_clouds` sits at Bevy's 16-param ceiling.
+    // .0 = the published cloud sun-transmittance cascade (CLOUD-5 / W2),
+    // .1 = whether receivers apply it (the `cloud-shadow` capture axis).
+    mut cloud_shadow_io: (ResMut<CloudShadowMap>, Res<CloudShadowConfig>),
 ) {
+    let (ref mut cloud_shadow, ref shadow_config) = cloud_shadow_io;
+    // Stand the sun-transmittance cascade down FIRST, and let the success path
+    // below raise it again. Every early-out here (clouds off, no camera, no
+    // cloud body, no ephemeris) means the map is about to go stale, and a stale
+    // cloud shadow is worse than none: it would keep darkening ground under a
+    // deck that is no longer being rendered.
+    config.shadow_frame = CloudShadowFrame::default();
+    cloud_shadow.frame = CloudShadowFrame::default();
+
     // Clouds disabled in graphics settings: park the raymarch camera far
     // outside any shell (same as the no-cloud-body case below) so every ray
     // misses and `update_body_terrain_atmosphere` binds the blank fallback,
@@ -583,7 +660,6 @@ fn drive_clouds(
     // the near fill would silently fall back to stale constants, so shout.
     if let Some(calibration) = fill.0.get(&body_id) {
         config.fill_threshold_nodes = calibration.threshold_vec4s();
-        config.shape_response = calibration.shape_response_vec4s();
     } else {
         bevy::log::warn_once!(
             target: "thalos::clouds",
@@ -593,6 +669,33 @@ fn drive_clouds(
     }
     config.wind_velocity = Vec3::new(climate.wind_m_s[0], climate.wind_m_s[1], 0.0);
     config.sun_dir = Vec4::new(sun_body.x, sun_body.y, sun_body.z, 0.0);
+
+    // Sun-transmittance cascade (CLOUD-5 / W2): resolve it from the SAME
+    // body-fixed camera position, sun direction, and radius the marcher above
+    // was just handed, so the shadow field and the visible deck are two
+    // projections of one state rather than two derivations of it.
+    let shadow_frame = CloudShadowFrame::resolve(cam_body, sun_body, radius);
+    config.shadow_frame = shadow_frame;
+    cloud_shadow.frame = shadow_frame;
+    cloud_shadow.world_to_body = q_bw;
+    cloud_shadow.body_center_ws = planet_center;
+    cloud_shadow.sun_body = sun_body;
+    cloud_shadow.strength = f32::from(u8::from(shadow_config.enabled));
+    cloud_shadow.debug_show = shadow_config.debug_show;
+    if shadow_config.debug_show {
+        bevy::log::info_once!(
+            target: "thalos::diagnostic::clouds",
+            event = "shadow_cascade",
+            active = shadow_frame.active,
+            half_extent_m = shadow_frame.half_extent_m,
+            texel_m = shadow_frame.texel_m(thalos_body_render::CLOUD_SHADOW_SIZE),
+            sun_elevation_cos = shadow_frame.sun_elevation_cos,
+            altitude_m = cam_body.length() - radius,
+            center_radius_m = shadow_frame.center.length(),
+            body_center_world_radius_m = planet_center.length(),
+            "cloud shadow cascade"
+        );
+    }
     let cloud_albedo = Vec3::from_array(climate.albedo).max(Vec3::ZERO);
     config.cloud_albedo = cloud_albedo.extend(1.0);
 
@@ -611,9 +714,13 @@ fn drive_clouds(
     let sun_chromaticity = Vec3::new(1.0, 0.84, 0.72).lerp(Vec3::new(1.0, 0.97, 0.93), day_blend);
     let horizon_transmittance = 0.85 + 0.15 * day_blend;
     // Albedo is applied once here; the volume does not re-multiply climate
-    // albedo, so keep it a touch under 1.0 to leave headroom for phase peaks.
-    let albedo = cloud_albedo * Vec3::new(0.94, 0.96, 0.99);
-    let sun_rgb = sun_chromaticity * albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
+    // albedo. It carries CHROMA only — the reflectance magnitude that makes a
+    // lit cloud white is `CLOUD_MS_ALBEDO` in the marcher, and peak headroom
+    // is the marcher's (achromatic) Reinhard white point. The former extra
+    // `(0.94, 0.96, 0.99)` headroom factor stacked on Thalos's authored
+    // (0.94, 0.96, 1.0) and biased sunlit cloud ~12% blue.
+    let sun_rgb =
+        sun_chromaticity * cloud_albedo * scene_flux * SUN_FLUX_SCALE * horizon_transmittance;
     config.sun_color = Vec4::new(sun_rgb.x, sun_rgb.y, sun_rgb.z, 1.0);
     // Ambient in-scatter. The PHYSICAL source is the F3/F4 sky-view LUT's
     // hemispherical irradiance (`SkyAmbient`, scene-flux units — the same

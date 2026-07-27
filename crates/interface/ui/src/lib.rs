@@ -40,6 +40,7 @@ impl Plugin for ThalosUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(glass::GlassPlugin)
             .init_resource::<TextFieldFocus>()
+            .add_message::<TextFieldSubmit>()
             .add_systems(Startup, (init_ui_theme, widgets::toast::setup_toast_area))
             .add_systems(
                 Update,

@@ -46,15 +46,26 @@ const MACRO_VAR_FINE_AMT: f32 = 0.6; // post-slim fine-tier amplitude
 const MACRO_VAR_AMT: f32 = 0.14;
 const SNOW_LINE_NOISE_M: f32 = 400.0;
 
-const LUSH_LO_M: f32 = 1500.0;
+// Re-anchored 2026-07-24 in `landcover.wgsl` / `procedural.rs` for the
+// diffusion terrain's 5.8 km massifs; this mirror had drifted and kept the old
+// 1500/2400/2400/3000 bands, so grass tint and the tree treeline disagreed
+// with the ground palette across the whole upper flank.
+const LUSH_LO_M: f32 = 2600.0;
 /// Forest gone above here (top of the lush band). `pub(crate)` so the tree
 /// scatter's biome gate keys its treeline off the SAME constant the ground
 /// palette uses — one definition of where woody cover stops.
-pub(crate) const LUSH_HI_M: f32 = 2400.0;
-const TREELINE_LO_M: f32 = 2400.0;
+pub(crate) const LUSH_HI_M: f32 = 3400.0;
+const TREELINE_LO_M: f32 = 3400.0;
 /// Alpine/scree fully taken over above here. `pub(crate)` for the tree scatter
 /// gate (see [`LUSH_HI_M`]).
-pub(crate) const TREELINE_HI_M: f32 = 3000.0;
+pub(crate) const TREELINE_HI_M: f32 = 4100.0;
+
+/// Residual share of the closed-canopy darkening the near-field understory
+/// keeps — mirror of `landcover.wgsl::understory_forest_residual`. The CPU
+/// field tints things that only exist near-field (grass blades, scatter
+/// plants), where the tile ground has recovered its understory colour and the
+/// canopy darkening belongs to the real trees standing on it.
+const UNDERSTORY_FOREST_AMT: f32 = 0.35;
 
 const C_FOREST: Vec3 = Vec3::new(0.034, 0.084, 0.028);
 const C_GRASS: Vec3 = Vec3::new(0.072, 0.152, 0.050);
@@ -112,16 +123,19 @@ pub fn sample_landcover(
     }
 }
 
-/// Vegetation colour the terrain paints at `(altitude, moisture)` — the exact
-/// `veg` branch of `eval_material_stack` (mirrored from the shared
-/// `landcover.wgsl::vegetation_color`), times the macro mottle the terrain
-/// applies to the whole ground. This is the grass blade tint, so blade == ground.
+/// Vegetation colour the terrain paints at `(altitude, moisture)` — the
+/// **understory** variant of the shared `landcover.wgsl` model (mirror of
+/// `vegetation_understory_color`), times the macro mottle the terrain applies
+/// to the whole ground. Everything this CPU field tints exists only
+/// near-field (grass blades, scatter-plant tints), where the tile ground has
+/// recovered its understory colour, so the closed-canopy darkening is scaled
+/// to the same [`UNDERSTORY_FOREST_AMT`] residual — blade == ground.
 fn vegetation_color(eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: f32) -> Vec3 {
     let jitter = macro_var * SNOW_LINE_NOISE_M;
     let lush = smoothstep(LUSH_HI_M, LUSH_LO_M, eco_altitude_m + jitter); // 1 low, 0 high
     let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, eco_altitude_m + jitter);
     let dryness = (0.5 - 0.5 * moisture).clamp(0.0, 1.0); // + wet → 0, − dry → 1
-    let forest_amt = smoothstep(0.58, 0.28, dryness) * lush;
+    let forest_amt = smoothstep(0.58, 0.28, dryness) * lush * UNDERSTORY_FOREST_AMT;
 
     let mut grass_c = C_GRASS.lerp(C_DRYGRASS, smoothstep(0.55, 0.88, dryness));
     grass_c = grass_c.lerp(C_SOIL, smoothstep(0.88, 0.98, dryness));

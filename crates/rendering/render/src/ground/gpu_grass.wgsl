@@ -35,7 +35,7 @@
 #import thalos::lighting::{compute_surface_sky, SurfaceSky, FoliageSurface, shade_foliage, object_aerial_recession, sun_daylight}
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_vert}
 #import thalos::grass_displace::grass_blade_world_pos
-#import thalos::landcover::{moisture_detail, macro_variation, vegetation_color, climate_warmth}
+#import thalos::landcover::{moisture_detail, macro_variation, vegetation_understory_color, climate_warmth}
 
 // Mirror of gpu_grass.rs `GpuGrassParams` — field order is load-bearing.
 struct GpuGrassParams {
@@ -432,7 +432,11 @@ fn vertex(in: VertexInput) -> VertexOutput {
     let p_body = gg.phase.xyz + east * clump_2d.x + north * clump_2d.y + r_up * h_rel;
     let moisture = clamp(gg.phase.w + moisture_detail(p_body), -1.0, 1.0);
     let macro_var = macro_variation(p_body);
-    let veg = vegetation_color(eco_h, moisture, macro_var, climate_warmth(gg.window_meta.w));
+    // Understory variant: blades only exist near-field, where the tile ground
+    // has recovered its understory colour (the canopy darkening belongs to the
+    // real trees there, not the ground) — full `vegetation_color` would paint
+    // canopy-dark blades on understory-bright ground through the forest belt.
+    let veg = vegetation_understory_color(eco_h, moisture, macro_var, climate_warmth(gg.window_meta.w));
 
     // Style blend: moisture picks along dry→lush; lawn treatment overrides.
     var styles = gg.style;

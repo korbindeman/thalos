@@ -312,8 +312,8 @@ pub(crate) fn respawn_into(
                 });
             place_craft(sim, coast_placement(state, attitude), None);
         }
-        SpawnSituation::Runway | SpawnSituation::RunwayApproach => {
-            warn!("respawn: runway scenarios are one-shot at startup; using orbit");
+        SpawnSituation::Runway | SpawnSituation::RunwayApproach | SpawnSituation::Launch => {
+            warn!("respawn: spaceport scenarios are one-shot at startup; using orbit");
             let (state, attitude) = orbit_respawn_state(sim, homeworld);
             place_craft(sim, coast_placement(state, attitude), None);
         }

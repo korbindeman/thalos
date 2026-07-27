@@ -130,6 +130,10 @@ impl GodViewOrbit {
 pub struct GodViewInput {
     /// Whether the cursor is over a UI panel (suppresses camera control).
     pub over_ui: bool,
+    /// Whether a text field owns the keyboard (suppresses the WASD pan) —
+    /// `crate::hud::UiKeyboardGate`, which covers both the native fields and
+    /// the egui viewpoint manager.
+    pub text_entry: bool,
     /// Whether right mouse is held (orbit drag).
     pub orbit_held: bool,
     /// Accumulated mouse-motion delta this frame.
@@ -179,8 +183,10 @@ pub fn drive_god_view(
     let horiz = east * yaw.cos() + north * yaw.sin();
 
     // WASD pans the focus across the ground, relative to the camera facing. Pan
-    // speed scales with zoom so it feels constant on screen.
-    if !input.over_ui {
+    // speed scales with zoom so it feels constant on screen. Read raw, so the
+    // text-entry gate has to be applied here: typing a name over the hub must
+    // not slide the view out from under it.
+    if !input.over_ui && !input.text_entry {
         let speed = (orbit.distance * PAN_SPEED_FACTOR * input.dt) as f64;
         let forward = -horiz; // into the screen, along the ground
         let right = forward.cross(up).normalize();

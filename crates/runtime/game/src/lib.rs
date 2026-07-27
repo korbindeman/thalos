@@ -37,6 +37,7 @@ mod reflection_probe;
 mod regime;
 mod relaunch;
 mod rendering;
+mod runtime_diagnostics;
 mod runway;
 mod scenario_menu;
 mod screenshot;
@@ -46,7 +47,7 @@ mod ship_view;
 mod shipyard_editor;
 mod sim_clock;
 mod sky_render;
-mod solar_system_state;
+pub mod solar_system_state;
 mod space_center;
 mod spawn;
 mod staging;
@@ -58,6 +59,7 @@ mod terrain_registry;
 mod units_settings;
 mod velocity_frame;
 mod view;
+pub mod viewpoints;
 mod warp_to_maneuver;
 mod window_settings;
 
@@ -438,14 +440,21 @@ impl AppBuilder {
                     "  Ship:            {label} on {} (over land)",
                     homeworld.name
                 );
-            } else if situation.is_runway() {
-                // The runway scenarios also seed the parking orbit as a placeholder
-                // behind the loading screen; `runway::finish_runway_spawn` installs
-                // the real runway + aircraft state on the first `Running` frame.
-                println!(
-                    "  Aircraft:        runway scenario on {} (placed once terrain loads)",
-                    homeworld.name
-                );
+            } else if situation.is_spaceport() {
+                // Spaceport scenarios seed the parking orbit as a placeholder
+                // behind the loading screen; `runway::finish_runway_spawn`
+                // installs the real runway/pad craft state once terrain loads.
+                if situation == SpawnSituation::Launch {
+                    println!(
+                        "  Rocket:          Saturn on {} launchpad (placed once terrain loads)",
+                        homeworld.name
+                    );
+                } else {
+                    println!(
+                        "  Aircraft:        runway scenario on {} (placed once terrain loads)",
+                        homeworld.name
+                    );
+                }
             } else if menu_boot {
                 println!("  Start screen:    pick a scenario in-game (just game <mode> skips it)");
             } else {
@@ -516,9 +525,11 @@ impl AppBuilder {
                 ..default()
             })
             .set(bevy::log::LogPlugin {
-                // Keep our own crates at INFO; silence Bevy's chatty
-                // startup-info categories so the terrain diagnostic and
-                // other game logs aren't buried. Override via RUST_LOG.
+                // Keep our own crates at INFO; silence Bevy's chatty startup
+                // categories so human-facing game status stays readable.
+                // `thalos::diagnostic::*` INFO events are separately written
+                // to JSONL and omitted by the console formatter below.
+                // Override collection levels via RUST_LOG.
                 filter: "info,\
                      wgpu=error,naga=warn,bevy_app=warn,\
                      bevy_render=warn,bevy_diagnostic=warn,\
@@ -531,7 +542,8 @@ impl AppBuilder {
                 // shader/pipeline validation failure can exit non-zero instead
                 // of writing a PNG and reporting success (BL-20). See
                 // `capture_health`.
-                custom_layer: capture_health::error_capture_layer,
+                custom_layer: capture_health::runtime_layers,
+                fmt_layer: runtime_diagnostics::human_console_layer,
                 ..default()
             });
         // No winit event loop in headless mode — `ScheduleRunnerPlugin` (added below)
@@ -617,7 +629,7 @@ impl AppBuilder {
             })
             .insert_resource(GameTerrainRegistry(terrain_registry))
             .insert_resource(body_surfaces)
-            .init_resource::<terrain_registry::GpuHeightMirrorRegistry>()
+            .init_resource::<terrain_registry::RenderedGroundRegistry>()
             .insert_resource(situation)
             // `just game hub` / the headless hub preset: build the spaceport (no
             // craft) behind the boot loading pass and open the space-center hub on
@@ -754,6 +766,14 @@ impl AppBuilder {
             .add_plugins(BodyTreePanelPlugin)
             .add_plugins(mem_diag::MemDiagPlugin)
             .add_plugins(DebugPlugin);
+
+        // F8/F9 are a developer collaboration surface: the interactive app
+        // gets the egui catalog manager and the quick-save prompt, while the
+        // headless host only consumes the same authored JSON data.
+        if screenshot_config.is_none() {
+            app.add_plugins(viewpoints::ViewpointManagerPlugin)
+                .add_plugins(viewpoints::quick_save::QuickSaveViewpointPlugin);
+        }
 
         // Headless screenshot: the fixed-step runner (no winit event loop) plus the
         // off-screen capture driver + its resolved config, layered over the fully

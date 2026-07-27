@@ -100,8 +100,8 @@ Each binary spawns one controller entity with layered contexts.
 
 Game:
 
-- `GameSystemContext` for Escape, desktop screenshot, F8 saved-perspective
-  handoff, and freecam
+- `GameSystemContext` for Escape, desktop screenshot, F8 viewpoint-manager
+  toggle, F9 viewpoint quick-save, and freecam
 - `GameViewContext` for HUD toggle, map toggle, and camera cycle
 - `GameFlightContext` for attitude, SAS, throttle, and HOTAS flight axes
 - `GameWarpContext` for sim-time meta-controls (pause, warp speed,
@@ -112,6 +112,72 @@ Game:
 - `GameManeuverContext` for node placement and deletion
 - `GameManeuverPrecisionContext` for Shift/Ctrl precision while a
   maneuver drag is active
+
+Applying any saved or agent-scripted entry from the F8 viewpoint manager
+activates freecam at that body-fixed camera pose. Closing the manager therefore
+leaves the developer in freecam at the selected view instead of handing the
+camera back to the orbit-focus driver.
+
+F9 saves the current view without opening the manager: the prompt's name field
+takes the keyboard (through the shared text-entry gate below, so no keystroke
+reaches flight or system bindings while it is up), and Enter or Escape closes
+it. Because the field owns Escape, F9 never stacks the pause menu.
+
+### Freecam
+
+F4 hands the ship camera to `freecam` (debug builds). Movement is WASD +
+R/F (up/down), look is LMB-drag, and the wheel sets the cruise speed —
+all raw `ButtonInput<KeyCode>` reads, because the flight context is
+suspended while freecam owns the camera (see *UI input ownership* below
+for how those reads still respect a focused text field).
+
+Two flight modes, both **on by default**, both toggleable from the panel
+or the keyboard:
+
+- **Level to planet up** (`L`) — the pose is constrained to the local
+  vertical at the camera's current position: yaw turns about that
+  vertical, pitch stops short of the poles, roll is zero. The constraint
+  is re-derived every frame against the up direction *where the camera
+  now is*, so the horizon stays level while flying across a body instead
+  of tipping over as the vertical rotates underneath. Q/E roll only
+  applies with this off (and it is forced off in deep space, where there
+  is no vertical to level against).
+- **Stop at the ground** (`C`) — the camera's radius is clamped to the
+  terrain height beneath it plus a small clearance. A *floor*, not a
+  swept collision: it stops the camera sinking through the surface it is
+  parked on, but one fast frame can still cross a ridge. Off = the old
+  fly-through-a-planet behaviour.
+
+Both constraints only touch a pose freecam produced, or the flight-camera
+pose it inherited on F4 entry. A pose *handed* to it — an applied
+viewpoint, a headless capture framing — is reproduced exactly until the
+user moves the camera, so authored roll and authored framing survive
+replay and capture baselines don't shift under them.
+
+`freecam::panel` draws the matching control surface on the left flank
+while freecam is active: the cruise speed with a real-world reference for
+scale, a log-scale drag slider over the whole 1 m/s – 10 000 km/s range,
+and the two mode switches. Panel and keyboard are two surfaces on **one**
+state — each pushes into `FreeCam` and reads back from it with
+value-guarded writes, so neither chases the other.
+
+## UI input ownership
+
+Two UIs draw over the same 3-D view — native Bevy UI (HUD, `thalos_ui` panels
+and text fields) and the egui F8 viewpoint manager — and either can take the
+pointer or the keyboard. `hud::input_gate` folds both into **one resource per
+device**, written by `update_ui_input_gates`:
+
+- `UiPointerGate.hovered` — a UI surface owns the pointer.
+- `UiKeyboardGate.text_entry()` — a text field owns the keyboard.
+
+Everything that reads input consults these rather than testing one UI system:
+`gate_enhanced_input_sources` disables the whole keyboard action source while
+`text_entry()` is true, and the handful of systems that must read
+`ButtonInput<KeyCode>` raw — freecam translation/roll/zoom and the god-view
+WASD pan, both of which run while their enhanced-input context is suspended —
+check it themselves. A new text surface is wired in at `update_ui_input_gates`,
+not chased through every keyboard reader.
 
 Planet editor:
 

@@ -8,6 +8,7 @@ pub mod aging_oceanic_field;
 pub mod biome_mask;
 pub mod body_builder;
 pub mod cache;
+pub mod canopy;
 pub mod cold_desert_field;
 pub(crate) mod crater_profile;
 pub mod cubemap;
@@ -41,7 +42,15 @@ pub use aging_oceanic_field::AgingOceanicField;
 pub use biome_mask::*;
 pub use body_builder::BodyBuilder;
 pub use cold_desert_field::*;
+/// How much of a crater's authored relief survives its age, in `0..1`.
+///
+/// Exported because consumers that *choose* craters (cinematic framings picking
+/// a landmark) must rank them by the same degradation the renderer applies —
+/// otherwise they select an ancient basin that has been flattened to nothing and
+/// frame empty ground.
+pub use crater_profile::degradation_factor;
 pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
+pub use diffusion_surface::DiffusionSurface;
 pub use feature_compiler::*;
 pub use field_surface::FieldSurface;
 pub use generic_terrestrial_field::*;
@@ -57,14 +66,6 @@ pub use package::{
     SCHEMA_VERSION as PACKAGE_SCHEMA_VERSION, TerrainPackageManifest, load_static_package,
     write_static_package,
 };
-/// How much of a crater's authored relief survives its age, in `0..1`.
-///
-/// Exported because consumers that *choose* craters (cinematic framings picking
-/// a landmark) must rank them by the same degradation the renderer applies —
-/// otherwise they select an ancient basin that has been flattened to nothing and
-/// frame empty ground.
-pub use crater_profile::degradation_factor;
-pub use diffusion_surface::DiffusionSurface;
 pub use procedural::{
     GENERATOR_VERSION, MacroBiome, ProceduralSurface, climate_cold_lift_m, climate_warmth,
 };

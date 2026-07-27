@@ -7,8 +7,8 @@ else is grouped by role or primary subsystem; this file is the canonical map.
 
 | Document | Authority |
 |----------|-----------|
-| [Backlog](backlog.md) | **Execution:** the status-tracked queue and the answer to “what’s next?” |
-| [Architecture](architecture.md) | **Codebase:** workspace layout, ownership, and dependency boundaries |
+| [Backlog](backlog.md) | **Execution:** the status-tracked queue, the answer to “what’s next?”, and the only status authority |
+| [Architecture](architecture.md) | **Codebase:** workspace layout, ownership, dependency boundaries, and the crate/module anatomy |
 | [Gameplay](gameplay.md) | **Product:** pillars, core loop, progression, and long-horizon player experience |
 | [Documentation map](README.md) | **Navigation:** where each kind of knowledge belongs |
 
@@ -45,6 +45,7 @@ Player-facing flows, editors, controls, and interface contracts.
 Vehicle dynamics, authority, physics, and near-surface behavior.
 
 - [Simulation core](simulation/simulation.md)
+- [Multiple vessels and physical separation](simulation/vessels.md)
 - [Craft regimes](simulation/regimes.md)
 - [Surface-local frame](simulation/surface_local.md)
 - [Surface gameplay and impacts](simulation/surface.md)
@@ -58,7 +59,8 @@ Celestial content and the physical surface of bodies.
 
 - [Celestial sphere](world/celestial.md)
 - [Terrain contract](world/terrain.md)
-- [Macro terrain and biomes](world/terrain_macro.md)
+- [Macro terrain: climate and landcover fields](world/terrain_macro.md)
+- [Biomes — the terrain authority](world/biomes.md) (`bio`)
 - [Mira airless terrain MVP](world/mira_airless_mvp.md)
 - [Vegetation](world/vegetation.md)
 
@@ -75,6 +77,7 @@ Atmospheric and surface-adjacent rendering systems.
 
 How to build, inspect, capture, and verify the project.
 
+- [Bevy 0.19 notes](development/bevy.md)
 - [Build speed and agent workflow](development/build_speed.md)
 - [Capture architecture](development/capture.md)
 - [Tooling](development/tooling.md)
@@ -92,14 +95,19 @@ canonical specs above; they do not replace them.
 
 ### Durable records and setting
 
-- [Architecture decisions](adr/) — accepted choices and rejected alternatives.
-- [Incident post-mortems](incidents/) — evidence, root cause, fix, and recurrence signals.
+- [Architecture decisions](adr/) — choices expensive to reverse, and the alternatives
+  rejected. Search with `rg`; writing one is the exception (ADR-20260724T223339Z).
+- [Incident post-mortems](incidents/) — non-obvious bugs: symptom, root cause, fix, and the
+  recurrence signal. Short by design.
 - [Lore](lore/) — solar-system and civilization references.
 - [Archive](archive/) — explicitly superseded design material.
 
-`CLAUDE.md` at the repository root is the agent operating manual. The `steer`
-skill (`.claude/skills/steer/SKILL.md`) routes new work between the roadmap and
-the backlog.
+`CLAUDE.md` at the repository root is the agent operating manual. It is loaded
+into **every** agent context, so it is deliberately kept to current direction,
+verification rules, and hard invariants — detail belongs in the documents above,
+and anything added there must earn its place in every session. The `steer` skill
+(`.claude/skills/steer/SKILL.md`) routes new work between the roadmap and the
+backlog.
 
 ## Placement rules
 

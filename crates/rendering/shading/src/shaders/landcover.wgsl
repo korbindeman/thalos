@@ -30,16 +30,37 @@ const MACRO_VAR_SCALE: f32 = 0.004;         // ~250 m mottle
 const MACRO_VAR_FINE_AMT: f32 = 0.6;
 const SNOW_LINE_NOISE_M: f32 = 400.0;
 
-// Temperate altitude bands: forest dominant on the lower flanks up to a
-// treeline ~2.4 km, then cool alpine tundra (grey scree is exposed on top of
-// this in the terrain's `eval_material_stack`), then snow. Forest is the
-// DEFAULT cover below the treeline (not gated to valley floors), so mountains
-// read green → grey → white the way a wet temperate range does, rather than
-// brown dry-grass across the whole mid-flank.
-const LUSH_LO_M: f32 = 1500.0;
-const LUSH_HI_M: f32 = 2400.0;
-const TREELINE_LO_M: f32 = 2400.0;
-const TREELINE_HI_M: f32 = 3000.0;
+// Ecological altitude bands: forest dominant on the lower flanks up to the
+// treeline, then cool alpine tundra (grey scree is exposed on top of this in
+// the terrain's `eval_material_stack`), then snow. Forest is the DEFAULT
+// cover below the treeline (not gated to valley floors), so mountains read
+// green → grey → white the way a wet temperate range does, rather than brown
+// dry-grass across the whole mid-flank.
+//
+// Every threshold is in ECOLOGICAL altitude (geometric height + the latitude
+// `climate_cold_lift`), and MIRRORS `thalos_terrain::procedural`
+// (`ALPINE_LO_M`/`ALPINE_HI_M`, `SNOWLINE_LO_M`/`SNOWLINE_HI_M`, and
+// `macro_band_ts`'s upland band) — keep them in lockstep. Re-anchored
+// 2026-07-24 for the diffusion terrain's 5.8 km massifs; see the Rust side
+// for the reasoning (the old tropical snowline buried whole massifs).
+const LUSH_LO_M: f32 = 2600.0;
+const LUSH_HI_M: f32 = 3400.0;
+const TREELINE_LO_M: f32 = 3400.0;
+const TREELINE_HI_M: f32 = 4100.0;
+const SNOWLINE_LO_M: f32 = 4600.0;
+const SNOWLINE_HI_M: f32 = 5300.0;
+
+// Above the treeline the surface is alpine rock/scree rather than vegetated
+// ground; above the snowline it is permanent snow. Shared by every surface
+// material so the tile shader's layers and the ground shader's palette cut at
+// exactly the same altitudes.
+fn alpine_weight(eco_altitude_m: f32) -> f32 {
+    return smoothstep(TREELINE_LO_M, TREELINE_HI_M, eco_altitude_m);
+}
+
+fn snowline_weight(eco_altitude_m: f32) -> f32 {
+    return smoothstep(SNOWLINE_LO_M, SNOWLINE_HI_M, eco_altitude_m);
+}
 
 const C_FOREST: vec3<f32>   = vec3<f32>(0.034, 0.084, 0.028);
 const C_GRASS: vec3<f32>    = vec3<f32>(0.072, 0.152, 0.050);
@@ -52,6 +73,31 @@ const C_SAND: vec3<f32>     = vec3<f32>(0.225, 0.190, 0.125);
 // — the living cover between bare scree patches. Replaces the old tan dry-grass
 // alpine tint that read as brown across the upper mountain.
 const C_ALPINE: vec3<f32>   = vec3<f32>(0.082, 0.094, 0.074);
+// Substrate that shows through the vegetated cover. Exposed as FUNCTIONS, not
+// as `const`s: naga_oil resolves an imported const's name but never emits its
+// definition, so `#import thalos::landcover::C_ROCK_LO` compiles the reference
+// to `thalos::landcover::C_ROCK_LO` and then fails with "no definition in
+// scope" — it takes the whole pipeline down. Functions are emitted, which is
+// why every other cross-shader value in this codebase travels as one.
+const LC_ROCK_LO: vec3<f32> = vec3<f32>(0.108, 0.104, 0.098); // lower rock (near-neutral grey)
+const LC_ROCK_HI: vec3<f32> = vec3<f32>(0.140, 0.143, 0.150); // alpine scree (cool grey)
+const LC_WET: vec3<f32>     = vec3<f32>(0.028, 0.058, 0.026); // wet hollow (dark green)
+
+/// Exposed rock, cooling and greying with altitude: warm soil-stained rock low
+/// down, lichen-free scree up high. `alpine` is `alpine_weight(eco_altitude)`.
+fn substrate_rock_color(alpine: f32) -> vec3<f32> {
+    return mix(LC_ROCK_LO, LC_ROCK_HI, clamp(alpine, 0.0, 1.0));
+}
+
+/// Earthy soil / peat showing through thin cover.
+fn substrate_soil_color() -> vec3<f32> {
+    return C_SOIL;
+}
+
+/// Damp hollow darkening.
+fn substrate_wet_color() -> vec3<f32> {
+    return LC_WET;
+}
 
 // ── Climate (latitude → cold lift / warmth) ────────────────────────────────
 // Mirror of `thalos_terrain::procedural::{climate_cold_lift_m, climate_warmth}`
@@ -59,12 +105,12 @@ const C_ALPINE: vec3<f32>   = vec3<f32>(0.082, 0.094, 0.074);
 // lift is how many metres the ecological altitude bands (lush belt, treeline,
 // snowline) descend at a latitude; consumers pass `altitude_m + cold_lift`
 // wherever a band threshold is compared.
-const CLIMATE_COLD_LIFT_MAX_M: f32 = 3600.0;
+const CLIMATE_COLD_LIFT_MAX_M: f32 = 5300.0;
 const CLIMATE_LAT_LO: f32 = 0.45;
 const CLIMATE_LAT_SPAN: f32 = 0.55;
 const CLIMATE_LAT_POW: f32 = 2.6;
-const CLIMATE_WARM_LO_M: f32 = 500.0;
-const CLIMATE_WARM_HI_M: f32 = 1600.0;
+const CLIMATE_WARM_LO_M: f32 = 735.0;
+const CLIMATE_WARM_HI_M: f32 = 2355.0;
 
 // Metres the ecological bands descend at `sin_lat = |body_dir.y|`. The power
 // curve keeps mid-latitudes mild (green at 45°) and makes ice a polar feature.
@@ -149,7 +195,16 @@ fn macro_variation(p: vec3<f32>) -> f32 {
 // climate_cold_lift(sin_lat)`), so the lush belt / treeline descend with
 // latitude. `warmth` (from `climate_warmth`) turns the driest ground into
 // hot-desert sand in warm climates and leaves it steppe/soil in cold ones.
-fn vegetation_color(eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: f32) -> vec3<f32> {
+//
+// `forest_scale` scales the closed-canopy darkening: 1 = the full canonical
+// mix (the far-field / orbital colour, where the dark green IS the canopy seen
+// from above), `understory_forest_residual()` = the near-field understory (the
+// ground actually visible under and between rendered scatter trees — grass and
+// litter with only a residual canopy shade, because the canopy itself is now
+// real geometry standing on top of it).
+fn vegetation_color_scaled(
+    eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: f32, forest_scale: f32,
+) -> vec3<f32> {
     let jitter = macro_var * SNOW_LINE_NOISE_M;
     let lush = smoothstep(LUSH_HI_M, LUSH_LO_M, eco_altitude_m + jitter);
     let alpine = smoothstep(TREELINE_LO_M, TREELINE_HI_M, eco_altitude_m + jitter);
@@ -157,7 +212,7 @@ fn vegetation_color(eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: 
     // Forest is the default cover below the treeline across a wide moisture
     // range; only genuinely dry ground reads as grass, and only the driest as
     // tan dry-grass / bare soil / (warm) sand.
-    let forest_amt = smoothstep(0.58, 0.28, dryness) * lush;
+    let forest_amt = smoothstep(0.58, 0.28, dryness) * lush * forest_scale;
     var grass_c = mix(C_GRASS, C_DRYGRASS, smoothstep(0.55, 0.88, dryness));
     grass_c = mix(grass_c, C_SOIL, smoothstep(0.88, 0.98, dryness));
     grass_c = mix(grass_c, C_SAND, smoothstep(0.80, 0.95, dryness) * warmth);
@@ -166,4 +221,38 @@ fn vegetation_color(eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: 
     // exposed on top in `eval_material_stack`), not tan dry-grass.
     veg = mix(veg, C_ALPINE, alpine);
     return veg;
+}
+
+fn vegetation_color(eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: f32) -> vec3<f32> {
+    return vegetation_color_scaled(eco_altitude_m, moisture, macro_var, warmth, 1.0);
+}
+
+// Near-field understory: the vegetated ground colour with the canopy darkening
+// reduced to a residual. Used by the tile ground's near field and by the grass
+// blade tint (blades only exist near-field), so blade == ground holds through
+// the forest belt. CPU mirror: `ground/landcover.rs`.
+fn vegetation_understory_color(
+    eco_altitude_m: f32, moisture: f32, macro_var: f32, warmth: f32,
+) -> vec3<f32> {
+    return vegetation_color_scaled(
+        eco_altitude_m, moisture, macro_var, warmth, understory_forest_residual(),
+    );
+}
+
+// Residual share of the closed-canopy darkening the near-field understory
+// keeps (leaf litter + canopy shade under real trees; the rest of the "dark
+// forest from orbit" colour belongs to the canopy, which is real geometry
+// near-field). Exposed as a function — naga_oil never emits imported consts.
+const UNDERSTORY_FOREST_AMT: f32 = 0.35;
+fn understory_forest_residual() -> f32 {
+    return UNDERSTORY_FOREST_AMT;
+}
+
+// The MACRO palette's closed-canopy anchor — mirrors
+// `thalos_terrain::procedural::albedo_from_bands`'s `forest` step (the colour
+// the baked tile albedo mixes toward by the absolute forest band weight).
+// Consumers that reconstruct the understory from the baked albedo must
+// subtract exactly this anchor; keep the two in lockstep.
+fn macro_forest_anchor() -> vec3<f32> {
+    return vec3<f32>(0.040, 0.095, 0.032);
 }

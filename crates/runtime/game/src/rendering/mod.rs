@@ -11,14 +11,13 @@
 //! ship-view meshes use 1.0 (1 unit = 1 m) inside BigSpace cells.
 
 mod body_lod;
-mod clouds;
+pub(crate) mod clouds;
 pub(crate) mod contact_shadow;
 mod generation;
 mod gpu_grass;
 mod grass;
 pub(crate) mod ground_terrain;
-mod lighting;
-mod map_terrain;
+pub(crate) mod lighting;
 mod materials;
 mod ocean;
 pub(crate) mod plume;
@@ -55,11 +54,11 @@ pub(crate) mod view_anchor;
 pub const SHADOW_CASCADE_COUNT: usize = 2;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
+use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 /// Test-only alias: the cloud-fill dev probe (`solar_system_state` tests)
 /// runs the spawn-time derivation without booting a capture.
 #[cfg(test)]
 pub(crate) use clouds::derive_body_fill_calibration as derive_body_fill_calibration_for_probe;
-use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
 use ground_terrain::{
     pause_surface_terrain_streaming_at_high_warp, sync_body_render_lod,
     update_body_terrain_atmosphere,
@@ -72,8 +71,8 @@ use materials::{
     LastCloudBandUpdate, update_cloud_bands, update_gas_giant_params, update_ring_params,
 };
 use real_space::{
-    attach_player_ship_to_big_space, attach_ship_camera_to_big_space, setup_big_space,
-    update_real_space_body_positions,
+    RealSpaceOrigin, attach_player_ship_to_big_space, attach_ship_camera_to_big_space,
+    setup_big_space, update_real_space_body_positions, update_real_space_origin,
 };
 use scene_depth::SceneDepthPlugin;
 use spawn::spawn_bodies;
@@ -120,10 +119,15 @@ impl Plugin for RenderingPlugin {
             // for cached providers) and the registry has to exist by then.
             .add_plugins(tile_cache::TileCachePlugin)
             .add_plugins(TerrainResidencyPlugin)
-            // NTR-X1: standard-path tile terrain driver — no-op unless
-            // THALOS_TILE_RENDERER=1 (which also gates udlod's try_spawn).
+            // NTR-X1: standard-path tile terrain driver — the DEFAULT ground
+            // renderer (it gates legacy udlod's try_spawn per body). No-op
+            // only under the THALOS_TILE_RENDERER=0 legacy escape hatch.
             .add_plugins(tile_terrain::TileTerrainDriverPlugin)
-            .add_plugins(map_terrain::MapTerrainPlugin)
+            // `map_terrain` deleted 2026-07-26: the map has rendered the baked
+            // impostor billboard at every distance since `bake_impostor_albedo_cube`
+            // landed, so the module's own `MAP_TERRAIN_ENABLED` and
+            // `wanted_map_body` were both hard-parked and it streamed nothing. It
+            // was also one of the larger udlod consumers.
             .add_plugins(clouds::CloudsRenderPlugin)
             .add_plugins(ocean::OceanRenderPlugin)
             .add_plugins(grass::GrassRenderPlugin)
@@ -134,6 +138,7 @@ impl Plugin for RenderingPlugin {
             // .add_plugins(rocks::RockScatterPlugin)
             .insert_resource(LastClick::default())
             .insert_resource(RenderOrigin::default())
+            .init_resource::<RealSpaceOrigin>()
             .insert_resource(RenderFrame::default())
             .insert_resource(PlanetshineTints::default())
             .insert_resource(CameraExposure::default())
@@ -141,6 +146,7 @@ impl Plugin for RenderingPlugin {
             .register_type::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ground_terrain::OceanDebugSettings>()
+            .init_resource::<lighting::SunDaylight>()
             .init_resource::<LastCloudBandUpdate>()
             .init_resource::<ActiveCraft>()
             // The N-craft accessor seam: keep `ActiveCraft` mirroring the active
@@ -187,6 +193,9 @@ impl Plugin for RenderingPlugin {
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
                     update_real_space_body_positions.after(sync_solar_system_state),
+                    // The big_space render frame, for everything placed in real
+                    // space from *outside* the hierarchy (the sun-shadow rig).
+                    update_real_space_origin,
                     // F1: the Bevy sun is a projection of the spine's heliocentric
                     // flux, so it must read the per-frame exposure gain first.
                     update_sun_light

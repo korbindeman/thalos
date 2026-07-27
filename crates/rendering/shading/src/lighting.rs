@@ -34,6 +34,46 @@ pub const MAX_STARS: usize = 4;
 /// `lighting.wgsl`.
 pub const MAX_ECLIPSE_OCCLUDERS: usize = 8;
 
+/// Scene-flux → radiance normalisation. Mirrors `SCENE_FLUX_SCALE` in
+/// `lighting.wgsl`; it absorbs the BRDF normalisation (the 1/4π family) so the
+/// spine's BRDFs return bare radiance factors and callers multiply flux in
+/// directly. Keep in lockstep.
+pub const SCENE_FLUX_SCALE: f32 = 0.5;
+
+/// Direct-sun reflectance scale. Mirrors `SURFACE_DIRECT_SCALE` in
+/// `lighting.wgsl`. Keep in lockstep.
+pub const SURFACE_DIRECT_SCALE: f32 = 0.23;
+
+/// The camera exposure at which **Bevy's stock PBR renders a surface exactly as
+/// bright as the spine does** — the bridge between the two lighting universes
+/// (`gfx §3`), given the flux→lux constant the Bevy sun is driven with.
+///
+/// Both paths are fed the same heliocentric scene flux, and each turns one unit
+/// of it into display radiance its own way. For a Lambert-ish surface of albedo
+/// `a` at incidence `cos θ`:
+///
+/// - spine: `a · cos θ · flux · SCENE_FLUX_SCALE · SURFACE_DIRECT_SCALE`
+///   (its BRDFs return radiance factors — the 1/π lives in `SCENE_FLUX_SCALE`);
+/// - Bevy: `a/π · cos θ · (flux · lux_per_spine_flux) · view.exposure`.
+///
+/// Equating them leaves exposure as the only free term. **This was never set:**
+/// nothing inserted an [`Exposure`] on the camera, so the Bevy universe ran at
+/// its `EV100_BLENDER` default (9.7) — about 1.5 stops hot — and every
+/// StandardMaterial surface, including the NTR-X1 tile terrain, rendered
+/// brighter and flatter than the spine ground beside it (backlog NTR-X5).
+///
+/// Returned as an [`Exposure`] rather than a bare number so the caller cannot
+/// mix up Bevy's `exposure = 1 / (2^ev100 · 1.2)` convention. Because only the
+/// **product** `lux_per_spine_flux × exposure` reaches a Bevy-lit fragment,
+/// retuning either input keeps parity as long as it flows through here.
+pub fn spine_parity_exposure(lux_per_spine_flux: f32) -> bevy::camera::Exposure {
+    let exposure =
+        SCENE_FLUX_SCALE * SURFACE_DIRECT_SCALE * core::f32::consts::PI / lux_per_spine_flux;
+    bevy::camera::Exposure {
+        ev100: -(exposure * 1.2).log2(),
+    }
+}
+
 /// One star's per-fragment light contract.
 ///
 /// `dir_flux.xyz` is the unit direction from the fragment toward the

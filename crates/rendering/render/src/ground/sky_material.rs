@@ -48,10 +48,6 @@ use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::shader::ShaderRef;
 
-use thalos_udlod::terrain::TerrainComponents;
-use thalos_udlod::terrain_data::gpu_tile_atlas::GpuTileAtlas;
-use thalos_udlod::terrain_data::gpu_tile_tree::GpuTileTree;
-use thalos_udlod::terrain_view::TerrainViewComponents;
 
 use crate::shading::AtmosphereBlock;
 
@@ -107,8 +103,6 @@ impl AsBindGroup for BodySkyMaterial {
     type Param = (
         SRes<RenderAssets<GpuImage>>,
         SRes<FallbackImage>,
-        Option<SRes<TerrainComponents<GpuTileAtlas>>>,
-        Option<SRes<TerrainViewComponents<GpuTileTree>>>,
     );
 
     fn label() -> &'static str {
@@ -121,7 +115,7 @@ impl AsBindGroup for BodySkyMaterial {
         &self,
         _layout: &BindGroupLayout,
         render_device: &RenderDevice,
-        (images, fallback, gpu_atlases, gpu_tile_trees): &mut SystemParamItem<'_, '_, Self::Param>,
+        (images, fallback): &mut SystemParamItem<'_, '_, Self::Param>,
         _force_no_bindless: bool,
     ) -> Result<UnpreparedBindGroup, AsBindGroupError> {
         let image = |handle: &Handle<Image>| -> Result<&GpuImage, AsBindGroupError> {
@@ -133,30 +127,26 @@ impl AsBindGroup for BodySkyMaterial {
         let coast_atlas = image(&self.coast_atlas)?;
         let ocean_slope = image(&self.ocean_slope)?;
 
-        // Resolve this body's resident height-tile atlas + tile tree from
-        // udlod's render-world registries. The tile tree is keyed per
-        // `(terrain, view)`; terrain only streams for the ship camera, so the
-        // first entry matching our terrain entity is the right one (if a
-        // second terrain-streaming view ever appears, the lookup serves it
-        // the ship camera's tree — coverage stays correct, resolution near
-        // that view's ground point may be coarse).
-        let tile_resources = self.terrain_entity.and_then(|terrain| {
-            let atlas_texture = gpu_atlases
-                .as_ref()?
-                .get(&terrain)?
-                .attachment_texture(0)?
-                .clone();
-            let gpu_tile_tree = gpu_tile_trees
-                .as_ref()?
-                .iter()
-                .find(|((t, _view), _)| *t == terrain)
-                .map(|(_, tree)| tree)?;
-            Some((
-                atlas_texture,
-                gpu_tile_tree.tile_tree_buffer().clone(),
-                gpu_tile_tree.origins_buffer().clone(),
-            ))
-        });
+        // The signed-sea-field height lookup (ADR-20260720T185958Z) used to
+        // resolve this body's resident height atlas + tile tree out of udlod's
+        // render-world registries. That binding is **gone** (2026-07-26): udlod
+        // is off the default build, and it had already stopped resolving for
+        // every tile-rendered body — no udlod terrain entity means no atlas, so
+        // the default renderer has been taking the fallback below since tiles
+        // became the default ground.
+        //
+        // Every body now takes it, so the ocean's coverage comes from the coarse
+        // coast-atlas tail rather than the resident heightfield. The bindings
+        // stay in the layout (the shader still declares them) bound to
+        // fallbacks, with `tile_lookup.x = 0` gating the shader off them — the
+        // same shape the `None` branch always had. Restoring close-range
+        // coastline fidelity means giving this an equivalent source from the
+        // tile renderer's height mirror, not resurrecting udlod.
+        let tile_resources: Option<(
+            bevy::render::render_resource::Texture,
+            bevy::render::render_resource::Buffer,
+            bevy::render::render_resource::Buffer,
+        )> = None;
 
         // If the lookup resources are missing (no terrain, cold spawn frame,
         // respawn churn), bind fallbacks AND force the uniform's enable flag
@@ -329,6 +319,10 @@ impl Material for BodySkyMaterial {
     // transmittance composite uniformly across the frame.
     fn alpha_mode(&self) -> AlphaMode {
         AlphaMode::Premultiplied
+    }
+
+    fn depth_bias(&self) -> f32 {
+        crate::composite_order::ATMOSPHERE
     }
 
     fn specialize(

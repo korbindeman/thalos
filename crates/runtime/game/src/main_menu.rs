@@ -174,6 +174,11 @@ const SCENARIOS: &[(SpawnSituation, &str, &str)] = &[
         "Meridian level at 15,000 ft",
     ),
     (
+        SpawnSituation::Launch,
+        "LAUNCH",
+        "Saturn standing on the launchpad",
+    ),
+    (
         SpawnSituation::Runway,
         "RUNWAY",
         "Meridian parked for takeoff",
@@ -486,9 +491,12 @@ fn apply_menu_action(
             SpawnSituation::Landing | SpawnSituation::FinalApproach | SpawnSituation::Cruise => {
                 descent.pending = true;
             }
-            SpawnSituation::Runway | SpawnSituation::RunwayApproach => {
+            SpawnSituation::Runway | SpawnSituation::RunwayApproach | SpawnSituation::Launch => {
                 runway_placement.pending = true;
-                settle.arm(matches!(start, SpawnSituation::Runway), false);
+                settle.arm(
+                    matches!(start, SpawnSituation::Runway | SpawnSituation::Launch),
+                    false,
+                );
             }
         }
         tracker.begin(steps_for(start, true));
@@ -538,11 +546,11 @@ fn apply_menu_action(
         // Craft swap + deferred terrain-aware placement: run a fresh loading
         // pass so the site build, park, and tile settle stay behind the
         // loading screen, exactly like a runway boot.
-        SpawnSituation::Runway | SpawnSituation::RunwayApproach => {
+        SpawnSituation::Runway | SpawnSituation::RunwayApproach | SpawnSituation::Launch => {
             let Some(blueprint) =
                 crate::ship_view::load_blueprint_from_path(start.ship_blueprint_path())
             else {
-                error!("start screen: runway blueprint failed to load; staying on menu");
+                error!("start screen: spaceport blueprint failed to load; staying on menu");
                 return;
             };
             relaunch.0 = Some(RelaunchSpec {
@@ -550,7 +558,10 @@ fn apply_menu_action(
                 situation: start,
             });
             runway_placement.pending = true;
-            settle.arm(matches!(start, SpawnSituation::Runway), false);
+            settle.arm(
+                matches!(start, SpawnSituation::Runway | SpawnSituation::Launch),
+                false,
+            );
             tracker.begin(steps_for(start, false));
             dest.0 = AppState::Running;
             next_state.set(AppState::Loading);

@@ -11,6 +11,14 @@ is **built** and the seams the later phases extend.
 
 ## Status
 
+**Phase 3 (built, 2026-07-25) — turbulent motion + a single length authority.**
+The column now convects like a turbulent jet rather than sliding as one rigid
+noise pattern (see *Motion*), and it ends by going dark instead of by running out
+of mesh (see *One length authority*). Screenshot-verified at sea level and in
+vacuum: the tail fades to black over ~15 % of its length with no rim, and the
+silhouette feathers. **Motion itself is unverified** — a still cannot show it;
+that needs a play session or a video capture.
+
 **Phase 2 (built, 2026-07-22).** The emission model is now *physical*: shape and
 brightness come from one thermodynamic chain rather than two independent authored
 fade curves, so the pad → orbit envelope is covered with no regime switch. See
@@ -34,9 +42,19 @@ Not yet built (later phases, in design-note order): secondary GPU particles
 > INC-0021. The plume light has to be an analytic term in the lighting spine
 > alongside sun/moonlight (BL-40). Do not re-attempt the `PointLight` route.
 
-Verify: `just screenshot plume` (agent-servable). Live feel (throttle sweeps,
-startup/shutdown transients, in-flight pressure sweep on a real ascent) is a user
-play session.
+Verify: `just screenshot plume` for the column itself, and
+`just screenshot plume-skyline` for how it *composites* — a firing engine seen
+from below against both sky and terrain, with the camera pitched above the
+horizontal. The second exists because the plume is a `Transparent3d` emitter and
+therefore invisible to the fullscreen composites' depth clip: when the
+atmosphere sorted in front of it, the column was erased on every sky pixel while
+looking perfectly correct against ground
+(INC-20260725T185440Z-plume-erased-by-the-sky). Any change to plume ordering,
+blending, or the composite stack must be judged on that framing, not on the
+black-sky hero shot, which cannot show the failure.
+
+Live feel (throttle sweeps, startup/shutdown transients, in-flight pressure
+sweep on a real ascent) is a user play session.
 
 ## Architecture
 
@@ -109,11 +127,41 @@ hack that had a visible failure mode:
   look) while the thin outer plume stays translucent and feathers to nothing at
   the silhouette, with no edge mask.
 
-The visible length falls out of the same model: `VISIBLE_RADIUS_GROWTH` is the
-expansion factor at which emission has died, so the billboard is exactly as long
-as the visible plume. At sea level a separate mixing-limited length caps it,
-because entrainment destroys the jet after a few tens of diameters however
-slowly it expands.
+## One length authority
+
+**The visible length falls out of the model, and nothing else may touch it.**
+`visible_length_m` bisects the CPU twin of the fragment's own chain — both layers,
+gain included — for the station where the rendered radiance drops below
+`VISIBLE_RADIANCE`, and the billboard is cut exactly there. Every input that
+should shorten a plume feeds that chain instead of trimming its result:
+
+| input | acts through |
+|---|---|
+| throttle | mass flow → `κ`, and the mixing length |
+| ignition transient | exit temperature `T_exit` |
+| back-pressure | entrainment rate, expansion angle |
+| propellant | `κ` (opacity), radiance |
+
+Two rules keep this honest, both learned the expensive way
+(INC-20260724T235437Z-plume-ended-on-a-lit-rim):
+
+- **No cap the shader cannot see.** The mixing-limited length used to be a
+  `min()` on the mesh while the fragment's entrainment rate was an unrelated
+  authored constant — two numbers for one physical process, so the geometry ended
+  where the column was still at 12 % of exit radiance. The entrainment rate is
+  now *derived* from the mixing length, so emission genuinely dies within it.
+- **The visibility floor is absolute, not a fraction of peak.** The core
+  saturates at an HDR radiance of order 10; 0.3 % of that is still clearly
+  visible after tonemapping. Relative floors are meaningless downstream of a
+  tonemapper.
+
+Both layers also use radial density kernels with **compact support** —
+`(1-(r/R)²)^½` for the core, `(1-(r/R)²)²` for the shear layer, with chord
+integrals `(π/2)·R·(1-(p/R)²)` and `(16/15)·R·(1-(p/R)²)^{5/2}`. A saturated
+top-hat has a razor silhouette in every direction, because the only thing that
+can end it is the chord going to zero; compact kernels reach exactly zero at the
+mesh boundary however optically thick the column is, so the edges feather on
+their own.
 
 **Packed-uniform warning.** `PlumeParams` addresses unrelated scalars
 positionally (`anim.w`, `shock.z`, …). Repurposing a lane is a rename, not an
@@ -140,6 +188,45 @@ The mesh uses **normalized axial coordinates** (`v` = axial 0→1, `x` = lateral
 −1→1); the vertex shader scales and orients it from `PlumeParams`, so shape and
 pressure response change with no runtime mesh regeneration (design note decision
 #1: procedural radial profile in the shader, not authored blend targets).
+
+## Motion
+
+The reference point is KSP's Waterfall, which gets its life from four cheap
+things: a noise texture **scrolled along the flow**, **several layers scrolling at
+different rates** so nothing reads as one repeating pattern, an edge falloff, and
+**controllers** (throttle, atmospheric density, and a `random` controller) driving
+material properties through curves. It simulates nothing, and neither do we.
+
+What this shader does, and why each piece is there:
+
+- **Advection is a rate, in eddies per second** — not a scroll in normalized
+  axial coordinates. Under the old normalized advection a *longer* plume moved its
+  own structure more slowly, which is backwards.
+- **Structures grow as they travel.** Noise is sampled on the **eddy coordinate**
+  `ξ(s) = ∫ds/eddy_size(s)`, which has the closed form `ln(1 + g·s/e₀)/g` for a
+  shear layer whose eddies grow linearly. A uniform grid in `ξ` is a self-similar
+  grid of turbulent structures, so fine striations at the lip coarsen into large
+  puffs downstream. This is the single strongest cue that the column is a
+  turbulent jet and not a scrolling texture.
+- **Three layers, three convection rates** (1.00 / 0.62 / 0.33) and three
+  azimuthal drift rates. The shear layer genuinely does convect slower than the
+  core, and the large structures slower still; the composite never repeats. The
+  slow layer's weight ramps up toward the tail, where the jet has broken down.
+- **The silhouette boils.** `radius_wobble` perturbs the envelope radius as eddies
+  pass. It is a function of `s` alone so the vertex and fragment stages agree
+  exactly and the mesh edge stays *on* the analytic envelope.
+- **Laminar where it should be.** Turbulence amplitude is gated by `breakup(s)`,
+  which is zero inside the potential core (the un-mixed cone that survives until
+  the shear layer reaches the axis) and one where the jet has fully broken down.
+  Past the core, sheath growth accelerates and the tail disperses.
+- **Flicker.** Low-frequency combustion roughness on gain and exit temperature,
+  worse at low throttle, damped in vacuum. It only ever *dims and shortens*, so
+  the visible column always stays inside the mesh the CPU sized for the
+  unflickered state.
+- **Shock cells lengthen downstream.** A constant wavenumber produces an evenly
+  spaced ladder of identical rungs; the phase is now `k·ln(1+g·s)/g`. Compression
+  nodes are weighted hard toward the axis (`fc³`) so they read as lenses rather
+  than flat rungs across a saturated column.
 
 ## Propellant families
 

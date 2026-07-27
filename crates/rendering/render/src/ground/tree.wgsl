@@ -289,8 +289,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // cannot drift. Per-instance hue is applied here (and identically on the
         // impostor), never baked into the atlas. Directional sunlit-leaf pop is the
         // lighting model's job below, so the albedo stays view-independent.
+        //
+        // Two per-instance tints multiply in: the random hue jitter (stand
+        // variety) and the landcover tint the tile combiner bakes into the
+        // vertex-colour r/b ratios (g ≡ 1) — the ground-family hue of the spot
+        // the tree grows on, from the SAME landcover field the ground and the
+        // grass blades read. The impostor applies the identical product.
         albedo = foliage_base_albedo(atlas_rgb, in.color.g, in.leaf, in.seed)
-            * foliage_hue_tint(in.seed);
+            * foliage_hue_tint(in.seed)
+            * vec3<f32>(in.color.r, 1.0, in.color.b);
 
         // Per-leaf normal: perturb the smooth crown-outward normal with the baked
         // leaf normal map so individual leaves catch light differently — depth,

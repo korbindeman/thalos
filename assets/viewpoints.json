@@ -1,0 +1,403 @@
+{
+  "schema": "thalos.viewpoints.v1",
+  "viewpoints": [
+    {
+      "id": "dark-thalos",
+      "name": "dark thalos",
+      "description": "",
+      "saved_unix_ms": 1784933095625,
+      "body": "Thalos",
+      "spawn": "runway",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -1369054.0661562858,
+        2896639.517815519,
+        -11122847.422909347
+      ],
+      "camera_rotation_body_xyzw": [
+        -0.6839427988759015,
+        0.7211773650938806,
+        0.08685245476022425,
+        0.06769126268706084
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "imported-latest",
+      "name": "Imported latest perspective",
+      "description": "Migrated from artifacts/diagnostics/latest_perspective.json when the shared viewpoint catalog replaced the overwrite-only F8 handoff.",
+      "saved_unix_ms": 1784839314385,
+      "body": "Thalos",
+      "spawn": "runway",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3194543.2107708445,
+        511525.8512686994,
+        14451.1006617003
+      ],
+      "camera_rotation_body_xyzw": [
+        -0.6581656707156138,
+        0.6006433981793197,
+        0.4185714500537908,
+        0.17562288949602237
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "orbit-cloud-check",
+      "name": "orbit cloud check",
+      "description": "",
+      "saved_unix_ms": 1784939247584,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -12201996.172423258,
+        2927788.258804262,
+        6197241.748594731
+      ],
+      "camera_rotation_body_xyzw": [
+        -0.4756982070630596,
+        0.2347044647658424,
+        0.8358650087352448,
+        -0.14126116659577376
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "realism",
+      "name": "realism",
+      "description": "",
+      "saved_unix_ms": 1785102173628,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 137186.77378494368,
+      "camera_position_body_m": [
+        -3157430.859599902,
+        418680.3108648176,
+        111089.07245976594
+      ],
+      "camera_rotation_body_xyzw": [
+        -0.3741671146185254,
+        0.4279126493109646,
+        -0.539229711078397,
+        -0.6213863963654397
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "rough-lookffff",
+      "name": "rough lookffff",
+      "description": "",
+      "saved_unix_ms": 1784931358000,
+      "body": "Thalos",
+      "spawn": "runway",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3157154.9173677005,
+        421960.84286761633,
+        105759.2283324852
+      ],
+      "camera_rotation_body_xyzw": [
+        -0.6584088986468917,
+        0.7477582268094374,
+        -0.05542556290173473,
+        -0.06544740940953264
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "scene",
+      "name": "scene",
+      "description": "",
+      "saved_unix_ms": 1785034589144,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3156994.058472502,
+        420270.8997825164,
+        111132.58181867911
+      ],
+      "camera_rotation_body_xyzw": [
+        0.037785768738395425,
+        -0.008733104568757047,
+        -0.6596695368013379,
+        -0.7505545088677757
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "scene2",
+      "name": "scene2",
+      "description": "",
+      "saved_unix_ms": 1785034612575,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3157175.6758905724,
+        419477.6581321743,
+        110583.8218768348
+      ],
+      "camera_rotation_body_xyzw": [
+        0.3478030248118336,
+        -0.46821354215048305,
+        0.493473925802329,
+        0.6452074235715783
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "tex-look",
+      "name": "tex_look",
+      "description": "",
+      "saved_unix_ms": 1785038080930,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3163459.952707384,
+        497963.31705217983,
+        234207.66339760157
+      ],
+      "camera_rotation_body_xyzw": [
+        0.44733987534857383,
+        -0.6092301715946875,
+        0.28105881704799174,
+        0.591381074520832
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    },
+    {
+      "id": "weak-clouds",
+      "name": "weak clouds",
+      "description": "",
+      "saved_unix_ms": 1785014144812,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3160836.632054684,
+        415937.8424921744,
+        100428.08085391368
+      ],
+      "camera_rotation_body_xyzw": [
+        0.5596295750239915,
+        -0.6177926608702082,
+        0.3439189084390789,
+        0.4322808709062281
+      ],
+      "vertical_fov_rad": 0.7853982,
+      "viewport": [
+        3840,
+        2160
+      ]
+    }
+  ],
+  "scripted_viewpoints": [
+    {
+      "id": "cloud-cruise",
+      "name": "Cloud cruise",
+      "description": "Aviation-altitude view across cloud tops and developing towers.",
+      "driver": "cloud-cruise"
+    },
+    {
+      "id": "cloud-interior",
+      "name": "Cloud interior",
+      "description": "Dense in-cloud traversal and lighting diagnostic.",
+      "driver": "cloud-interior"
+    },
+    {
+      "id": "cloud-limb",
+      "name": "Cloud limb",
+      "description": "Low-orbit tangent view of the cloud line inside the atmosphere limb.",
+      "driver": "cloud-limb"
+    },
+    {
+      "id": "cloud-motion",
+      "name": "Cloud motion",
+      "description": "Moving near-sun runway view for temporal reconstruction and disocclusion.",
+      "driver": "cloud-motion"
+    },
+    {
+      "id": "cloud-planet",
+      "name": "Cloud planet",
+      "description": "Full-disc orbital weather-layer and impostor framing.",
+      "driver": "cloud-planet"
+    },
+    {
+      "id": "cloud-runway",
+      "name": "Cloud runway",
+      "description": "Low flight view over the runway into the cloud-bearing sky.",
+      "driver": "cloud-runway"
+    },
+    {
+      "id": "cloud-sunset",
+      "name": "Cloud sunset",
+      "description": "Near-surface cloud view toward a sun just above the local horizon.",
+      "driver": "cloud-sunset"
+    },
+    {
+      "id": "dry-belt",
+      "name": "Dry belt",
+      "description": "Search-driven low oblique survey of genuine dry low-latitude terrain.",
+      "driver": "dry-belt"
+    },
+    {
+      "id": "earth-reference",
+      "name": "Earth reference",
+      "description": "ISS-like orbital atmosphere calibration framing over Thalos.",
+      "driver": "earth-reference"
+    },
+    {
+      "id": "forest-stand",
+      "name": "Forest stand",
+      "description": "Low oblique over a searched wet-belt forest stand; probe for tree/grass/ground colour coupling.",
+      "driver": "forest-stand"
+    },
+    {
+      "id": "hub",
+      "name": "Space-center hub",
+      "description": "The space-center view as PLAY presents it, with the base built and no craft placed.",
+      "driver": "hub"
+    },
+    {
+      "id": "massif-aerial",
+      "name": "Massif aerial",
+      "description": "Wide showcase view of the diffusion window's north-eastern massif.",
+      "driver": "massif-aerial"
+    },
+    {
+      "id": "massif-ridge",
+      "name": "Massif ridge",
+      "description": "Mid-altitude showcase view across the summit ridge and material transitions.",
+      "driver": "massif-ridge"
+    },
+    {
+      "id": "massif-valley",
+      "name": "Massif valley",
+      "description": "Low valley-floor showcase view looking up at the massif face.",
+      "driver": "massif-valley"
+    },
+    {
+      "id": "mira-approach",
+      "name": "Mira approach",
+      "description": "Grazing-light oblique orbital framing for macro relief and rim shadows.",
+      "driver": "mira-approach"
+    },
+    {
+      "id": "mira-disc",
+      "name": "Mira disc",
+      "description": "Near-full body framing for albedo provinces, ejecta, and ray systems.",
+      "driver": "mira-disc"
+    },
+    {
+      "id": "mira-eva",
+      "name": "Mira EVA",
+      "description": "Eye-level survey at the canonical Mira EVA site.",
+      "driver": "mira-eva"
+    },
+    {
+      "id": "mira-orbit",
+      "name": "Mira orbit",
+      "description": "Low-orbit view of Mira's cratered daylight horizon.",
+      "driver": "mira-orbit"
+    },
+    {
+      "id": "mira-rim",
+      "name": "Mira crater rim",
+      "description": "Low oblique landmark-crater framing for walls, floor, terraces, and central peak.",
+      "driver": "mira-rim"
+    },
+    {
+      "id": "mira-surface",
+      "name": "Mira surface",
+      "description": "Close oblique survey for package detail, streaming, and Hapke response.",
+      "driver": "mira-surface"
+    },
+    {
+      "id": "ocean",
+      "name": "Open ocean",
+      "description": "Search-driven deep-water view aligned near the low-sun glitter path.",
+      "driver": "ocean"
+    },
+    {
+      "id": "ocean-slopes",
+      "name": "Ocean slopes diagnostic",
+      "description": "Open-ocean framing with the resolved-slope and filtered-roughness diagnostic.",
+      "driver": "ocean-slopes"
+    },
+    {
+      "id": "paved-ground",
+      "name": "Paved ground",
+      "description": "Eye-level along the base's taxiway/apron/road network: the scatter-versus-pavement probe.",
+      "driver": "paved-ground"
+    },
+    {
+      "id": "plume",
+      "name": "Engine plume",
+      "description": "Three-quarter firing-engine hero view with deterministic plume pressure.",
+      "driver": "plume"
+    },
+    {
+      "id": "plume-skyline",
+      "name": "Engine plume against the skyline",
+      "description": "Firing engine seen from below, camera pitched above the horizontal: probes fullscreen-composite draw order against sky and terrain in one frame.",
+      "driver": "plume-skyline"
+    },
+    {
+      "id": "runway-atmosphere",
+      "name": "Runway atmosphere",
+      "description": "Low view across the basin for surface sky, haze, terrain recession, and structures.",
+      "driver": "runway-atmosphere"
+    },
+    {
+      "id": "spaceport-aerial",
+      "name": "Spaceport aerial",
+      "description": "Three-quarter establishing view of the runway, pads, tanks, hangars, and parked aircraft.",
+      "driver": "spaceport-aerial"
+    }
+  ]
+}

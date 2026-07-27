@@ -22,6 +22,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DMat3, DQuat, DVec2, DVec3};
+use bevy::platform::collections::HashMap;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
@@ -38,6 +39,169 @@ use crate::structures::{StructureId, StructurePlacement, StructureRegistry};
 
 use super::place::{BaseMaterials, kind_bounding_m};
 use super::{BaseBuildState, BaseEditor, BaseEditorMode, base_editor_open};
+
+use thalos_body_render::{ScatterRegion, ScatterTreatment};
+use thalos_terrain::TerrainFlatten;
+
+// ── Paved footprints ────────────────────────────────────────────────────────
+//
+// Connections are drawn as a *lifted drape*: `CONNECTION_LIFT_BASE_M` of clear
+// air between the pavement and the flattened ground under it. Nothing told the
+// scatter layers about that pavement, so grass kept growing on the ground
+// beneath and its blades came up through the tarmac — visible as stubby tufts
+// scattered over every taxiway, apron and road, sunk to their tips because the
+// drape hides the lower part of each blade (INC-20260726T040431Z).
+//
+// The lift constant's own comment records the same symptom being met by
+// *raising the drape* until the blades were hidden. That is a race the drape
+// cannot win: a taller blade, a lower lift, or a bumpier pad brings the tufts
+// straight back, and the lift is bounded above by how far pavement can float
+// before it reads as a lip. The blades have to not be there.
+//
+// So every connection publishes the footprint it paves, in the same call that
+// builds its mesh, and the scatter layers read it exactly as they already read
+// building and runway footprints. Mesh and footprint come off the same
+// centreline and the same width, so they cannot drift apart.
+
+/// Extra clearance (m) outside the pavement edge. Small — grass should meet the
+/// tarmac, just not stand in it.
+const PAVED_CLEAR_MARGIN_M: f64 = 0.6;
+/// Ramp width (m) outside the cleared rectangle. `classify_scatter` clears
+/// wherever the footprint weight exceeds `SCATTER_CLEAR_W` (0.05), i.e. across
+/// almost all of this ramp, so it stays narrow.
+const PAVED_CLEAR_RAMP_M: f64 = 1.0;
+
+/// Every connection's paved footprint, as scatter regions the grass and
+/// vegetation layers clear against.
+///
+/// Keyed by site so a rebuild (the editor re-running `rebuild_connections`
+/// after a placement change) replaces that site's pavement wholesale instead of
+/// accumulating stale strips.
+///
+/// **Single writer:** `spawn_connection_entity` — the one funnel every
+/// connection spawner already goes through.
+#[derive(Resource, Default)]
+pub struct PavedFootprints {
+    by_site: HashMap<(BodyId, StructureId), Vec<ScatterRegion>>,
+}
+
+impl PavedFootprints {
+    /// Drop everything recorded for a site — called before its connections are
+    /// respawned.
+    pub fn clear_site(&mut self, body_id: BodyId, site_id: StructureId) {
+        self.by_site.remove(&(body_id, site_id));
+    }
+
+    fn extend(
+        &mut self,
+        body_id: BodyId,
+        site_id: StructureId,
+        regions: impl IntoIterator<Item = ScatterRegion>,
+    ) {
+        self.by_site
+            .entry((body_id, site_id))
+            .or_default()
+            .extend(regions);
+    }
+
+    /// Every paved region on a body, for the scatter layers' region list.
+    pub fn regions_on(&self, body_id: BodyId) -> impl Iterator<Item = &ScatterRegion> {
+        self.by_site
+            .iter()
+            .filter(move |((b, _), _)| *b == body_id)
+            .flat_map(|(_, regions)| regions.iter())
+    }
+}
+
+/// One paved rectangle in the site tangent frame: centre `(along, across)`,
+/// unit direction `dir` of its long axis, and half-extents.
+#[derive(Clone, Copy)]
+pub(super) struct PavedRect {
+    center: DVec2,
+    dir: DVec2,
+    half_along: f64,
+    half_across: f64,
+}
+
+/// The paved rectangles a width-`width_m` strip along `center` covers — one per
+/// polyline segment. A filleted path is already dense enough that per-segment
+/// rectangles track the curve within the clear ramp.
+pub(super) fn path_paved_rects(center: &[DVec2], width_m: f64) -> Vec<PavedRect> {
+    center
+        .windows(2)
+        .filter_map(|seg| {
+            let (a, b) = (seg[0], seg[1]);
+            let delta = b - a;
+            let len = delta.length();
+            if len < 1.0e-6 {
+                return None;
+            }
+            Some(PavedRect {
+                center: (a + b) * 0.5,
+                dir: delta / len,
+                half_along: len * 0.5,
+                half_across: width_m * 0.5,
+            })
+        })
+        .collect()
+}
+
+/// The paved rectangles a strip network over `edges` covers.
+fn network_paved_rects(nodes: &[Node], edges: &[(usize, usize)], width_m: f64) -> Vec<PavedRect> {
+    edges
+        .iter()
+        .flat_map(|&(i, j)| {
+            let a = DVec2::new(nodes[i].along, nodes[i].across);
+            let b = DVec2::new(nodes[j].along, nodes[j].across);
+            path_paved_rects(&[a, b], width_m)
+        })
+        .collect()
+}
+
+/// Convert site-frame paved rectangles into body-fixed scatter regions.
+///
+/// The frame matches `site_anchor` / the mesh builders exactly: local `x` is
+/// `heading` (along), local `z` is `heading × center_dir` (across), and a
+/// site-frame point sits at `center_dir · pad_r + heading · along + across · c`.
+/// `pad_r` doubles as the footprint's reference radius and the elevation is
+/// left at zero: a scatter region is only ever asked for `weight(dir)`, never
+/// for a height, and `pad_r` is the exact radius the mesh's own site-frame
+/// points were placed at — so the footprint converts directions to tangent
+/// offsets on the same sphere the pavement was built on.
+fn paved_regions(
+    rects: &[PavedRect],
+    center_dir: DVec3,
+    heading: DVec3,
+    pad_r: f64,
+) -> Vec<ScatterRegion> {
+    let across_v = heading.cross(center_dir).normalize();
+    rects
+        .iter()
+        .map(|r| {
+            let point = center_dir * pad_r + heading * r.center.x + across_v * r.center.y;
+            let rect_center = point.normalize();
+            // Long axis in the tangent plane at the rectangle's *own* centre,
+            // re-orthogonalised there — the site frame's axes tilt by
+            // offset/radius across a kilometre-scale base.
+            let along_v = heading * r.dir.x + across_v * r.dir.y;
+            let tangent_along = (along_v - rect_center * along_v.dot(rect_center)).normalize();
+            let tangent_across = tangent_along.cross(rect_center).normalize();
+            ScatterRegion {
+                footprint: TerrainFlatten::new(
+                    rect_center,
+                    tangent_along,
+                    tangent_across,
+                    r.half_along + PAVED_CLEAR_MARGIN_M,
+                    r.half_across + PAVED_CLEAR_MARGIN_M,
+                    PAVED_CLEAR_RAMP_M,
+                    0.0,
+                    pad_r,
+                ),
+                treatment: ScatterTreatment::Clear,
+            }
+        })
+        .collect()
+}
 
 /// A kind of paved connection. Each carries its own width / colour / lift so the
 /// network reads as distinct facility types. New variants extend the base's
@@ -136,6 +300,7 @@ pub(super) struct BaseEditorConnectionsPlugin;
 impl Plugin for BaseEditorConnectionsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ConnectionsState>()
+            .init_resource::<PavedFootprints>()
             .add_systems(Update, rebuild_connections.run_if(base_editor_open))
             // Same anchoring contract as `place::update_placed_transforms`: in
             // `SimStage::Sync` after `sync_solar_system_state` so it reads the
@@ -160,6 +325,7 @@ fn rebuild_connections(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<ShadowedStandardMaterial>>,
     mut state: ResMut<ConnectionsState>,
+    mut paved: ResMut<PavedFootprints>,
     existing: Query<(Entity, &ConnectionVisual)>,
     root: Res<RealSpaceRoot>,
 ) {
@@ -209,12 +375,14 @@ fn rebuild_connections(
     }
     state.built = Some((site_id, rev));
 
-    // Drop the stale mesh for this site.
+    // Drop the stale mesh for this site — and the footprints that went with
+    // it, or a moved taxiway would keep clearing grass along its old route.
     for (entity, cv) in existing.iter() {
         if cv.site_id == site_id {
             commands.entity(entity).despawn();
         }
     }
+    paved.clear_site(body_id, site_id);
     if nodes.len() < 2 {
         return; // nothing to connect
     }
@@ -247,6 +415,7 @@ fn rebuild_connections(
     spawn_connection_entity(
         &mut commands,
         &mut meshes,
+        &mut paved,
         material,
         root.entity,
         body_id,
@@ -254,6 +423,12 @@ fn rebuild_connections(
         center_body,
         basis_body,
         mesh,
+        paved_regions(
+            &network_paved_rects(&nodes, &edges, style.width_m),
+            up,
+            heading,
+            pad_r,
+        ),
     );
 }
 
@@ -521,6 +696,7 @@ fn finish_mesh(
 fn spawn_connection_entity(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    paved: &mut PavedFootprints,
     material: Handle<ShadowedStandardMaterial>,
     root: Entity,
     body_id: BodyId,
@@ -528,7 +704,11 @@ fn spawn_connection_entity(
     center_body: DVec3,
     basis_body: DQuat,
     mesh: Mesh,
+    regions: Vec<ScatterRegion>,
 ) {
+    // Recorded here rather than at each caller so a connection can never be
+    // drawn without publishing the ground it covers.
+    paved.extend(body_id, site_id, regions);
     commands.spawn((
         Mesh3d(meshes.add(mesh)),
         MeshMaterial3d(material),
@@ -566,6 +746,7 @@ fn site_anchor(center_dir: DVec3, heading: DVec3, pad_r: f64) -> (DVec3, DQuat) 
 pub(super) fn spawn_authored_network(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    paved: &mut PavedFootprints,
     mats: &BaseMaterials,
     root: Entity,
     body_id: BodyId,
@@ -604,6 +785,7 @@ pub(super) fn spawn_authored_network(
     spawn_connection_entity(
         commands,
         meshes,
+        paved,
         kind.material(mats),
         root,
         body_id,
@@ -611,6 +793,12 @@ pub(super) fn spawn_authored_network(
         center_body,
         basis_body,
         mesh,
+        paved_regions(
+            &network_paved_rects(&node_vec, edges, style.width_m),
+            center_dir,
+            heading,
+            pad_r,
+        ),
     );
 }
 
@@ -620,6 +808,7 @@ pub(super) fn spawn_authored_network(
 pub(super) fn spawn_authored_apron(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    paved: &mut PavedFootprints,
     mats: &BaseMaterials,
     root: Entity,
     body_id: BodyId,
@@ -640,6 +829,7 @@ pub(super) fn spawn_authored_apron(
     spawn_connection_entity(
         commands,
         meshes,
+        paved,
         ConnectionKind::Apron.material(mats),
         root,
         body_id,
@@ -647,6 +837,17 @@ pub(super) fn spawn_authored_apron(
         center_body,
         basis_body,
         mesh,
+        paved_regions(
+            &[PavedRect {
+                center: DVec2::new(along, across),
+                dir: DVec2::X,
+                half_along,
+                half_across,
+            }],
+            center_dir,
+            heading,
+            pad_r,
+        ),
     );
 }
 
@@ -663,6 +864,7 @@ pub(super) fn spawn_authored_apron(
 pub(super) fn spawn_authored_path(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
+    paved: &mut PavedFootprints,
     mats: &BaseMaterials,
     root: Entity,
     body_id: BodyId,
@@ -684,6 +886,7 @@ pub(super) fn spawn_authored_path(
     spawn_connection_entity(
         commands,
         meshes,
+        paved,
         kind.material(mats),
         root,
         body_id,
@@ -691,6 +894,12 @@ pub(super) fn spawn_authored_path(
         center_body,
         basis_body,
         mesh,
+        paved_regions(
+            &path_paved_rects(&center, style.width_m),
+            center_dir,
+            heading,
+            pad_r,
+        ),
     );
 }
 

@@ -9,8 +9,7 @@ scenario).
 
 Related: `docs/simulation/simulation.md` (authority + warp the scenario starts drive),
 `docs/simulation/surface_local.md` (the runway placement this gates on),
-CLAUDE.md *Agent-driven inspection* (the paused-on-spawn / `THALOS_AUTO_RUN`
-contract).
+CLAUDE.md *Invariants* (the paused-on-spawn / `THALOS_AUTO_RUN` contract).
 
 ## 1. App states
 
@@ -108,7 +107,7 @@ Scenario starts route on `WorldState`; **no process restart** either way:
   `SpawnSituation`, seats the sim where no terrain is needed
   (`respawn_into` for orbit / polar / EVA), arms the boot deferred-placement
   flags for the rest (`DescentPlacement` for the descents + cruise,
-  `RunwayPlacement` + settle for the runway pair), registers the **boot**
+  `RunwayPlacement` + settle for the runway pair and launchpad start), registers the **boot**
   step set (`steps_for(start, true)` — world load + placement), flips
   `WorldState::Live`, and re-enters `Loading` with destination `Running`.
   No craft swap: `spawn_player_ship` hasn't run yet and builds the chosen
@@ -121,12 +120,13 @@ Scenario starts route on `WorldState`; **no process restart** either way:
   - **Cruise** — craft swap to the Meridian: queues a
     `relaunch::RelaunchRequest` (the shipyard Launch path), which tears down
     the old craft, places cruise, and rebuilds from the blueprint.
-  - **Runway / Runway approach** — craft swap **plus** the deferred
+  - **Runway / Runway approach / Launch** — craft swap **plus** the deferred
     terrain-aware placement: re-arms `runway::RunwayPlacement` and the
     settle gate (`SurfaceSettle::arm`), registers a fresh `[placement(,
     settle)]` tracker pass, and re-enters `Loading` so site build + park +
-    tile settle happen behind the loading screen exactly like a
-    `just game runway` boot.
+    tile settle happen behind the loading screen exactly like a direct
+    spaceport boot. `launch` swaps to `ships/saturn.ron` and routes vertical
+    seating through the shared `base_editor::place_on_launchpad` core.
 - **SHIPYARD** — arms `OpenShipyardOnStart` and starts the orbit scenario
   (through either route above); the editor opens on entry to `Running` (it
   must never open during a load — it gates off the very systems that

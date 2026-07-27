@@ -137,6 +137,15 @@ is reserved for ships that collapsed after `stable_contact` in
 
 ### 2.3 Height query — `../../crates/rendering/render/src/ground/pipeline.rs`
 
+> **Legacy path.** Since the keystone (ADR-20260723T142945Z) the default ground
+> renderer is `thalos_body_render::tiles`, and "what does the ground draw here?"
+> is answered by `RenderedGround` — `tiles::height_mirror::TileHeightMirror` on
+> the tile path, udlod's atlas mirror below. The UDLOD-specific machinery in
+> this section applies to bodies the tile driver has not installed on and to the
+> `THALOS_TILE_RENDERER=0` baseline; the *contract* (one height authority, read
+> back from what is actually drawn) is unchanged and is the part that carried
+> over.
+
 `rendered_height_m(surface, dynamic_state, dir, tile_lod_m)`
 ([pipeline.rs:500](../../crates/rendering/render/src/ground/pipeline.rs)) is the
 single CPU-side "what does UDLOD draw here?" entry point. Three

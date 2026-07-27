@@ -886,7 +886,68 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // doesn't flag it unused.
     _ = surface_dist;
 
-    let base_surface_airlight = mix(1.0, airlight_ratio, clamp(surface_fade, 0.0, 1.0));
+    // Column consistency (the low-τ half of aerial perspective).
+    //
+    // `airlight_ratio` scales the ADDITIVE in-scatter only; the dst-attenuation
+    // `physical_opacity` below stays physical (`1 − T`). Those two must agree or
+    // the composite is not energy-consistent: on any surface pixel it removes
+    // `1 − T` of the terrain's own radiance and hands back only `airlight_ratio`
+    // of the airlight that is supposed to replace it. Straight down from orbit
+    // through a full Thalos column that is a ~15% dim with ~1/30th of the light
+    // returned, so orbital land came out DARKER and MORE saturated rather than
+    // veiled — the "too clear at high altitude" report. The `aerial` ramp above
+    // already keeps the pair consistent at the thick end (it feeds both the
+    // in-scatter scale and the opacity); only this floor was left constant.
+    //
+    // So lift the airlight from the ground-calibrated clear-weather value toward
+    // the strength the in-scatter would carry at `strength: 1` — `atmos_geom.z`
+    // is the artistic sky-dome inflation, which exists only to crush stars, so
+    // `1 / atmos_geom.z` undoes it and lands on the physically consistent
+    // airlight. `max` so an authored hazier-than-physical weather is never
+    // pulled back down.
+    //
+    // Driven by RAYLEIGH air mass, not total τ. The sea-level calibration is
+    // aerosol-dominated (8 km horizontal crosses ~6.7 Mie scale heights but only
+    // one Rayleigh one), while an orbital ray barely crosses the 1.2 km Mie layer
+    // at all, so keying the lift on total τ would re-haze the ground distance the
+    // Mie cut was made to keep crisp — and with GREY haze, which is what washed
+    // it to a grey-tan band before. The two columns separate out of the
+    // CHROMATIC spread of the transmittance the integrator already returned: Mie
+    // is spectrally flat, so it cancels exactly in a channel difference and what
+    // survives is pure Rayleigh. `1.0` = one vertical column = nadir from orbit.
+    // (Assumes `mie_beta_g.xyz` is grey, which every authored body is; a body that
+    // authored coloured aerosols would leave a small residue in the difference and
+    // read a slightly high air mass — degrades gracefully, never fails.)
+    let tau_chan = -log(clamp(scatter.transmittance, vec3<f32>(1.0e-4), vec3<f32>(1.0)));
+    let tau_zenith_rayleigh = sky_atmos.rayleigh_beta_h.xyz * sky_atmos.rayleigh_beta_h.w;
+    let rayleigh_chroma_span = max(tau_zenith_rayleigh.z - tau_zenith_rayleigh.x, 1.0e-4);
+    let rayleigh_air_mass = max((tau_chan.z - tau_chan.x) / rayleigh_chroma_span, 0.0);
+    // Onset at a sixth of a vertical column so the near field a ground observer
+    // sees (≤ ~2 km at sea level) keeps its tuned look untouched. The far end is
+    // deliberately well past the one column a nadir orbital ray crosses: an
+    // oblique view from orbit spans roughly 1–4 columns across a single frame, so
+    // a nearer ceiling pins most of the frame at one value and reads as a flat
+    // wash rather than aerial perspective that develops with depth.
+    let column_lift_near = 0.15;
+    let column_lift_far = 4.00;
+    // Fraction of the physically consistent airlight actually applied. Surface
+    // radiance and airlight are not in a common exposure/flux scale, so the
+    // in-scatter over-contributes even at `strength: 1` (docs/rendering/
+    // atmosphere.md). The ground calibration folds a 0.10 correction into
+    // `aerial_perspective_strength`; that is far too aggressive once the column
+    // is thick — applying it here is what produced no veil at all — but the
+    // uncorrected value over-veils orbital land to a flat blue-grey with no
+    // biome colour left. Screenshot-calibrated against ISS reference framings.
+    let column_airlight_exposure = 0.50;
+    let physical_airlight =
+        column_airlight_exposure / max(sky_atmos.atmos_geom.z, 1.0e-3);
+    let column_airlight = mix(
+        airlight_ratio,
+        max(airlight_ratio, physical_airlight),
+        smoothstep(column_lift_near, column_lift_far, rayleigh_air_mass),
+    );
+
+    let base_surface_airlight = mix(1.0, column_airlight, clamp(surface_fade, 0.0, 1.0));
     let surface_airlight = max(base_surface_airlight, aerial);
     let airlight_scale = select(surface_airlight, 1.0, airlight_ratio <= 0.0);
     scatter.in_scatter = scatter.in_scatter * airlight_scale;

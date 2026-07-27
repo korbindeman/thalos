@@ -88,6 +88,35 @@ pub struct TreeMeshData {
     pub indices: Vec<u32>,
 }
 
+/// Sky exposure a leaf card sees, from the direction it faces out of the crown:
+/// `1` straight up (full sky), [`CARD_SKY_FLOOR`] straight down (fully shaded by
+/// the canopy above it). The **one** definition — every leaf-card builder below
+/// multiplies its height-in-crown term by this, so all species darken their
+/// flanks and undersides identically and the impostor bake inherits it.
+///
+/// **Why orientation and not just height.** The baked AO used to be dominated by
+/// height in the crown, with at most a `0.80..1.00` orientation nudge. Height and
+/// sky exposure agree on the crown's top and diverge everywhere else: an outer
+/// card halfway up read as nearly fully lit whether it faced the sun or the
+/// ground. So a crown's whole visible shell came out at high exposure — it
+/// rendered as a bright hollow shell with no interior depth ("the canopies look
+/// thin") whose mean value landed at open-meadow brightness, when closed canopy
+/// should read clearly darker than the meadow around it.
+///
+/// The tell that identified this: forcing the shaded end of
+/// `thalos::foliage`'s `canopy_grade` to saturated red barely tinted the crowns,
+/// proving almost no *visible* fragment was reaching the shaded end at all — the
+/// grade wasn't the lever, the AO distribution feeding it was.
+fn card_sky_exposure(n_out: Vec3) -> f32 {
+    let up = n_out.normalize_or(Vec3::Y).y * 0.5 + 0.5;
+    CARD_SKY_FLOOR + (1.0 - CARD_SKY_FLOOR) * up
+}
+
+/// Exposure of a leaf card facing straight down — the deep shade under a crown.
+/// A ~3× top-to-underside range; the old `0.80` floor was a ~1.25× range, which
+/// is why crowns had no volume.
+const CARD_SKY_FLOOR: f32 = 0.30;
+
 impl TreeMeshData {
     fn new() -> Self {
         Self::default()
@@ -160,7 +189,7 @@ fn push_conifer(b: &mut TreeMeshData, params: &TreeMeshParams) {
         let n_light = (outdir * 0.4 + Vec3::Y * 0.7).normalize_or(Vec3::Y);
         let roll = (hash01(s, 4) - 0.5) * 0.5;
         let size = (cone_r * 1.4).max(base_radius * sz * 0.5) * (0.8 + 0.4 * hash01(s, 5));
-        let ao = 0.45 + 0.55 * ht;
+        let ao = (0.45 + 0.55 * ht) * card_sky_exposure(outdir);
         let wind = (0.3 + 0.7 * ht).clamp(0.0, 1.0);
         push_leaf_card(
             b,
@@ -420,7 +449,7 @@ fn push_skin_card(
     let n_light = (n_out + rand_unit(seed, 31) * 0.32).normalize_or(n_out);
     let roll = hash01(seed, 9) * TAU;
     let h01 = ((pos.y - crown_base) / (crown_top - crown_base).max(0.01)).clamp(0.0, 1.0);
-    let ao = 0.52 + 0.4 * h01;
+    let ao = (0.52 + 0.4 * h01) * card_sky_exposure(n_out);
     let wind = (0.3 + 0.7 * h01).clamp(0.0, 1.0);
     let cell = LEAF_CELL_FIRST + (hash_u(seed, 12) % LEAF_CELL_COUNT.max(1));
     push_leaf_card(
@@ -472,7 +501,7 @@ fn push_lobe_card(
     let n_light = (n_out + rand_unit(seed, 31) * 0.32).normalize_or(n_out);
     let roll = hash01(seed, 9) * TAU;
     let h01 = ((pos.y - crown_base) / (crown_top - crown_base).max(0.01)).clamp(0.0, 1.0);
-    let ao = (0.4 + 0.6 * h01) * ao_scale;
+    let ao = (0.4 + 0.6 * h01) * ao_scale * card_sky_exposure(n_out);
     let wind = (0.3 + 0.7 * h01).clamp(0.0, 1.0);
     let cell = LEAF_CELL_FIRST + (hash_u(seed, 12) % LEAF_CELL_COUNT.max(1));
     push_leaf_card(
@@ -721,8 +750,7 @@ fn push_foliage_cluster(
         let dir = fib_dir(i, cards, s);
         let n_out = dir.normalize_or(Vec3::Y);
         let pos = center + n_out * radius * (0.85 + 0.16 * hash01(s, 9));
-        let form = n_out.y * 0.5 + 0.5;
-        let ao = bright * (0.80 + 0.20 * form) * (0.62 + 0.38 * h01);
+        let ao = bright * card_sky_exposure(n_out) * (0.62 + 0.38 * h01);
         let wind = (0.4 + 0.6 * h01).clamp(0.0, 1.0);
         let face = (n_out + rand_unit(s, 3) * 0.32).normalize_or(n_out);
         let n_light = (n_out + Vec3::Y * 0.24 + rand_unit(s, 4) * 0.20).normalize_or(n_out);

@@ -49,14 +49,14 @@ pub fn not_in_photo_mode(photo_mode: Res<PhotoMode>) -> bool {
 
 fn toggle_photo_mode_input(
     input: Res<GameInputIntent>,
-    ui_text: Res<thalos_ui::TextFieldFocus>,
+    ui_keyboard: Res<crate::hud::UiKeyboardGate>,
     mut photo_mode: ResMut<PhotoMode>,
 ) {
     if !input.toggle_photo_mode {
         return;
     }
-    // Don't steal P while the user is typing into a UI text field.
-    if ui_text.is_focused() {
+    // Don't steal P while the user is typing into a text field.
+    if ui_keyboard.text_entry() {
         return;
     }
     photo_mode.active = !photo_mode.active;

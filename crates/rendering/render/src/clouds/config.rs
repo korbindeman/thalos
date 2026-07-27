@@ -1,6 +1,7 @@
 use bevy::prelude::*;
 
 use super::images::{RENDER_HEIGHT, RENDER_WIDTH};
+use super::shadow_frame::CloudShadowFrame;
 
 #[derive(Resource, Clone, Copy, Reflect)]
 #[reflect(Resource)]
@@ -77,10 +78,6 @@ pub struct CloudsConfig {
     /// areal fill tracks the strata density the far tier renders; the default
     /// only covers bodies with no derived calibration.
     pub fill_threshold_nodes: [Vec4; 2],
-    /// Expected filtered density `E[shaped | env]`: 16 nodes (`i / 15`),
-    /// derived by the same calibration. The banded march's coarse LOD renders
-    /// this in place of the Cartesian shape term (BL-20260724T003705Z).
-    pub shape_response: [Vec4; 4],
     /// Capture diagnostic: -1 = near volume only, 0 = production composite,
     /// 1 = far surface projection only.
     pub tier_diagnostic: f32,
@@ -116,6 +113,11 @@ pub struct CloudsConfig {
     /// Invalidates all temporal samples when target size, active body,
     /// weather, or simulation continuity changes.
     pub history_epoch: u32,
+    /// Placement of the view-anchored cloud sun-transmittance cascade
+    /// (CLOUD-5 / W2). Written each frame by the game's cloud driver, which
+    /// owns the anchor and the extent ladder; the compute pass marches it and
+    /// `thalos::cloud_shadow` receivers project into it.
+    pub shadow_frame: CloudShadowFrame,
     /// Velocity of the wind, metres/second in the body-fixed frame: `x` is
     /// zonal drift (eastward surface speed at the equator — applied as a slow
     /// rotation of the whole cloud field about the body's spin axis, so the
@@ -160,14 +162,6 @@ impl Default for CloudsConfig {
                 Vec4::new(0.81, 0.757, 0.704, 0.651),
                 Vec4::new(0.599, 0.546, 0.493, 0.44),
             ],
-            // Mild ramp fallback; every cloudy body derives the real curve at
-            // spawn.
-            shape_response: [
-                Vec4::new(0.0, 0.03, 0.07, 0.10),
-                Vec4::new(0.13, 0.17, 0.20, 0.23),
-                Vec4::new(0.27, 0.30, 0.33, 0.37),
-                Vec4::new(0.40, 0.43, 0.47, 0.50),
-            ],
             tier_diagnostic: 0.0,
             far_pixel_footprint: 1.0,
             far_coverage_preserving: 1.0,
@@ -180,6 +174,7 @@ impl Default for CloudsConfig {
             resolution_scale: 2.0 / 3.0,
             sparse_march: true,
             history_epoch: 1,
+            shadow_frame: CloudShadowFrame::default(),
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),
         }
     }

@@ -24,10 +24,10 @@ use std::sync::{Mutex, OnceLock};
 // `tracing_subscriber` comes via `bevy::log`'s re-export rather than a direct
 // dependency, so the layer cannot drift from the subscriber Bevy actually
 // builds.
+use bevy::log::BoxedLayer;
 use bevy::log::tracing_subscriber::Layer;
 use bevy::log::tracing_subscriber::layer::Context;
 use bevy::log::tracing_subscriber::registry::Registry;
-use bevy::log::BoxedLayer;
 use bevy::prelude::*;
 use tracing::Event;
 use tracing::field::{Field, Visit};
@@ -54,9 +54,22 @@ pub fn error_messages() -> Vec<String> {
     retained().lock().map(|m| m.clone()).unwrap_or_default()
 }
 
-/// Install into [`bevy::log::LogPlugin::custom_layer`].
-pub fn error_capture_layer(_app: &mut App) -> Option<BoxedLayer> {
-    Some(Box::new(ErrorCounterLayer))
+/// Install runtime support layers into [`bevy::log::LogPlugin::custom_layer`].
+///
+/// Error accounting protects capture validity; the diagnostic layer routes
+/// machine-oriented events away from the console and into the canonical JSONL
+/// artifact stream.
+pub fn runtime_layers(_app: &mut App) -> Option<BoxedLayer> {
+    let mut layers: Vec<BoxedLayer> = vec![Box::new(ErrorCounterLayer)];
+    match crate::runtime_diagnostics::jsonl_layer() {
+        Ok(layer) => layers.push(layer),
+        Err(error) => {
+            // The tracing subscriber does not exist yet, so this cannot use a
+            // log macro without recursing through logger setup.
+            eprintln!("could not open runtime diagnostic JSONL artifact: {error}");
+        }
+    }
+    Some(Box::new(layers))
 }
 
 struct ErrorCounterLayer;

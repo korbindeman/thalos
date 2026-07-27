@@ -71,6 +71,7 @@ fn drive_base_editor_camera(
     height_sources: Res<HeightSourceRegistry>,
     registry: Res<StructureRegistry>,
     ui_gate: Res<crate::hud::UiPointerGate>,
+    ui_keyboard: Res<crate::hud::UiKeyboardGate>,
     mouse_buttons: Res<ButtonInput<MouseButton>>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time<Real>>,
@@ -103,6 +104,7 @@ fn drive_base_editor_camera(
         &keys,
         GodViewInput {
             over_ui: ui_gate.hovered,
+            text_entry: ui_keyboard.text_entry(),
             orbit_held: mouse_buttons.pressed(MouseButton::Right),
             drag,
             scroll,

@@ -3,6 +3,11 @@
 //! One focused field at a time ([`TextFieldFocus`]); raw key events feed the
 //! focused field's `value`. Hosts gate their own keyboard bindings on
 //! [`TextFieldFocus::is_focused`] so typing never trips game actions.
+//!
+//! There is no caret/selection model — the caret is always at the end. The one
+//! exception is [`UiTextField::selected`]: a prefilled suggestion that renders
+//! highlighted and is replaced wholesale by the first keystroke, so a
+//! suggest-and-accept prompt is one keypress to take and one word to override.
 
 use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::prelude::*;
@@ -17,6 +22,10 @@ pub struct UiTextField {
     pub value: String,
     pub placeholder: String,
     pub max_len: usize,
+    /// The whole value is selected: it renders highlighted, and the next
+    /// keystroke replaces it instead of appending. Cleared by any edit, by
+    /// clicking the field, and by losing focus.
+    pub select_all: bool,
 }
 
 impl UiTextField {
@@ -25,8 +34,25 @@ impl UiTextField {
             value: value.into(),
             placeholder: placeholder.into(),
             max_len: 48,
+            select_all: false,
         }
     }
+
+    /// Start with the value fully selected — for a prefilled suggestion the
+    /// user should be able to accept with Enter or type straight over.
+    pub fn selected(mut self) -> Self {
+        self.select_all = true;
+        self
+    }
+}
+
+/// Emitted when a focused field is dismissed by the keyboard: Enter
+/// (`accepted`) or Escape (cancelled). Hosts that need commit-vs-cancel read
+/// this; hosts that only mirror the value can keep using `Changed<UiTextField>`.
+#[derive(Message, Debug, Clone, Copy)]
+pub struct TextFieldSubmit {
+    pub field: Entity,
+    pub accepted: bool,
 }
 
 /// Marker on the text child inside a field.
@@ -84,7 +110,8 @@ pub fn spawn_text_field(
             } else {
                 theme.body(value)
             };
-            c.spawn((bundle, TextFieldText));
+            // The selection highlight is this node's background fill.
+            c.spawn((bundle, BackgroundColor(Color::NONE), TextFieldText));
         })
         .id()
 }
@@ -92,12 +119,17 @@ pub fn spawn_text_field(
 /// Focus a field on click; blur when clicking anything else.
 pub fn focus_text_fields(
     mut focus: ResMut<TextFieldFocus>,
-    fields: Query<(Entity, &Interaction), (Changed<Interaction>, With<UiTextField>)>,
+    mut fields: Query<(Entity, &Interaction, &mut UiTextField), Changed<Interaction>>,
     other_presses: Query<(Entity, &Interaction), (Changed<Interaction>, Without<UiTextField>)>,
 ) {
-    for (entity, interaction) in &fields {
+    for (entity, interaction, mut field) in &mut fields {
         if matches!(interaction, Interaction::Pressed) {
             focus.field = Some(entity);
+            // A click means "edit this", not "replace it" — the caret lands at
+            // the end rather than keeping a prefilled suggestion selected.
+            if field.select_all {
+                field.select_all = false;
+            }
             return;
         }
     }
@@ -116,6 +148,7 @@ pub fn apply_text_field_input(
     mut focus: ResMut<TextFieldFocus>,
     mut key_events: MessageReader<KeyboardInput>,
     mut fields: Query<&mut UiTextField>,
+    mut submits: MessageWriter<TextFieldSubmit>,
 ) {
     let Some(entity) = focus.field else {
         key_events.clear();
@@ -127,30 +160,61 @@ pub fn apply_text_field_input(
         return;
     };
     let mut value = field.value.clone();
+    let mut select_all = field.select_all;
+    // Any keystroke that edits the value first consumes the selection, which
+    // is what makes a prefilled suggestion typeable-over.
+    let take_selection = |value: &mut String, select_all: &mut bool| {
+        if *select_all {
+            value.clear();
+            *select_all = false;
+        }
+    };
+    let mut submitted = false;
     for event in key_events.read() {
-        if !event.state.is_pressed() {
+        // Everything after Enter/Escape belongs to whatever the host opens
+        // next, not to a field that has already closed.
+        if !event.state.is_pressed() || submitted {
             continue;
         }
         match &event.logical_key {
             Key::Character(s) => {
+                take_selection(&mut value, &mut select_all);
                 for c in s.chars().filter(|c| !c.is_control()) {
                     if value.len() < field.max_len {
                         value.push(c);
                     }
                 }
             }
-            Key::Space if value.len() < field.max_len => value.push(' '),
-            Key::Backspace => {
-                value.pop();
+            Key::Space => {
+                take_selection(&mut value, &mut select_all);
+                if value.len() < field.max_len {
+                    value.push(' ');
+                }
             }
-            Key::Enter | Key::Escape => {
+            Key::Backspace | Key::Delete => {
+                if select_all {
+                    take_selection(&mut value, &mut select_all);
+                } else {
+                    value.pop();
+                }
+            }
+            key @ (Key::Enter | Key::Escape) => {
+                select_all = false;
                 focus.field = None;
+                submitted = true;
+                submits.write(TextFieldSubmit {
+                    field: entity,
+                    accepted: matches!(key, Key::Enter),
+                });
             }
             _ => {}
         }
     }
     if field.value != value {
         field.value = value;
+    }
+    if field.select_all != select_all {
+        field.select_all = select_all;
     }
 }
 
@@ -159,13 +223,25 @@ pub fn update_text_field_visuals(
     theme: Res<UiTheme>,
     focus: Res<TextFieldFocus>,
     fields: Query<(Entity, &UiTextField, &Children)>,
-    mut texts: Query<(&mut Text, &mut TextColor, &mut TextFont), With<TextFieldText>>,
+    mut texts: Query<
+        (
+            &mut Text,
+            &mut TextColor,
+            &mut TextFont,
+            &mut BackgroundColor,
+        ),
+        With<TextFieldText>,
+    >,
     mut borders: Query<&mut BorderColor, With<UiTextField>>,
 ) {
     for (entity, field, children) in &fields {
         let focused = focus.field == Some(entity);
+        let selected = focused && field.select_all && !field.value.is_empty();
         let (shown, color, font) = if field.value.is_empty() && !focused {
             (field.placeholder.clone(), TEXT_FAINT, theme.font_ui.clone())
+        } else if selected {
+            // Selected text carries the caret in its highlight, not a bar.
+            (field.value.clone(), ON_ACCENT, theme.font_ui.clone())
         } else if focused {
             (
                 format!("{}▏", field.value),
@@ -175,8 +251,9 @@ pub fn update_text_field_visuals(
         } else {
             (field.value.clone(), TEXT_PRIMARY, theme.font_ui.clone())
         };
+        let highlight = if selected { ACCENT } else { Color::NONE };
         for child in children.iter() {
-            if let Ok((mut text, mut tc, mut tf)) = texts.get_mut(child) {
+            if let Ok((mut text, mut tc, mut tf, mut bg)) = texts.get_mut(child) {
                 if **text != shown {
                     **text = shown.clone();
                 }
@@ -185,6 +262,9 @@ pub fn update_text_field_visuals(
                 }
                 if tf.font != font {
                     tf.font = font.clone();
+                }
+                if bg.0 != highlight {
+                    bg.0 = highlight;
                 }
             }
         }

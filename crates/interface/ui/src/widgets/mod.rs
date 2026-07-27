@@ -23,7 +23,7 @@ pub use slider::{
     update_slider_visuals,
 };
 pub use text_field::{
-    TextFieldFocus, TextFieldText, UiTextField, apply_text_field_input, focus_text_fields,
-    spawn_text_field, update_text_field_visuals,
+    TextFieldFocus, TextFieldSubmit, TextFieldText, UiTextField, apply_text_field_input,
+    focus_text_fields, spawn_text_field, update_text_field_visuals,
 };
 pub use toast::{Toast, ToastArea, ToastKind, spawn_toast, update_toasts};

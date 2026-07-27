@@ -41,7 +41,8 @@ fn main() {
 
     let mut app = App::new();
     let asset_plugin = AssetPlugin {
-        file_path: "../../assets".to_string(),
+        // Relative to `CARGO_MANIFEST_DIR` (crates/interface/ui), not the cwd.
+        file_path: "../../../assets".to_string(),
         ..default()
     };
     if window_mode {
@@ -78,9 +79,21 @@ fn main() {
         .add_systems(Update, drive_capture);
     }
 
+    // `THALOS_UI_SCALE` rasterises the kit at a chosen effective UI scale. The
+    // game's on-screen scale is `window scale × UiScale`, so a headless run at
+    // 1.5 reproduces what a 150 % display shows — which is how the fractional
+    // -scale text question gets answered without launching the game.
+    if let Ok(raw) = std::env::var("THALOS_UI_SCALE")
+        && let Ok(scale) = raw.trim().parse::<f32>()
+        && scale > 0.0
+    {
+        app.insert_resource(UiScale(scale));
+    }
+
     app.add_plugins(ThalosUiPlugin)
         .add_systems(Startup, setup_scene)
         .add_systems(Startup, (setup_ui, spawn_demo_toast).after(init_ui_theme))
+        .add_systems(Startup, focus_preselected_field.after(setup_ui))
         .run();
 }
 
@@ -234,6 +247,18 @@ fn setup_scene(
 #[derive(Component)]
 struct DemoAction;
 
+/// The demo field that shows the prefilled-and-selected state (the F9
+/// viewpoint prompt's). Focused once at startup so the preview captures it.
+#[derive(Component)]
+struct PreselectedField;
+
+fn focus_preselected_field(
+    mut focus: ResMut<TextFieldFocus>,
+    field: Single<Entity, With<PreselectedField>>,
+) {
+    focus.field = Some(*field);
+}
+
 fn setup_ui(mut commands: Commands, theme: Res<UiTheme>) {
     commands
         .spawn((
@@ -278,7 +303,7 @@ fn menu_panel(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
         spawn_menu_row(panel, theme, DemoAction, "SETTINGS", "window & input");
         spawn_menu_row(panel, theme, DemoAction, "QUIT", "");
         spawn_heading(panel, theme, "SECTION HEADING", true);
-        panel.spawn(theme.body("Body text — the interface face at 13px."));
+        panel.spawn(theme.body("Body text — the interface face at 12px."));
         panel.spawn(theme.small("Small text — descriptions and sublabels."));
         panel.spawn(theme.faint("Faint text — placeholders, fine print."));
         panel.spawn(theme.mono("MONO 123 456.78 km — Fira Code"));
@@ -393,6 +418,15 @@ fn controls_panel(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
                     UiTextField::new("", "empty placeholder"),
                     Val::Px(180.0),
                     DemoAction,
+                );
+                // Focused below so the selection highlight is in the preview:
+                // it only renders on the field holding the keyboard.
+                spawn_text_field(
+                    row,
+                    theme,
+                    UiTextField::new("Thalos 340 m", "viewpoint name").selected(),
+                    Val::Px(180.0),
+                    (DemoAction, PreselectedField),
                 );
             });
         spawn_heading(panel, theme, "SLIDERS", true);

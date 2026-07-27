@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "generator_version": 2,
+  "assets": [
+    {
+      "name": "terrain_albedo_array",
+      "file": "terrain_albedo_array.png",
+      "width": 512,
+      "height": 3072,
+      "fnv1a64": "c06817ba43dfe41e"
+    },
+    {
+      "name": "terrain_material_array",
+      "file": "terrain_material_array.png",
+      "width": 512,
+      "height": 3072,
+      "fnv1a64": "9b5e564f7812840d"
+    }
+  ]
+}

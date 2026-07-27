@@ -70,6 +70,43 @@ libraries (`thalos::lighting`, `thalos::atmosphere`) are registered by
 `PlanetLightingPlugin`; a shader that imports them must run in an app that
 added that plugin or the import won't resolve.
 
+### naga_oil resolves `const` imports but never emits them — export values as functions
+
+Symptom: a pipeline dies at creation with
+
+```
+error: no definition in scope for identifier: `thalos::landcover::C_ROCK_LO`
+750 │ ground = mix(ground, mix(C_ROCK_LO, C_ROCK_HI, alpine), rock_t);
+```
+
+and — because a failed terrain pipeline still lets the process run — the
+visible result is **ground rendered black** while everything else lights
+normally. The capture host exits 3, and the real error only reaches
+`artifacts/diagnostics/visual_capture_server.log`, never the client's stdout,
+so `just screenshot` reports a bare exit code 1. Read that log first (BL-20's
+cousin: PNGs are still written).
+
+Cause: `#import thalos::landcover::{C_ROCK_LO}` is accepted by the
+preprocessor, and every *use* is rewritten to the mangled module-qualified
+name — but naga_oil only composes **functions** (and types) from the imported
+module into the final naga module. The `const` definition is never carried
+across, so the mangled reference dangles.
+
+Fix: wrap the value in a function and import that.
+
+```wgsl
+const LC_ROCK_LO: vec3<f32> = vec3<f32>(0.108, 0.104, 0.098);
+fn substrate_rock_color(alpine: f32) -> vec3<f32> {
+    return mix(LC_ROCK_LO, LC_ROCK_HI, clamp(alpine, 0.0, 1.0));
+}
+```
+
+This is why every shared value in this repo already travels as a function
+(`vegetation_color`, `macro_variation`, `shade_surface`) — the shared-library
+rule and naga_oil's capabilities happen to agree. A shared *palette anchor*
+therefore needs an accessor, not a `const`. Hit July 2026 giving the tile
+renderer udlod's substrate palette.
+
 ### A struct *field* name that matches a naga_oil `#import`ed global breaks field access
 
 Symptom: `error: invalid field accessor 'config'` pointing at a perfectly
@@ -218,3 +255,24 @@ from `dpdx`/`dpdy` in uniform fragment control flow and fade each colour and
 normal octave as the footprint approaches its wavelength. Otherwise a strong
 BRDF response can turn unresolved normal flips into bright/dark stipple even on
 fully opaque geometry. Hit July 2026 on Mira's Hapke regolith (INC-0009).
+
+### Never project a large position onto a per-fragment direction to phase a noise
+
+`noise(dot(p, across) / L, dot(p, fall) / L2)` is the obvious way to stretch a
+procedural texture along a slope frame, and it is a moiré generator whenever
+`|p|` is large. The phase derivative with respect to surface orientation is
+`|p| / L`: with the tile path's wrapped body position (up to `TILE_WRAP_M`,
+8192 m) and `L = 24 m`, tilting the surface **0.2°** slides the pattern a full
+stripe. The texture then tracks the normal field instead of the ground and
+renders as contour-following whorls — an agate / topographic-map look, densest
+where slope turns, and worst up close where no footprint fade retires it.
+
+The tell: swirls that follow *shading* rather than *ground*. Suspect this before
+precision, LOD, or the height source — `p` being bounded means f32 is innocent.
+
+Fix: keep the coordinate isotropic in body space (so phase depends on position
+only) and get the anisotropy from a directional **filter** — N taps of the same
+field displaced along the direction. Sensitivity drops to `span/2 × angle`. The
+slope frame may *orient* a pattern; it may never *phase* one. Same rule applies
+to any varying frame (flow fields, tangents, view vectors). Hit July 2026 on
+`tile_terrain.wgsl`'s rock gully striation (INC-20260727T004856Z).

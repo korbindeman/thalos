@@ -12,7 +12,7 @@ use crate::UiTheme;
 use crate::tokens::*;
 
 /// How a slider's value renders in its value label.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug)]
 pub enum SliderFormat {
     /// `12.50 m`
     Meters,
@@ -24,6 +24,29 @@ pub enum SliderFormat {
     Scale2,
     /// `420 L` (any unit suffix)
     Amount(&'static str),
+    /// Caller-supplied formatter, for sliders whose stored value is not what
+    /// the user reads — e.g. a log-scale control that stores an exponent but
+    /// reads out in metres per second.
+    Custom(fn(f32) -> String),
+}
+
+/// Hand-written rather than derived: a derived `PartialEq` would compare the
+/// [`SliderFormat::Custom`] function *addresses*, which Rust does not guarantee
+/// to be unique across codegen units (the `unpredictable_function_pointer_comparisons`
+/// lint). `fn_addr_eq` makes that comparison explicit and deliberate; a false
+/// negative only costs a redundant re-format of a label.
+impl PartialEq for SliderFormat {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Meters, Self::Meters)
+            | (Self::Degrees, Self::Degrees)
+            | (Self::Plain2, Self::Plain2)
+            | (Self::Scale2, Self::Scale2) => true,
+            (Self::Amount(left), Self::Amount(right)) => left == right,
+            (Self::Custom(left), Self::Custom(right)) => std::ptr::fn_addr_eq(*left, *right),
+            _ => false,
+        }
+    }
 }
 
 impl SliderFormat {
@@ -34,6 +57,7 @@ impl SliderFormat {
             SliderFormat::Plain2 => format!("{value:.2}"),
             SliderFormat::Scale2 => format!("{value:.2}×"),
             SliderFormat::Amount(unit) => format!("{value:.0} {unit}"),
+            SliderFormat::Custom(format) => format(value),
         }
     }
 }

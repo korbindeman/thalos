@@ -50,8 +50,7 @@ fn main() -> std::io::Result<()> {
         .unwrap_or_else(|| PathBuf::from("target/thalos_macro"));
     std::fs::create_dir_all(&out_dir)?;
 
-    let width =
-        (std::f64::consts::TAU * f64::from(THALOS_RADIUS_M) / COARSE_PX_M).round() as usize; // ~869
+    let width = (std::f64::consts::TAU * f64::from(THALOS_RADIUS_M) / COARSE_PX_M).round() as usize; // ~869
     let height = width / 2;
     let surface = ProceduralSurface::new(THALOS_RADIUS_M, THALOS_BODY_SEED);
 
@@ -63,11 +62,7 @@ fn main() -> std::io::Result<()> {
         let lat = (90.0 - (y as f64 + 0.5) / height as f64 * 180.0).to_radians();
         for x in 0..width {
             let lon = ((x as f64 + 0.5) / width as f64 * 360.0).to_radians();
-            let dir = DVec3::new(
-                lat.cos() * lon.cos(),
-                lat.sin(),
-                lat.cos() * lon.sin(),
-            );
+            let dir = DVec3::new(lat.cos() * lon.cos(), lat.sin(), lat.cos() * lon.sin());
             let (sample, _) = surface.sample_biome_d(dir, SAMPLE_LOD_M);
             let h = sample.height_m;
             let sin_lat = lat.sin().abs();

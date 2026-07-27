@@ -312,7 +312,7 @@ pub struct GrassTileBuildInput {
     pub lawn_density_per_m2: f32,
     /// Far-ring forest cull strength in `[0, 1]`. Distant grass under a tree
     /// canopy is occluded by the trees in front of it, so the far clipmap rings
-    /// thin grass by `forest_cull × forest_coverage(dir)` — full grass on open
+    /// thin grass by `forest_cull × canopy_coverage(dir)` — full grass on open
     /// plains, ~none deep inside a grove. `0` (near rings) keeps all grass.
     pub forest_cull: f32,
 }
@@ -341,6 +341,9 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
     let (center_dir, basis) = lattice.frame(input.key)?;
     let source = input.height_source.as_ref();
     let built_revision = source.revision();
+
+    // Hoisted once per tile — see the per-candidate use in the acceptance gate.
+    let canopy_climate = source.canopy_climate(center_dir, GRASS_SAMPLE_LOD_M);
 
     let center_height_m = source.sample_height_m(center_dir.as_vec3(), GRASS_SAMPLE_LOD_M)?;
     let center_surface_body_m = center_dir * (input.radius_m + center_height_m as f64);
@@ -419,7 +422,11 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
             // Far rings cull grass under canopy — the trees occlude it, so the
             // distant blades are pure overdraw. Near rings pass `forest_cull = 0`.
             if input.forest_cull > 0.0 {
-                accept *= 1.0 - input.forest_cull * crate::ground::scatter::forest_coverage(dir);
+                // Same canopy authority the trees are placed from, so grass is
+                // culled exactly where canopy actually closes over it and returns
+                // in the glades (`thalos_terrain::canopy`). Climate is hoisted per
+                // tile — this runs once per blade candidate, thousands per tile.
+                accept *= 1.0 - input.forest_cull * canopy_climate.coverage(dir, h);
             }
             if (rng(2) as f32) >= accept {
                 continue;

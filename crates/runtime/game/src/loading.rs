@@ -301,7 +301,7 @@ pub fn steps_for(situation: SpawnSituation, boot: bool) -> Vec<StepDesc> {
     if situation.has_deferred_placement() {
         steps.push(StepDesc::new(step::PLACEMENT, "Placing craft", 1.0));
     }
-    if matches!(situation, SpawnSituation::Runway) {
+    if matches!(situation, SpawnSituation::Runway | SpawnSituation::Launch) {
         steps.push(StepDesc::new(step::SETTLE, "Settling terrain", 2.0));
     }
     steps

@@ -127,7 +127,10 @@
         "decoupler_std": Decoupler((
             display_name: "Decoupler",
             mass_per_diameter: 25.0,
-            ejection_impulse_per_diameter: 100.0,
+            // 4 m launch vehicles receive 8 kN·s. At Saturn's wet
+            // stage masses that opens the gap at ~0.28 m/s; after booster
+            // burnout it is faster, while remaining a physical impulse.
+            ejection_impulse_per_diameter: 2000.0,
         )),
         "adapter_std": Adapter((
             display_name: "Adapter",

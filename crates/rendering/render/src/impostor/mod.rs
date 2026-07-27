@@ -25,8 +25,8 @@ pub use material::{
 pub use post_stack::space_camera_post_stack;
 pub use proc_impostor::{
     COAST_ATLAS_HEIGHT_RANGE_M, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
-    coast_bathymetry_cube_from_bytes, coast_bathymetry_cube_len,
-    blank_coast_cube, blank_impostor_cube,
+    blank_coast_cube, blank_impostor_cube, coast_bathymetry_cube_from_bytes,
+    coast_bathymetry_cube_len,
 };
 pub use rings::{
     MAX_RING_STOPS, RingLayers, RingMaterial, RingMaterialHandle, RingParams, build_ring_mesh,

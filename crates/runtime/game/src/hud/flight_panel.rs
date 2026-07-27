@@ -105,7 +105,7 @@ pub fn setup(
     let mut root = panel_node();
     // Sit immediately above the navball, aligned with its left edge.
     root.left = Val::Px(NAVBALL_LEFT_PX);
-    root.bottom = Val::Px(NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 10.0);
+    root.bottom = Val::Px(NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 8.0);
     root.min_width = Val::Px(NAVBALL_SIZE_PX);
 
     let (bg, border) = panel_frame(&theme);

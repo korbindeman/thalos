@@ -11,10 +11,11 @@
 //!
 //! 1. [`CASCADE_COUNT`] plain orthographic [`Camera3d`]s *outside* big_space
 //!    (like the map camera), all on [`SHADOW_CASTER_LAYER`], aimed down the
-//!    active body's sun direction over the **craft** at increasing half-extents
-//!    (near = crisp, far = wide). Tree mesh tiles are tagged onto that layer too,
-//!    so the same `TreeMaterial` draw (leaf alpha-discard) writes leaf-shaped
-//!    depth into every cascade that contains them.
+//!    active body's sun direction over the **ground below the view** at
+//!    increasing half-extents (near = crisp, far = wide). Tree mesh tiles are
+//!    tagged onto that layer too, so the same `TreeMaterial` draw (leaf
+//!    alpha-discard) writes leaf-shaped depth into every cascade that contains
+//!    them.
 //! 2. A render-graph node copies each cascade camera's depth attachment into its
 //!    OWN sample-able [`SunShadowImage`] depth map (the `scene_depth` copy
 //!    pattern, one plain `texture_depth_2d` per cascade — deliberately NOT a
@@ -23,12 +24,19 @@
 //!    ([`thalos_body_render::ShadowCascadeBlock`]) and, per fragment, walk the
 //!    cascades near→far and darken the direct-sun term using the tightest one.
 //!
-//! Centring on the craft (near the ground) — not the camera — keeps the shadowed
-//! area put as the view orbits, and keeps each cascade's orthographic depth range
-//! shallow regardless of how high the view camera is. Above a camera-altitude
-//! limit the ground-projected set collapses to a single craft-centred cascade
-//! (craft self-shadow in orbit — stock Bevy CSM is off, this is the one shadow
-//! world).
+//! Centring on the **ground below the
+//! [`ViewAnchor`](crate::rendering::view_anchor::ViewAnchor)** — the render camera,
+//! whatever is driving it — is what makes the shadowed area follow the view
+//! (flight, god view, freecam) with no per-mode plumbing, while keeping each
+//! cascade's orthographic depth range shallow regardless of how high the camera
+//! is. Two frames of reference meet here and must not be confused: the anchor
+//! is resolved in f64 WORLD space, and the cascade cameras live *outside*
+//! big_space, so the projection into render space goes through
+//! [`RealSpaceOrigin`](crate::rendering::real_space::RealSpaceOrigin) — the
+//! floating origin's cell origin — never through `RenderOrigin` (the craft-
+//! tracking map pivot). Above a camera-altitude limit the ground-projected set
+//! collapses to a single craft-centred cascade (craft self-shadow in orbit —
+//! stock Bevy CSM is off, this is the one shadow world).
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -312,7 +320,7 @@ impl Plugin for SunShadowPlugin {
                     update_sun_shadow_camera
                         .after(update_real_space_body_positions)
                         .after(sync_solar_system_state)
-                        .after(crate::rendering::update_render_origin),
+                        .after(crate::rendering::real_space::update_real_space_origin),
                     // Mirror the live cascade onto the craft hull/gear so they
                     // RECEIVE it (the render crate's `apply_craft_shadow` fans
                     // `CraftShadowMaps` onto the materials in PostUpdate).
@@ -454,7 +462,7 @@ fn update_sun_shadow_camera(
     cache: Res<SolarSystemState>,
     bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
     ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
-    origin: Res<crate::rendering::RenderOrigin>,
+    origin: Res<crate::rendering::real_space::RealSpaceOrigin>,
     view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
     height_sources: Res<thalos_physics_local::HeightSourceRegistry>,
     // Contact tier (W18a): its gate is published in `block.gate.z` so it reaches
@@ -608,7 +616,15 @@ fn update_sun_shadow_camera(
             })
             .unwrap_or(0.0) as f64;
         let player_alt = (r - body_radius_m as f64 - terrain_h) as f32;
-        let player_render = (player_inertial - origin.position).as_vec3();
+        // Render space here means the BIG_SPACE render frame — the floating
+        // origin's cell origin (`RealSpaceOrigin`), which is what the casters'
+        // `GlobalTransform`s are measured from. It is emphatically NOT
+        // `RenderOrigin` (the camera FOCUS pivot, i.e. the craft in flight):
+        // that put the whole cascade set `|camera − craft|` away from the world
+        // it was meant to cover, so ground shadows survived only while the view
+        // stayed within a cascade half-extent of the ship and died as freecam
+        // flew off. See `real_space::RealSpaceOrigin`.
+        let player_render = origin.to_render(player_inertial);
         // Craft-local mode centres the (single) cascade on the craft itself —
         // projecting to a ground point tens/hundreds of km below would throw
         // the box away from the only caster that matters up here.
@@ -819,9 +835,16 @@ fn update_sun_shadow_camera(
         }
 
         if log_now {
+            // `centre_off_m` is the decisive coverage signal: the cascade set is
+            // centred on the ground under the camera, so in the correct render
+            // frame it can only differ from the camera by the nadir drop
+            // (≈ `alt_m`). Anything larger means the boxes are sitting somewhere
+            // the view isn't — the failure mode `RealSpaceOrigin` exists to kill.
+            let centre_off_m = (center - cam_pos).length();
             log_shadow_state(&format!(
                 "{{\"frame\":{},\"reason\":\"{}\",\"active\":true,\"alt_m\":{:.1},\
                  \"body\":\"{}\",\"n_terrain\":{},\"strength\":{:.3},\"cascades\":{},\
+                 \"footprint\":{:.1},\"centre_off_m\":{:.1},\
                  \"eye\":[{:.1},{:.1},{:.1}],\"sun\":[{:.3},{:.3},{:.3}]}}",
                 *frame,
                 reason,
@@ -830,6 +853,8 @@ fn update_sun_shadow_camera(
                 n_terrain_bodies,
                 SHADOW_STRENGTH,
                 CASCADE_COUNT,
+                footprint,
+                centre_off_m,
                 eye_dbg.x,
                 eye_dbg.y,
                 eye_dbg.z,

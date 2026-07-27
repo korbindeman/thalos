@@ -2,8 +2,8 @@
 //!
 //! Anchored to the bottom-left of the screen. The render target sits inside
 //! a circular HUD frame, while direction-marker overlay nodes (prograde,
-//! retrograde, etc.) parent to the image node so their 256 px coordinate
-//! system stays stable.
+//! retrograde, etc.) parent to the image node so their [`NAVBALL_SIZE_PX`]
+//! coordinate system stays stable.
 
 use bevy::prelude::*;
 
@@ -11,10 +11,10 @@ use crate::hud::theme::HudTheme;
 use crate::navball::render::NavballRenderTarget;
 use crate::photo_mode::HideInPhotoMode;
 
-pub const NAVBALL_LEFT_PX: f32 = 40.0;
-pub const NAVBALL_BOTTOM_PX: f32 = 40.0;
-pub const NAVBALL_SIZE_PX: f32 = 256.0;
-pub const FRAME_PADDING_PX: f32 = 10.0;
+pub const NAVBALL_LEFT_PX: f32 = 28.0;
+pub const NAVBALL_BOTTOM_PX: f32 = 28.0;
+pub const NAVBALL_SIZE_PX: f32 = 224.0;
+pub const FRAME_PADDING_PX: f32 = 8.0;
 pub const FRAME_SIZE_PX: f32 = NAVBALL_SIZE_PX + FRAME_PADDING_PX * 2.0;
 
 /// Marker for the circular navball frame node. HUD adornments that need to

@@ -98,6 +98,153 @@ fn cascade_bias_m(texel_m: f32, slope: f32) -> f32 {
     return clamp(texel_m * BIAS_TEXELS * (1.0 + slope), BIAS_MIN_M, BIAS_MAX_M);
 }
 
+// ── PCSS (contact-hardening penumbra) ────────────────────────────────────────
+//
+// The tent PCF above has ONE fixed ~3-texel penumbra, which is exactly what
+// makes shadows read as engine output: a real sun is an extended source, so a
+// shadow is razor-sharp where the caster touches the ground and widens
+// linearly with caster→receiver distance (a building tip's shadow is metres
+// soft while its base is crisp). Classic PCSS restores that in three steps per
+// fragment: (1) a sparse BLOCKER SEARCH estimates the average light-space
+// depth of whatever occludes this point; (2) the penumbra width follows from
+// the sun's angular size × the occluder distance; (3) a Vogel-disk PCF with
+// that radius filters the visibility. Fragments the search finds unoccluded
+// early-out fully lit, and radii inside the tent's own footprint fall back to
+// the tent — so fully-lit and contact regions cost roughly what they did.
+//
+// Only the `_nrm` fragment path (terrain, structures, hull) runs PCSS; foliage
+// keeps the fixed tent (leaf shadows are chaotic at texel scale — a blocker
+// search there buys noise, not realism) and the per-vertex grass path keeps
+// its cheap point kernel.
+
+// tan of the sun's FULL angular diameter (~0.53°): metres of penumbra per
+// metre of caster→receiver light-space distance. Physical value — raise for a
+// softer, hazier-sun look.
+const SUN_TAN_ANGULAR_WIDTH: f32 = 0.0093;
+// Blocker-search radius, in texels of the sampled cascade. Bounds the largest
+// occluder distance whose penumbra the search can notice; beyond it the
+// filter simply stays at its widest.
+const PCSS_SEARCH_TEXELS: f32 = 6.0;
+// Cap on the variable PCF radius (texels). Keeps the widest penumbra's taps
+// dense enough that 16 samples do not band.
+const PCSS_MAX_FILTER_TEXELS: f32 = 6.0;
+const PCSS_TAPS: i32 = 16;
+const PCSS_TAU: f32 = 6.28318530717958647;
+
+// Interleaved-gradient noise over shadow-MAP texel coordinates — a stable
+// per-fragment rotation for the Vogel disk. Keyed to the map space (not world
+// position) so a big_space origin rebase cannot re-roll it.
+fn pcss_rotation(map_pos: vec2<f32>) -> f32 {
+    return fract(52.9829189 * fract(dot(map_pos, vec2<f32>(0.06711056, 0.00583715)))) * PCSS_TAU;
+}
+
+// PCSS variant of [`cascade_factor`]. `clip_per_m` converts stored-depth
+// deltas back to light-space metres (`params.x`); `texel_m` is the cascade's
+// texel size in metres (`params.y`).
+fn cascade_factor_pcss(
+    world_pos: vec3<f32>,
+    vp: mat4x4<f32>,
+    bias: f32,
+    strength: f32,
+    tex: texture_depth_2d,
+    inset: f32,
+    fade: bool,
+    clip_per_m: f32,
+    texel_m: f32,
+) -> f32 {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    if (clip.w <= 0.0) {
+        return -1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if (any(ndc.xy < vec2<f32>(-inset)) || any(ndc.xy > vec2<f32>(inset)) ||
+        ndc.z < 0.0 || ndc.z > 1.0) {
+        return -1.0;
+    }
+    let uv = ndc.xy * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5);
+    let dims_i = vec2<i32>(textureDimensions(tex));
+    let dims = vec2<f32>(dims_i);
+    let map_pos = uv * dims - vec2<f32>(0.5);
+
+    // (1) Blocker search: 16 sparse taps over ±PCSS_SEARCH_TEXELS, plus one
+    // guaranteed CENTER tap — the sparse ring's 4-texel stride can hop clean
+    // over a thin caster (a pole's 2-texel shadow), and missing the blocker
+    // here would punch a lit hole through that caster's own shadow. Average
+    // the light-space depth delta of the taps that occlude this fragment.
+    var occ_sum_m = 0.0;
+    var occ_n = 0.0;
+    let center = clamp(vec2<i32>(map_pos + vec2<f32>(0.5)), vec2<i32>(0), dims_i - 1);
+    let center_stored = textureLoad(tex, center, 0);
+    if (center_stored > ndc.z + bias) {
+        occ_sum_m = (center_stored - ndc.z) / max(clip_per_m, 1.0e-9);
+        occ_n = 1.0;
+    }
+    for (var j = 0; j < 4; j = j + 1) {
+        for (var i = 0; i < 4; i = i + 1) {
+            let off = (vec2<f32>(f32(i), f32(j)) - vec2<f32>(1.5)) * (PCSS_SEARCH_TEXELS / 1.5);
+            let texel = clamp(vec2<i32>(map_pos + off), vec2<i32>(0), dims_i - 1);
+            let stored = textureLoad(tex, texel, 0);
+            if (stored > ndc.z + bias) {
+                occ_sum_m = occ_sum_m + (stored - ndc.z) / max(clip_per_m, 1.0e-9);
+                occ_n = occ_n + 1.0;
+            }
+        }
+    }
+    if (occ_n == 0.0) {
+        // Nothing occludes anywhere in reach — fully lit, skip the filter.
+        return 1.0;
+    }
+
+    // (2) Penumbra radius from the average occluder distance, in texels.
+    let avg_occluder_m = occ_sum_m / occ_n;
+    let radius_tx = clamp(
+        SUN_TAN_ANGULAR_WIDTH * avg_occluder_m / max(texel_m, 1.0e-6),
+        0.0,
+        PCSS_MAX_FILTER_TEXELS,
+    );
+
+    var lit = 0.0;
+    if (radius_tx <= 1.2) {
+        // Contact range: the fixed tent is denser than a 16-tap disk at this
+        // radius and noise-free — identical to the pre-PCSS look, which was
+        // already right at contact.
+        let base = vec2<i32>(floor(map_pos));
+        let f = map_pos - floor(map_pos);
+        var wx = vec4<f32>(1.0 - f.x, 1.0, 1.0, f.x) / 3.0;
+        var wy = vec4<f32>(1.0 - f.y, 1.0, 1.0, f.y) / 3.0;
+        for (var j = 0; j < 4; j = j + 1) {
+            for (var i = 0; i < 4; i = i + 1) {
+                let texel = clamp(base + vec2<i32>(i - 1, j - 1), vec2<i32>(0), dims_i - 1);
+                let stored = textureLoad(tex, texel, 0);
+                lit = lit + wx[i] * wy[j] * select(1.0, 0.0, stored > ndc.z + bias);
+            }
+        }
+    } else {
+        // (3) Vogel-disk PCF at the penumbra radius, rotated per fragment so
+        // the sparse taps dither instead of banding.
+        let rot = pcss_rotation(map_pos);
+        let cr = cos(rot);
+        let sr = sin(rot);
+        for (var t = 0; t < PCSS_TAPS; t = t + 1) {
+            let r = radius_tx * sqrt((f32(t) + 0.5) / f32(PCSS_TAPS));
+            let a = f32(t) * 2.39996322972865332;
+            let d = vec2<f32>(cos(a), sin(a)) * r;
+            let off = vec2<f32>(d.x * cr - d.y * sr, d.x * sr + d.y * cr);
+            let texel = clamp(vec2<i32>(map_pos + off + vec2<f32>(0.5)), vec2<i32>(0), dims_i - 1);
+            let stored = textureLoad(tex, texel, 0);
+            lit = lit + select(1.0, 0.0, stored > ndc.z + bias);
+        }
+        lit = lit / f32(PCSS_TAPS);
+    }
+
+    var edge_fade = 1.0;
+    if (fade) {
+        let edge = max(abs(ndc.x), abs(ndc.y));
+        edge_fade = 1.0 - smoothstep(0.85, 1.0, edge);
+    }
+    return 1.0 - strength * (1.0 - lit) * edge_fade;
+}
+
 // ── Contact tier (W18a) ───────────────────────────────────────────────────────
 //
 // The cascades above are the MID-FIELD tier of the three-tier shadow split
@@ -363,26 +510,29 @@ fn sun_shadow_factor_nrm(
     let offset1 = min(block.params[1].y * NORMAL_OFFSET_TEXELS * (1.0 + slope), NORMAL_OFFSET_MAX_M);
     let offset2 = min(block.params[2].y * NORMAL_OFFSET_TEXELS * (1.0 + slope), NORMAL_OFFSET_MAX_M);
 
-    var f = cascade_factor(
+    var f = cascade_factor_pcss(
         world_pos + normal * offset0,
         block.view_proj[0],
         cascade_bias_m(block.params[0].y, slope) * block.params[0].x,
         s, tex0, 0.98, false,
+        block.params[0].x, block.params[0].y,
     );
     if (f < 0.0) {
-        f = cascade_factor(
+        f = cascade_factor_pcss(
             world_pos + normal * offset1,
             block.view_proj[1],
             cascade_bias_m(block.params[1].y, slope) * block.params[1].x,
             s, tex1, 0.98, false,
+            block.params[1].x, block.params[1].y,
         );
     }
     if (f < 0.0) {
-        f = cascade_factor(
+        f = cascade_factor_pcss(
             world_pos + normal * offset2,
             block.view_proj[2],
             cascade_bias_m(block.params[2].y, slope) * block.params[2].x,
             s, tex2, 1.0, true,
+            block.params[2].x, block.params[2].y,
         );
     }
     if (f < 0.0) {

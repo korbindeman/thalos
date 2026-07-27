@@ -225,9 +225,9 @@ fn setup_mfd(
     let mut root = panel_node();
     // Right edge, between the top-right FPS overlay and the bottom-right
     // staging stack — where the legacy TRAJECTORY panel sat.
-    root.right = Val::Px(20.0);
-    root.top = Val::Px(140.0);
-    root.row_gap = Val::Px(6.0);
+    root.right = Val::Px(16.0);
+    root.top = Val::Px(122.0);
+    root.row_gap = Val::Px(5.0);
     root.align_items = AlignItems::Center;
     let (bg, border) = panel_frame(theme);
 
@@ -266,7 +266,7 @@ fn setup_mfd(
 fn spawn_selector(slot: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
     slot.spawn((
         Node {
-            width: Val::Px(200.0),
+            width: Val::Px(178.0),
             flex_direction: FlexDirection::Row,
             flex_wrap: FlexWrap::Wrap,
             justify_content: JustifyContent::Center,

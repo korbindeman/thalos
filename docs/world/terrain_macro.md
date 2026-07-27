@@ -193,19 +193,30 @@ land — tropical forest at the equator, a *coherent* steppe/desert belt at
 barrens→tundra→cap polewards. Runway site stays LAND (602 m, equatorial wet
 belt). In-game live-eye pending (TM-P3 row).
 
-### Remaining for a fuller Phase 2
+### Remaining for a fuller Phase 2 — superseded by [biomes.md](biomes.md)
 
-- **Biome identities (TM-P3b)**: erg/reg desert character, savanna, taiga
-  vs temperate forest tone, softer polar rock ring, sea ice.
-- **Scatter/biome coupling**: **trees & shrubs now gated by moisture + treeline**
-  (landed 2026-07-20, TM-P2r.1 — `woody_biome_gate` in `scatter.rs`, §3
-  follow-up above); the remainder is **grass profiles that switch per biome**
-  (fold the macro fields into the grass style choice), the systematic version of
-  the Phase-1 follow-up.
-- **Explicit biome weights** (savanna vs steppe vs tundra palettes, biome-
-  driven material masks) if the two-scalar model stops being enough.
-- Sea ice at the polar ocean (water renderer, not terrain).
-- Regional relief character (hills/swell amplitude by climate/orogeny).
+**As of 2026-07-25 the Phase 2 remainder is no longer this doc's plan.** Every
+item below turned out to want the same thing — a biome that is *authoritative*
+rather than derived from the palette this doc builds — so they were folded into
+the `bio` slices (`BIO-1`…`BIO-7`, ADR-20260725T004758Z). This doc keeps the
+climate/landcover **fields**; `biomes.md` owns what is done with them.
+
+The items and where they went:
+
+- **Biome identities (TM-P3b)** — erg/reg desert, savanna, taiga vs temperate
+  tone, softer polar rock ring, sea ice → **BIO-6**, as `BiomeDef` content.
+  Deliberately not authored against the smoothstep ladder first: that work would
+  be thrown away when the seam lands.
+- **Scatter/biome coupling** — trees & shrubs are gated by moisture + treeline
+  today (landed 2026-07-20, TM-P2r.1 — `woody_biome_gate` in `scatter.rs`, §3
+  follow-up above); grass profiles per biome → **BIO-4**, which also deletes
+  `woody_biome_gate` in favour of biome scatter data.
+- **Explicit biome weights** → **BIO-2**. This is the one that forced the
+  inversion: "if the two-scalar model stops being enough" turned out to be
+  already true, and widening `MaterialBands` a third time was the wrong shape.
+- **Regional relief character** (hills/swell amplitude by climate/orogeny) →
+  a `BiomeDef` generation field, landing with **BIO-2**/**BIO-5**.
+- Sea ice at the polar ocean stays a water-renderer item, tracked under BIO-6.
 
 ## 5. Phase 3 — landmass & islands (DESIGN)
 

@@ -6,7 +6,8 @@ between them. This describes the **target** architecture; today's
 implementation is the patched-conics + `KeplerianPropagator` core.
 
 > **Implementation status (2026-06-12).** Shipped and current:
-> the canonical core (one `ShipPropagator` for live + prediction, one
+> the canonical core (one `ShipPropagator` for live + prediction, a
+> deterministic `CraftId`-keyed fleet whose vessels each own one
 > `CraftState`/`AuthorityMode` with a transition log), the
 > surface-local-frame ship physics (`docs/simulation/surface_local.md`), the
 > fly-by-wire control layer (`docs/simulation/control.md`), and the **per-craft
@@ -528,6 +529,12 @@ pub struct CraftState {
     pub authority: AuthorityMode,
 }
 ```
+
+The accepted multi-vessel specialization is
+[vessels.md](vessels.md): `Simulation` becomes a deterministic registry keyed
+by `CraftId`, and active craft becomes a separate control/presentation
+selection. Stage separation always creates another canonical record; it never
+creates a Bevy-only debris authority.
 
 ### Authority mode
 

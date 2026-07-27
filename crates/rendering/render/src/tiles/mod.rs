@@ -4,32 +4,64 @@
 //! cube-sphere quadtree, entirely on Bevy's standard render path.
 //!
 //! Ported from the standalone probe (`thalos-terrain-probe`, M0–M4) with the
-//! Thalos adaptations: per-body radius, tiles parented to the body's rotating
-//! big_space grid (big_space composes rotated-grid origin-relative transforms
-//! in f64, so co-rotating children keep planet-scale precision), content from
-//! the body's canonical `Arc<dyn SurfaceQuery>` (real albedo/roughness per
-//! sample), and the selection eye supplied by the game from `ViewAnchor`
-//! (body-fixed camera position — the one per-frame answer to "where is the
-//! view?").
+//! Thalos adaptations: per-body radius, tiles placed on the big_space **root**
+//! grid in f64 every frame from the body's pose (NOT parented to the body's
+//! rotating grid — that is a decimetre of ground jitter, see
+//! [`TileBodyOrigin`]), content from the body's canonical
+//! `Arc<dyn SurfaceQuery>` (real albedo/roughness per sample), and the selection
+//! eye supplied by the game from `ViewAnchor` (body-fixed camera position — the
+//! one per-frame answer to "where is the view?").
 //!
-//! Slice 1 (Mira): behind the game's `THALOS_TILE_RENDERER=1` toggle; udlod
-//! keeps running everywhere else. Known limits, tracked in the backlog: plain
-//! `StandardMaterial` (no `thalos::shadow` rig, no Hapke — airless shading
-//! fidelity is the follow-up), no GPU height-mirror feed (CPU `HeightSource`
-//! fallback serves colliders), heights-only displacement of `sample_d`.
+//! **This is the default ground renderer.** The legacy udlod path
+//! (`crates/rendering/udlod`, reached through [`crate::ground`]) still streams
+//! bodies the tile driver has not installed on, and can be forced for the whole
+//! process with `THALOS_TILE_RENDERER=0` as an A/B baseline. Known limits,
+//! tracked in the backlog: heights-only displacement of `sample_d`, and a
+//! flatten handle read per tile *bake*, so pads installed over resident tiles
+//! need those tiles dropped.
+//!
+//! **Authored ground outranks the distance rule.** Structure pads publish a
+//! [`RefinementSite`] floor that selection honours at any camera distance, so
+//! the mesh under a base always resolves the flat footprint stamped into it
+//! (INC-20260725T184654Z). Everything else — ruggedness, the residency brake —
+//! may only ever take detail *away* from the distance rule.
+//!
+//! Ground consumers (scatter, colliders, camera floor, HUD altitude) read the
+//! meshed heights back through [`height_mirror`], the tile-path analogue of
+//! udlod's GPU-atlas mirror — see that module for why sampling the analytic
+//! surface directly is not equivalent.
+//!
+//! **Residency is budgeted in bytes** ([`TILE_MESH_BYTES`],
+//! `THALOS_TILE_BUDGET_MB`). The budget brakes by *coarsening selection*, never
+//! by evicting resident tiles — the despawn rule is hole-free, so eviction would
+//! punch holes in the ground. Any new per-tile GPU resource must join
+//! `TILE_MESH_BYTES` or the budget silently under-counts VRAM
+//! (INC-20260725T012104Z-tile-residency-had-no-budget).
+//!
+//! The budget is **machine-wide, not per process**: it is divided by the number
+//! of live Thalos renderers ([`vram_share`]), because the card is shared and two
+//! instances each reading the full figure is how the second `DeviceLost`
+//! happened after the first budget landed.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use bevy::asset::RenderAssetUsages;
-use bevy::math::DVec3;
+use bevy::camera::visibility::RenderLayers;
+use bevy::math::{DQuat, DVec3};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::tasks::{Task, block_on, poll_once};
 use big_space::prelude::*;
 use thalos_terrain::SurfaceQuery;
 
+pub mod cache;
+pub mod height_mirror;
 pub mod material;
+pub mod vram_share;
+
+pub use cache::{CachedTileProvider, SurfaceTileCache, TileNamespaceFn};
+pub use height_mirror::{TileHeightMirror, TileHeightMirrorHandle};
 
 /// Vertices per tile side (core grid, excluding halo).
 pub const TILE_RES: usize = 65;
@@ -37,23 +69,198 @@ pub const TILE_RES: usize = 65;
 pub const TILE_HALO: usize = 1;
 /// Coarsest selected level (8×8 tiles per face).
 pub const MIN_LEVEL: u8 = 3;
-/// Split while camera distance < factor × tile arc.
-const SPLIT_FACTOR: f64 = 3.0;
+/// Split while camera distance < factor × tile arc — the *floor* of the
+/// ruggedness-scaled rule below.
+///
+/// This factor alone sets the *geometric* resolution of any framing: a
+/// resident tile at distance `d` has arc ≈ `d / SPLIT_FACTOR`, so its sample
+/// spacing is `d / (SPLIT_FACTOR × (TILE_RES − 1))`. At 3.0 the NTR-X4
+/// showcase framings (god view 22 km out) meshed the ground at ~100–200 m
+/// while the diffusion source carries a 90 m band with ~90 m of RMS detail
+/// below the 180 m scale — the mountains came out as soft domes because the
+/// *mesh*, not the data, was the limit. 6.0 puts the near/mid field at
+/// ~50–100 m so the source band is actually resolved; it costs ~4× the
+/// resident tiles at a given distance.
+const SPLIT_FACTOR: f64 = 6.0;
+/// Split cap for the most rugged terrain (ntr §7's relief-aware rule).
+///
+/// A single distance factor buys resolution *everywhere* at 4× the tiles per
+/// doubling, which is why 6.0 is as far as a uniform rule can go. But the
+/// resolution a frame actually needs is not uniform: from altitude the ocean
+/// and the plains are already converged at 6.0 while mountain ridges are
+/// still the mesh's fault, not the data's — a distant massif reads as a soft
+/// dome at 300 m/vertex however sharp the source is. So the cap is raised to
+/// this value and [`tile_ruggedness_weight`] *removes* the extra everywhere
+/// the terrain is smooth, which is the shape ntr §7 asks for (relief may only
+/// take detail away from the distance rule, never add it) with the base rule
+/// re-based from "everywhere" to "rugged". Cost lands only on the terrain the
+/// player is looking at when they say "mountains".
+const SPLIT_FACTOR_RUGGED: f64 = 18.0;
+/// Ruggedness (tile relief ÷ tile arc — a mean-slope proxy) at and below which
+/// a tile refines on the plain [`SPLIT_FACTOR`] rule, and at or above which it
+/// gets the full [`SPLIT_FACTOR_RUGGED`] cap. Measured on Thalos's diffusion
+/// terrain: ocean and coastal plain sit under 0.01, rolling upland ~0.02–0.04,
+/// the NE massif's flanks 0.06+.
+const RUGGED_LO: f32 = 0.012;
+const RUGGED_HI: f32 = 0.055;
+/// Sample spacing (m/vertex) below which the ruggedness boost stops buying
+/// anything and switches off, leaving the plain [`SPLIT_FACTOR`] rule.
+///
+/// The boost exists to make *distant* relief legible. Refining past the
+/// source's own finest band just re-meshes a signal that is no longer there:
+/// Thalos's diffusion window carries a 90 m band, so ~45 m/vertex already
+/// resolves it at Nyquist and the mesh stops being the limit. Measured
+/// (`artifacts/visual/runs/altitude-detail/`): without this floor the 22 km
+/// god view paid 2.7× the tiles (2,874 → 7,752) and 2.7× the cold stream for
+/// a frame the eye cannot tell from the baseline, because that framing's near
+/// field was already under 45 m. The floor gates only the boost — the base
+/// rule and `max_level` are untouched, so near-field mesh, colliders and
+/// scatter keep the resolution they have.
+const RUGGED_SPACING_FLOOR_M: f64 = 45.0;
 const MAX_IN_FLIGHT: usize = 24;
+
+// --- residency budget --------------------------------------------------------
+//
+// INC-20260725T012104Z-tile-residency-had-no-budget: this renderer could
+// allocate VRAM without limit until a `DeviceLost` stopped it.
+
+/// Skirt ring vertices appended by [`build_tile_mesh`] (one loop around the
+/// core grid: `4·(res−1)`, i.e. each side minus its shared corner).
+const TILE_SKIRT_VERTS: usize = 4 * TILE_RES - 4;
+/// Vertices in one tile mesh — core grid plus the skirt ring.
+const TILE_VERTS: usize = TILE_RES * TILE_RES + TILE_SKIRT_VERTS;
+/// Bytes per vertex across the attribute set [`build_tile_mesh`] writes:
+/// POSITION 12 + NORMAL 12 + COLOR 16 + UV_0 8 + UV_1 8. Kept adjacent to the
+/// mesher so adding an attribute (NTR-RT1 wants TANGENT) updates the budget's
+/// denominator in the same edit instead of silently under-counting VRAM.
+const TILE_VERTEX_BYTES: usize = 12 + 12 + 16 + 8 + 8;
+/// Indices in one tile mesh: two triangles per core quad plus two per skirt
+/// quad.
+const TILE_INDICES: usize = ((TILE_RES - 1) * (TILE_RES - 1) * 2 + TILE_SKIRT_VERTS * 2) * 3;
+/// GPU bytes one resident tile costs — **347 KiB** at `TILE_RES = 65`.
+///
+/// This is the number the residency budget is denominated in, and the reason it
+/// has to be: a *count* cap looks harmless and silently means gigabytes (the
+/// same lesson `rendering::tile_cache`'s payload budget already records).
+pub const TILE_MESH_BYTES: usize = TILE_VERTS * TILE_VERTEX_BYTES + TILE_INDICES * 4;
+
+/// Soft VRAM target for tile meshes **across every Thalos renderer on this
+/// machine**, overridable with `THALOS_TILE_BUDGET_MB` (0 disables the budget
+/// entirely). One process's share is this divided by the live instance count —
+/// see [`residency_budget_bytes`] and [`vram_share`].
+///
+/// 4 GiB ≈ 12,080 tiles. Chosen to sit **above every working set we have
+/// actually measured**, so the brake cannot silently regress a framing that was
+/// already capture-verified: the launch-pad first-coverage is ~3,100 tiles
+/// (1.0 GiB), the NTR-X4 showcase framings 3,427–4,419 (1.2–1.5 GiB), and the
+/// hungriest measured case — NTR-X12's 30 m Mira descent under the ruggedness
+/// rule — 10,900 (3.6 GiB). That leaves ~11 % margin over the worst known
+/// framing while still braking hard on the churn that reached a `DeviceLost`.
+///
+/// It is therefore a **runaway brake, not a quality cap**, and deliberately
+/// generous: the residency gauge is what tells us where it can be tightened, and
+/// a smaller card wants `THALOS_TILE_BUDGET_MB` set down rather than this
+/// guessed lower.
+const DEFAULT_RESIDENCY_BUDGET_BYTES: usize = 4096 * 1024 * 1024;
+
+/// Pressure fraction below which the split scale is allowed to recover. The
+/// deadband between this and 1.0 is what stops the controller oscillating (a
+/// scale that pumped every frame would read as visible LOD breathing).
+const BUDGET_RECOVER_FRACTION: f64 = 0.8;
+/// Multiplicative step down when over budget, and up when recovering. Down is
+/// faster than up: overshoot costs VRAM we may not have, undershoot costs only
+/// a few frames of softer distant relief.
+const SPLIT_SCALE_DOWN: f64 = 0.9;
+const SPLIT_SCALE_UP: f64 = 1.02;
+/// Floor on the split scale — `SPLIT_FACTOR × 0.333 ≈ 2.0`, coarse but a
+/// complete, walkable surface. The budget may take detail away; it may never
+/// take the ground away.
+const MIN_SPLIT_SCALE: f64 = 1.0 / 3.0;
+/// Seconds between residency gauge lines.
+const GAUGE_INTERVAL_S: f32 = 5.0;
+
+/// The machine-wide tile VRAM target, read once from `THALOS_TILE_BUDGET_MB`.
+fn machine_budget_bytes() -> usize {
+    static BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BYTES.get_or_init(|| {
+        let Ok(raw) = std::env::var("THALOS_TILE_BUDGET_MB") else {
+            return DEFAULT_RESIDENCY_BUDGET_BYTES;
+        };
+        match raw.trim().parse::<usize>() {
+            // 0 = no budget: the pre-budget behaviour, for an A/B that shows
+            // what the brake is actually holding back.
+            Ok(0) => {
+                warn!("THALOS_TILE_BUDGET_MB=0 — tile residency budget DISABLED");
+                usize::MAX
+            }
+            Ok(mb) => mb * 1024 * 1024,
+            Err(_) => {
+                warn!("THALOS_TILE_BUDGET_MB={raw:?} is not MiB; using the default");
+                DEFAULT_RESIDENCY_BUDGET_BYTES
+            }
+        }
+    })
+}
+
+/// This process's share of the tile VRAM budget: the machine-wide target split
+/// evenly across the renderer instances currently alive.
+///
+/// A single instance therefore behaves **exactly** as before this split existed,
+/// which is what keeps every capture-verified framing unregressed. A second
+/// instance halves both — the case that reached a `DeviceLost` on 2026-07-25 at
+/// 20:08 UTC with two 4 GiB-entitled processes on one 12 GB card, neither of
+/// them ever braking (INC-20260725T012104Z-tile-residency-had-no-budget).
+///
+/// Re-read every frame rather than cached at boot: instances start and die at
+/// arbitrary times, so a share fixed at startup would be wrong for whichever
+/// process was already running — the one that would keep its full entitlement
+/// precisely when a peer appears.
+fn residency_budget_bytes() -> usize {
+    let machine = machine_budget_bytes();
+    if machine == usize::MAX {
+        return usize::MAX;
+    }
+    machine / vram_share::live_instances().max(1)
+}
 /// Despawn laxness: a despawn-ready tile lingers until BOTH gates pass —
 /// wall-clock (covers upload stalls) and frame count (covers the render
-/// pipeline, which is per-frame not per-second). Overlap while lingering is
-/// harmless: per-level depth bias makes the finer surface win wherever the
-/// two nearly coincide, so old tiles can stay up generously.
+/// pipeline, which is per-frame not per-second). The lingering tile keeps
+/// drawing *alongside* its replacement, so the overlap has to be resolved in
+/// favour of the finer surface — see [`LEVEL_RENDER_LIFT_M`].
 const DESPAWN_GRACE_S: f32 = 0.5;
 const DESPAWN_GRACE_FRAMES: u16 = 20;
-/// Per-level depth-bias step (hardware `DepthBiasState.constant` units, via
-/// `StandardMaterial::depth_bias`). Finer tiles get a larger positive bias:
-/// under reversed-Z GreaterEqual, positive bias reads nearer, so wherever a
-/// stale coarse tile and its refined replacement are near-coplanar the
-/// refined one owns the pixels — "newest detail always wins" without
-/// coupling despawn timing to visual correctness.
-pub const LEVEL_DEPTH_BIAS_STEP: f32 = 2.0;
+/// Per-level **geometric** lift (metres of extra radius) baked into a tile's
+/// rendered vertices: level `L` draws at `radius + h + L ×` this.
+///
+/// The overlap this resolves is structural, not incidental. On a merge the
+/// coarse ancestor lands *before* its fine children retire (the despawn rule is
+/// hole-free by construction), so for `DESPAWN_GRACE_S` the two surfaces are
+/// both drawn and interpenetrate wherever they disagree — and the coarse one
+/// wins any pixel where it happens to sit nearer, which is what buried
+/// structures draped on the ground (paving sits only ~0.12 m proud).
+///
+/// This **used to be** `StandardMaterial::depth_bias`, on the belief that it was
+/// a hardware `DepthBiasState.constant`. It is not: Bevy folds `depth_bias` into
+/// the render phase's *sort distance* only (`core_3d`: `rangefinder.distance() +
+/// depth_bias`), and sort order decides nothing among opaque geometry — the
+/// depth test does. So the "finer detail always wins" invariant the tile
+/// renderer documented was never actually implemented, and coarse-over-fine
+/// overdraw flickered on every camera move (INC-20260725T191500Z).
+///
+/// A radial lift is the honest version of the same intent: it is real geometry,
+/// so it holds at any distance and any depth precision, and it is
+/// view-independent, so it can never pop. It buys **coplanar** cases — the
+/// interior of a structure pad, flat plains — where the two levels sample the
+/// same surface and only the mesh differs. It does not, and cannot, order two
+/// meshes that genuinely disagree by metres over rugged ground; nothing short of
+/// not overlapping does that, and not overlapping trades flicker for holes.
+///
+/// The step is bounded by what may hide under it: the runway asphalt sits
+/// 0.12 m over the pad, and `max_level` is 18, so the deepest tile draws 36 mm
+/// high — invisible on terrain, and 3× clear of the thinnest thing draped on it.
+/// The height mirror publishes the *provider's* heights, not these, so
+/// colliders, the camera floor and HUD altitude are untouched by the lift.
+pub const LEVEL_RENDER_LIFT_M: f64 = 0.002;
 
 // --- cube-sphere addressing (probe tiles.rs, verbatim) -----------------------
 
@@ -82,7 +289,12 @@ impl TileKey {
     pub fn containing(face: u8, level: u8, u: f64, v: f64) -> Self {
         let n = 1u32 << level;
         let t = |c: f64| (((c + 1.0) * 0.5 * n as f64) as i64).clamp(0, n as i64 - 1) as u32;
-        Self { face, level, x: t(u), y: t(v) }
+        Self {
+            face,
+            level,
+            x: t(u),
+            y: t(v),
+        }
     }
 
     pub fn containing_dir(dir: DVec3, level: u8) -> Self {
@@ -102,10 +314,30 @@ impl TileKey {
     pub fn children(self) -> [Self; 4] {
         let (f, l, x, y) = (self.face, self.level + 1, self.x * 2, self.y * 2);
         [
-            Self { face: f, level: l, x, y },
-            Self { face: f, level: l, x: x + 1, y },
-            Self { face: f, level: l, x, y: y + 1 },
-            Self { face: f, level: l, x: x + 1, y: y + 1 },
+            Self {
+                face: f,
+                level: l,
+                x,
+                y,
+            },
+            Self {
+                face: f,
+                level: l,
+                x: x + 1,
+                y,
+            },
+            Self {
+                face: f,
+                level: l,
+                x,
+                y: y + 1,
+            },
+            Self {
+                face: f,
+                level: l,
+                x: x + 1,
+                y: y + 1,
+            },
         ]
     }
 
@@ -165,9 +397,9 @@ pub fn face_uv_of_dir(dir: DVec3) -> (u8, f64, f64) {
 
 // --- tile payload + provider ---------------------------------------------------
 
-/// One sampled tile: heights + linear albedo + canonical material band
-/// weights (`[snow, forest]`, see `thalos_terrain::MaterialBands`) on the
-/// halo grid.
+/// One sampled tile: heights + linear albedo + canonical material-selection
+/// inputs (`[eco_altitude_m, forest]`, see `thalos_terrain::MaterialBands`)
+/// on the halo grid.
 pub struct SurfaceTile {
     pub key: TileKey,
     pub sample_spacing_m: f64,
@@ -187,6 +419,14 @@ impl SurfaceTile {
 /// boundary.
 pub trait TerrainTileProvider: Send + Sync {
     fn request(&self, key: TileKey, radius_m: f64) -> SurfaceTile;
+
+    /// Peak relief above the reference sphere, metres — the allowance the
+    /// horizon test lifts every tile by so terrain that legitimately pokes over
+    /// the limb is never culled. Conservative by default (no provider metadata
+    /// means "assume anything", which only costs refinement work).
+    fn height_range_m(&self) -> f32 {
+        f32::INFINITY
+    }
 }
 
 /// `SurfaceQuery`-backed provider — samples the body's one height/albedo
@@ -196,6 +436,10 @@ pub struct SurfaceQueryProvider {
 }
 
 impl TerrainTileProvider for SurfaceQueryProvider {
+    fn height_range_m(&self) -> f32 {
+        self.surface.height_range_m()
+    }
+
     fn request(&self, key: TileKey, radius_m: f64) -> SurfaceTile {
         let spacing = key.sample_spacing_m(radius_m);
         let side = SurfaceTile::grid_side();
@@ -205,6 +449,11 @@ impl TerrainTileProvider for SurfaceQueryProvider {
         // across the shared *bounded* eval pool, exactly like udlod's
         // `compute_tile_pixels` (never rayon's implicit global pool; see
         // `ground::tile_synthesis_pool`).
+        //
+        // Evaluating whole tiles on a widened outer pool instead was tried and
+        // reverted; see `TILE_SYNTHESIS_THREADS` for the measurement that killed
+        // it. Cheap tiles come from the cache tier above this provider, not from
+        // a different thread shape.
         let rows: Vec<(Vec<f32>, Vec<[f32; 3]>, Vec<[f32; 2]>)> =
             crate::ground::tile_synthesis_pool::tile_eval_pool().install(|| {
                 use rayon::prelude::*;
@@ -217,15 +466,16 @@ impl TerrainTileProvider for SurfaceQueryProvider {
                         let t = (j as f64 - TILE_HALO as f64) * step;
                         for i in 0..side {
                             let s = (i as f64 - TILE_HALO as f64) * step;
-                            let (sample, bands) =
-                                self.surface.sample_bands_d(key.dir_at(s, t), spacing as f32);
+                            let (sample, bands) = self
+                                .surface
+                                .sample_bands_d(key.dir_at(s, t), spacing as f32);
                             h.push(sample.height_m);
                             a.push([
                                 sample.albedo_linear.x,
                                 sample.albedo_linear.y,
                                 sample.albedo_linear.z,
                             ]);
-                            b.push([bands.snow, bands.forest]);
+                            b.push([bands.eco_altitude_m, bands.canopy]);
                         }
                         (h, a, b)
                     })
@@ -297,13 +547,18 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     let step = 1.0 / (res - 1) as f64;
     let h_scale = debug_height_scale();
 
+    // Finer levels render fractionally further out so a refined tile owns the
+    // pixels wherever it overlaps a lingering coarser one (see
+    // `LEVEL_RENDER_LIFT_M`). Rendering only — `tile.heights_m` is what the
+    // height mirror publishes to colliders and the camera floor.
+    let lift = key.level as f64 * LEVEL_RENDER_LIFT_M;
     let mut pos_grid: Vec<DVec3> = Vec::with_capacity(side * side);
     for j in 0..side {
         for i in 0..side {
             let s = (i as f64 - halo as f64) * step;
             let t = (j as f64 - halo as f64) * step;
             let h = tile.heights_m[j * side + i] as f64 * h_scale;
-            pos_grid.push(key.dir_at(s, t) * (radius_m + h));
+            pos_grid.push(key.dir_at(s, t) * (radius_m + h + lift));
         }
     }
     let origin =
@@ -329,7 +584,9 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
         for i in 0..res {
             let (gi, gj) = (i + halo, j + halo);
             let p = pos_grid[gj * side + gi];
-            let dev = (p.length() - radius_m) as f32;
+            // Report the terrain height, not the render lift folded into it, so
+            // the diagnostic stays comparable with the provider's own range.
+            let dev = (p.length() - radius_m - lift) as f32;
             mesh_h.0 = mesh_h.0.min(dev);
             mesh_h.1 = mesh_h.1.max(dev);
             let rel = p - origin;
@@ -345,7 +602,7 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
             let a = tile.albedo_linear[gj * side + gi];
             // Spare-channel contract with `tile_terrain.wgsl` (NTR-X4):
             // uv0 + uv1.x = wrapped body-fixed position, uv1.y = canonical
-            // snow band weight, color.a = canonical forest band weight.
+            // ecological altitude (m), color.a = canonical forest band weight.
             let b = tile.bands[gj * side + gi];
             colors.push([a[0], a[1], a[2], b[1]]);
             let wrapped = p - wrap_anchor;
@@ -368,7 +625,11 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     // debug height exaggeration: extreme scales legitimately invert steep
     // triangles, which is the exaggeration doing its job, not a winding bug.
     if (h_scale - 1.0).abs() < 1e-9 {
-        let tri = [indices[0] as usize, indices[1] as usize, indices[2] as usize];
+        let tri = [
+            indices[0] as usize,
+            indices[1] as usize,
+            indices[2] as usize,
+        ];
         let (p0, p1, p2) = (
             DVec3::from(positions[tri[0]].map(f64::from)),
             DVec3::from(positions[tri[1]].map(f64::from)),
@@ -430,7 +691,11 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
     mesh.insert_indices(Indices::U32(indices));
-    BuiltTile { mesh, origin, mesh_h }
+    BuiltTile {
+        mesh,
+        origin,
+        mesh_h,
+    }
 }
 
 // --- streaming (probe streaming.rs, per-root) ------------------------------------
@@ -447,6 +712,49 @@ pub struct TileEyeTarget {
     pub root: Entity,
     /// Camera position in the body-fixed frame, meters.
     pub cam_body: DVec3,
+    /// Body centre in world space, **f64**.
+    pub body_position: DVec3,
+    /// Body-fixed → world surface orientation, **f64** — the same authority
+    /// every other surface consumer shares
+    /// (`transforms::surface_orientation_authored`). Precision here is
+    /// load-bearing, not incidental: see [`TileBodyOrigin`].
+    pub body_orientation: DQuat,
+}
+
+/// A resident tile's origin in the **body-fixed** frame — the point its mesh
+/// vertices are stored relative to — kept so [`stream_tile_terrain`] can
+/// re-place the tile in world space from the body's f64 pose every frame.
+///
+/// **Why tiles are not children of the body's rotating grid.** That is the
+/// natural-looking parenting, and it is a trap this repo has already paid for
+/// twice. A tile's body-fixed origin has magnitude ≈ the planet radius, and
+/// big_space would rotate that multi-Mm offset into world space with the grid
+/// entity's `Transform.rotation` — an **f32** quaternion. f32 quaternion ULP at
+/// 3,186 km is a *decimetre*: measured over the spin cycle, mean 0.055 m,
+/// p95 0.165 m, worst 0.256 m, re-rolling every frame as the body turns. The
+/// runway's asphalt is lifted 0.12 m over the pad, so the ground crossed above
+/// and below the paving frame to frame and the whole space center flickered in
+/// and out of the terrain (INC-20260725T195500Z).
+///
+/// So tiles are root-grid children placed in f64 here, exactly as
+/// `update_runway_transform` places the runway and for the identical reason,
+/// leaving the f32 `Transform.rotation` acting only on in-tile vertex offsets
+/// (≤ 0.04 m of ULP even for a `MIN_LEVEL` tile, and micrometres near the
+/// surface). The legacy udlod ground dodges the same trap via
+/// `PreciseRotation`; this is the tile path's equivalent.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct TileBodyOrigin(pub DVec3);
+
+/// Set containing [`stream_tile_terrain`]. The driver that writes [`TileEye`]
+/// must run **before** this: the streamer places tiles from the target's f64
+/// body pose, and a frame-stale pose would slide the ground metres against
+/// everything built on it (232 m/s of surface speed at Thalos's equator).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TileStreamSet;
+
+/// World placement of a body-fixed point, in f64 up to the final grid split.
+fn place_body_point(origin_body: DVec3, target: &TileEyeTarget, grid: &Grid) -> (CellCoord, Vec3) {
+    grid.translation_to_grid(target.body_position + target.body_orientation * origin_body)
 }
 
 struct StreamedTile {
@@ -455,6 +763,10 @@ struct StreamedTile {
     gen_micros: u64,
     /// Sampled height range (m) — diagnostic for flat-terrain regressions.
     h_range: (f32, f32),
+    /// The provider's halo height grid, handed to the CPU height mirror so
+    /// scatter / colliders read the heights this mesh was built from (see
+    /// [`height_mirror`]).
+    heights_m: Arc<Vec<f32>>,
 }
 
 /// One streaming tile terrain on a body grid entity. Insert on the body's
@@ -463,10 +775,34 @@ struct StreamedTile {
 pub struct TileTerrainRoot {
     pub radius_m: f64,
     pub provider: Arc<dyn TerrainTileProvider>,
-    /// One material per quadtree level, identical except for the depth bias
-    /// (see [`LEVEL_DEPTH_BIAS_STEP`]). Indexed by `TileKey::level`.
-    pub materials: Vec<Handle<material::TileTerrainMaterial>>,
+    /// The one material every tile shares. This used to be a per-level `Vec`
+    /// differing only in `depth_bias`; that bias never did anything (see
+    /// [`LEVEL_RENDER_LIFT_M`]), so the levels are now genuinely identical and
+    /// the set collapsed to a single handle.
+    pub material: Handle<material::TileTerrainMaterial>,
     pub max_level: u8,
+    /// CPU mirror of the resident tiles' heights — the ground authority every
+    /// surface consumer (scatter, colliders, camera floor, HUD altitude) reads
+    /// while this renderer owns the body. Cloned into the game's rendered-ground
+    /// registry when the root is installed.
+    pub height_mirror: TileHeightMirrorHandle,
+    /// Render layers stamped on every spawned tile. Explicit (not defaulted)
+    /// because the tiles are real-scale ground: a host with more than one
+    /// camera over the same scene — Thalos draws the 1:1 ship view and the
+    /// 1e-6-scaled map view from the same world — will otherwise draw a
+    /// planet-sized landscape into the far-scale view — which is exactly what
+    /// the default layer 0 did (the udlod ground it replaces has always been
+    /// `SHIP_LAYER`-only).
+    pub render_layers: RenderLayers,
+    /// When set, every streamed tile also spawns a **shadow-caster child**: the
+    /// same mesh handle drawn with this material on these layers (the game's
+    /// sun-shadow cascade layer). The child is what lets terrain cast into the
+    /// cascade rig — ridges shadow valleys, hills shadow plains — without the
+    /// cascade cameras paying the real tile material's layer-stack fragment
+    /// cost over their whole 4096² targets: the caster material is a bare
+    /// unlit `StandardMaterial`, so the ortho passes rasterize depth almost
+    /// for free. `None` (default) keeps terrain a pure receiver.
+    pub caster: Option<(Handle<StandardMaterial>, RenderLayers)>,
     desired: HashSet<TileKey>,
     resident: HashMap<TileKey, Entity>,
     pending: HashMap<TileKey, Task<StreamedTile>>,
@@ -481,16 +817,38 @@ pub struct TileTerrainRoot {
     /// merge-case?) so a failing audit can name the ancestor that dropped and
     /// under which certificate. Capped at 512.
     recent_despawns: Vec<(TileKey, f64, bool)>,
+    /// Measured ruggedness (relief ÷ arc) of every tile this session has ever
+    /// generated, feeding the relief-aware split rule via
+    /// [`Self::ruggedness_at`]. Deliberately **not** pruned on despawn: the
+    /// split factor of a key must not change when its tile leaves residency,
+    /// or refinement would undo itself the moment it succeeded. Monotone
+    /// knowledge (each key measured once) is also what keeps the selection
+    /// from oscillating — see the descent simulation.
+    ruggedness: HashMap<TileKey, f32>,
+    /// Authored ground the selection must resolve however far the eye is (see
+    /// [`RefinementSite`]). Republished each frame by the driver that owns the
+    /// body's structure pads, so a pad placed at runtime is honoured on the next
+    /// selection instead of at the next root install.
+    refinement_sites: Vec<RefinementSite>,
+    /// Peak relief above the reference sphere (m), from the provider — the
+    /// allowance [`above_horizon`] lifts tiles by. Cached at construction
+    /// because it is a per-body constant.
+    relief_m: f64,
     gen_stats: GenStats,
     /// Latched true the first time the desired set is fully resident. After
     /// that, the hole-free despawn rule keeps coverage complete, so the
     /// impostor↔terrain swap can trust it without flickering back.
     covered_once: bool,
+    /// Budget controller state: multiplier on the split factors, 1.0 = the
+    /// unconstrained rule. Driven by [`Self::update_split_scale`].
+    split_scale: f64,
+    /// Seconds until the next residency gauge line.
+    gauge_countdown: f32,
 }
 
-/// Rolling per-tile generation-time telemetry; logs every 200 landings so
+/// Rolling per-tile generation-time telemetry; records every 200 landings so
 /// the raster->point->raster tax stays measured (the tile-native package
-/// provider is the planned fix).
+/// provider is the planned fix). The runtime routes this target to JSONL.
 #[derive(Default)]
 struct GenStats {
     samples: Vec<u64>,
@@ -514,15 +872,17 @@ impl GenStats {
             let mean = self.samples.iter().sum::<u64>() / self.samples.len() as u64;
             let p95 = self.samples[self.samples.len() * 95 / 100];
             info!(
-                "tile terrain: {} tiles landed | gen mean {:.1} ms p95 {:.1} ms (last {}) | provider h [{:.1}, {:.1}] m | mesh h [{:.1}, {:.1}] m",
-                self.total_landed,
-                mean as f64 / 1000.0,
-                p95 as f64 / 1000.0,
-                self.samples.len(),
-                self.h_min,
-                self.h_max,
-                self.mesh_min,
-                self.mesh_max,
+                target: "thalos::diagnostic::tile_terrain",
+                event = "generation_batch",
+                total_landed = self.total_landed,
+                sample_count = self.samples.len(),
+                mean_ms = mean as f64 / 1000.0,
+                p95_ms = p95 as f64 / 1000.0,
+                provider_height_min_m = self.h_min,
+                provider_height_max_m = self.h_max,
+                mesh_height_min_m = self.mesh_min,
+                mesh_height_max_m = self.mesh_max,
+                "tile generation batch"
             );
             self.samples.clear();
         }
@@ -541,27 +901,139 @@ impl TileTerrainRoot {
     pub fn new(
         radius_m: f64,
         provider: Arc<dyn TerrainTileProvider>,
-        materials: Vec<Handle<material::TileTerrainMaterial>>,
+        material: Handle<material::TileTerrainMaterial>,
+        render_layers: RenderLayers,
     ) -> Self {
         let max_level = max_level_for(radius_m);
+        let relief_m = provider.height_range_m() as f64;
         Self {
+            height_mirror: Arc::new(RwLock::new(TileHeightMirror::new(radius_m, max_level))),
             radius_m,
             provider,
-            materials,
+            material,
             max_level,
+            render_layers,
+            caster: None,
+            refinement_sites: Vec::new(),
             desired: HashSet::new(),
             resident: HashMap::new(),
             pending: HashMap::new(),
             retiring: HashMap::new(),
             coverage_check_countdown: 2.0,
             recent_despawns: Vec::new(),
+            ruggedness: HashMap::new(),
+            relief_m,
             gen_stats: GenStats::default(),
             covered_once: false,
+            split_scale: 1.0,
+            gauge_countdown: 0.0,
         }
+    }
+
+    /// Release everything this root owns, returning the tile entities the caller
+    /// must despawn.
+    ///
+    /// Used when the root hands off to another body: tiles are children of the
+    /// **big_space root**, not of this component's entity (see
+    /// [`TileBodyOrigin`]), so removing the component would orphan every
+    /// resident tile into the scene rather than despawn it.
+    ///
+    /// `ruggedness` is cleared too, unlike on despawn where it is deliberately
+    /// kept: it is a measurement of *this body's* terrain, and a `TileKey` is
+    /// only unique within a body. Carrying it across a handoff would apply one
+    /// body's mountains to another's coordinates.
+    pub fn release_all(&mut self) -> Vec<Entity> {
+        let entities: Vec<Entity> = self.resident.values().copied().collect();
+        self.resident.clear();
+        // Dropping a pending task aborts it (the streamer relies on the same
+        // behaviour when it cancels un-wanted tiles).
+        self.pending.clear();
+        self.desired.clear();
+        self.retiring.clear();
+        self.recent_despawns.clear();
+        self.ruggedness.clear();
+        self.refinement_sites.clear();
+        self.covered_once = false;
+        if let Ok(mut mirror) = self.height_mirror.write() {
+            mirror.clear();
+        }
+        entities
     }
 
     pub fn resident_count(&self) -> usize {
         self.resident.len()
+    }
+
+    /// Replace the authored refinement floors (see [`RefinementSite`]).
+    /// Idempotent and cheap — the driver calls it every frame from the body's
+    /// flatten handle, and a no-op change costs one slice comparison.
+    pub fn set_refinement_sites(&mut self, sites: Vec<RefinementSite>) {
+        if self.refinement_sites != sites {
+            self.refinement_sites = sites;
+        }
+    }
+
+    /// VRAM the landed tile meshes occupy right now.
+    pub fn resident_bytes(&self) -> usize {
+        self.resident.len() * TILE_MESH_BYTES
+    }
+
+    /// VRAM already committed: landed tiles plus the in-flight ones that are
+    /// going to land. The budget controller's input — using resident alone
+    /// would let 24 more tiles arrive after the brake was already needed.
+    pub fn committed_bytes(&self) -> usize {
+        (self.resident.len() + self.pending.len()) * TILE_MESH_BYTES
+    }
+
+    /// Current split-factor multiplier: 1.0 while inside the residency budget,
+    /// lower while the brake is holding detail back.
+    pub fn split_scale(&self) -> f64 {
+        self.split_scale
+    }
+
+    /// Steer [`Self::split_scale`] from committed VRAM.
+    ///
+    /// **Why selection and not eviction.** The despawn rule is hole-free by
+    /// construction — a tile may only leave once its footprint is served by
+    /// other resident tiles — so a budget that evicted resident tiles would
+    /// punch holes in the ground. Coarsening *desire* instead makes the coarse
+    /// ancestor desired again; once it lands, the fine tiles it covers retire
+    /// through the normal merge certificate and the budget is recovered with no
+    /// hole at any instant.
+    ///
+    /// The consequence to keep in mind: satisfying the brake costs a transient
+    /// *increase* (the ancestor lands before its children leave, ≤ ~1/3 pyramid
+    /// overhead), which is why the budget must sit below real VRAM with headroom
+    /// rather than at it.
+    fn update_split_scale(&mut self, budget_bytes: usize) {
+        if budget_bytes == usize::MAX {
+            self.split_scale = 1.0;
+            return;
+        }
+        let committed = self.committed_bytes() as f64;
+        let budget = budget_bytes as f64;
+        if committed > budget {
+            self.split_scale = (self.split_scale * SPLIT_SCALE_DOWN).max(MIN_SPLIT_SCALE);
+        } else if committed < budget * BUDGET_RECOVER_FRACTION && self.split_scale < 1.0 {
+            self.split_scale = (self.split_scale * SPLIT_SCALE_UP).min(1.0);
+        }
+    }
+
+    /// Ruggedness under `key` for the split rule: its own measurement if this
+    /// session has ever generated it, else the nearest measured ancestor's
+    /// (ruggedness is scale-invariant, so it inherits unscaled). `None` above
+    /// the first measurement — a cold selection is the plain distance rule.
+    fn ruggedness_at(&self, key: TileKey) -> Option<f32> {
+        let mut k = key;
+        loop {
+            if let Some(&r) = self.ruggedness.get(&k) {
+                return Some(r);
+            }
+            match k.parent() {
+                Some(p) if p.level >= MIN_LEVEL => k = p,
+                _ => return None,
+            }
+        }
     }
 
     /// True once the streamed terrain has (ever) fully covered the desired
@@ -571,13 +1043,8 @@ impl TileTerrainRoot {
         self.covered_once
     }
 
-
     pub fn settled(&self) -> bool {
-        self.pending.is_empty()
-            && self
-                .desired
-                .iter()
-                .all(|k| self.resident.contains_key(k))
+        self.pending.is_empty() && self.desired.iter().all(|k| self.resident.contains_key(k))
     }
 
     /// Sample spacing (m/vertex) of the finest resident tile containing
@@ -600,16 +1067,207 @@ fn tile_arc_m(level: u8, radius_m: f64) -> f64 {
     radius_m * core::f64::consts::FRAC_PI_2 / (1u64 << level) as f64
 }
 
+/// How much of the [`SPLIT_FACTOR`] → [`SPLIT_FACTOR_RUGGED`] range a tile of
+/// this ruggedness earns: 0 on water and plains, 1 on mountain flanks.
+///
+/// Ruggedness is `relief ÷ arc`, which is *scale-invariant* for fractal
+/// terrain — a mountainside reads the same at level 6 and level 12. That is
+/// what lets an unmeasured tile inherit its nearest measured ancestor's value
+/// unscaled (see [`TileTerrainRoot::ruggedness_at`]); a relief figure could
+/// not be inherited without a Hurst assumption that compounds every level and
+/// ratchets the selection deeper each descent.
+fn tile_ruggedness_weight(rugged: f32) -> f64 {
+    let t = ((rugged - RUGGED_LO) / (RUGGED_HI - RUGGED_LO)).clamp(0.0, 1.0) as f64;
+    // Smoothstep: no hard line in the terrain where the tile density jumps.
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// Is any part of `key` above the body's own horizon from `cam_body`?
+///
+/// Exact sphere-tangent test: a point `p` on a sphere of radius `r` centred at
+/// the origin is above the horizon seen from `c` iff `p · c ≥ r²`. Every corner
+/// (and the centre) is lifted to `r + relief_m` first, so a mountain that
+/// legitimately pokes over the limb is never culled — with Thalos's ±9.8 km and
+/// Mira's ±13 km that allowance is what keeps the test honest rather than
+/// merely cheap.
+///
+/// Used to gate *refinement only*, never coverage: a tile that fails still
+/// enters the leaf set at whatever level it reached, so the sphere stays fully
+/// tiled and nothing downstream (the coverage invariant, the height mirror's
+/// fallback, the impostor handoff) sees a hole. Cutting them out entirely would
+/// save more (46–60 % vs 28–40 % measured) but trades a guarantee for it.
+///
+/// This is view-*independent* — it depends on the eye's position, not where it
+/// looks — so unlike frustum culling it can never pop when the camera turns.
+fn above_horizon(key: TileKey, cam_body: DVec3, radius_m: f64, relief_m: f64) -> bool {
+    // No relief bound (a provider without metadata) means "assume anything is
+    // up there", i.e. refine as the distance rule alone would. Must be an
+    // explicit escape: feeding a huge finite allowance through the maths below
+    // does *not* degrade to "always visible", it degrades to nonsense.
+    if !relief_m.is_finite() {
+        return true;
+    }
+    let cam_len = cam_body.length();
+    if cam_len <= radius_m {
+        return true;
+    }
+    let top = radius_m + relief_m;
+    // Widest angle from the sub-camera point at which ground lifted to `top`
+    // still clears the tangent plane: `p · c ≥ r²` with `|p| = top` becomes
+    // `cos θ ≥ r² / (top · |c|)`.
+    let cos_max = radius_m * radius_m / (top * cam_len);
+    if cos_max <= -1.0 {
+        return true;
+    }
+    let theta_max = cos_max.min(1.0).acos();
+
+    // Bound the tile by its cone, NOT by point samples. A tile at MIN_LEVEL
+    // spans 589 km on Thalos, so from 756 m up its corners and centre are all
+    // far below the horizon while the ground directly beneath the camera —
+    // inside the same tile — is in plain view. Sampling points culled every
+    // coarse tile and refinement stopped dead at the MIN_LEVEL shell; the cone
+    // is conservative for any tile size.
+    let centre = key.center_dir();
+    let cam_dir = cam_body / cam_len;
+    let theta_c = centre.dot(cam_dir).clamp(-1.0, 1.0).acos();
+    let theta_r = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+        .iter()
+        .map(|&(s, t)| centre.dot(key.dir_at(s, t)).clamp(-1.0, 1.0).acos())
+        .fold(0.0f64, f64::max);
+    theta_c - theta_r <= theta_max
+}
+
+/// A body-fixed patch whose ground the selection must resolve to at least
+/// `spacing_m`, **whatever the camera distance rule says**.
+///
+/// The distance/ruggedness rule answers "how much detail does this framing
+/// deserve?", which is the right question for natural terrain and the wrong one
+/// for authored ground. A structure pad is a flat plane stamped into the
+/// heightfield with a hard edge and a blend ramp; the mesh either resolves that
+/// footprint or it reverts to the natural terrain the pad cut away — at the
+/// spaceport, 83 m of it (`terrain 537..692 m` levelled to 609 m). Everything
+/// draped on the pad is proud of it by centimetres, so an under-resolved tile
+/// does not degrade the base gracefully, it swallows it whole.
+///
+/// So the pad publishes its own resolution requirement and selection honours it
+/// as a **floor**. This is deliberately the mirror image of
+/// [`tile_ruggedness_weight`], which may only ever take detail *away* from the
+/// distance rule: authored ground is the one input allowed to add it back.
+///
+/// The floor still yields to [`above_horizon`] — a base on the far side of the
+/// body earns nothing — which is what keeps it from pinning fine tiles at the
+/// antipode for the whole session.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RefinementSite {
+    /// Unit body-fixed direction to the patch centre.
+    pub center_dir: DVec3,
+    /// Angular radius (radians) the guarantee covers — the authored footprint
+    /// plus whatever blend surrounds it.
+    pub angular_radius: f64,
+    /// Sample spacing (m/vertex) the ground under the patch must reach.
+    pub spacing_m: f64,
+}
+
+impl RefinementSite {
+    /// Does `key`'s cone overlap this site's cone? Cone-vs-cone, not a point
+    /// test, for the same reason [`above_horizon`] bounds tiles by their cone: a
+    /// coarse tile spans hundreds of km, so a centre-direction test would miss
+    /// every ancestor that actually covers the site — which is exactly the set
+    /// the floor exists to catch.
+    fn overlaps(&self, key: TileKey) -> bool {
+        let centre = key.center_dir();
+        let theta_c = centre.dot(self.center_dir).clamp(-1.0, 1.0).acos();
+        let theta_r = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0)]
+            .iter()
+            .map(|&(s, t)| centre.dot(key.dir_at(s, t)).clamp(-1.0, 1.0).acos())
+            .fold(0.0f64, f64::max);
+        theta_c - theta_r <= self.angular_radius
+    }
+}
+
+/// Must `key` refine to honour an authored [`RefinementSite`]?
+fn below_site_floor(key: TileKey, radius_m: f64, sites: &[RefinementSite]) -> bool {
+    let spacing = key.sample_spacing_m(radius_m);
+    sites
+        .iter()
+        .any(|site| spacing > site.spacing_m && site.overlaps(key))
+}
+
 /// Pure selection: distance-split descent + cross-face 2:1 balance via
 /// direction probes (probe M2/M3).
-pub fn select_leaves(cam_body: DVec3, radius_m: f64, max_level: u8) -> HashSet<TileKey> {
+///
+/// `ruggedness` answers "how rough is the terrain under this key" (see
+/// [`tile_ruggedness_weight`]); `None` — nothing measured there yet — means
+/// the tile refines on the plain [`SPLIT_FACTOR`] rule, so a cold start
+/// behaves exactly as the distance-only selection did and sharpens as
+/// measurements land.
+pub fn select_leaves_with_relief(
+    cam_body: DVec3,
+    radius_m: f64,
+    max_level: u8,
+    relief_m: f64,
+    ruggedness: &dyn Fn(TileKey) -> Option<f32>,
+) -> HashSet<TileKey> {
+    select_leaves_scaled(
+        cam_body,
+        radius_m,
+        max_level,
+        relief_m,
+        ruggedness,
+        1.0,
+        &[],
+    )
+}
+
+/// [`select_leaves_with_relief`] with the residency budget's multiplier applied
+/// to both split factors.
+///
+/// `split_scale` ≤ 1.0 shrinks the distance at which every level refines, so the
+/// whole selection coarsens proportionally instead of a single band collapsing.
+/// Leaf count goes roughly as the square of the factor, so 0.9 is ~20% fewer
+/// tiles per step — the brake reaches a 2.5 GiB target from a runaway in a
+/// handful of frames. `max_level` and the horizon test are untouched: the budget
+/// only moves *where* detail stops, never removes the surface.
+///
+/// `sites` are authored [`RefinementSite`] floors. They outrank both the
+/// distance rule and `split_scale` — the brake may make distant mountains softer
+/// (nobody can tell), but it may not let the ground swallow a base.
+pub fn select_leaves_scaled(
+    cam_body: DVec3,
+    radius_m: f64,
+    max_level: u8,
+    relief_m: f64,
+    ruggedness: &dyn Fn(TileKey) -> Option<f32>,
+    split_scale: f64,
+    sites: &[RefinementSite],
+) -> HashSet<TileKey> {
+    let split_scale = split_scale.clamp(MIN_SPLIT_SCALE, 1.0);
     let want_split = |key: TileKey| -> bool {
         if key.level >= max_level {
             return false;
         }
+        // Authored floor first: it is unconditional apart from the horizon, so
+        // there is nothing the distance rule below could add to the answer.
+        if below_site_floor(key, radius_m, sites) {
+            return above_horizon(key, cam_body, radius_m, relief_m);
+        }
         let arc = tile_arc_m(key.level, radius_m);
         let d = ((cam_body - key.center_dir() * radius_m).length() - arc * 0.75).max(1.0);
-        d < SPLIT_FACTOR * arc
+        // The boost only applies while a split still lands above the source's
+        // detail floor (see `RUGGED_SPACING_FLOOR_M`).
+        let child_spacing = key.sample_spacing_m(radius_m) * 0.5;
+        let w = if child_spacing >= RUGGED_SPACING_FLOOR_M {
+            ruggedness(key).map_or(0.0, tile_ruggedness_weight)
+        } else {
+            0.0
+        };
+        let factor = (SPLIT_FACTOR + (SPLIT_FACTOR_RUGGED - SPLIT_FACTOR) * w) * split_scale;
+        if d >= factor * arc {
+            return false;
+        }
+        // Cheapest test last: only worth paying once distance has already said
+        // yes. Ground the eye cannot possibly see does not earn refinement.
+        above_horizon(key, cam_body, radius_m, relief_m)
     };
 
     let mut leaves: HashSet<TileKey> = HashSet::new();
@@ -618,7 +1276,12 @@ pub fn select_leaves(cam_body: DVec3, radius_m: f64, max_level: u8) -> HashSet<T
     for face in 0..6u8 {
         for y in 0..n {
             for x in 0..n {
-                stack.push(TileKey { face, level: MIN_LEVEL, x, y });
+                stack.push(TileKey {
+                    face,
+                    level: MIN_LEVEL,
+                    x,
+                    y,
+                });
             }
         }
     }
@@ -670,14 +1333,17 @@ pub fn select_leaves(cam_body: DVec3, radius_m: f64, max_level: u8) -> HashSet<T
     leaves
 }
 
+/// [`select_leaves_with_relief`] with no relief knowledge and no horizon
+/// allowance bound — the plain distance rule. Kept as the pure form the
+/// selection tests drive.
+pub fn select_leaves(cam_body: DVec3, radius_m: f64, max_level: u8) -> HashSet<TileKey> {
+    select_leaves_with_relief(cam_body, radius_m, max_level, f64::INFINITY, &|_| None)
+}
+
 /// Is `key`'s whole footprint covered by resident tiles (itself, or recursively
 /// by its children at any mix of levels)? Short-circuits at each resident node,
 /// so the traversal is bounded by the resident set, not by 4^depth.
-fn covered_by_resident(
-    key: TileKey,
-    resident: &HashMap<TileKey, Entity>,
-    max_level: u8,
-) -> bool {
+fn covered_by_resident(key: TileKey, resident: &HashMap<TileKey, Entity>, max_level: u8) -> bool {
     if resident.contains_key(&key) {
         return true;
     }
@@ -772,7 +1438,9 @@ fn despawn_ready(
     retiring.retain(|key, _| removable.contains(key));
     let mut expired = Vec::new();
     for key in removable {
-        let (secs, frames) = retiring.entry(key).or_insert((DESPAWN_GRACE_S, DESPAWN_GRACE_FRAMES));
+        let (secs, frames) = retiring
+            .entry(key)
+            .or_insert((DESPAWN_GRACE_S, DESPAWN_GRACE_FRAMES));
         if *secs > 0.0 || *frames > 0 {
             *secs -= dt;
             *frames = frames.saturating_sub(1);
@@ -820,14 +1488,22 @@ fn uncovered_desired(
 fn stream_tile_terrain(
     eye: Res<TileEye>,
     time: Res<Time>,
-    mut roots: Query<(Entity, &mut TileTerrainRoot, &Grid)>,
+    mut roots: Query<&mut TileTerrainRoot>,
+    big_space: Query<(Entity, &Grid), With<BigSpace>>,
+    mut placed: Query<(&TileBodyOrigin, &mut CellCoord, &mut Transform)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut commands: Commands,
 ) {
     let Some(target) = &eye.target else {
         return;
     };
-    let Ok((root_entity, mut root, grid)) = roots.get_mut(target.root) else {
+    // Tiles hang off the big_space ROOT, not the body's rotating grid — see
+    // [`TileBodyOrigin`] for why that distinction is a decimetre of ground.
+    let Ok((root_entity, grid)) = big_space.single() else {
+        return;
+    };
+    let body_rotation = target.body_orientation.as_quat();
+    let Ok(mut root) = roots.get_mut(target.root) else {
         return;
     };
     let cam = target.cam_body;
@@ -835,7 +1511,30 @@ fn stream_tile_terrain(
     let max_level = root.max_level;
     let root_ref = &mut *root;
 
-    root_ref.desired = select_leaves(cam, radius, max_level);
+    // Residency budget: steer the split scale from the VRAM already committed
+    // *before* selecting, so a frame that is over budget selects a coarser set
+    // rather than committing more first (INC-20260725T012104Z-tile-residency-had-no-budget).
+    let budget_bytes = residency_budget_bytes();
+    root_ref.update_split_scale(budget_bytes);
+
+    // Selection reads the measured-ruggedness memo, so mountains hold their
+    // mesh out to `SPLIT_FACTOR_RUGGED` while water and plains stay on the
+    // plain `SPLIT_FACTOR` rule, and skips refinement below the body's own
+    // horizon. Split the borrow: `ruggedness_at` walks `&self` while `desired`
+    // is being written.
+    let desired_now = {
+        let known: &TileTerrainRoot = root_ref;
+        select_leaves_scaled(
+            cam,
+            radius,
+            max_level,
+            known.relief_m,
+            &|key| known.ruggedness_at(key),
+            known.split_scale,
+            &known.refinement_sites,
+        )
+    };
+    root_ref.desired = desired_now;
 
     // Bridge tiles keep multi-level replacement progressive (see
     // `bridge_requests`).
@@ -879,7 +1578,13 @@ fn stream_tile_terrain(
                     (lo.min(h), hi.max(h))
                 });
             let built = build_tile_mesh(&tile, radius);
-            StreamedTile { key, built, gen_micros: started.elapsed().as_micros() as u64, h_range }
+            StreamedTile {
+                key,
+                built,
+                gen_micros: started.elapsed().as_micros() as u64,
+                h_range,
+                heights_m: Arc::new(tile.heights_m),
+            }
         });
         root_ref.pending.insert(key, task);
     }
@@ -898,28 +1603,68 @@ fn stream_tile_terrain(
         root_ref
             .gen_stats
             .record(done.gen_micros, done.h_range, done.built.mesh_h);
-        let (cell, local) = grid.translation_to_grid(done.built.origin);
-        let material = root_ref
-            .materials
-            .get(done.key.level as usize)
-            .or_else(|| root_ref.materials.last())
-            .cloned()
-            .unwrap_or_default();
-        let entity = commands
-            .spawn((
-                Mesh3d(meshes.add(done.built.mesh)),
-                MeshMaterial3d(material),
-                Transform::from_translation(local),
-                cell,
-                ChildOf(root_entity),
-            ))
-            .id();
+        // Feed the relief-aware split rule. `h_range` is the provider's own
+        // sampled spread over this tile, so the measurement costs nothing
+        // beyond the generation that already happened.
+        if done.h_range.0.is_finite() && done.h_range.1.is_finite() {
+            let relief = done.h_range.1 - done.h_range.0;
+            let arc = tile_arc_m(done.key.level, radius) as f32;
+            root_ref.ruggedness.insert(done.key, relief / arc);
+        }
+        let (cell, local) = place_body_point(done.built.origin, target, grid);
+        let mesh_handle = meshes.add(done.built.mesh);
+        let mut tile = commands.spawn((
+            Mesh3d(mesh_handle.clone()),
+            MeshMaterial3d(root_ref.material.clone()),
+            // Rotation carries the body's spin, so it acts only on the
+            // in-tile vertex offsets; the multi-Mm part of the placement is
+            // already resolved in f64 above.
+            Transform::from_translation(local).with_rotation(body_rotation),
+            cell,
+            TileBodyOrigin(done.built.origin),
+            root_ref.render_layers.clone(),
+            ChildOf(root_entity),
+        ));
+        // Shadow-caster child (see `TileTerrainRoot::caster`): same mesh, cheap
+        // material, cascade layer only. Identity transform — it inherits the
+        // tile's placement — and it despawns with the tile (recursive despawn).
+        if let Some((caster_mat, caster_layers)) = &root_ref.caster {
+            tile.with_child((
+                Mesh3d(mesh_handle),
+                MeshMaterial3d(caster_mat.clone()),
+                Transform::IDENTITY,
+                caster_layers.clone(),
+            ));
+        }
+        let entity = tile.id();
         root_ref.resident.insert(done.key, entity);
+        // Publish the heights this tile was meshed from, so every ground
+        // consumer seats on the geometry that is actually drawn.
+        if let Ok(mut mirror) = root_ref.height_mirror.write() {
+            mirror.insert(done.key, done.heights_m);
+        }
+    }
+
+    // Re-place every resident tile from this frame's f64 body pose. The body
+    // spins, so this is not optional bookkeeping — it is what keeps the ground
+    // welded to everything built on it. Doing it here rather than in a system of
+    // its own means one pose value serves both the tiles that landed this frame
+    // and the ones already up, so the two can never be a frame apart.
+    for (origin, mut cell, mut transform) in &mut placed {
+        let (next_cell, local) = place_body_point(origin.0, target, grid);
+        if *cell != next_cell {
+            *cell = next_cell;
+        }
+        transform.translation = local;
+        transform.rotation = body_rotation;
     }
 
     if !root_ref.covered_once
         && !root_ref.desired.is_empty()
-        && root_ref.desired.iter().all(|k| root_ref.resident.contains_key(k))
+        && root_ref
+            .desired
+            .iter()
+            .all(|k| root_ref.resident.contains_key(k))
     {
         root_ref.covered_once = true;
         info!(
@@ -941,9 +1686,10 @@ fn stream_tile_terrain(
     //    refinement read as gradual sharpening instead of a late swap.
     // Lax retirement: a removable tile only despawns after its condition has
     // held continuously through BOTH grace gates. Overlap while lingering is
-    // rendered correctly by the per-level depth bias (finer wins), so there
-    // is no pressure to despawn promptly. Decision logic lives in
-    // `despawn_ready` (pure — exercised by the descent simulation test).
+    // rendered correctly by the per-level render lift (finer wins — see
+    // `LEVEL_RENDER_LIFT_M`), so there is no pressure to despawn promptly.
+    // Decision logic lives in `despawn_ready` (pure — exercised by the descent
+    // simulation test).
     let dt = time.delta_secs();
     let now = time.elapsed_secs_f64();
     let expired = despawn_ready(
@@ -956,6 +1702,9 @@ fn stream_tile_terrain(
     for key in expired {
         if let Some(entity) = root_ref.resident.remove(&key) {
             commands.entity(entity).despawn();
+            if let Ok(mut mirror) = root_ref.height_mirror.write() {
+                mirror.remove(key);
+            }
             // Forensics: record the despawn + which certificate held at this
             // final revalidation frame (merge = desired ancestor resident).
             let merge_case = {
@@ -988,6 +1737,38 @@ fn stream_tile_terrain(
     // LOGICAL (a selection/despawn bug); if the screen shows holes while
     // this stays silent, the problem is presentation-side (upload, culling,
     // material) — the discriminator for the black-tile reports.
+    // Residency gauge. The generation-stats line next to it counts *cumulative*
+    // landings, which cannot answer "how much VRAM is the ground holding now" —
+    // the question the OOM in INC-20260725T012104Z had no data for, because a
+    // 19,200-landing log is equally consistent with a 1 GiB working set and a
+    // 6 GiB one. This is periodic rather than per-landing so a settled scene
+    // still reports its footprint.
+    root_ref.gauge_countdown -= dt;
+    if root_ref.gauge_countdown <= 0.0 {
+        root_ref.gauge_countdown = GAUGE_INTERVAL_S;
+        let mib = |bytes: usize| bytes as f64 / (1024.0 * 1024.0);
+        let budget_note = if budget_bytes == usize::MAX {
+            "off".to_string()
+        } else {
+            format!("{:.0} MiB", mib(budget_bytes))
+        };
+        // `instances` is load-bearing when reading this line back: a budget that
+        // suddenly halves is a peer starting, not the brake misbehaving.
+        info!(
+            target: "thalos::diagnostic::tile_terrain",
+            event = "residency_gauge",
+            resident = root_ref.resident.len(),
+            resident_mib = mib(root_ref.resident_bytes()),
+            pending = root_ref.pending.len(),
+            desired = root_ref.desired.len(),
+            retiring = root_ref.retiring.len(),
+            budget = %budget_note,
+            instances = vram_share::live_instances(),
+            split_scale = root_ref.split_scale,
+            "tile residency gauge"
+        );
+    }
+
     root_ref.coverage_check_countdown -= dt;
     if root_ref.coverage_check_countdown <= 0.0 {
         root_ref.coverage_check_countdown = 2.0;
@@ -1003,7 +1784,11 @@ fn stream_tile_terrain(
             // any recent despawn among the chain (with age + certificate).
             for key in uncovered.iter().take(3) {
                 let mut chain = format!("{key:?}: self[");
-                chain.push_str(if root_ref.pending.contains_key(key) { "pending" } else { "absent" });
+                chain.push_str(if root_ref.pending.contains_key(key) {
+                    "pending"
+                } else {
+                    "absent"
+                });
                 chain.push(']');
                 let mut probe = *key;
                 while let Some(p) = probe.parent() {
@@ -1038,6 +1823,493 @@ fn stream_tile_terrain(
 }
 
 #[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    const R: f64 = 3_186_000.0;
+    const RELIEF: f64 = 9_797.6;
+
+    fn flat_tile(key: TileKey) -> SurfaceTile {
+        let n = SurfaceTile::grid_side().pow(2);
+        SurfaceTile {
+            key,
+            sample_spacing_m: key.sample_spacing_m(R),
+            heights_m: vec![0.0; n],
+            albedo_linear: vec![[0.5, 0.4, 0.3]; n],
+            bands: vec![[0.0, 0.0]; n],
+        }
+    }
+
+    /// The budget's denominator must equal what the mesher actually uploads.
+    /// A new vertex attribute (NTR-RT1 wants TANGENT) silently under-counts
+    /// VRAM otherwise, and an under-counting budget is worse than none: it
+    /// reports headroom that does not exist.
+    #[test]
+    fn tile_mesh_bytes_matches_the_built_mesh() {
+        let built = build_tile_mesh(
+            &flat_tile(TileKey {
+                face: 0,
+                level: 6,
+                x: 3,
+                y: 5,
+            }),
+            R,
+        );
+        let vertex_bytes = built.mesh.get_vertex_buffer_size();
+        let index_bytes = built
+            .mesh
+            .get_index_buffer_bytes()
+            .expect("tile meshes are indexed")
+            .len();
+        assert_eq!(
+            vertex_bytes + index_bytes,
+            TILE_MESH_BYTES,
+            "TILE_MESH_BYTES ({TILE_MESH_BYTES}) disagrees with the mesh \
+             ({vertex_bytes} vertex + {index_bytes} index) — an attribute changed"
+        );
+    }
+
+    /// Coarsening is proportional and bounded: a lower scale always costs fewer
+    /// tiles, and even the floor keeps a complete surface (never fewer leaves
+    /// than the MIN_LEVEL shell, which is the whole sphere).
+    #[test]
+    fn split_scale_trades_tiles_for_coverage_not_ground() {
+        let max_level = max_level_for(R);
+        let cam = DVec3::new(0.31, 0.72, 0.62).normalize() * (R + 2_000.0);
+        let shell = 6 * (1usize << MIN_LEVEL).pow(2);
+        let mut previous = usize::MAX;
+        for scale in [1.0, 0.8, 0.6, MIN_SPLIT_SCALE] {
+            let leaves = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, scale, &[]);
+            assert!(
+                leaves.len() < previous,
+                "scale {scale} did not reduce the working set ({} vs {previous})",
+                leaves.len()
+            );
+            assert!(
+                leaves.len() >= shell,
+                "scale {scale} left the sphere uncovered ({} leaves < {shell})",
+                leaves.len()
+            );
+            previous = leaves.len();
+        }
+    }
+
+    /// Placing a tile through an **f32** body rotation misses by more than the
+    /// paving is lifted; placing it in f64 does not.
+    ///
+    /// This is the arithmetic behind [`TileBodyOrigin`], kept executable because
+    /// the failure it guards is invisible in a still and unremarkable in code
+    /// review: "parent the tiles to the body's grid" reads like the obviously
+    /// right thing and costs a decimetre of ground (INC-20260725T195500Z).
+    #[test]
+    fn f32_body_rotation_cannot_place_ground_under_a_runway() {
+        // A point on the surface, and the body turning through its day.
+        let p_body = DVec3::new(0.31, 0.13, 0.94).normalize() * R;
+        let axis = DVec3::Y;
+        const PAVING_LIFT_M: f64 = 0.12;
+
+        let mut worst_f32 = 0.0f64;
+        let mut worst_f64 = 0.0f64;
+        for step in 0..2_000 {
+            let angle = step as f64 * core::f64::consts::TAU / 2_000.0;
+            let exact = DQuat::from_axis_angle(axis, angle);
+            // What a grid-parented tile gets: the same rotation, quantised to
+            // the f32 `Transform.rotation` big_space propagates through.
+            let via_f32 = exact.as_quat().normalize().as_dquat();
+            worst_f32 = worst_f32.max((via_f32 * p_body - exact * p_body).length());
+            // What this renderer does instead: f64 all the way to the grid
+            // split, with f32 acting only on in-tile vertex offsets.
+            let offset = DVec3::new(120.0, -40.0, 300.0); // a near-surface vertex
+            let f64_path = exact * p_body + (exact.as_quat() * offset.as_vec3()).as_dvec3();
+            worst_f64 = worst_f64.max((f64_path - exact * (p_body + offset)).length());
+        }
+        assert!(
+            worst_f32 > PAVING_LIFT_M,
+            "f32 body rotation only strayed {worst_f32:.3} m — if this stops \
+             exceeding the {PAVING_LIFT_M} m paving lift the tile placement could \
+             be simplified back to grid parenting"
+        );
+        assert!(
+            worst_f64 < 0.001,
+            "f64 placement strayed {worst_f64:.4} m — the precision this renderer \
+             depends on is gone"
+        );
+    }
+
+    /// The meshed ground over a structure pad lands on the pad's plane, to a
+    /// tolerance far under the 0.12 m the paving is lifted by.
+    ///
+    /// Runs the real chain — `FlattenedSurface` → `SurfaceQueryProvider` →
+    /// [`build_tile_mesh`] — over the runway basin's actual geometry, at every
+    /// level the pad floor admits, and measures each vertex against the tangent
+    /// plane analytically. This is the falsifier that separates "the ground is
+    /// in the wrong place" from "the thing drawn on the ground is": if paving
+    /// z-fights and this passes, the fault is not on the terrain side.
+    #[test]
+    fn meshed_ground_lands_on_the_pad_plane() {
+        use thalos_terrain::{FlattenRegion, FlattenedSurface, TerrainFlatten, flatten_handle};
+
+        /// Rolling synthetic terrain — the pad has to cut real relief for the
+        /// test to mean anything (the spaceport basin removes 83 m).
+        struct RollingSurface;
+        impl SurfaceQuery for RollingSurface {
+            fn sample(&self, dir: Vec3, _lod_m: f32) -> thalos_terrain::query::SurfaceSample {
+                let d = dir.as_dvec3();
+                let h = 600.0 + 90.0 * (d.x * 900.0).sin() * (d.z * 700.0).cos();
+                thalos_terrain::query::SurfaceSample {
+                    height_m: h as f32,
+                    albedo_linear: Vec3::splat(0.4),
+                    roughness: 0.9,
+                    moisture: 0.0,
+                }
+            }
+            fn radius_m(&self) -> f32 {
+                R as f32
+            }
+            fn height_range_m(&self) -> f32 {
+                RELIEF as f32
+            }
+        }
+
+        // The runway basin, as `finish_runway_spawn` installs it.
+        let center_dir = DVec3::new(0.31, 0.13, 0.94).normalize();
+        let along = center_dir.cross(DVec3::Y).normalize();
+        let across = center_dir.cross(along).normalize();
+        const ELEVATION_M: f64 = 609.0;
+        let pad = TerrainFlatten::new(
+            center_dir,
+            along,
+            across,
+            3_500.0,
+            2_500.0,
+            500.0,
+            ELEVATION_M,
+            R,
+        );
+        let handle = flatten_handle();
+        handle.write().expect("fresh handle").push(FlattenRegion {
+            id: 1,
+            flatten: pad,
+        });
+
+        let provider = SurfaceQueryProvider {
+            surface: Arc::new(FlattenedSurface::new(Arc::new(RollingSurface), handle)),
+        };
+
+        // Every level from the pad floor (10 on Thalos) up to the deepest.
+        for level in 10..=max_level_for(R) {
+            let key = TileKey::containing_dir(center_dir, level);
+            let built = build_tile_mesh(&provider.request(key, R), R);
+            let lift = level as f64 * LEVEL_RENDER_LIFT_M;
+            let positions = built
+                .mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .and_then(|a| a.as_float3())
+                .expect("tile meshes carry positions")
+                .to_vec();
+            let mut worst = 0.0f64;
+            // Core grid only — the skirt ring that follows it is *supposed* to
+            // hang below the surface (it exists to hide inter-level seams).
+            for p in positions.into_iter().take(TILE_RES * TILE_RES) {
+                let world = built.origin + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+                let dir = world.normalize();
+                // Only the levelled interior is under test; the ramp is
+                // *supposed* to leave the plane.
+                if pad.weight(dir) < 1.0 {
+                    continue;
+                }
+                // Distance from the tangent plane the pad levels to, which is
+                // `p · center_dir = R + elevation` by construction.
+                let off = (world.dot(center_dir) - (R + ELEVATION_M + lift)).abs();
+                worst = worst.max(off);
+            }
+            assert!(
+                worst < 0.01,
+                "level {level}: meshed ground strays {worst:.4} m from the pad plane \
+                 (paving sits 0.12 m over it)"
+            );
+        }
+    }
+
+    /// A structure pad's ground holds its resolution at **every** camera
+    /// distance and under the residency brake at its floor.
+    ///
+    /// This is the regression probe for INC-20260725T191500Z: the spaceport
+    /// paving flickered in and out as the craft moved, because selection
+    /// coarsened the basin until the mesh cut straight across the levelled
+    /// footprint and the natural terrain the pad removed (83 m of it) drew back
+    /// over paving standing 0.12 m proud. The distance sweep is the point — the
+    /// bug never appeared at one framing, only across a move.
+    #[test]
+    fn pad_sites_hold_their_resolution_at_every_distance() {
+        let max_level = max_level_for(R);
+        let pad_dir = DVec3::new(0.31, 0.13, 0.94).normalize();
+        // The runway basin: ~4.3 km half-diagonal + a 500 m ramp, resolved four
+        // samples across that ramp (the game driver's `PAD_RAMP_SAMPLES`).
+        let site = RefinementSite {
+            center_dir: pad_dir,
+            angular_radius: (4_800.0f64 / R).atan(),
+            spacing_m: 125.0,
+        };
+        // Straight up over the pad, so it is above the horizon throughout —
+        // from a low pass to well out of the atmosphere.
+        for altitude in [500.0, 2_000.0, 8_000.0, 30_000.0, 120_000.0, 600_000.0] {
+            let cam = pad_dir * (R + altitude);
+            for scale in [1.0, MIN_SPLIT_SCALE] {
+                let leaves =
+                    select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, scale, &[site]);
+                let worst = leaves
+                    .iter()
+                    .filter(|k| site.overlaps(**k))
+                    .map(|k| k.sample_spacing_m(R))
+                    .fold(0.0f64, f64::max);
+                assert!(
+                    worst <= site.spacing_m,
+                    "at {altitude} m (scale {scale}) the pad was meshed at {worst:.0} m/vertex, \
+                     coarser than the {} m floor its ramp needs",
+                    site.spacing_m
+                );
+            }
+        }
+    }
+
+    /// The floor is a floor, not a licence: ground with no pad over it must
+    /// select exactly as it did before sites existed.
+    #[test]
+    fn pad_sites_leave_the_rest_of_the_body_alone() {
+        let max_level = max_level_for(R);
+        let pad_dir = DVec3::new(0.31, 0.13, 0.94).normalize();
+        let site = RefinementSite {
+            center_dir: pad_dir,
+            angular_radius: (4_800.0f64 / R).atan(),
+            spacing_m: 125.0,
+        };
+        // And it stays cheap. Measured: the floor costs *nothing* below ~30 km
+        // (the distance rule is already finer than 125 m there), +33 leaves from
+        // a 200 km orbit and +90 from 2,000 km — the pad's own tiles plus the
+        // 2:1 balance cascade down to them. At 347 KiB each that peak is 31 MiB,
+        // under 1 % of the residency budget. If this bound ever fails, the floor
+        // has started buying detail the distance rule should be buying.
+        for altitude in [200_000.0, 2_000_000.0] {
+            let cam = pad_dir * (R + altitude);
+            let plain = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[]);
+            let with_site =
+                select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[site]);
+            let extra = with_site.len().saturating_sub(plain.len());
+            assert!(
+                extra <= 128,
+                "pad floor cost {extra} extra leaves at {altitude} m \
+                 ({} → {})",
+                plain.len(),
+                with_site.len()
+            );
+        }
+        let cam = pad_dir * (R + 30_000.0);
+        let plain = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[]);
+        let with_site = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[site]);
+        // Every leaf the plain rule chose is still a leaf unless the site (or
+        // the 2:1 balance around it) refined it — i.e. unless its descendants
+        // are present instead.
+        for key in plain.difference(&with_site) {
+            assert!(
+                with_site.iter().any(|k| k.level > key.level && {
+                    let mut probe = *k;
+                    loop {
+                        match probe.parent() {
+                            Some(p) if p.level >= key.level => {
+                                probe = p;
+                                if probe == *key {
+                                    break true;
+                                }
+                            }
+                            _ => break false,
+                        }
+                    }
+                }),
+                "{key:?} vanished from the selection without being refined"
+            );
+        }
+    }
+
+    /// The controller brakes while over budget and recovers once under it —
+    /// and the deadband means it does neither in between (no LOD pumping).
+    #[test]
+    fn budget_controller_brakes_then_recovers() {
+        let budget = 64 * TILE_MESH_BYTES;
+        let mut root = TileTerrainRoot::new(
+            R,
+            Arc::new(NullProvider),
+            Handle::default(),
+            RenderLayers::default(),
+        );
+
+        // Over budget: brake, all the way down to the floor but no further.
+        root.resident = (0..200)
+            .map(|i| {
+                (
+                    TileKey {
+                        face: 0,
+                        level: 6,
+                        x: i,
+                        y: 0,
+                    },
+                    Entity::PLACEHOLDER,
+                )
+            })
+            .collect();
+        for _ in 0..200 {
+            root.update_split_scale(budget);
+        }
+        assert!(
+            (root.split_scale() - MIN_SPLIT_SCALE).abs() < 1e-9,
+            "brake stopped at {} instead of the floor",
+            root.split_scale()
+        );
+
+        // Inside the deadband (between the recover fraction and the budget):
+        // hold, so the scale does not oscillate frame to frame.
+        root.resident = (0..58)
+            .map(|i| {
+                (
+                    TileKey {
+                        face: 0,
+                        level: 6,
+                        x: i,
+                        y: 0,
+                    },
+                    Entity::PLACEHOLDER,
+                )
+            })
+            .collect();
+        let held = root.split_scale();
+        for _ in 0..50 {
+            root.update_split_scale(budget);
+        }
+        assert_eq!(root.split_scale(), held, "scale moved inside the deadband");
+
+        // Well under budget: recover to unconstrained and stop there.
+        root.resident.clear();
+        for _ in 0..500 {
+            root.update_split_scale(budget);
+        }
+        assert_eq!(root.split_scale(), 1.0, "scale did not recover");
+    }
+
+    /// A disabled budget is exactly the pre-budget renderer.
+    #[test]
+    fn disabled_budget_never_brakes() {
+        let mut root = TileTerrainRoot::new(
+            R,
+            Arc::new(NullProvider),
+            Handle::default(),
+            RenderLayers::default(),
+        );
+        root.resident = (0..100_000)
+            .map(|i| {
+                (
+                    TileKey {
+                        face: 0,
+                        level: 9,
+                        x: i,
+                        y: 0,
+                    },
+                    Entity::PLACEHOLDER,
+                )
+            })
+            .collect();
+        root.update_split_scale(usize::MAX);
+        assert_eq!(root.split_scale(), 1.0);
+    }
+
+    struct NullProvider;
+
+    impl TerrainTileProvider for NullProvider {
+        fn request(&self, key: TileKey, _radius_m: f64) -> SurfaceTile {
+            flat_tile(key)
+        }
+
+        fn height_range_m(&self) -> f32 {
+            RELIEF as f32
+        }
+    }
+}
+
+#[cfg(test)]
+mod horizon_tests {
+    use super::*;
+
+    const R: f64 = 3_186_000.0;
+    const RELIEF: f64 = 9_797.6;
+
+    /// The ground under your feet must always be refinable. A tile at
+    /// MIN_LEVEL spans 589 km on Thalos, so from a few hundred metres up its
+    /// corners and centre all sit far below the horizon even though the patch
+    /// directly beneath the camera does not — the bug that froze refinement at
+    /// the 384-tile MIN_LEVEL shell and made every framing render as a smooth
+    /// sphere.
+    #[test]
+    fn horizon_gate_keeps_the_ground_underfoot() {
+        for alt in [30.0, 756.0, 22_000.0, 200_000.0] {
+            let cam = DVec3::new(0.31, 0.72, 0.62).normalize() * (R + alt);
+            for level in MIN_LEVEL..=12 {
+                let key = TileKey::containing_dir(cam.normalize(), level);
+                assert!(
+                    above_horizon(key, cam, R, RELIEF),
+                    "nadir tile culled at alt {alt} m, level {level}"
+                );
+            }
+        }
+    }
+
+    /// ...and the antipode never is, at any altitude below synchronous silly.
+    #[test]
+    fn horizon_gate_culls_the_far_side() {
+        for alt in [30.0, 22_000.0, 200_000.0] {
+            let up = DVec3::new(0.31, 0.72, 0.62).normalize();
+            let cam = up * (R + alt);
+            let key = TileKey::containing_dir(-up, 8);
+            assert!(
+                !above_horizon(key, cam, R, RELIEF),
+                "antipodal tile survived at alt {alt} m"
+            );
+        }
+    }
+
+    /// An unbounded relief allowance must degrade to "refine as distance says",
+    /// never to a nonsense comparison.
+    #[test]
+    fn unbounded_relief_never_culls() {
+        let up = DVec3::new(0.31, 0.72, 0.62).normalize();
+        let cam = up * (R + 22_000.0);
+        let key = TileKey::containing_dir(-up, 8);
+        assert!(above_horizon(key, cam, R, f64::INFINITY));
+    }
+
+    /// End-to-end: the gate trims the working set without stalling refinement.
+    #[test]
+    fn horizon_gate_trims_without_stalling() {
+        let max_level = max_level_for(R);
+        for alt in [756.0, 22_000.0, 160_000.0] {
+            let cam = DVec3::new(0.31, 0.72, 0.62).normalize() * (R + alt);
+            let open = select_leaves(cam, R, max_level);
+            let gated = select_leaves_with_relief(cam, R, max_level, RELIEF, &|_| None);
+            let shell = 6 * (1usize << MIN_LEVEL).pow(2);
+            assert!(
+                gated.len() > shell * 2,
+                "alt {alt} m: refinement stalled near the MIN_LEVEL shell ({} leaves)",
+                gated.len()
+            );
+            assert!(
+                gated.len() < open.len(),
+                "alt {alt} m: gate saved nothing ({} vs {})",
+                gated.len(),
+                open.len()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 mod streaming_tests {
     use super::*;
 
@@ -1048,9 +2320,21 @@ mod streaming_tests {
     /// descending into craters" reports: if the despawn/selection logic can
     /// drop the last cover of a desired tile, this fails with the tick and
     /// chain state.
-    #[test]
-    fn descent_keeps_every_desired_tile_covered() {
+    ///
+    /// `rugged_field` supplies each tile's true ruggedness, measured at landing
+    /// and memoised exactly as `stream_tile_terrain` does, so the relief-aware
+    /// split rule is driven through the same feedback loop it has in
+    /// production: selection deepens as measurements arrive. `None` runs the
+    /// plain distance rule.
+    /// `sim_end_s` must outlast the streamer, not just the retirement gates —
+    /// see the settle comment in the loop. It is sized from the measured drain
+    /// rate, so it grows with the working set the rule selects.
+    fn simulate_descent(rugged_field: Option<&dyn Fn(TileKey) -> f32>, sim_end_s: f32) {
         const RADIUS_M: f64 = 869_000.0;
+        // Mira's real height range, so the rugged twin drives the horizon
+        // refinement gate too: it moves with the eye, which is exactly the
+        // thing that could strand a resident tile's cover.
+        const RELIEF_M: f64 = 13_019.0;
         const DT: f32 = 1.0 / 60.0;
         const GEN_LATENCY_S: f32 = 0.032;
         // Production parallelism: the synthesis pool runs 4 workers; the
@@ -1090,6 +2374,25 @@ mod streaming_tests {
 
         let mut resident: HashMap<TileKey, Entity> = HashMap::new();
         let mut retiring: HashMap<TileKey, (f32, u16)> = HashMap::new();
+        // The production ruggedness memo: measured once per key, never pruned.
+        let mut rugged_memo: HashMap<TileKey, f32> = HashMap::new();
+        let select = |cam: DVec3, memo: &HashMap<TileKey, f32>| -> HashSet<TileKey> {
+            if rugged_field.is_none() {
+                return select_leaves(cam, RADIUS_M, max_level);
+            }
+            select_leaves_with_relief(cam, RADIUS_M, max_level, RELIEF_M, &|key| {
+                let mut k = key;
+                loop {
+                    if let Some(&r) = memo.get(&k) {
+                        return Some(r);
+                    }
+                    match k.parent() {
+                        Some(p) if p.level >= MIN_LEVEL => k = p,
+                        _ => return None,
+                    }
+                }
+            })
+        };
         // (key, seconds-until-landed); at most MAX_IN_FLIGHT actively count
         // down, the rest queue — mirrors the bounded pool.
         let mut pending: Vec<(TileKey, f32)> = Vec::new();
@@ -1105,11 +2408,32 @@ mod streaming_tests {
             (lo.x >> shift) == hi.x && (lo.y >> shift) == hi.y
         };
 
-        // 62 s of flight, then hold still 13 s so retirement fully settles.
+        let mut desired: HashSet<TileKey> = HashSet::new();
+        let mut last_cam = DVec3::ZERO;
+        let mut last_memo_len = usize::MAX;
+
+        // 62 s of flight, then hold still until residency settles.
+        //
+        // The hold has to outlast the *streamer*, not just the retirement
+        // gates: the low sweep ends with ~6,450 desired tiles and a shortfall
+        // of ~3,850, which drains at the simulated 120 tiles/s — ~32 s. At the
+        // original 13 s hold the coverage latch could never close, so the
+        // convergence half of this gate was asserting on a state the harness
+        // never reached (the per-tick invariant above was still live and
+        // silent, which is why no hole hid behind it). The relief rule wants
+        // more still, since ruggedness deepens the selection.
         let mut t = 0.0_f32;
-        while t < 75.0 {
+        while t < sim_end_s {
             let cam = cam_at(t);
-            let desired = select_leaves(cam, RADIUS_M, max_level);
+            // Reuse the previous set when neither the eye nor the ruggedness
+            // memo moved — production recomputes per frame and would get the
+            // identical set, and the stationary settle is most of the ticks.
+            let memo_len = rugged_memo.len();
+            if cam != last_cam || memo_len != last_memo_len {
+                desired = select(cam, &rugged_memo);
+                last_cam = cam;
+                last_memo_len = memo_len;
+            }
             let bridges = bridge_requests(&desired, &resident);
 
             // Cancel pendings nobody wants (production: Task drop).
@@ -1126,9 +2450,7 @@ mod streaming_tests {
             let mut missing: Vec<TileKey> = desired
                 .iter()
                 .chain(bridges.iter())
-                .filter(|k| {
-                    !resident.contains_key(k) && !pending.iter().any(|(p, _)| p == *k)
-                })
+                .filter(|k| !resident.contains_key(k) && !pending.iter().any(|(p, _)| p == *k))
                 .copied()
                 .collect();
             missing.sort_by(|a, b| {
@@ -1157,9 +2479,14 @@ mod streaming_tests {
             for key in landed {
                 events.push((t, "land", key));
                 resident.insert(key, Entity::PLACEHOLDER);
+                if let Some(field) = rugged_field {
+                    rugged_memo.insert(key, field(key));
+                }
             }
 
-            if !covered_once && !desired.is_empty() && desired.iter().all(|k| resident.contains_key(k))
+            if !covered_once
+                && !desired.is_empty()
+                && desired.iter().all(|k| resident.contains_key(k))
             {
                 covered_once = true;
             }
@@ -1197,13 +2524,31 @@ mod streaming_tests {
                 }
             }
 
+            // Shortfall trace during the stationary settle: distinguishes "the
+            // streamer just needs longer" from "selection and residency never
+            // agree" when the coverage latch fails to close.
+            if !covered_once && t > 62.0 && (t * 60.0).round() as i64 % 60 == 0 {
+                let missing = desired.iter().filter(|k| !resident.contains_key(k)).count();
+                eprintln!(
+                    "  t={t:.1} settle: desired={} missing={} resident={} pending={} bridges={}",
+                    desired.len(),
+                    missing,
+                    resident.len(),
+                    pending.len(),
+                    bridges.len(),
+                );
+            }
+
             t += DT;
         }
         assert!(covered_once, "descent never reached full coverage");
 
         // After 13 s stationary, every stale tile (bridges included) must
-        // have retired: residents converge exactly onto the desired set.
-        let desired = select_leaves(cam_at(75.0), RADIUS_M, max_level);
+        // have retired: residents converge exactly onto the desired set. With
+        // the relief rule live this also catches a ratcheting oracle — a
+        // ruggedness estimate that keeps deepening the selection would leave
+        // the resident set permanently chasing it.
+        let desired = select(cam_at(sim_end_s), &rugged_memo);
         let stale: Vec<TileKey> = resident
             .keys()
             .filter(|k| !desired.contains(k))
@@ -1215,6 +2560,28 @@ mod streaming_tests {
             stale.len(),
             stale.first()
         );
+    }
+
+    #[test]
+    fn descent_keeps_every_desired_tile_covered() {
+        simulate_descent(None, 125.0);
+    }
+
+    /// The same descent with the relief-aware split rule live. A belt of rugged
+    /// terrain crosses the descent site, so the boost engages mid-stream and
+    /// the desired set deepens *underneath* tiles that are already resident —
+    /// the failure mode the plain sim cannot reach.
+    #[test]
+    fn rugged_descent_keeps_every_desired_tile_covered() {
+        let belt = |key: TileKey| -> f32 {
+            let d = key.center_dir();
+            // Smooth basins between two crossing ridges: spans RUGGED_LO
+            // (0.012) through past RUGGED_HI (0.055), so both ends of the
+            // ruggedness ramp are exercised.
+            let s = ((d.x * 9.0).sin() * (d.z * 7.0).cos()).abs();
+            (0.004 + 0.06 * s) as f32
+        };
+        simulate_descent(Some(&belt), 185.0);
     }
 }
 
@@ -1231,6 +2598,35 @@ impl Plugin for TileTerrainPlugin {
         }
         app.add_plugins(bevy::pbr::MaterialPlugin::<material::TileTerrainMaterial>::default());
         app.init_resource::<TileEye>()
-            .add_systems(Update, stream_tile_terrain);
+            .add_systems(Update, stream_tile_terrain.in_set(TileStreamSet))
+            // `Last`, not `PostUpdate`: the game's cloud driver resolves the
+            // cascade frame in `PostUpdate`, and the compute pass marches THAT
+            // frame the same frame. Fanning the receiver block from an
+            // unordered `PostUpdate` system would hand materials the previous
+            // frame's placement half the time, so a moving camera would sample
+            // the map through a frame it was not marched in — a shadow that
+            // slides against the ground it belongs to.
+            .add_systems(Last, apply_cloud_shadow);
+    }
+}
+
+/// Fan the live cloud sun-transmittance cascade onto every tile material —
+/// the same shape as `craft::apply_craft_shadow` fanning the sun cascade, and
+/// for the same reason: the field is one global authority, not per-material
+/// state, so materials must never be given their own copy to drift with.
+///
+/// No-op without [`CloudShadowMap`] (a binary with no cloud renderer), which
+/// leaves the block zeroed and the shader fully lit.
+fn apply_cloud_shadow(
+    map: Option<Res<crate::clouds::CloudShadowMap>>,
+    mut materials: ResMut<Assets<material::TileTerrainMaterial>>,
+) {
+    let Some(map) = map else {
+        return;
+    };
+    let block = map.block();
+    for (_, mat) in materials.iter_mut() {
+        mat.extension.cloud_shadow = block;
+        mat.extension.cloud_shadow_map = map.handle.clone();
     }
 }

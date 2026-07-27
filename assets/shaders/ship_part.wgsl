@@ -92,12 +92,6 @@ var craft_shadow_map_1: texture_depth_2d;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104)
 var craft_shadow_map_2: texture_depth_2d;
 
-// How dark a fully-shadowed hull gets. `apply_pbr_lighting` returns direct+ambient
-// combined, so we can't gate only the sun term yet (F8 ports the hull onto
-// `shade_surface` for that) — instead attenuate toward this floor so a shadowed
-// hull keeps its ambient / IBL fill rather than going black. Tunable.
-const CRAFT_SHADOW_FLOOR: f32 = 0.4;
-
 const PI: f32 = 3.14159265358979;
 const TAU: f32 = 6.28318530717958;
 
@@ -344,10 +338,19 @@ fn fragment(
     let out = deferred_output(in, pbr_input);
 #else
     var out: FragmentOutput;
+    // Direct/indirect split (exact, by linearity — see `shadowed_standard.wgsl`):
+    // a second `apply_pbr_lighting` with the indirect occlusions zeroed and
+    // emissive removed returns exposure·direct only; the shadow subtracts just
+    // that share, so a shadowed hull keeps its full ambient / env-map fill —
+    // deep shadows, no floor.
+    var pbr_direct = pbr_input;
+    pbr_direct.diffuse_occlusion = vec3<f32>(0.0);
+    pbr_direct.specular_occlusion = 0.0;
+    pbr_direct.material.emissive = vec4<f32>(0.0);
+    let direct = apply_pbr_lighting(pbr_direct);
     out.color = apply_pbr_lighting(pbr_input);
     // Receive the shared sun-shadow cascade (terrain relief, trees, other craft,
-    // structures): walk the cascades at this fragment's render-space position and
-    // attenuate the lit hull toward `CRAFT_SHADOW_FLOOR` in shadow. The geometric
+    // structures) at this fragment's render-space position. The geometric
     // world normal (not the rivet-perturbed N) drives the stable-CSM receiver
     // offset + slope-scaled bias.
     let craft_shadow_f = sun_shadow_factor_nrm(
@@ -359,7 +362,7 @@ fn fragment(
         craft_shadow_map_2,
     );
     out.color = vec4<f32>(
-        out.color.rgb * max(craft_shadow_f, CRAFT_SHADOW_FLOOR),
+        max(out.color.rgb - (1.0 - craft_shadow_f) * direct.rgb, vec3<f32>(0.0)),
         out.color.a,
     );
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

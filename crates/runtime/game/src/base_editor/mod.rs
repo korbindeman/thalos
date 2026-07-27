@@ -33,6 +33,7 @@ mod place;
 mod ui;
 
 pub use launch_select::SpaceportLaunchRequest;
+pub(crate) use place::place_on_launchpad;
 
 use bevy::math::{DQuat, DVec2, DVec3};
 use bevy::prelude::*;
@@ -46,6 +47,7 @@ use crate::structures::{
 };
 use crate::view::ViewMode;
 
+pub use connections::PavedFootprints;
 pub use place::BaseBuildState;
 
 /// `tile_lod_m` for the focus / surface-height queries. The editor never needs
@@ -144,6 +146,7 @@ pub(crate) fn spawn_default_base(
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<thalos_body_render::ShadowedStandardMaterial>,
     registry: &mut StructureRegistry,
+    paved: &mut connections::PavedFootprints,
     root: Entity,
     body_id: BodyId,
     basin_site_id: StructureId,
@@ -301,6 +304,7 @@ pub(crate) fn spawn_default_base(
     connections::spawn_authored_path(
         commands,
         meshes,
+        paved,
         &mats,
         root,
         body_id,
@@ -322,6 +326,7 @@ pub(crate) fn spawn_default_base(
     connections::spawn_authored_path(
         commands,
         meshes,
+        paved,
         &mats,
         root,
         body_id,
@@ -345,6 +350,7 @@ pub(crate) fn spawn_default_base(
         connections::spawn_authored_path(
             commands,
             meshes,
+            paved,
             &mats,
             root,
             body_id,
@@ -385,6 +391,7 @@ pub(crate) fn spawn_default_base(
     connections::spawn_authored_network(
         commands,
         meshes,
+        paved,
         &mats,
         root,
         body_id,
@@ -415,6 +422,7 @@ pub(crate) fn spawn_default_base(
     connections::spawn_authored_apron(
         commands,
         meshes,
+        paved,
         &mats,
         root,
         body_id,
@@ -437,6 +445,7 @@ pub(crate) fn spawn_default_base(
         connections::spawn_authored_apron(
             commands,
             meshes,
+            paved,
             &mats,
             root,
             body_id,
@@ -458,6 +467,7 @@ pub(crate) fn spawn_default_base(
     connections::spawn_authored_path(
         commands,
         meshes,
+        paved,
         &mats,
         root,
         body_id,
@@ -490,6 +500,7 @@ pub(crate) fn spawn_default_base(
     connections::spawn_authored_network(
         commands,
         meshes,
+        paved,
         &mats,
         root,
         body_id,

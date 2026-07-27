@@ -50,6 +50,7 @@ use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::coords::SHIP_LAYER;
+use crate::base_editor::PavedFootprints;
 use crate::graphics_settings::GraphicsSettings;
 use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
@@ -248,6 +249,7 @@ fn site_scatter_region(site: &StructureSite, body_radius_m: f64) -> Option<Scatt
 /// (`rendering::gpu_grass`), so both layers honour the same footprints.
 pub(crate) fn grass_scatter_regions(
     structures: &StructureRegistry,
+    paved: &PavedFootprints,
     body_id: BodyId,
     radius_m: f64,
 ) -> Vec<ScatterRegion> {
@@ -255,6 +257,11 @@ pub(crate) fn grass_scatter_regions(
         .sites_on(body_id)
         .iter()
         .filter_map(|site| site_scatter_region(site, radius_m))
+        // Taxiways, aprons, roads and crawlerways are generated, not placed, so
+        // they never reach `StructureRegistry`; they publish their footprints
+        // separately as they are built. Without these the blades grew under the
+        // pavement drape and came up through it.
+        .chain(paved.regions_on(body_id).copied())
         .collect()
 }
 
@@ -406,8 +413,9 @@ fn drive_grass_tiles(
     solar: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
-    gpu_height_mirrors: Res<crate::terrain_registry::GpuHeightMirrorRegistry>,
+    rendered_ground: Res<crate::terrain_registry::RenderedGroundRegistry>,
     structures: Res<StructureRegistry>,
+    paved: Res<crate::base_editor::PavedFootprints>,
     graphics: Res<GraphicsSettings>,
     anchor: Res<ViewAnchor>,
     mut commands: Commands,
@@ -466,7 +474,7 @@ fn drive_grass_tiles(
     let Some(height_source) = height_sources.get(body_id) else {
         return;
     };
-    let mirror = gpu_height_mirrors.get(body_id);
+    let mirror = rendered_ground.get(body_id);
 
     let cam_dir = view.cam_dir;
     let agl = view.agl_m;
@@ -580,9 +588,9 @@ fn drive_grass_tiles(
     // empty off-base, so wild terrain is untouched. Shared (`Arc`) into every
     // tile build dispatched this frame.
     let scatter_regions: Arc<Vec<ScatterRegion>> =
-        Arc::new(grass_scatter_regions(&structures, body_id, radius_m));
+        Arc::new(grass_scatter_regions(&structures, &paved, body_id, radius_m));
 
-    let mirror_guard = mirror.as_ref().and_then(|m| m.read().ok());
+    let ground = mirror.as_ref();
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
     for (_, rk) in candidates {
@@ -591,7 +599,7 @@ fn drive_grass_tiles(
         }
         let ring = &GRASS_RINGS[rk.ring as usize];
         let tps = ring_tps[rk.ring as usize];
-        if let Some(guard) = &mirror_guard {
+        if let Some(ground) = ground {
             let Some((center, _)) = grass_tile_frame(rk.key, tps) else {
                 continue;
             };
@@ -600,7 +608,7 @@ fn drive_grass_tiles(
             // distant rings (over coarse far terrain) never pass the gate and
             // grass never reaches the horizon.
             let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(GRASS_MAX_TERRAIN_TEXEL_M);
-            match guard.best_resident_texel_m(center.as_vec3()) {
+            match ground.best_resident_texel_m(center.as_vec3()) {
                 Some(texel) if texel <= texel_limit => {}
                 _ => continue, // terrain not detailed here yet — retry next frame
             }

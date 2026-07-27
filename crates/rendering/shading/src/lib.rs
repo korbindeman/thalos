@@ -21,7 +21,10 @@ mod multi_scatter;
 mod sky_view;
 
 pub use atmosphere::{AtmosphereBlock, CLOUD_BAND_COUNT};
-pub use lighting::{MAX_ECLIPSE_OCCLUDERS, MAX_STARS, SceneLighting, StarLight};
+pub use lighting::{
+    MAX_ECLIPSE_OCCLUDERS, MAX_STARS, SCENE_FLUX_SCALE, SURFACE_DIRECT_SCALE, SceneLighting,
+    StarLight, spine_parity_exposure,
+};
 pub use multi_scatter::{
     MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, MultiScatterLut, bake_multi_scatter_lut,
 };
@@ -54,6 +57,11 @@ impl Plugin for PlanetLightingPlugin {
         // grass, and ground-patch materials (one copy instead of four). See
         // `shaders/shadow.wgsl`.
         bevy::shader::load_shader_library!(app, "shaders/shadow.wgsl");
+        // Shared cloud sun-transmittance sampler — the receiving half of the
+        // one cloud-occlusion field (CLOUD-5 / W2). Imported by every surface
+        // material so terrain, foliage, rock, and hull cannot end up under
+        // different weather. See `shaders/cloud_shadow.wgsl`.
+        bevy::shader::load_shader_library!(app, "shaders/cloud_shadow.wgsl");
         // Shared foliage MATERIAL model (the albedo analogue of `shade_foliage`),
         // imported by both the near mesh trees and the impostor bake so the two
         // cannot drift. See `shaders/foliage.wgsl`.

@@ -44,7 +44,7 @@ use bevy::prelude::*;
 
 use crate::photo_mode::not_in_photo_mode;
 
-pub use input_gate::UiPointerGate;
+pub use input_gate::{UiKeyboardGate, UiPointerGate};
 
 pub struct HudPlugin;
 
@@ -59,10 +59,10 @@ fn setup_top_left_row(mut commands: Commands) {
         .spawn((
             Node {
                 position_type: PositionType::Absolute,
-                left: Val::Px(20.0),
-                top: Val::Px(20.0),
+                left: Val::Px(16.0),
+                top: Val::Px(16.0),
                 flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(8.0),
+                column_gap: Val::Px(6.0),
                 align_items: AlignItems::FlexStart,
                 ..default()
             },
@@ -77,6 +77,7 @@ impl Plugin for HudPlugin {
         app.add_plugins(UiMaterialPlugin::<flight_panel::ThrottleArcMaterial>::default())
             .add_plugins(mfd::MfdPlugin)
             .init_resource::<UiPointerGate>()
+            .init_resource::<UiKeyboardGate>()
             .init_resource::<TimeDisplayMode>()
             .init_resource::<nav_panel::ManeuverPanelState>()
             .init_resource::<orbital_panel::AltitudeDisplay>()
@@ -164,7 +165,7 @@ impl Plugin for HudPlugin {
                     // `*_closed` chain did.
                     .run_if(not_in_photo_mode.and_then(crate::game_context::flight_or_no_context)),
             )
-            .add_systems(Update, input_gate::update_ui_pointer_gate)
+            .add_systems(Update, input_gate::update_ui_input_gates)
             .add_systems(Update, hide_in_photo_mode);
     }
 }

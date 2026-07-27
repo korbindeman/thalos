@@ -48,6 +48,7 @@ use thalos_shipyard::{
 use crate::SimStage;
 use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
+use crate::ship_view::CraftPart;
 use crate::sim_clock::SimClock;
 
 /// Per-engine flow recipe for an enabled engine. Stored separately from
@@ -221,7 +222,7 @@ fn finish_with_throttle(
     let active = effective > 0.0;
     let cut_edge = refresh.prev_effective > 0.0 && !active;
     if should_mark_prediction_dirty(active, cut_edge) {
-        sim.simulation.prediction_state.mark_dirty();
+        sim.simulation.mark_prediction_dirty();
     }
 
     refresh.prev_effective = effective;
@@ -426,13 +427,18 @@ fn refresh_active_propulsion(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActivePropulsion>,
     debug: Option<Res<crate::debug::DebugMode>>,
-    engines: Query<(Entity, &Engine, Option<&EngineActivation>), Without<EditorPart>>,
-    intakes: Query<(Entity, &AirIntake, Option<&SurfaceMount>), Without<EditorPart>>,
+    engines: Query<(Entity, &CraftPart, &Engine, Option<&EngineActivation>), Without<EditorPart>>,
+    intakes: Query<(Entity, &CraftPart, &AirIntake, Option<&SurfaceMount>), Without<EditorPart>>,
     parts: PartQuery,
-    resources: Query<&PartResources, Without<EditorPart>>,
+    resources: Query<(&CraftPart, &PartResources), Without<EditorPart>>,
 ) {
+    let active_id = sim.simulation.active_craft_id();
     let dry_mass_kg: f64 = parts
         .iter()
+        .filter(|part| {
+            part.get::<CraftPart>()
+                .is_some_and(|owner| owner.0 == active_id)
+        })
         .map(|part| {
             live_part_dry_mass_kg(part) as f64 * surface_multiplier(part.get::<SurfaceMount>())
         })
@@ -440,7 +446,8 @@ fn refresh_active_propulsion(
 
     let resource_mass_kg: f64 = resources
         .iter()
-        .flat_map(|part| part.pools.iter())
+        .filter(|(owner, _)| owner.0 == active_id)
+        .flat_map(|(_, part)| part.pools.iter())
         .map(|(&res, pool)| pool.mass_kg(res))
         .sum();
 
@@ -468,14 +475,20 @@ fn refresh_active_propulsion(
     };
     let mut intake_available: HashMap<AmbientIntakeKind, f64> = HashMap::new();
     if atmosphere_available {
-        for (_, intake, surface_mount) in intakes.iter() {
+        for (_, owner, intake, surface_mount) in intakes.iter() {
+            if owner.0 != active_id {
+                continue;
+            }
             add_intake_capture(
                 &mut intake_available,
                 intake.capture,
                 surface_multiplier(surface_mount),
             );
         }
-        for (entity, engine, activation) in engines.iter() {
+        for (entity, owner, engine, activation) in engines.iter() {
+            if owner.0 != active_id {
+                continue;
+            }
             if !activation.map(|a| a.enabled).unwrap_or(true) {
                 continue;
             }
@@ -491,7 +504,10 @@ fn refresh_active_propulsion(
     }
 
     let mut intake_demand: HashMap<AmbientIntakeKind, f64> = HashMap::new();
-    for (entity, engine, activation) in engines.iter() {
+    for (entity, owner, engine, activation) in engines.iter() {
+        if owner.0 != active_id {
+            continue;
+        }
         if !activation.map(|a| a.enabled).unwrap_or(true) {
             continue;
         }
@@ -516,7 +532,10 @@ fn refresh_active_propulsion(
         })
         .collect();
 
-    for (entity, engine, activation) in engines.iter() {
+    for (entity, owner, engine, activation) in engines.iter() {
+        if owner.0 != active_id {
+            continue;
+        }
         if !activation.map(|a| a.enabled).unwrap_or(true) {
             continue;
         }
@@ -606,7 +625,7 @@ fn refresh_active_propulsion(
     sim.simulation.set_ship_mass(active.wet_mass_kg);
 
     if changed {
-        sim.simulation.prediction_state.mark_dirty();
+        sim.simulation.mark_prediction_dirty();
     }
 }
 

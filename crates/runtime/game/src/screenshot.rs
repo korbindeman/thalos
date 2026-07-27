@@ -27,7 +27,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use bevy::{
     asset::{AssetEvent, RenderAssetUsages},
@@ -40,7 +40,7 @@ use bevy::{
         view::screenshot::{Capturing, Screenshot, ScreenshotCaptured, save_to_disk},
     },
     shader::Shader,
-    window::{CursorIcon, PrimaryWindow, SystemCursorIcon},
+    window::{CursorIcon, SystemCursorIcon},
 };
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::renderer_tile_lod_m_at;
@@ -51,13 +51,13 @@ use thalos_body_render::{
 };
 use thalos_capture_protocol::{
     CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureRequest, CaptureResponse,
-    CaptureServerState,
+    CaptureServerState, Viewpoint,
 };
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
-use crate::camera::{ActiveCamera, ShipCamera};
+use crate::camera::ShipCamera;
 use crate::loading::AppState;
 use crate::rendering::contact_shadow::ContactShadowConfig;
 use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
@@ -68,15 +68,9 @@ use crate::spawn::{Homeworld, SpawnSituation};
 use crate::structures::StructureRegistry;
 use crate::terrain_registry::{AirlessLandmark, BodySurfaceRegistry};
 
-const SAVED_PERSPECTIVE_SCHEMA: &str = "thalos.saved-perspective.v1";
-const SAVED_PERSPECTIVE_FILENAME: &str = "latest_perspective.json";
 const CAPTURE_REQUEST_FILENAME: &str = "visual_capture_request.json";
 const CAPTURE_RESPONSE_FILENAME: &str = "visual_capture_response.json";
 const CAPTURE_SERVER_STATE_FILENAME: &str = "visual_capture_server.json";
-
-fn saved_perspective_path() -> PathBuf {
-    crate::artifact_paths::default_diagnostic_path(SAVED_PERSPECTIVE_FILENAME)
-}
 
 // ---------------------------------------------------------------------------
 // F2 window screenshot
@@ -86,10 +80,7 @@ pub struct ScreenshotPlugin;
 
 impl Plugin for ScreenshotPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (screenshot_on_f2, screenshot_cursor))
-            // PostUpdate observes the final camera pose after flight, freecam,
-            // hub, and editor drivers have all had their turn in Update.
-            .add_systems(PostUpdate, save_perspective);
+        app.add_systems(Update, (screenshot_on_f2, screenshot_cursor));
     }
 }
 
@@ -220,270 +211,16 @@ fn screenshot_dir() -> Option<PathBuf> {
     env::var_os("HOME").map(|home| PathBuf::from(home).join("Desktop").join("thalos"))
 }
 
-fn timestamp_millis() -> u128 {
+pub(crate) fn timestamp_millis() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
 }
 
-/// Persist the active 3-D view for a later headless replay. The camera pose is
-/// stored body-fixed, so floating-origin recentering and a fresh process's body
-/// transform cannot move the saved geographic viewpoint.
-#[allow(clippy::too_many_arguments)]
-fn save_perspective(
-    input: Res<GameInputIntent>,
-    view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
-    sim: Res<SimulationState>,
-    solar: Res<SolarSystemState>,
-    situation: Res<SpawnSituation>,
-    space_center: Option<Res<crate::space_center::SpaceCenter>>,
-    cameras: Query<(&CellCoord, &Transform, &Projection), (With<ShipCamera>, With<ActiveCamera>)>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    photo_mode: Res<crate::photo_mode::PhotoMode>,
-    theme: Res<thalos_ui::UiTheme>,
-    toast_area: Query<Entity, With<thalos_ui::ToastArea>>,
-    mut commands: Commands,
-) {
-    if !input.save_perspective {
-        return;
-    }
-
-    let result = (|| -> Result<SavedPerspective, String> {
-        let anchor = view_anchor
-            .resolved
-            .ok_or_else(|| "the 3-D view is not anchored to a terrain body yet".to_string())?;
-        let states = solar
-            .states
-            .as_deref()
-            .ok_or_else(|| "the solar-system state is not ready yet".to_string())?;
-        let body_state = states
-            .get(anchor.body)
-            .ok_or_else(|| "the view body's state is unavailable".to_string())?;
-        let body = sim
-            .system
-            .bodies
-            .get(anchor.body)
-            .ok_or_else(|| "the view body is unavailable".to_string())?;
-        let (cell, transform, projection) = cameras.single().map_err(|_| {
-            "switch to the active 3-D ship/free camera before saving a perspective".to_string()
-        })?;
-        let Projection::Perspective(perspective) = projection else {
-            return Err("the active 3-D camera is not perspective-projected".to_string());
-        };
-
-        let camera_world = DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
-            * crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M as f64
-            + transform.translation.as_dvec3();
-        // Saved perspectives are body-fixed in the SURFACE frame (the frame
-        // the ground renders in), so a replay on a tidally-locked moon lands
-        // on the same terrain the user was looking at.
-        let surface_q = crate::rendering::transforms::surface_orientation_authored(
-            &sim.system.bodies,
-            anchor.body,
-            states,
-        )
-        .unwrap_or_else(|| body_state.orientation.normalize());
-        let camera_body = surface_q.inverse() * (camera_world - body_state.position);
-        let rotation_world = DQuat::from_xyzw(
-            transform.rotation.x as f64,
-            transform.rotation.y as f64,
-            transform.rotation.z as f64,
-            transform.rotation.w as f64,
-        );
-        let rotation_body = (surface_q.inverse() * rotation_world).normalize();
-        let viewport = windows
-            .single()
-            .map(|window| {
-                [
-                    window.resolution.physical_width().max(1),
-                    window.resolution.physical_height().max(1),
-                ]
-            })
-            .unwrap_or([1920, 1080]);
-
-        Ok(SavedPerspective {
-            schema: SAVED_PERSPECTIVE_SCHEMA.to_string(),
-            saved_unix_ms: timestamp_millis(),
-            body: body.name.clone(),
-            spawn: SavedSpawn::from(*situation),
-            boots_hub: space_center.as_deref().is_some_and(|hub| hub.open),
-            sim_time_s: sim.simulation.sim_time(),
-            camera_position_body_m: [camera_body.x, camera_body.y, camera_body.z],
-            camera_rotation_body_xyzw: [
-                rotation_body.x,
-                rotation_body.y,
-                rotation_body.z,
-                rotation_body.w,
-            ],
-            vertical_fov_rad: perspective.fov,
-            viewport,
-        })
-    })();
-
-    let path = saved_perspective_path();
-    match result.and_then(|saved| saved.write_to(path.clone())) {
-        Ok(()) => {
-            info!(
-                target: "thalos::screenshot",
-                "saved agent perspective to {}; replay with `just screenshot latest`",
-                path.display(),
-            );
-            show_capture_toast(
-                &mut commands,
-                &photo_mode,
-                &theme,
-                &toast_area,
-                "PERSPECTIVE SAVED · agents can run `just screenshot latest`",
-                thalos_ui::ToastKind::Success,
-            );
-        }
-        Err(error) => {
-            warn!(target: "thalos::screenshot", "could not save perspective: {error}");
-            show_capture_toast(
-                &mut commands,
-                &photo_mode,
-                &theme,
-                &toast_area,
-                format!("PERSPECTIVE NOT SAVED · {error}"),
-                thalos_ui::ToastKind::Warn,
-            );
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Headless capture — config
 // ---------------------------------------------------------------------------
-
-/// The minimum boot scene needed to reconstruct the world behind a saved
-/// camera. This deliberately snapshots no craft dynamics: the handoff owns a
-/// perspective, while the named spawn remains the canonical scene builder.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-enum SavedSpawn {
-    Orbit,
-    Polar,
-    Eva,
-    Landing,
-    Final,
-    Runway,
-    RunwayApproach,
-    Cruise,
-}
-
-impl From<SpawnSituation> for SavedSpawn {
-    fn from(value: SpawnSituation) -> Self {
-        match value {
-            SpawnSituation::ShipOrbit => Self::Orbit,
-            SpawnSituation::PolarOrbit => Self::Polar,
-            SpawnSituation::Eva => Self::Eva,
-            SpawnSituation::Landing => Self::Landing,
-            SpawnSituation::FinalApproach => Self::Final,
-            SpawnSituation::Runway => Self::Runway,
-            SpawnSituation::RunwayApproach => Self::RunwayApproach,
-            SpawnSituation::Cruise => Self::Cruise,
-        }
-    }
-}
-
-impl From<SavedSpawn> for SpawnSituation {
-    fn from(value: SavedSpawn) -> Self {
-        match value {
-            SavedSpawn::Orbit => Self::ShipOrbit,
-            SavedSpawn::Polar => Self::PolarOrbit,
-            SavedSpawn::Eva => Self::Eva,
-            SavedSpawn::Landing => Self::Landing,
-            SavedSpawn::Final => Self::FinalApproach,
-            SavedSpawn::Runway => Self::Runway,
-            SavedSpawn::RunwayApproach => Self::RunwayApproach,
-            SavedSpawn::Cruise => Self::Cruise,
-        }
-    }
-}
-
-/// Versioned player-to-agent camera handoff. Position and orientation are in
-/// the named body's fixed frame; headless replay projects them through that
-/// body's fresh [`BodyState`](thalos_physics_canonical::types::BodyState).
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct SavedPerspective {
-    schema: String,
-    saved_unix_ms: u128,
-    body: String,
-    spawn: SavedSpawn,
-    boots_hub: bool,
-    /// Recorded for diagnosis/provenance. Replay intentionally uses the named
-    /// spawn's canonical time so it never creates a half-restored craft state.
-    sim_time_s: f64,
-    camera_position_body_m: [f64; 3],
-    camera_rotation_body_xyzw: [f64; 4],
-    vertical_fov_rad: f32,
-    viewport: [u32; 2],
-}
-
-impl SavedPerspective {
-    fn load_from(path: PathBuf) -> Result<Self, String> {
-        let bytes = fs::read(&path)
-            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-        let saved: Self = serde_json::from_slice(&bytes)
-            .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-        saved.validate()?;
-        Ok(saved)
-    }
-
-    fn write_to(&self, path: PathBuf) -> Result<(), String> {
-        self.validate()?;
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-        }
-        let json = serde_json::to_vec_pretty(self)
-            .map_err(|error| format!("could not encode perspective: {error}"))?;
-        fs::write(&path, json)
-            .map_err(|error| format!("could not write {}: {error}", path.display()))
-    }
-
-    fn validate(&self) -> Result<(), String> {
-        if self.schema != SAVED_PERSPECTIVE_SCHEMA {
-            return Err(format!(
-                "unsupported perspective schema {:?}; expected {SAVED_PERSPECTIVE_SCHEMA}",
-                self.schema
-            ));
-        }
-        if self.body.trim().is_empty() {
-            return Err("saved perspective has no target body".to_string());
-        }
-        if !self.sim_time_s.is_finite()
-            || !self
-                .camera_position_body_m
-                .iter()
-                .all(|value| value.is_finite())
-            || !self
-                .camera_rotation_body_xyzw
-                .iter()
-                .all(|value| value.is_finite())
-        {
-            return Err("saved perspective contains a non-finite number".to_string());
-        }
-        let rotation_len_sq = self
-            .camera_rotation_body_xyzw
-            .iter()
-            .map(|value| value * value)
-            .sum::<f64>();
-        if rotation_len_sq < 0.25 {
-            return Err("saved perspective has an invalid camera rotation".to_string());
-        }
-        if !self.vertical_fov_rad.is_finite()
-            || !(1.0f32.to_radians()..179.0f32.to_radians()).contains(&self.vertical_fov_rad)
-        {
-            return Err("saved perspective has an invalid vertical FOV".to_string());
-        }
-        if self.viewport[0] == 0 || self.viewport[1] == 0 {
-            return Err("saved perspective has an empty viewport".to_string());
-        }
-        Ok(())
-    }
-}
 
 /// A named framing. Each preset knows which spawn scenario the world must boot
 /// into (so `main.rs` can force it) and the default camera pose + output path.
@@ -502,6 +239,17 @@ pub enum ScreenshotPreset {
     /// sky, long slant-path haze, terrain recession, structures, and the real
     /// runway scenario through the same `ShipCamera` used in play.
     RunwayAtmosphere,
+    /// Eye-level along the base's paved network — taxiway, apron and service
+    /// road filling the near frame from ~13 m up.
+    ///
+    /// The regression probe for **scatter versus pavement**. Connections are a
+    /// drape lifted 12 cm over the flattened ground, so anything that grows on
+    /// the ground under them comes up through the tarmac as stubby tufts, and
+    /// nothing in an aerial framing resolves a blade
+    /// (INC-20260726T040431Z). It is the only preset that samples pavement
+    /// from inside the grass layer's altitude band, so it is where a missing
+    /// clear footprint shows first.
+    PavedGround,
     /// The space-center hub exactly as PLAY presents it: a clean start with the
     /// spaceport built but **no craft placed** — the canonical placeholder craft
     /// stays in orbit while the camera god-views the base. Boots the `hub`
@@ -520,6 +268,16 @@ pub enum ScreenshotPreset {
     /// should be sparse-to-absent here and the ground tan; contrast with the
     /// green spaceport `spaceport-aerial` shot (equatorial wet belt).
     DryBelt,
+    /// A low oblique survey over a **forest stand** on the wet belt — the
+    /// verification probe for the tree/grass/ground colour coupling (the
+    /// shared landcover palette, the near-field understory recovery, the
+    /// per-instance canopy tint). Mirrors [`Self::DryBelt`]'s searched-site
+    /// shape: boots the plain orbit scenario, then searches the daylight
+    /// hemisphere for the low-latitude land direction that maximises macro
+    /// moisture *and* the scatter stand field, so the frame lands on real
+    /// rendered trees standing on forest-painted ground wherever the fields
+    /// put them (seed/rotation-independent).
+    ForestStand,
     /// A fixed ISS-like orbital view over Thalos's land near the spaceport.
     /// The 3:2 frame and high horizon mirror the Earth reference used to
     /// calibrate atmosphere thickness, aerial perspective, and exposure. This
@@ -596,6 +354,19 @@ pub enum ScreenshotPreset {
     /// shock-diamond / sea-level look is reproducible regardless of the craft's
     /// real altitude. Scrub the pressure with `THALOS_PLUME_PRESSURE` (Pa).
     Plume,
+    /// The plume seen from **below the engine, looking up past the craft** at a
+    /// lit daytime sky, with the far ground still in the bottom of the frame.
+    ///
+    /// This is the ordering probe, not a hero shot. The body-centred fullscreen
+    /// composites are pinned behind world transparency by
+    /// [`thalos_body_render::composite_order`]; the failure that rule exists to
+    /// prevent only appears when the camera is pitched **above** the local
+    /// horizontal, because that is when the planet centre falls *behind* the
+    /// camera and the atmosphere's geometric sort key stops being large and
+    /// negative. A plume framed against sky from a level or downward view will
+    /// not reproduce it. Any future capture meant to exercise composite order
+    /// must keep this upward pitch.
+    PlumeSkyline,
     /// **Showcase framing 1 of 3 (NTR-X4)** — aerial oblique establishing shot
     /// of the diffusion window's NE massif (5.8 km peaks ~54 km NNE of the
     /// spaceport), styled after the Alpine photogrammetry reference: the whole
@@ -770,8 +541,10 @@ impl ScreenshotPreset {
         Self::LatestPerspective,
         Self::SpaceportAerial,
         Self::RunwayAtmosphere,
+        Self::PavedGround,
         Self::Hub,
         Self::DryBelt,
+        Self::ForestStand,
         Self::EarthReference,
         Self::Ocean,
         Self::OceanSlopes,
@@ -789,6 +562,7 @@ impl ScreenshotPreset {
         Self::CloudPlanet,
         Self::CloudSunset,
         Self::Plume,
+        Self::PlumeSkyline,
         Self::MassifAerial,
         Self::MassifRidge,
         Self::MassifValley,
@@ -799,8 +573,10 @@ impl ScreenshotPreset {
             Self::LatestPerspective => "latest-perspective",
             Self::SpaceportAerial => "spaceport-aerial",
             Self::RunwayAtmosphere => "runway-atmosphere",
+            Self::PavedGround => "paved-ground",
             Self::Hub => "hub",
             Self::DryBelt => "dry-belt",
+            Self::ForestStand => "forest-stand",
             Self::EarthReference => "earth-reference",
             Self::Ocean => "ocean",
             Self::OceanSlopes => "ocean-slopes",
@@ -818,14 +594,15 @@ impl ScreenshotPreset {
             Self::CloudPlanet => "cloud-planet",
             Self::CloudSunset => "cloud-sunset",
             Self::Plume => "plume",
+            Self::PlumeSkyline => "plume-skyline",
             Self::MassifAerial => "massif-aerial",
             Self::MassifRidge => "massif-ridge",
             Self::MassifValley => "massif-valley",
         }
     }
 
-    fn parse(raw: &str) -> Self {
-        match raw.trim().to_ascii_lowercase().as_str() {
+    fn try_parse(raw: &str) -> Option<Self> {
+        Some(match raw.trim().to_ascii_lowercase().as_str() {
             "latest" | "perspective" | "latest-perspective" | "latest_perspective" => {
                 Self::LatestPerspective
             }
@@ -835,8 +612,12 @@ impl ScreenshotPreset {
             "runway-atmosphere" | "runway_atmosphere" | "runway-sky" | "surface-atmosphere" => {
                 Self::RunwayAtmosphere
             }
+            "paved-ground" | "paved_ground" | "pavement" | "taxiway" | "apron" => {
+                Self::PavedGround
+            }
             "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
             "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
+            "forest" | "forest-stand" | "foreststand" | "trees" => Self::ForestStand,
             "earth-reference" | "earth_reference" | "earth-ref" | "atmosphere" | "atmo" => {
                 Self::EarthReference
             }
@@ -859,14 +640,12 @@ impl ScreenshotPreset {
             | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
             "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
             "plume" | "engine" | "exhaust" | "rocket" => Self::Plume,
+            "plume-skyline" | "plume_skyline" | "plume-sky" | "plume-ascent" => Self::PlumeSkyline,
             "massif-aerial" | "massif_aerial" | "massif" | "mountains" => Self::MassifAerial,
             "massif-ridge" | "massif_ridge" | "ridge" => Self::MassifRidge,
             "massif-valley" | "massif_valley" | "valley" => Self::MassifValley,
-            other => {
-                eprintln!("  Unknown THALOS_SCREENSHOT preset '{other}'; using spaceport-aerial.");
-                Self::SpaceportAerial
-            }
-        }
+            _ => return None,
+        })
     }
 
     /// The scenario the world must be booted into for this preset.
@@ -877,6 +656,7 @@ impl ScreenshotPreset {
             Self::LatestPerspective => SpawnSituation::ShipOrbit,
             Self::SpaceportAerial
             | Self::RunwayAtmosphere
+            | Self::PavedGround
             | Self::CloudRunway
             | Self::CloudMotion => SpawnSituation::Runway,
             // The massif showcase presets ride the runway scenario for its
@@ -890,7 +670,9 @@ impl ScreenshotPreset {
             // Dry-belt frames wild terrain far from any base, so a plain orbit
             // scenario is enough; the driver poses the camera over the searched
             // desert site (the craft stays in orbit, irrelevant to the framing).
-            Self::DryBelt | Self::Ocean | Self::OceanSlopes => SpawnSituation::ShipOrbit,
+            Self::DryBelt | Self::ForestStand | Self::Ocean | Self::OceanSlopes => {
+                SpawnSituation::ShipOrbit
+            }
             Self::EarthReference => SpawnSituation::Runway,
             Self::MiraOrbit
             | Self::MiraSurface
@@ -905,6 +687,11 @@ impl ScreenshotPreset {
             | Self::CloudSunset => SpawnSituation::ShipOrbit,
             // Plain orbit: space/planet backdrop, engine forced to fire.
             Self::Plume => SpawnSituation::ShipOrbit,
+            // Final approach: the rocket airborne at ~1.5 km AGL over flat dry
+            // land, nose retrograde (engine down). Gives a real atmospheric
+            // plume, a lit sky, and ground still in frame — all three needed
+            // for the composite-order probe.
+            Self::PlumeSkyline => SpawnSituation::FinalApproach,
         }
     }
 
@@ -936,7 +723,7 @@ impl ScreenshotPreset {
         match self {
             Self::LatestPerspective => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/latest_perspective.png"),
                 width: 1920,
                 height: 1080,
@@ -956,7 +743,7 @@ impl ScreenshotPreset {
             },
             Self::SpaceportAerial => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/spaceport_aerial.png"),
                 width: 1920,
                 height: 1080,
@@ -974,7 +761,7 @@ impl ScreenshotPreset {
             },
             Self::RunwayAtmosphere => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/runway_atmosphere.png"),
                 width: 1920,
                 height: 1080,
@@ -993,11 +780,33 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            Self::PavedGround => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/paved_ground.png"),
+                width: 1920,
+                height: 1080,
+                // 180 deg puts the camera on the airside pavement looking back
+                // across the taxiway and apron; a 500 m boom at 1.5 deg is
+                // ~13 m up — inside the grass layer's full-blade band
+                // (`gpu_grass::HIDE_AGL_M` = 550), which is the whole point.
+                azimuth_deg: 180.0,
+                elevation_deg: 1.5,
+                distance_m: 500.0,
+                warmup_frames: 480,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("paved_ground.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
             // Matches the hub's establishing view (`BASE_ESTABLISHING_DISTANCE_M`,
             // the one god-view framing per base) so the capture shows what PLAY shows.
             Self::Hub => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/hub.png"),
                 width: 1920,
                 height: 1080,
@@ -1019,7 +828,7 @@ impl ScreenshotPreset {
             // cold-streaming floor), and nothing pre-built the terrain here.
             Self::DryBelt => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/dry_belt.png"),
                 width: 1920,
                 height: 1080,
@@ -1035,9 +844,37 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            // Low oblique and close, mid-way into a stand: individual mesh
+            // trees in the foreground, the impostor band and the far
+            // forest-painted ground in one frame, so the whole tree/ground
+            // colour handoff is visible at once. Same cold-streaming warmup
+            // reasoning as `DryBelt`.
+            Self::ForestStand => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/forest_stand.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 35.0,
+                elevation_deg: 14.0,
+                distance_m: 900.0,
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("forest_stand.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                // Near-clear sky: this probe judges SUNLIT hue coupling between
+                // canopy, blades, and ground — an overcast frame flattens all
+                // three into the same grey-lit family and hides regressions,
+                // and the wet-belt site the search picks is reliably under a
+                // dense deck (0.35 still read fully overcast there).
+                cloud_coverage_scale: Some(0.10),
+            },
             Self::CloudRunway => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/cloud_runway.png"),
                 width: 1920,
                 height: 1080,
@@ -1076,7 +913,7 @@ impl ScreenshotPreset {
             }
             Self::CloudCruise => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/cloud_cruise.png"),
                 width: 1920,
                 height: 1080,
@@ -1104,7 +941,7 @@ impl ScreenshotPreset {
             },
             Self::CloudInterior => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/cloud_interior.png"),
                 width: 1920,
                 height: 1080,
@@ -1130,7 +967,7 @@ impl ScreenshotPreset {
             },
             Self::CloudLimb => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/cloud_limb.png"),
                 width: 1920,
                 height: 1080,
@@ -1156,7 +993,7 @@ impl ScreenshotPreset {
             },
             Self::CloudPlanet => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/cloud_planet.png"),
                 width: 1920,
                 height: 1080,
@@ -1188,7 +1025,7 @@ impl ScreenshotPreset {
             },
             Self::CloudSunset => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/cloud_sunset.png"),
                 width: 1920,
                 height: 1080,
@@ -1216,17 +1053,19 @@ impl ScreenshotPreset {
             // azimuth swings around the stack.
             Self::Plume => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/plume.png"),
                 width: 1920,
                 height: 1080,
                 // Framed against black sky, not the sunlit planet: the plume is
                 // an *additive* emitter, so a bright backdrop washes out exactly
                 // the colour and shock structure this probe exists to check.
-                // Distance fits the longer sea-level column in frame.
+                // Distance fits the whole sea-level column in frame *including
+                // its tail*: the point of the probe is where the plume ends, so
+                // a framing that crops the fade is useless (INC-20260724T235437Z-plume-ended-on-a-lit-rim).
                 azimuth_deg: 235.0,
                 elevation_deg: 8.0,
-                distance_m: 70.0,
+                distance_m: 130.0,
                 // Orbit scenario builds fast; the plume just needs the ship + a
                 // few frames for the ignition transient to settle to full.
                 warmup_frames: 90,
@@ -1238,12 +1077,46 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            // Same craft-centred GodView focus as `Plume` (up = the nose axis),
+            // but posed *under* the waist so the camera looks up the stack.
+            //
+            // The negative elevation is the whole point and is not a taste
+            // call: it is what puts the view above the local horizontal, which
+            // is the only regime in which the fullscreen composites can sort
+            // ahead of world transparency (see `PlumeSkyline`'s doc). 18° below
+            // a craft 1.5 km up still leaves the far ground and horizon in the
+            // bottom of the frame, so one image shows both backdrops — the
+            // plume against sky and the plume against terrain — and the old
+            // failure is a cut exactly at the skyline.
+            Self::PlumeSkyline => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/plume_skyline.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 235.0,
+                elevation_deg: -18.0,
+                // Far enough back that the whole column plus a wide band of
+                // sky and ground is in frame, not just the bell.
+                distance_m: 260.0,
+                // Descent scenario: deferred terrain-aware placement plus a
+                // cold surface site, so this needs the long streaming warmup
+                // rather than the orbital preset's 90 frames.
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                report: crate::artifact_paths::default_jsonl_path("plume_skyline.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
             // NTR-X4 showcase framings. All three point at fixed sites in the
             // diffusion detail window (see `massif_site`), stream a cold wild
             // mountain site, and therefore need the long warmup.
             Self::MassifAerial => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/massif_aerial.png"),
                 width: 1920,
                 height: 1080,
@@ -1266,7 +1139,7 @@ impl ScreenshotPreset {
             },
             Self::MassifRidge => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/massif_ridge.png"),
                 width: 1920,
                 height: 1080,
@@ -1291,7 +1164,7 @@ impl ScreenshotPreset {
             },
             Self::MassifValley => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/massif_valley.png"),
                 width: 1920,
                 height: 1080,
@@ -1315,7 +1188,7 @@ impl ScreenshotPreset {
             },
             Self::EarthReference => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/earth_reference.png"),
                 // The Earth reference is 1000×667 (approximately 3:2). Keep
                 // that composition instead of comparing a wider 16:9 crop.
@@ -1335,7 +1208,7 @@ impl ScreenshotPreset {
             },
             Self::Ocean => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/ocean.png"),
                 width: 1920,
                 height: 1080,
@@ -1358,7 +1231,7 @@ impl ScreenshotPreset {
             },
             Self::OceanSlopes => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/ocean_slopes.png"),
                 width: 1920,
                 height: 1080,
@@ -1376,7 +1249,7 @@ impl ScreenshotPreset {
             },
             Self::MiraOrbit => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/mira_orbit.png"),
                 width: 1920,
                 height: 1080,
@@ -1397,7 +1270,7 @@ impl ScreenshotPreset {
             },
             Self::MiraSurface => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/mira_surface.png"),
                 width: 1920,
                 height: 1080,
@@ -1418,7 +1291,7 @@ impl ScreenshotPreset {
             },
             Self::MiraEva => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/mira_eva.png"),
                 width: 2048,
                 height: 1280,
@@ -1439,7 +1312,7 @@ impl ScreenshotPreset {
             },
             Self::MiraDisc => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/mira_disc.png"),
                 width: 1920,
                 height: 1080,
@@ -1472,7 +1345,7 @@ impl ScreenshotPreset {
             },
             Self::MiraApproach => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/mira_approach.png"),
                 width: 1920,
                 height: 1080,
@@ -1502,7 +1375,7 @@ impl ScreenshotPreset {
             },
             Self::MiraRim => ScreenshotConfig {
                 preset: self,
-                saved: None,
+                viewpoint: None,
                 out: PathBuf::from("artifacts/visual/latest/mira_rim.png"),
                 width: 1920,
                 height: 1080,
@@ -1548,9 +1421,9 @@ impl ScreenshotPreset {
 #[derive(Resource, Clone, Debug)]
 pub struct ScreenshotConfig {
     pub preset: ScreenshotPreset,
-    /// Present only for the F8 player handoff. Scripted presets keep this
-    /// `None` and continue through their typed framing paths.
-    saved: Option<SavedPerspective>,
+    /// Present only for a catalog-authored viewpoint. Scripted presets keep
+    /// this `None` and continue through their typed framing paths.
+    viewpoint: Option<Viewpoint>,
     /// Output PNG path (relative to the working dir). Its parent is created.
     pub out: PathBuf,
     pub width: u32,
@@ -1591,8 +1464,8 @@ impl ScreenshotConfig {
     /// mode; see `main.rs`).
     ///
     /// - `THALOS_SCREENSHOT` — preset name (or a truthy value for the default).
-    ///   `latest` / `perspective` replays the F8 handoff at
-    ///   `artifacts/diagnostics/latest_perspective.json`.
+    ///   A viewpoint id (or `viewpoint:<id>`) replays the shared authored
+    ///   catalog at `assets/viewpoints.json`; `latest` selects its newest entry.
     /// - `THALOS_SCREENSHOT_OUT` — output PNG path.
     /// - `THALOS_SCREENSHOT_SIZE` — `WIDTHxHEIGHT` (e.g. `2560x1440`).
     /// - `THALOS_SCREENSHOT_AZIMUTH` / `_ELEVATION` — camera angles, degrees.
@@ -1621,8 +1494,8 @@ impl ScreenshotConfig {
     ///   in seconds (ocean diagnostics/phase comparisons only).
     pub fn from_env() -> Option<Self> {
         let raw = env::var("THALOS_SCREENSHOT").ok()?;
-        let preset = ScreenshotPreset::parse(&raw);
-        let mut cfg = Self::for_preset(preset);
+        let mut cfg = Self::for_scene(&raw)
+            .unwrap_or_else(|error| panic!("could not resolve capture scene {raw:?}: {error}"));
         let overrides = CAPTURE_OVERRIDE_KEYS
             .iter()
             .filter_map(|key| env::var(key).ok().map(|value| ((*key).to_owned(), value)))
@@ -1634,17 +1507,44 @@ impl ScreenshotConfig {
     fn for_preset(preset: ScreenshotPreset) -> Self {
         let mut cfg = preset.defaults();
         if preset == ScreenshotPreset::LatestPerspective {
-            let saved = SavedPerspective::load_from(saved_perspective_path())
-                .unwrap_or_else(|error| {
-                    panic!(
-                        "could not load the latest saved perspective: {error}. Press F8 in the game first."
-                    )
-                });
-            cfg.width = saved.viewport[0];
-            cfg.height = saved.viewport[1];
-            cfg.saved = Some(saved);
+            let viewpoint = crate::viewpoints::resolve_viewpoint("latest")
+                .unwrap_or_else(|error| panic!("could not load the latest viewpoint: {error}"));
+            cfg.apply_viewpoint(viewpoint);
+            cfg.out = PathBuf::from("artifacts/visual/latest/latest_perspective.png");
+            cfg.report = crate::artifact_paths::default_jsonl_path("latest_perspective.jsonl");
         }
         cfg
+    }
+
+    fn for_scene(raw: &str) -> Result<Self, String> {
+        if let Some(preset) = ScreenshotPreset::try_parse(raw) {
+            return Ok(Self::for_preset(preset));
+        }
+        let viewpoint = crate::viewpoints::resolve_viewpoint(raw)?;
+        let mut cfg = ScreenshotPreset::LatestPerspective.defaults();
+        cfg.apply_viewpoint(viewpoint);
+        Ok(cfg)
+    }
+
+    fn apply_viewpoint(&mut self, viewpoint: Viewpoint) {
+        self.width = viewpoint.viewport[0];
+        self.height = viewpoint.viewport[1];
+        self.out = PathBuf::from(format!(
+            "artifacts/visual/latest/{}.png",
+            viewpoint.id.replace('-', "_")
+        ));
+        self.report = crate::artifact_paths::default_jsonl_path(&format!(
+            "viewpoint_{}.jsonl",
+            viewpoint.id.replace('-', "_")
+        ));
+        self.viewpoint = Some(viewpoint);
+    }
+
+    fn scene_name(&self) -> String {
+        self.viewpoint
+            .as_ref()
+            .map(crate::viewpoints::viewpoint_scene_name)
+            .unwrap_or_else(|| self.preset.name().to_owned())
     }
 
     fn apply_overrides(&mut self, overrides: &BTreeMap<String, String>) {
@@ -1729,25 +1629,25 @@ impl ScreenshotConfig {
 
     /// Body whose authored world must be loaded before the capture app boots.
     pub fn target_body_name(&self) -> &str {
-        self.saved
+        self.viewpoint
             .as_ref()
-            .map(|saved| saved.body.as_str())
+            .map(|viewpoint| viewpoint.body.as_str())
             .unwrap_or_else(|| self.preset.target_body_name())
     }
 
     /// Canonical scene builder to run behind this capture.
     pub fn spawn_situation(&self) -> SpawnSituation {
-        self.saved
+        self.viewpoint
             .as_ref()
-            .map(|saved| SpawnSituation::from(saved.spawn))
+            .map(|viewpoint| SpawnSituation::from(viewpoint.spawn))
             .unwrap_or_else(|| self.preset.spawn_situation())
     }
 
     /// Whether the boot should build the no-craft space-center hub route.
     pub fn boots_hub(&self) -> bool {
-        self.saved
+        self.viewpoint
             .as_ref()
-            .map(|saved| saved.boots_hub)
+            .map(|viewpoint| viewpoint.boots_hub)
             .unwrap_or_else(|| self.preset.boots_hub())
     }
 }
@@ -1840,7 +1740,7 @@ fn capture_server_state_path() -> PathBuf {
 
 #[derive(Resource, Debug, Default)]
 struct PersistentCaptureServer {
-    boot_preset: Option<ScreenshotPreset>,
+    boot_scene: Option<String>,
     boot_width: u32,
     boot_height: u32,
     compatible_presets: Vec<String>,
@@ -1854,13 +1754,13 @@ struct PersistentCaptureServer {
 
 impl PersistentCaptureServer {
     fn publish(&self, ready: bool) {
-        let Some(preset) = self.boot_preset else {
+        let Some(scene) = self.boot_scene.as_deref() else {
             return;
         };
         let state = CaptureServerState {
             schema_version: CAPTURE_PROTOCOL_SCHEMA,
             pid: std::process::id(),
-            preset: preset.name().to_owned(),
+            preset: scene.to_owned(),
             compatible_presets: self.compatible_presets.clone(),
             width: self.boot_width,
             height: self.boot_height,
@@ -1920,6 +1820,9 @@ struct ScreenshotDriver {
     /// Cached body-fixed direction of the searched dry-belt site (DryBelt preset
     /// only), resolved once so the framing stays fixed across warmup.
     dry_site_dir: Option<DVec3>,
+    /// Cached body-fixed direction of the searched forest-stand site
+    /// (ForestStand preset only), same latching as [`Self::dry_site_dir`].
+    forest_site_dir: Option<DVec3>,
     /// Cached deep-water direction for the low-sun open-ocean preset.
     ocean_site_dir: Option<DVec3>,
     /// Cached Mira survey site for the airless presets: body-fixed direction
@@ -2037,7 +1940,7 @@ fn initialize_capture_server(
     cfg: Res<ScreenshotConfig>,
     mut server: ResMut<PersistentCaptureServer>,
 ) {
-    server.boot_preset = Some(cfg.preset);
+    server.boot_scene = Some(cfg.scene_name());
     server.boot_width = cfg.width;
     server.boot_height = cfg.height;
     server.compatible_presets = compatible_presets(&cfg);
@@ -2058,10 +1961,7 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
         CAPTURE_PRESETS,
         "capture protocol and runtime preset catalogs diverged"
     );
-    if boot.preset == ScreenshotPreset::LatestPerspective {
-        return vec![boot.preset.name().to_owned()];
-    }
-    ScreenshotPreset::ALL
+    let mut scenes = ScreenshotPreset::ALL
         .iter()
         .copied()
         .filter(|preset| *preset != ScreenshotPreset::LatestPerspective)
@@ -2075,7 +1975,36 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
             defaults.width == boot.width && defaults.height == boot.height
         })
         .map(|preset| preset.name().to_owned())
-        .collect()
+        .collect::<Vec<_>>();
+    if let Ok(catalog) = crate::viewpoints::load_catalog() {
+        scenes.extend(
+            catalog
+                .viewpoints
+                .iter()
+                .filter(|viewpoint| {
+                    viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
+                        && SpawnSituation::from(viewpoint.spawn) == boot.spawn_situation()
+                        && viewpoint.boots_hub == boot.boots_hub()
+                        && viewpoint.viewport == [boot.width, boot.height]
+                })
+                .map(crate::viewpoints::viewpoint_scene_name),
+        );
+        if catalog.latest().is_some_and(|viewpoint| {
+            viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
+                && SpawnSituation::from(viewpoint.spawn) == boot.spawn_situation()
+                && viewpoint.boots_hub == boot.boots_hub()
+                && viewpoint.viewport == [boot.width, boot.height]
+        }) {
+            scenes.push("latest-perspective".to_owned());
+        }
+    }
+    let boot_scene = boot.scene_name();
+    if !scenes.contains(&boot_scene) {
+        scenes.push(boot_scene);
+    }
+    scenes.sort();
+    scenes.dedup();
+    scenes
 }
 
 fn publish_capture_server_state(
@@ -2135,27 +2064,51 @@ fn poll_capture_requests(
         return;
     }
 
-    let requested_preset = ScreenshotPreset::parse(&request.preset);
     if !server
         .compatible_presets
         .iter()
-        .any(|preset| preset == requested_preset.name())
+        .any(|scene| scene == &request.preset)
     {
         server.respond(
             &request.id,
             false,
             format!(
                 "server booted for {}; {} needs a different boot world",
-                server.boot_preset.map_or("unknown", ScreenshotPreset::name),
-                requested_preset.name()
+                server.boot_scene.as_deref().unwrap_or("unknown"),
+                request.preset
             ),
             None,
         );
         return;
     }
 
-    let mut next = ScreenshotConfig::for_preset(requested_preset);
+    let mut next = match ScreenshotConfig::for_scene(&request.preset) {
+        Ok(next) => next,
+        Err(error) => {
+            server.respond(&request.id, false, error, None);
+            return;
+        }
+    };
     next.apply_overrides(&request.overrides);
+    if !next
+        .target_body_name()
+        .eq_ignore_ascii_case(cfg.target_body_name())
+        || next.spawn_situation() != cfg.spawn_situation()
+        || next.boots_hub() != cfg.boots_hub()
+        || next.width != server.boot_width
+        || next.height != server.boot_height
+    {
+        server.respond(
+            &request.id,
+            false,
+            format!(
+                "{} changed to a different boot world/context; restart the capture host",
+                request.preset
+            ),
+            None,
+        );
+        return;
+    }
     // A body with no constructed surface renders as a blank world. That is fine
     // for a body merely present in the scene (it degrades locally), but a shot
     // *of* it would be invalid evidence dressed as a valid PNG — refuse it with
@@ -2215,7 +2168,9 @@ fn apply_live_capture_diagnostics(
     mut ocean_debug: ResMut<OceanDebugSettings>,
     mut ssao: ResMut<SsaoConfig>,
     mut contact_shadow: ResMut<ContactShadowConfig>,
+    mut cloud_shadow: ResMut<crate::rendering::clouds::CloudShadowConfig>,
     mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
+    mut tile_materials: ResMut<Assets<thalos_body_render::tiles::material::TileTerrainMaterial>>,
 ) {
     if !cfg.is_changed() && !runtime.is_changed() {
         return;
@@ -2324,18 +2279,29 @@ fn apply_live_capture_diagnostics(
 
     ssao.apply_capture_mode(runtime.get("THALOS_SSAO"));
     contact_shadow.apply_capture_mode(runtime.get("THALOS_CONTACT_SHADOW"));
+    cloud_shadow.apply_capture_mode(runtime.get("THALOS_CLOUD_SHADOW"));
     let inspection = terrain_inspection_override(runtime.get("THALOS_TERRAIN_INSPECTION"));
     for (_, material) in terrain_materials.iter_mut() {
         material.extras.inspection.x = inspection;
     }
+    // Same override on the tile renderer's materials, so the `terrain-lighting`
+    // axis reads the *live* value on the persistent host for whichever renderer
+    // owns the body. Without this the tile path would honour only its
+    // boot-time env read and silently render one mode for every variant of a
+    // warm-host comparison — the labelled-but-identical failure the axis
+    // contract exists to prevent.
+    for (_, material) in tile_materials.iter_mut() {
+        material.extension.params.inspect = inspection as u32;
+    }
     info!(
-        target: "thalos::screenshot",
-        "cloud probe: quality={} view_steps={} shadow_steps={} reconstruction={} coverage={:.2}",
-        cfg.cloud_quality.name(),
-        clouds.clouds_raymarch_steps_count,
-        clouds.clouds_shadow_raymarch_steps_count,
+        target: "thalos::diagnostic::capture",
+        event = "cloud_probe_configuration",
+        quality = cfg.cloud_quality.name(),
+        view_steps = clouds.clouds_raymarch_steps_count,
+        shadow_steps = clouds.clouds_shadow_raymarch_steps_count,
         reconstruction,
-        clouds.clouds_coverage,
+        coverage = clouds.clouds_coverage,
+        "cloud probe configuration"
     );
 }
 
@@ -2366,23 +2332,39 @@ fn configure_plume_capture(
     if !cfg.is_changed() && !runtime.is_changed() {
         return;
     }
-    if cfg.preset != ScreenshotPreset::Plume {
+    if !matches!(
+        cfg.preset,
+        ScreenshotPreset::Plume | ScreenshotPreset::PlumeSkyline
+    ) {
         over.throttle = None;
         over.ambient_pressure_pa = None;
         over.ignition = None;
         return;
     }
-    let pressure = runtime
-        .get("THALOS_PLUME_PRESSURE")
-        .and_then(|raw| raw.trim().parse::<f32>().ok())
-        .or_else(|| env_parse::<f32>("THALOS_PLUME_PRESSURE"))
-        .unwrap_or(101_325.0);
+    // `PlumeSkyline` flies inside the atmosphere at a known altitude, so its
+    // back-pressure is already deterministic — pinning it would only decouple
+    // the probe from the air the composites are integrating through.
+    let pressure = match cfg.preset {
+        ScreenshotPreset::PlumeSkyline => None,
+        _ => Some(
+            runtime
+                .get("THALOS_PLUME_PRESSURE")
+                .and_then(|raw| raw.trim().parse::<f32>().ok())
+                .or_else(|| env_parse::<f32>("THALOS_PLUME_PRESSURE"))
+                .unwrap_or(101_325.0)
+                .max(0.0),
+        ),
+    };
     over.throttle = Some(1.0);
-    over.ambient_pressure_pa = Some(pressure.max(0.0));
+    over.ambient_pressure_pa = pressure;
     over.ignition = Some(1.0);
     info!(
-        target: "thalos::screenshot",
-        "plume probe: throttle=1.0 ambient_pressure={pressure:.0} Pa"
+        target: "thalos::diagnostic::capture",
+        event = "plume_probe_configuration",
+        throttle = 1.0,
+        ambient_pressure_pa = pressure.unwrap_or(f32::NAN),
+        pressure_source = if pressure.is_some() { "pinned" } else { "atmosphere" },
+        "plume probe configuration"
     );
 }
 
@@ -2451,10 +2433,11 @@ fn probe_apron_lod(
         })
         .collect();
     info!(
-        target: "thalos::screenshot",
-        "apron probe: view->pad {:.2} km | off:[texel_m|dh_m] {}",
-        view_dist_km,
-        lods.join(" ")
+        target: "thalos::diagnostic::capture",
+        event = "apron_probe",
+        view_distance_km = view_dist_km,
+        samples = %lods.join(" "),
+        "apron probe"
     );
 }
 
@@ -2579,6 +2562,14 @@ fn drive_headless_screenshot(
             &mut driver.dry_site_dir,
         )
         .map(CaptureFocus::from),
+        ScreenshotPreset::ForestStand => forest_site_context(
+            &sim,
+            &solar,
+            &height_sources,
+            homeworld.0,
+            &mut driver.forest_site_dir,
+        )
+        .map(CaptureFocus::from),
         ScreenshotPreset::Ocean | ScreenshotPreset::OceanSlopes => ocean_site_context(
             &sim,
             &solar,
@@ -2624,6 +2615,9 @@ fn drive_headless_screenshot(
         }
         // Frame the craft itself, not a surface site.
         ScreenshotPreset::Plume => craft_context(&sim).map(CaptureFocus::from),
+        ScreenshotPreset::PlumeSkyline => {
+            plume_skyline_context(&sim, &solar).map(CaptureFocus::from)
+        }
         ScreenshotPreset::MassifAerial
         | ScreenshotPreset::MassifRidge
         | ScreenshotPreset::MassifValley => {
@@ -2673,17 +2667,17 @@ fn drive_headless_screenshot(
     }
     let pose_cfg = motion_cfg.as_ref().unwrap_or(&cfg);
 
-    if let Some(saved) = pose_cfg.saved.as_ref() {
-        if !pose_saved_perspective(
-            saved,
-            homeworld.0,
+    if let Some(viewpoint) = pose_cfg.viewpoint.as_ref() {
+        if let Err(error) = crate::viewpoints::pose_viewpoint(
+            viewpoint,
             &sim.system.bodies,
             &solar,
             root,
-            &mut transform,
             &mut cell,
+            &mut transform,
             &mut projection,
         ) {
+            warn!(target: "thalos::screenshot", "could not pose viewpoint: {error}");
             return;
         }
     } else if pose_cfg.preset == ScreenshotPreset::MiraEva {
@@ -2799,7 +2793,7 @@ fn drive_headless_screenshot(
         cfg.out.display(),
         cfg.width,
         cfg.height,
-        cfg.preset.name(),
+        cfg.scene_name(),
         cfg.cloud_quality.name(),
         cfg.cloud_temporal,
     );
@@ -2852,6 +2846,115 @@ fn drive_headless_screenshot(
             .observe(save_to_disk(cfg.out.clone()));
     }
     driver.captured = true;
+}
+
+/// Pose one catalog-backed scripted agent view in the running game.
+///
+/// This reuses the same focus search and framing code as headless capture. It
+/// intentionally changes only the camera: diagnostic render overrides (slope
+/// false-colour, plume pressure, cloud coverage, temporal slew) remain capture
+/// concerns and are described in the manager status.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn pose_scripted_viewpoint(
+    driver: &str,
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    registry: &StructureRegistry,
+    surfaces: &BodySurfaceRegistry,
+    root: &Grid,
+    cell: &mut CellCoord,
+    transform: &mut Transform,
+) -> Result<(BodyId, String), String> {
+    let preset = ScreenshotPreset::try_parse(driver)
+        .filter(|preset| *preset != ScreenshotPreset::LatestPerspective)
+        .ok_or_else(|| format!("unknown scripted viewpoint driver {driver:?}"))?;
+    let cfg = preset.defaults();
+    let body_id = sim
+        .system
+        .name_to_id
+        .get(preset.target_body_name())
+        .copied()
+        .ok_or_else(|| format!("body {:?} is not authored", preset.target_body_name()))?;
+    let mut dry_site = None;
+    let mut forest_site = None;
+    let mut ocean_site = None;
+    let mut airless_site = None;
+    let focus = match preset {
+        ScreenshotPreset::DryBelt => {
+            dry_site_context(sim, solar, height_sources, body_id, &mut dry_site)
+                .map(CaptureFocus::from)
+        }
+        ScreenshotPreset::ForestStand => {
+            forest_site_context(sim, solar, height_sources, body_id, &mut forest_site)
+                .map(CaptureFocus::from)
+        }
+        ScreenshotPreset::Ocean | ScreenshotPreset::OceanSlopes => {
+            ocean_site_context(sim, solar, height_sources, body_id, &mut ocean_site)
+                .map(CaptureFocus::from)
+        }
+        ScreenshotPreset::MiraOrbit
+        | ScreenshotPreset::MiraSurface
+        | ScreenshotPreset::MiraDisc
+        | ScreenshotPreset::MiraApproach
+        | ScreenshotPreset::MiraRim => daylight_surface_context(
+            sim,
+            solar,
+            height_sources,
+            body_id,
+            surfaces,
+            &mut airless_site,
+            match preset {
+                ScreenshotPreset::MiraDisc => AirlessSunGeometry::SubSolar,
+                ScreenshotPreset::MiraApproach => AirlessSunGeometry::Grazing,
+                _ => AirlessSunGeometry::Oblique,
+            },
+            if preset == ScreenshotPreset::MiraRim {
+                LandmarkChoice::MostLegible
+            } else {
+                LandmarkChoice::Typical
+            },
+        ),
+        ScreenshotPreset::MiraEva => {
+            eva_surface_context(sim, solar, height_sources, body_id).map(CaptureFocus::from)
+        }
+        ScreenshotPreset::Plume => craft_context(sim).map(CaptureFocus::from),
+        ScreenshotPreset::PlumeSkyline => plume_skyline_context(sim, solar).map(CaptureFocus::from),
+        ScreenshotPreset::MassifAerial
+        | ScreenshotPreset::MassifRidge
+        | ScreenshotPreset::MassifValley => {
+            let (lat_deg, lon_deg) = massif_site(preset);
+            fixed_site_context(sim, solar, height_sources, body_id, lat_deg, lon_deg)
+                .map(CaptureFocus::from)
+        }
+        _ => match cfg.framing {
+            ScreenshotFraming::GodView
+            | ScreenshotFraming::SunRelativeGodView { .. }
+            | ScreenshotFraming::BodyDisc { .. }
+            | ScreenshotFraming::LocalCloud {
+                site_sun_elevation_deg: None,
+                ..
+            } => hub_context(sim, solar, height_sources, registry, body_id).map(CaptureFocus::from),
+            ScreenshotFraming::LocalCloud {
+                site_sun_elevation_deg: Some(sun_elevation_deg),
+                ..
+            } => cloud_site_context(sim, solar, height_sources, body_id, sun_elevation_deg)
+                .map(CaptureFocus::from),
+        },
+    }
+    .ok_or_else(|| format!("scripted viewpoint {driver:?} is not ready in this world"))?;
+
+    if preset == ScreenshotPreset::MiraEva {
+        pose_eva_camera(&cfg, &focus.hub, root, transform, cell);
+    } else {
+        pose_camera(&cfg, &focus, sim, solar, root, transform, cell);
+    }
+    Ok((
+        body_id,
+        format!(
+            "Viewing scripted agent viewpoint {driver}; capture-only diagnostic overrides are unchanged"
+        ),
+    ))
 }
 
 const CLOUD_MOTION_SLEW_FRAMES: u32 = 36;
@@ -2911,8 +3014,11 @@ fn ocean_site_context(
                 .sample_height_m(dir.as_vec3(), OCEAN_SITE_LOD_M)
                 .unwrap_or(0.0);
             info!(
-                target: "thalos::screenshot",
-                "ocean site: depth {depth_m:.0} m, sun elevation {sun_elevation_deg:.1}°"
+                target: "thalos::diagnostic::capture",
+                event = "ocean_site",
+                depth_m,
+                sun_elevation_deg,
+                "ocean capture site"
             );
             *cached_dir = Some(dir);
             dir
@@ -3027,8 +3133,11 @@ fn daylight_surface_context(
             );
             let incidence_deg = site.0.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
             info!(
-                target: "thalos::screenshot",
-                "airless survey site: solar incidence {incidence_deg:.0}° ({geometry:?})"
+                target: "thalos::diagnostic::capture",
+                event = "airless_survey_site",
+                solar_incidence_deg = incidence_deg,
+                geometry = ?geometry,
+                "airless survey capture site"
             );
             *cached_site = Some(site);
             site
@@ -3096,9 +3205,11 @@ fn eva_surface_context(
         {
             let incidence_deg = dir_body.dot(sun_body).clamp(-1.0, 1.0).acos().to_degrees();
             info!(
-                target: "thalos::screenshot",
-                "eva site: solar incidence {incidence_deg:.1}° ({})",
-                if incidence_deg >= 90.0 { "NIGHT" } else { "lit" },
+                target: "thalos::diagnostic::capture",
+                event = "eva_site",
+                solar_incidence_deg = incidence_deg,
+                illumination = if incidence_deg >= 90.0 { "night" } else { "lit" },
+                "EVA capture site"
             );
         }
     });
@@ -3125,6 +3236,50 @@ fn craft_context(sim: &SimulationState) -> Option<HubContext> {
         body_id: sim.simulation.dominant_body(),
         center_world: craft + nose * FOCUS_OFFSET_M,
         up_world: nose,
+        pad_r: 0.0,
+    })
+}
+
+/// Focus context centered on the player craft with **local up** as the pole,
+/// for [`ScreenshotPreset::PlumeSkyline`].
+///
+/// [`craft_context`] poles on the ship's nose, which is right for a hero shot
+/// orbiting the stack but wrong here twice over: the horizon rolls with the
+/// craft's attitude, and — the part that matters — `elevation_deg` then means
+/// "angle off the craft's waist" rather than "angle off the local horizontal".
+/// This probe exists to hold the camera at a known pitch *above the horizontal*,
+/// because that is the regime where the fullscreen composites can sort ahead of
+/// world transparency (see [`thalos_body_render::composite_order`]). Poling on
+/// the radial makes the framing say exactly that, and keeps it true no matter
+/// how the descending craft happens to be pointed.
+fn plume_skyline_context(sim: &SimulationState, solar: &SolarSystemState) -> Option<HubContext> {
+    /// Shift the focus down the stack toward the bell, as [`craft_context`]
+    /// does, so the column rather than the pod centres the frame.
+    const FOCUS_OFFSET_M: f64 = -4.0;
+    let body_id = sim.simulation.dominant_body();
+    // No body state yet (the frame the solar cache has not filled): fall back to
+    // the nose-poled hero framing rather than returning no focus at all. It
+    // rolls with the craft, but a rolled frame still exercises the ordering —
+    // an unposed capture is simply lost.
+    let Some(body_state) = solar
+        .states
+        .as_deref()
+        .and_then(|states| states.get(body_id))
+    else {
+        return craft_context(sim);
+    };
+    let craft = sim.simulation.ship_state().position;
+    let up_world = match (craft - body_state.position).try_normalize() {
+        Some(up) => up,
+        None => return craft_context(sim),
+    };
+    let nose = (sim.simulation.attitude().orientation * DVec3::Y)
+        .try_normalize()
+        .unwrap_or(DVec3::Y);
+    Some(HubContext {
+        body_id,
+        center_world: craft + nose * FOCUS_OFFSET_M,
+        up_world,
         pad_r: 0.0,
     })
 }
@@ -3206,10 +3361,12 @@ fn find_rugged_airless_site(
     };
     if let Some(landmark) = landmark {
         info!(
-            target: "thalos::screenshot",
-            "airless landmark crater: radius {:.1} km, relief {:.0} m ({choice:?})",
-            landmark.radius_m / 1000.0,
-            landmark.relief_m,
+            target: "thalos::diagnostic::capture",
+            event = "airless_landmark",
+            radius_m = landmark.radius_m,
+            relief_m = landmark.relief_m,
+            choice = ?choice,
+            "airless landmark selected"
         );
         return (landmark.dir, Some(f64::from(landmark.radius_m)));
     }
@@ -3331,14 +3488,15 @@ fn stats_json(stats: Option<ProbeStats>) -> String {
 }
 
 fn framing_json(cfg: &ScreenshotConfig) -> String {
-    if let Some(saved) = cfg.saved.as_ref() {
+    if let Some(viewpoint) = cfg.viewpoint.as_ref() {
         return serde_json::json!({
-            "kind": "saved_perspective",
-            "body": saved.body.as_str(),
-            "position_body_m": saved.camera_position_body_m,
-            "rotation_body_xyzw": saved.camera_rotation_body_xyzw,
-            "vertical_fov_rad": saved.vertical_fov_rad,
-            "recorded_sim_time_s": saved.sim_time_s,
+            "kind": "viewpoint",
+            "id": viewpoint.id.as_str(),
+            "body": viewpoint.body.as_str(),
+            "position_body_m": viewpoint.camera_position_body_m,
+            "rotation_body_xyzw": viewpoint.camera_rotation_body_xyzw,
+            "vertical_fov_rad": viewpoint.vertical_fov_rad,
+            "recorded_sim_time_s": viewpoint.sim_time_s,
         })
         .to_string();
     }
@@ -3387,55 +3545,6 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
             )
         }
     }
-}
-
-/// Re-project an F8 handoff through the freshly booted body's current state.
-/// This preserves the exact geographic eye position, orientation, and lens
-/// without restoring a partial simulation snapshot.
-fn pose_saved_perspective(
-    saved: &SavedPerspective,
-    body_id: BodyId,
-    bodies: &[thalos_world::BodyDefinition],
-    solar: &SolarSystemState,
-    root: &Grid,
-    transform: &mut Transform,
-    cell: &mut CellCoord,
-    projection: &mut Projection,
-) -> bool {
-    let Some(states) = solar.states.as_deref() else {
-        return false;
-    };
-    let Some(body_state) = states.get(body_id) else {
-        return false;
-    };
-    // Same SURFACE frame the save wrote (see `handle_save_perspective`).
-    let surface_q =
-        crate::rendering::transforms::surface_orientation_authored(bodies, body_id, states)
-            .unwrap_or_else(|| body_state.orientation.normalize());
-    let camera_body = DVec3::from_array(saved.camera_position_body_m);
-    let rotation_body = DQuat::from_xyzw(
-        saved.camera_rotation_body_xyzw[0],
-        saved.camera_rotation_body_xyzw[1],
-        saved.camera_rotation_body_xyzw[2],
-        saved.camera_rotation_body_xyzw[3],
-    )
-    .normalize();
-    let camera_world = body_state.position + surface_q * camera_body;
-    let rotation_world = (surface_q * rotation_body).normalize();
-    let (next_cell, local) = root.translation_to_grid(camera_world);
-    *cell = next_cell;
-    transform.translation = local;
-    transform.rotation = Quat::from_xyzw(
-        rotation_world.x as f32,
-        rotation_world.y as f32,
-        rotation_world.z as f32,
-        rotation_world.w as f32,
-    )
-    .normalize();
-    if let Projection::Perspective(perspective) = projection {
-        perspective.fov = saved.vertical_fov_rad;
-    }
-    true
 }
 
 /// Append one self-contained JSON object. Keeping it JSONL means repeated runs
@@ -3491,7 +3600,7 @@ fn write_cloud_probe_report(
             "\"total_bytes\":{}}}}}\n"
         ),
         unix_ms,
-        cfg.preset.name(),
+        cfg.scene_name(),
         cfg.width,
         cfg.height,
         screenshot_target_bytes,
@@ -3927,9 +4036,13 @@ fn fixed_site_context(
     static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     LOGGED.get_or_init(|| {
         info!(
-            target: "thalos::screenshot",
-            "fixed site ({lat_deg:.4}, {lon_deg:.4}): height {height_m:.0} m, diffusion={}",
-            crate::terrain_registry::thalos_diffusion_enabled(),
+            target: "thalos::diagnostic::capture",
+            event = "fixed_site",
+            lat_deg,
+            lon_deg,
+            height_m,
+            diffusion = crate::terrain_registry::thalos_diffusion_enabled(),
+            "fixed capture site"
         );
     });
     Some(HubContext {
@@ -3991,8 +4104,11 @@ fn dry_site_context(
             let moisture = hs.landcover_moisture(d);
             let lat_deg = d.y.clamp(-1.0, 1.0).asin().to_degrees();
             info!(
-                target: "thalos::screenshot",
-                "dry-belt site: lat {lat_deg:.0}°, macro moisture {moisture:+.2} (drier = more desert)"
+                target: "thalos::diagnostic::capture",
+                event = "dry_belt_site",
+                lat_deg,
+                macro_moisture = moisture,
+                "dry-belt capture site"
             );
             d
         }
@@ -4010,6 +4126,123 @@ fn dry_site_context(
         up_world,
         pad_r,
     })
+}
+
+/// Focus for the [`ScreenshotPreset::ForestStand`] colour-coupling probe: a
+/// wet, stand-covered sunlit land site, framed at the surface. Mirrors
+/// [`dry_site_context`] exactly except for the score being maximised.
+fn forest_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    cached_dir: &mut Option<DVec3>,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let hs = height_sources.get(body_id)?;
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
+
+    let dir_body = match *cached_dir {
+        Some(d) => d,
+        None => {
+            let sun_inertial = (-body_state.position).normalize_or_zero();
+            let sun_body = if sun_inertial == DVec3::ZERO {
+                DVec3::Y
+            } else {
+                (surface_q.inverse() * sun_inertial).normalize()
+            };
+            let d = find_forest_site(hs.as_ref(), sun_body);
+            *cached_dir = Some(d);
+            let moisture = hs.landcover_moisture(d);
+            let site_h = hs
+                .sample_height_m(d.as_vec3(), DRY_SITE_LOD_M)
+                .unwrap_or(0.0);
+            let stand = hs.canopy_coverage(d, site_h, DRY_SITE_LOD_M);
+            let lat_deg = d.y.clamp(-1.0, 1.0).asin().to_degrees();
+            info!(
+                target: "thalos::diagnostic::capture",
+                event = "forest_stand_site",
+                lat_deg,
+                macro_moisture = moisture,
+                stand_coverage = stand,
+                "forest-stand capture site"
+            );
+            d
+        }
+    };
+
+    let up_world = (surface_q * dir_body).normalize();
+    let height_m = hs
+        .sample_height_m(dir_body.as_vec3(), DRY_SITE_LOD_M)
+        .unwrap_or(0.0)
+        .max(0.0) as f64;
+    let pad_r = radius_m + height_m;
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * pad_r,
+        up_world,
+        pad_r,
+    })
+}
+
+/// Spiral the daylight hemisphere around `sun_dir_body` (same walk as
+/// [`find_driest_site`]) and return the body-fixed direction that **maximises**
+/// wet-belt forest, scored on the canonical canopy coverage
+/// ([`HeightSource::canopy_coverage`], `thalos_terrain::canopy`) — which is both
+/// what the ground paints *and* what the trees are placed from, so a
+/// high-coverage site is guaranteed to frame real trees. This used to score
+/// `moisture + 1.2 × stand` against two independent fields precisely because a
+/// wet site could land in a stand gap and frame empty ground; unifying the
+/// fields removed the need to hedge. Land-only, low-latitude, falls back to the
+/// sub-stellar point.
+fn find_forest_site(hs: &dyn HeightSource, sun_dir_body: DVec3) -> DVec3 {
+    let sun = sun_dir_body.try_normalize().unwrap_or(DVec3::Y);
+    let t1 = {
+        let seed = if sun.y.abs() < 0.9 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        (seed - sun * seed.dot(sun)).normalize()
+    };
+    let t2 = sun.cross(t1).normalize();
+
+    const RINGS: usize = 22;
+    const MAX_ANGLE_RAD: f64 = 1.10;
+    let mut best: Option<(f32, DVec3)> = None; // (score, dir) — maximise
+    for ring in 0..=RINGS {
+        let theta = MAX_ANGLE_RAD * ring as f64 / RINGS as f64;
+        let (st, ct) = theta.sin_cos();
+        let spokes = ((st * 28.0).ceil() as usize).max(1);
+        for spoke in 0..spokes {
+            let phi = std::f64::consts::TAU * spoke as f64 / spokes as f64;
+            let (sp, cp) = phi.sin_cos();
+            let dir = (sun * ct + (t1 * cp + t2 * sp) * st)
+                .try_normalize()
+                .unwrap_or(sun);
+            if dir.y.abs() > DRY_SITE_MAX_ABS_LAT_SIN {
+                continue;
+            }
+            let Some(h) = hs.sample_height_m(dir.as_vec3(), DRY_SITE_LOD_M) else {
+                continue;
+            };
+            if h <= DRY_SITE_MIN_HEIGHT_M {
+                continue; // want forested LAND, not ocean
+            }
+            let score = hs.canopy_coverage(dir, h, DRY_SITE_LOD_M);
+            if best.is_none_or(|(bs, _)| score > bs) {
+                best = Some((score, dir));
+            }
+        }
+    }
+    best.map(|(_, d)| d).unwrap_or(sun)
 }
 
 /// Spiral the daylight hemisphere around `sun_dir_body` and return the

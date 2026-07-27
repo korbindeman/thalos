@@ -1,3 +1,4 @@
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::*;
 use thalos_body_render::udlod::prelude::PreciseRotation;
@@ -7,6 +8,61 @@ use super::transforms::surface_body_to_world_orientation_f64;
 use super::types::{PlayerShip, RealSpaceBody, SolarSystemState, TidallyLocked};
 
 pub const REAL_SPACE_CELL_SIZE_M: f32 = 1_000.0;
+
+/// The world point that renders at render-space **zero** — the one authority on
+/// the big_space render frame.
+///
+/// big_space places every entity relative to the *grid cell origin of the
+/// [`FloatingOrigin`]* (`LocalFloatingOrigin::set(origin_cell, ZERO, IDENTITY)`
+/// in `big_space::grid::local_origin`), so for anything in the root grid
+/// `render = world − floating_origin_cell_origin`. An entity that must sit
+/// among big_space content while living *outside* the hierarchy — the
+/// sun-shadow cascade cameras above all — has to measure from exactly this
+/// point, or it lands somewhere the world isn't.
+///
+/// **This is not [`RenderOrigin`](crate::coords::RenderOrigin).** That one
+/// tracks the *camera focus pivot* (the craft, in flight) and feeds the scaled
+/// map / orbit projections, where a kilometre of slop is invisible. It
+/// diverges from the render frame by the entire camera↔craft separation the
+/// moment the view leaves the craft — freecam, god view — which is what parked
+/// the shadow cascades around the ship instead of around the view
+/// (INC-20260724T232104Z). Real-space placement reads this resource; scaled
+/// map-space placement keeps `RenderOrigin`.
+///
+/// **Sole writer:** [`update_real_space_origin`].
+#[derive(Resource, Default, Clone, Copy, Debug)]
+pub struct RealSpaceOrigin {
+    pub position: DVec3,
+}
+
+impl RealSpaceOrigin {
+    /// A world-space point in render space.
+    #[inline]
+    pub fn to_render(&self, world: DVec3) -> Vec3 {
+        (world - self.position).as_vec3()
+    }
+}
+
+/// Publish the floating origin's cell origin as [`RealSpaceOrigin`].
+///
+/// Reads the camera's `CellCoord` as it stands at `SimStage::Sync` — the value
+/// last frame's `TransformSystems::Propagate` rendered against. The camera
+/// drivers rewrite it later this frame (`SimStage::Camera`), so on a frame where
+/// the camera crosses a cell boundary this trails the render frame by one cell
+/// (≤ `REAL_SPACE_CELL_SIZE_M`) for that frame; every other frame it is exact.
+/// That residual is the ordinary one-frame camera lag every `SimStage::Sync`
+/// consumer carries (see `rendering::view_anchor`), not the unbounded
+/// craft-relative error it replaces.
+pub(super) fn update_real_space_origin(
+    grid: Query<&Grid, With<BigSpace>>,
+    floating_origin: Query<&CellCoord, With<FloatingOrigin>>,
+    mut origin: ResMut<RealSpaceOrigin>,
+) {
+    let (Ok(grid), Ok(cell)) = (grid.single(), floating_origin.single()) else {
+        return;
+    };
+    origin.position = grid.grid_position_double(cell, &Transform::IDENTITY);
+}
 
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct RealSpaceRoot {

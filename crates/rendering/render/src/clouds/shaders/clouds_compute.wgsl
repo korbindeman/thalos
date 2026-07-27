@@ -2,14 +2,26 @@
 #import thalos::atmosphere::{
     cloud_surface_shape,
     cloud_march_step_m,
+    cloud_cell_field,
+    cloud_cell_style,
+    cloud_far_ownership,
     cloud_march_stop_m,
-    cloud_march_coarseness,
-    cloud_morph_noise,
     cloud_strata_warp,
     CLOUD_MARCH_REACH_M,
-    CLOUD_MARCH_ENTRY_FADE_START_M,
-    CLOUD_MARCH_ENTRY_FADE_END_M,
+    CLOUD_MARCH_MIN_STEP_M,
     CLOUD_MARCH_FADE_FRACTION,
+}
+
+/// Radians subtended by one cloud-target pixel. `inverse_camera_projection` is
+/// the inverse of the projection, so element [0][0] is 1/P00 — the half-width
+/// tangent at unit depth; two of those over the target width is the per-pixel
+/// angle. Derived rather than uniform-fed so it cannot drift from the
+/// projection the same march is tracing. This is the LOD driver for the whole
+/// cloud system: distance is not footprint (see the thalos::atmosphere march
+/// contract).
+fn cloud_pixel_angle() -> f32 {
+    return 2.0 * config.inverse_camera_projection[0][0]
+        / max(config.render_resolution.x, 1.0);
 }
 
 // Camera-change threshold for the temporal-history gate. Coarse on purpose:
@@ -52,7 +64,7 @@ const WORLEY_RESOLUTION_F32 = 64.0;
 // 600 m near → 4.8 km at range) while evaluating the smooth broad mass only.
 // A meaningful hit backs up one interval and switches to the full-density
 // cadence at 1/5 of the local broad step; four empty fine samples return to
-// coarse mode. Distance-stretched steps are safe ONLY because the density
+// coarse mode. Footprint-stretched steps are safe ONLY because the density
 // field is band-limited ahead of every step increase (erosion retires as the
 // refine step grows past the detail scale; the shape spectrum narrows; past
 // ~90 km density is the derived homogenized field) — see the contract block
@@ -78,6 +90,31 @@ const CAMERA_CUT_DELTA = 0.05;
 // distant clouds behind a natural blue/warm veil instead of a soot-brown
 // extinction-only tint (the "dirty distant deck" failure).
 const AIRLIGHT_GAIN = 1.35;
+// Convective cell aspect (round-9). The authored `clouds_base_shape_scale_m`
+// describes the SHEET scale; a cumulus lobe is taller than it is wide, so
+// convective columns stretch the domain's RADIAL axis — a metre of climb moves
+// the sample only 1/stretch of a metre through the noise, so one lobe stays
+// coherent from base to top instead of decorrelating into a stack of unrelated
+// blobs. `march_column` (fill_lut.rs) mirrors both; keep them in lockstep.
+//
+// The horizontal period stays at the authored scale, and the reason is a
+// measured failure: narrowing it to 0.42× (≈3.4 km cells) made the near field
+// beautifully solid AND painted the cruise deck as a regular lattice of
+// identical puffs in rows — the 64³ volume's Cartesian repeat, which becomes
+// planet-visible once many periods fit on screen (the ADR-20260722T141000Z
+// "rows" family, from the tile side this time). Apparent cell size must come
+// from the FORMATION THRESHOLD picking peaks out of a wide period — one lobe
+// per period is what broken cumulus actually looks like — not from shortening
+// the period. If narrower cells are ever wanted, the repeat has to be broken
+// first (a second octave at a non-commensurate period), not shortened.
+const CONVECTIVE_WIDTH_SCALE = 1.0;
+const CONVECTIVE_STRETCH = 1.9;
+// How much the periodic Cartesian volume perturbs the aperiodic cell field.
+// It is a SUB-CELL sculptor now: it adds billow and vertical structure inside
+// a cell that `cloud_cell_field` placed, and it retires at range. Raising it
+// toward 1.0 hands cell-scale organization back to an 8 km repeat, which is
+// the "rows" failure above. Mirrored in fill_lut.rs — keep in lockstep.
+const SUBCELL_SHAPE_WEIGHT = 0.55;
 
 struct Config {
     clouds_base_shape_scale_m: f32,
@@ -120,13 +157,17 @@ struct Config {
     // tracks the strata density (the far tier's authority).
     fill_threshold0: vec4f,
     fill_threshold1: vec4f,
-    // Expected filtered density E[shaped | env]: 16 nodes (i/15), derived by
-    // the same calibration. The march's coarse bands render this in place of
-    // the Cartesian shape term (see `shape_response_sample`).
-    shape_response0: vec4f,
-    shape_response1: vec4f,
-    shape_response2: vec4f,
-    shape_response3: vec4f,
+    // Cloud sun-transmittance cascade placement, body-fixed. Mirror of
+    // `CloudShadowFrame` (shadow_frame.rs) — the receivers' `CloudShadowBlock`
+    // carries the identical numbers, so producer and consumer cannot drift.
+    // xyz = map centre on the reference sphere, w = half extent (m).
+    shadow_origin: vec4f,
+    // xyz = +u tangent, w = metres per texel.
+    shadow_axis_u: vec4f,
+    // xyz = +v tangent, w = 1 when the cascade is live.
+    shadow_axis_v: vec4f,
+    // xyz = reference-plane normal, w = sun elevation cosine at the centre.
+    shadow_up: vec4f,
 };
 
 @group(0) @binding(0) var<uniform> config: Config;
@@ -153,6 +194,11 @@ struct Config {
 // Canonical surface-space broad shape at four normalized-height strata. It is
 // generated/versioned with weather and shares weather_sampler's filter state.
 @group(1) @binding(7) var surface_density_texture: texture_cube<f32>;
+// View-anchored cloud sun-transmittance cascade (CLOUD-5 / W2 near tier).
+// r = fraction of the sun beam that survives the whole deck to reach the
+// reference plane at this texel. Written by `cloud_shadow` below; sampled by
+// every surface receiver through `thalos::cloud_shadow`.
+@group(1) @binding(8) var cloud_shadow_texture: texture_storage_2d<rgba16float, write>;
 struct Ray {
     step_distance: f32,
     dir_length: f32,
@@ -183,29 +229,6 @@ struct RaymarchResult {
 // the canonical planet-fixed weather cubemap.
 fn sample_weather(n: vec3f) -> vec4f {
     return textureSampleLevel(weather_texture, weather_sampler, n, 0.0);
-}
-
-// Derived expected filtered density vs strata density: E[shaped | env] from
-// the same spawn-time Monte-Carlo that fits the formation threshold
-// (`fill_lut::derive_fill_calibration`). This IS the band-limited version of
-// the Cartesian shape term — the coarse march bands sample it instead of the
-// noise volume, so the homogenized field is mean-preserving by construction
-// rather than a second hand-tuned response.
-fn shape_response_sample(env: f32) -> f32 {
-    var nodes = array<f32, 16>(
-        config.shape_response0.x, config.shape_response0.y,
-        config.shape_response0.z, config.shape_response0.w,
-        config.shape_response1.x, config.shape_response1.y,
-        config.shape_response1.z, config.shape_response1.w,
-        config.shape_response2.x, config.shape_response2.y,
-        config.shape_response2.z, config.shape_response2.w,
-        config.shape_response3.x, config.shape_response3.y,
-        config.shape_response3.z, config.shape_response3.w,
-    );
-    let t = clamp(env, 0.0, 1.0) * 15.0;
-    let i = u32(min(t, 14.0));
-    let f = t - f32(i);
-    return mix(nodes[i], nodes[i + 1u], f);
 }
 
 // Derived formation threshold vs strata density (see the Config fields).
@@ -292,22 +315,23 @@ fn weather_phase_offset(weather: vec4f, period: f32) -> vec3f {
 // acceleration must use a truly conservative volume in a future optimization:
 // heuristically resuming at base/top or macro thresholds produced stable
 // horizontal isosurfaces at grazing angles (INC-0011).
-// `coarse` (from `cloud_march_coarseness`, 0..2) is the density field's LOD:
-// 0 = full morphology; →1 = erosion retires, the shape spectrum narrows to
-// its low-frequency mix, formation edges widen; →2 = the Cartesian shape term
-// is replaced by the derived homogenized field E[shaped | env]. Each stage
-// band-limits the field BEFORE the march's step size grows past the scale it
-// removes (see the thalos::atmosphere march contract) — this is what makes
-// the long-reach single representation alias-free (BL-20260724T003705Z).
+// `filter_m` is the caller's sampling scale in metres — the march step, the
+// sun-tap spacing, or the shadow-texel footprint, whichever applies. It is the
+// ONLY LOD input: camera distance does not appear in this function at all.
+// Everything that has to retire with scale retires against it — the cell
+// field's octaves, the periodic Cartesian sub-cell sculptor, erosion, and the
+// formation-edge width — so the field band-limits BEFORE the sampler that needs
+// it coarsens (ADR-20260721T033055Z's conservative-bounds requirement), and
+// range degrades cells into COARSER CELLS rather than into a mean.
 fn get_cloud_map_density(
     pos: vec3f,
     shell_height: f32,
     weather: vec4f,
     surface_density: f32,
     detail_weight: f32,
+    filter_m: f32,
     macro_noise: f32,
     formation: f32,
-    coarse: f32,
 ) -> f32 {
     let cov = clamp(weather.r * config.clouds_coverage, 0.0, 1.0);
     let local_base = clamp(weather.b, 0.0, 0.92);
@@ -321,22 +345,41 @@ fn get_cloud_map_density(
     let storm_w = smoothstep(0.72, 0.88, weather.g);
     let cumulus_w = max(0.0, 1.0 - stratus_w - storm_w);
 
-    let c1 = clamp(coarse, 0.0, 1.0);
-    let c2 = clamp(coarse - 1.0, 0.0, 1.0);
+    // Sub-cell sculptor LOD, derived from the ONE sampling scale rather than
+    // from camera distance. The periodic Cartesian volume adds lobes well under
+    // its authored period, so it retires as `filter_m` climbs toward that
+    // period; the aperiodic cell field carries morphology from there on and
+    // band-limits itself the same way. There is no longer a `coarse` ladder —
+    // distance never enters the density function.
+    let sculpt_fade = smoothstep(
+        0.10 * max(config.clouds_base_shape_scale_m, 500.0),
+        0.55 * max(config.clouds_base_shape_scale_m, 500.0),
+        filter_m,
+    );
     let coupling = clamp(config.surface_density_coupling, 0.0, 1.0);
-    var env = clamp(surface_density, 0.0, 1.0);
-    // Homogenized bands re-mottle `env` with the SHARED sub-texel morphology
-    // field (the far tier modulates its LUT input identically), so the
-    // smooth E[shaped | env] stand-in carries the same texture character as
-    // both the far projection and the sculpted near bands — without this the
-    // 90 km+ band read as blur against the far tier's crisp mottle (user
-    // ascent verdict, 150 km framing). Broad octave only: the fine octave's
-    // 830 m period sits under the coarse bands' refine cadence.
-    if (c2 > 1.0e-3) {
-        let morph = cloud_morph_noise(pos, 0.0);
-        env = clamp(env + (morph - 0.5) * (0.55 * c2), 0.0, 1.0);
-    }
-    let shared_envelope = smoothstep(0.04, 0.42, env);
+    let env = clamp(surface_density, 0.0, 1.0);
+    // Occupancy gates FORMATION, never extinction (round-9; user verdict
+    // 2026-07-25 "clouds are super ghost-ish"). `env` is the strata cube's
+    // AREAL FRACTION — the share of a ~5 km weather texel that is cloudy, see
+    // `cloud_surface_density_cpu` — so scaling extinction by it thinned every
+    // cell in proportion to how sparse its NEIGHBOURHOOD is: a 30 %-coverage
+    // region rendered as one 30 %-opaque film rather than solid cells with
+    // clear air between them. It also double-counted, because the derived
+    // `formation_threshold(env)` above already spends the same occupancy on
+    // deciding where cloud exists. This is the grey-veil error
+    // `weather_column_from_texel` warns about, reached from the near tier's
+    // side. What remains is a hard clear-air cut, so the Cartesian shape noise
+    // cannot grow cloud where the producer authored none; the fill contract is
+    // preserved because the spawn-time Monte-Carlo re-fits the threshold curve
+    // against this exact math (E[column alpha] still tracks strata mean — it
+    // now reaches it with FEW OPAQUE columns instead of many translucent ones).
+    // The toe matters as much as the removal: a gate that ramps from zero
+    // turns a 3 %-occupancy region into half-density fog across the whole
+    // region, which is the ghost read arriving by a different door (the
+    // massif framing is exactly such a low-occupancy lane). Stay at hard zero
+    // through genuinely clear air and reach full extinction by the time a
+    // texel holds any real cloud.
+    let formation_gate = smoothstep(0.02, 0.08, env);
 
     let bottom_softness = max(config.clouds_bottom_softness, 0.01);
     // Round-7 morphology: convective tops are SCULPTED, not faded. The former
@@ -357,49 +400,84 @@ fn get_cloud_map_density(
         + cumulus_profile * cumulus_w
         + storm_profile * storm_w;
 
-    // Fully homogenized band: the derived expected filtered density stands in
-    // for the Cartesian shape term entirely — no noise fetches at all, so the
-    // long-range broad probes are CHEAPER than near ones.
-    if (c2 >= 1.0 && coupling >= 1.0) {
-        return max(
-            shape_response_sample(env)
-                * vertical_profile
-                * shared_envelope
-                * config.clouds_density,
-            0.0,
+    let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
+    let radius = length(pos);
+    let up_shape = pos / max(radius, 1.0);
+
+    // ── Cell-scale morphology: the aperiodic column field ────────────────────
+    // This is the formation carrier at EVERY range. It replaces the old
+    // arrangement where cell structure lived only in the periodic Cartesian
+    // volume and was therefore deleted past ~90 km, leaving a flat sheet
+    // (2026-07-25 verdict: "incoherent soupy blobby mess"). Nothing the
+    // weather cube can store reaches this scale — 4.9 km texels, ~15–25 km of
+    // authored content — so the cells have to be analytic and aperiodic.
+    // Morphology is a property of the PLACE, not a global constant: rolls,
+    // round cells, coarse storm clusters and lane-cut sheets are all the same
+    // field under a different style (`cloud_cell_style`). Resolved per sample
+    // rather than per ray because a 300 km grazing ray genuinely crosses style
+    // regions; it costs one extra low-frequency noise fetch.
+    let cell_style = cloud_cell_style(up_shape, weather.g);
+    let cell = cloud_cell_field(up_shape, config.planet_radius, filter_m, cell_style);
+
+    // ── Sub-cell sculpting: the periodic Cartesian volume ────────────────────
+    // Demoted to what it is actually good at — intra-cell billow and vertical
+    // structure inside a cell the field above already placed. It retires with
+    // `c2` because its 8 km repeat is the term that cuts planet-visible rows
+    // once many periods fit on screen; retiring it costs morphology only at
+    // ranges where its lobes are sub-footprint anyway. Skipping the fetch
+    // entirely also keeps the long-range broad probes cheaper than near ones.
+    var shape = cell;
+    let sub_weight = SUBCELL_SHAPE_WEIGHT * (1.0 - sculpt_fade);
+    var anvil_base = cell;
+    if (sub_weight > 1.0e-3) {
+        // Convective morphology is ANISOTROPIC (round-9; user ask 2026-07-25,
+        // "vertical development", MSFS/cumulonimbus reference). A radially
+        // STRETCHED domain keeps one lobe coherent over its whole depth
+        // instead of decorrelating into a stack of unrelated blobs. Sheets
+        // keep the isotropic period — a stratus deck genuinely is wide and
+        // flat. `convective_w` is continuous in the weather type channel, so
+        // no type boundary can pop the volume. The horizontal period stays
+        // WIDE: narrowing it is the rejected round-9 experiment that painted
+        // the cruise deck as a lattice of identical puffs in rows.
+        // Mirrored in `march_column` (fill_lut.rs) — keep the two in lockstep.
+        let convective_w = clamp(cumulus_w + storm_w, 0.0, 1.0);
+        let shape_scale = max(config.clouds_base_shape_scale_m, 500.0)
+            * mix(1.0, CONVECTIVE_WIDTH_SCALE, convective_w);
+        let alt_local = radius - (config.planet_radius + config.clouds_bottom_height);
+        // Pull the domain back along the local vertical in proportion to
+        // altitude: a metre of climb then moves the sample only 1/stretch of a
+        // metre through the noise, elongating every feature vertically.
+        let shape_domain = pos
+            - up_shape * (alt_local * (1.0 - 1.0 / CONVECTIVE_STRETCH) * convective_w);
+        let broad = cloud_volume(
+            rotated_domain(shape_domain)
+                + weather_phase_offset(weather, shape_scale)
+                + vec3f(1800.0, -4200.0, 900.0),
+            shape_scale,
         );
+        // The erosion channel stays out of the solid body: promoting its small
+        // cells into `shape` fragmented the volume into screen-space stipple
+        // instead of adding readable billows. Spectrum follows column height:
+        // tall (congestus/storm) columns weight the low-frequency channels so a
+        // tower reads as ONE coherent mass with large billows; squat
+        // fair-weather columns keep the small-lobe mix.
+        let shape_squat = broad.r * 0.52 + broad.g * 0.24 + broad.a * 0.24;
+        let shape_tall = broad.r * 0.64 + broad.g * 0.06 + broad.a * 0.30;
+        let sub = mix(shape_squat, shape_tall, max(column_tall, sculpt_fade));
+        // Additive and mean-preserving: as `sub_weight` retires, the field's
+        // distribution keeps its mean AND its variance, so the derived fill
+        // calibration stays valid and contrast does not step at the band edge.
+        shape = cell + (sub - 0.5) * sub_weight;
+        anvil_base = cell + ((broad.r * 0.72 + broad.a * 0.28) - 0.5) * sub_weight;
     }
 
-    let shape_scale = max(config.clouds_base_shape_scale_m, 500.0);
-    let broad = cloud_volume(
-        rotated_domain(pos)
-            + weather_phase_offset(weather, shape_scale)
-            + vec3f(1800.0, -4200.0, 900.0),
-        shape_scale,
-    );
-    // Broad Perlin/Worley masses. The erosion channel stays out of the solid
-    // body: promoting its small cells into `shape` fragmented the volume into
-    // screen-space stipple instead of adding readable billows.
-    // Spectrum follows column height: tall (congestus/storm) columns weight
-    // the low-frequency channels so a tower reads as ONE coherent mass with
-    // large billows; squat fair-weather columns keep the small-lobe mix. This
-    // is a sub-strata morphology choice, so it has no CPU mirror. The
-    // coarseness LOD also narrows toward the tall (low-frequency) mix so band
-    // 1's doubled step never meets the small-lobe channel.
-    let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
-    let shape_squat = broad.r * 0.52 + broad.g * 0.24 + broad.a * 0.24;
-    let shape_tall = broad.r * 0.64 + broad.g * 0.06 + broad.a * 0.30;
-    let shape = mix(shape_squat, shape_tall, max(column_tall, c1));
-
-    // Formation authority is the NON-PERIODIC surface field. The strata
-    // density (coverage threshold + typed vertical response, applied by the
-    // CPU producer on the body-direction sphere) decides where cloud bodies
-    // live; the periodic Cartesian volume only sculpts sub-texel lobes inside
-    // that envelope. The previous threshold let the 21.6 km macro octave and
-    // the 8 km tile's low frequencies organize clouds over tens of km, and the
-    // spherical shell cut that Cartesian repeat into planet-visible rows
-    // (ADR-20260722T141000Z; 2026-07-23 user verdict). `macro_noise` remains
-    // only as a faint sub-dominant variety term.
+    // Formation authority is NON-PERIODIC at every scale: the strata cube owns
+    // synoptic/mesoscale occupancy (≥ ~15 km), `cloud_cell_field` owns cell
+    // scale (~1–5 km), and only sub-cell sculpting comes from the periodic
+    // Cartesian volume — which is why no repeat can organize clouds at a scale
+    // the eye reads as a pattern (ADR-20260722T141000Z; 2026-07-23 user
+    // verdict). `macro_noise` remains only as a faint sub-dominant variety
+    // term.
     // The threshold makes the near tier's COLUMN areal fill (seen from above)
     // track the strata density — the contract the far tier reads directly.
     // The curve is DERIVED at body spawn by a CPU Monte-Carlo mirror of this
@@ -425,8 +503,7 @@ fn get_cloud_map_density(
     // zero at the base where areal fill is decided). Tall congestus/storm
     // columns keep more mass with height so towers stay coherent. Mirrored
     // in `march_column` (fill_lut.rs) and `cloud_surface_density_cpu` — keep
-    // the three in lockstep. (`column_tall` is declared at the
-    // shape-spectrum blend above.)
+    // the three in lockstep. (`column_tall` is declared above the cell field.)
     let dome = h * h;
     let vertical_narrow = h * 0.04 * stratus_w
         + dome * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
@@ -435,7 +512,7 @@ fn get_cloud_map_density(
     // Cumulonimbus anvils broaden again near the tropopause, but only where
     // the storm weather channel permits them.
     let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
-    let anvil_shape = broad.r * 0.72 + broad.a * 0.28 - (threshold - 0.06);
+    let anvil_shape = anvil_base - (threshold - 0.06);
     mass = max(mass, anvil_shape * anvil_profile * storm_w);
 
     // Fine 3-D Worley erosion is strongest only near the boundary, preserving
@@ -446,10 +523,10 @@ fn get_cloud_map_density(
     // iso-contour as visible "fingerprint" rings inside big lobes once the
     // softer CLOUD-4 lighting stopped hiding them.
     let edge = 1.0 - smoothstep(0.02, 0.34, mass);
-    // Erosion retires with coarseness ahead of the band-1 step increase (the
-    // caller's footprint-keyed `detail_weight` also fades it as the refine
-    // step outgrows the detail scale — either gate suffices).
-    let detail_weight_lod = detail_weight * (1.0 - c1);
+    // Erosion retires with the sculptor (the caller's footprint-keyed
+    // `detail_weight` also fades it as the refine step outgrows the authored
+    // detail scale — either gate suffices).
+    let detail_weight_lod = detail_weight * (1.0 - sculpt_fade);
     if (edge * detail_weight_lod > 1.0e-3) {
         let detail = cloud_volume(
             rotated_domain(pos + boil) + vec3f(270.0, -610.0, 130.0),
@@ -467,20 +544,25 @@ fn get_cloud_map_density(
             * config.clouds_detail_strength * 0.55;
     }
 
-    let edge_softness = mix(max(config.clouds_base_edge_softness, 0.015), 0.30, c1);
-    let shaped_full = smoothstep(0.0, edge_softness, mass);
-    // Homogenize toward the derived expected filtered density as the field
-    // approaches band 2 — mean-preserving at both ends by construction.
-    let shaped = mix(shaped_full, shape_response_sample(env), c2);
-    // The surface field owns planet-scale occupancy in every projection. At
-    // mip 0 this is a coherent body-fixed envelope; the Cartesian volume only
-    // sculpts sub-cell shape inside it. Far consumers sample the same payload
-    // at footprint mips, so refinement adds morphology instead of replacing
-    // one cloud distribution with another.
+    // Formation-edge softening with range. This was `0.30` at c1 — keyed to
+    // the BROAD band step even though density is only ever integrated at the
+    // 0.2× refine cadence, so it over-softened by ~5× and turned every distant
+    // cell into a low-alpha skirt. That was the round-9 `massif-ridge` milky
+    // veil's prime remaining suspect, and softening is the one thing that
+    // cannot survive here: the whole point of the cell field is that contrast
+    // is preserved with range, and a widening edge erases it just as
+    // effectively as rendering the mean did.
+    let edge_softness = mix(max(config.clouds_base_edge_softness, 0.015), 0.075, sculpt_fade);
+    let shaped = smoothstep(0.0, edge_softness, mass);
+    // The strata field owns planet-scale occupancy in every projection — but it
+    // spends that authority through the DERIVED formation threshold, not by
+    // scaling extinction (see `formation_gate`). Far consumers sample the same
+    // strata payload at footprint mips AND the same cell field, so range
+    // removes sub-cell sculpting and nothing else.
     return max(
         shaped
             * vertical_profile
-            * mix(1.0, shared_envelope, coupling)
+            * mix(1.0, formation_gate, coupling)
             * config.clouds_density,
         0.0,
     );
@@ -510,7 +592,7 @@ fn volumetric_sun_depth(
     macro_noise: f32,
     formation: f32,
     jitter: f32,
-    coarse: f32,
+    filter_m: f32,
 ) -> f32 {
     var ray_step_size = config.clouds_shadow_raymarch_step_size;
     var distance_along_ray = ray_step_size * (0.25 + 0.5 * jitter);
@@ -528,9 +610,9 @@ fn volumetric_sun_depth(
                 weather,
                 surface_density,
                 0.0,
+                filter_m,
                 macro_noise,
                 formation,
-                coarse,
             );
         optical_depth += density * ray_step_size;
         ray_step_size *= config.clouds_shadow_raymarch_step_multiply;
@@ -599,6 +681,9 @@ fn atmosphere_view_transmittance(sample_pos: vec3f, camera_pos: vec3f) -> vec3f 
     return exp(-tau);
 }
 
+const INV_PI = 0.31830989;
+const INV_FOUR_PI = 0.07957747;
+
 /// Per-octave dual-lobe phase values (Nubis/Frostbite multi-scatter octaves).
 /// Evaluated ONCE PER RAY; per sample each octave is attenuated by its own
 /// `exp(-τ_sun · c_i)`, so deep shade retains soft wide-lobe fill from the
@@ -615,7 +700,7 @@ fn multi_scatter_lobes(cos_theta: f32, g_fwd: f32, g_bwd: f32, lerp_g: f32) -> v
             lerp_g,
         );
         // HG omits 1/(4π); normalize into scene units and bound the forward peak.
-        lobes[i] = min(lobe * 0.07957747, 2.2);
+        lobes[i] = min(lobe * INV_FOUR_PI, 2.2);
         gf *= 0.5;
         gb *= 0.5;
     }
@@ -629,6 +714,38 @@ fn multi_scatter_lobes(cos_theta: f32, g_fwd: f32, g_bwd: f32, lerp_g: f32) -> v
 // flat cotton with no readable sun side.
 const MS_OCTAVE_WEIGHTS = vec3f(1.0, 0.34, 0.13);
 const MS_OCTAVE_EXTINCTION = vec3f(1.0, 0.25, 0.06);
+
+// ── Why clouds are white ─────────────────────────────────────────────────────
+// A water cloud scatters conservatively (ϖ ≈ 0.9999) through a strongly
+// forward phase, so an optically thick sunlit cell reaches the diffusion
+// limit: it returns ~0.75–0.85 of the incident flux, and that light leaves
+// close to isotropically. Its radiance is therefore ≈ A·E/π, roughly SIX
+// times the single-scattering side lobe (p(90°)·E ≈ 0.043·E here).
+//
+// Single scattering alone renders a cloud no brighter than the sky ambient
+// filling it — grey-blue mud that takes its chroma from the ambient rather
+// than the sun. That was the defect: the octave sum was divided by Σw, which
+// makes it a weighted AVERAGE of phase values, so the "multiple-scattering
+// octaves" only reshaped the lobe and added none of the energy they name.
+// Measured on `cloud_cruise` (2026-07-24 capture): brightest near-tier cloud
+// pixel 0.30 display luminance against 0.49–0.73 for the sky behind it and
+// 0.73 for the far tier's rendering of the same field.
+//
+// The replacement splits the source term the way the physics does:
+//   single  — exact normalized phase against the unattenuated beam; owns the
+//             forward glare and the silver lining;
+//   multi   — an isotropic-equivalent reservoir at the cloud's diffusion
+//             albedo, whose DEPTH response is the surviving job of the wider
+//             octaves (they attenuate far more slowly, so light leaks around
+//             occluders instead of multiplying cores to charcoal).
+// `CLOUD_MS_ALBEDO` is a physical property of the medium, not a brightness
+// knob: it is what makes a lit cell as bright as a white Lambertian surface
+// facing the same sun, which is the anchor the far tier must be matched to.
+const CLOUD_MS_ALBEDO = 0.80;
+// Residual anisotropy of the multiply-scattered reservoir: it is not perfectly
+// isotropic — the sun side of a cell stays brighter. 0 = flat, 1 = the widest
+// octave's full lobe.
+const MS_ANISO = 0.7;
 
 /// Silver-lining / powder: thin edges facing the light brighten; the same thin
 /// path looking *away* from the light darkens (HZD powder). Restrained: the
@@ -701,7 +818,9 @@ fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray
 
     // Jitter only the first fine sample. Coarse probes back up before they hand
     // a hit to the full-density cadence, so they cannot skip the entry edge.
-    let step = cloud_march_step_m(seg_start) * REFINE_STEP_FRACTION;
+    // `MIN_STEP` is the right scale here: the caller re-derives the real
+    // footprint/budget step per sample, and this only phases the first one.
+    let step = CLOUD_MARCH_MIN_STEP_M * REFINE_STEP_FRACTION;
     // The full-step temporal phase is safe now that the minimum density
     // feature is larger than one march step. It prevents near-horizontal rays
     // from stacking their samples into coherent bands; history averages the
@@ -713,10 +832,16 @@ fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray
 
 fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> RaymarchResult {
     let ray = get_ray(ray_origin, ray_dir, max_dist, jitter);
+    let pixel_angle = cloud_pixel_angle();
 
-    // Shell entered beyond the near estimator's ownership: the composite's
-    // band march owns the whole ray; skip the volume work entirely.
-    if (ray.start > min(max_dist, CLOUD_MARCH_ENTRY_FADE_END_M)) {
+    // The far/orbital projection owns this ray only once cell-scale morphology
+    // is genuinely sub-pixel (whole-disc / map framings). Keying this to the
+    // shell ENTRY DISTANCE instead — the old 240–300 km window — deleted the
+    // volumetrics in the middle of every ascent, which is exactly where the
+    // deck is best resolved (345 m/pixel at 300 km).
+    let entry_footprint = ray.start * pixel_angle;
+    let far_own = cloud_far_ownership(entry_footprint);
+    if (far_own >= 1.0 || ray.start > max_dist) {
         return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
 
@@ -788,17 +913,14 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     // one broad interval, but never before the last completed fine frontier.
     var refined_until = ray.start;
 
-    // March-exhaustion fade: a ray travelling far *inside* the deck uses all
-    // its configured step cap and stops mid-cloud; the entry-distance haze below never
-    // fires for it (entry was close), so without this the stop front reads
-    // as a sharp tonal seam arc across the deck. The banded reach comes from
-    // the shared thalos::atmosphere contract (the composite mirrors it), and
-    // the dissolve covers only the last stretch — the old half-span dissolve
-    // started washing morphology out at 34 km, a big part of the perceived
-    // detail cliff.
     let ray_step_limit = clamp(config.clouds_raymarch_steps_count, 1u, MAX_RAY_STEPS_CAP);
-    let reach_end = cloud_march_stop_m(f32(ray_step_limit), ray.start);
+    // Where this ray's probe budget runs out, under the same footprint step
+    // law. Only grazing rays ever reach it — a steep one finishes its short
+    // in-shell segment long before. The marcher dissolves over the last
+    // stretch and the far tier fades in complementarily.
+    let reach_end = cloud_march_stop_m(f32(ray_step_limit), ray.start, pixel_angle);
     let reach_fade_begin = mix(ray.start, reach_end, CLOUD_MARCH_FADE_FRACTION);
+
 
     for (var step: u32 = 0u; step < ray_step_limit; step++) {
         if (dir_length > ray.end) { break; }
@@ -812,19 +934,25 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         // so steep rays still resolve thin layers vertically (such rays have
         // geometrically short in-shell segments, so the clamp stays cheap).
         let radial_rate = abs(dot(up, ray_dir));
-        let broad_step = min(
-            cloud_march_step_m(dir_length),
-            max(600.0, MAX_RADIAL_STEP_M / max(radial_rate, 1.0e-3)),
-        );
+        let broad_step = cloud_march_step_m(dir_length, pixel_angle, radial_rate);
         let fine_step = broad_step * REFINE_STEP_FRACTION;
-        // Field LOD at this distance (see get_cloud_map_density).
-        let coarse = cloud_march_coarseness(dir_length);
-        // Homogenized bands warp the strata lookup through the SHARED
-        // contract (`cloud_strata_warp`) so the ~5 km texel lattice reads as
-        // organic cells; the far tier warps identically at its resolved
-        // footprints, so the crossfaded fields stay registered. Band 0 keeps
-        // the raw direction — there the Cartesian sculptor owns morphology.
-        let up_strata = cloud_strata_warp(up, clamp(coarse - 1.0, 0.0, 1.0));
+        // Sampling scale everything band-limits against: the REFINE cadence
+        // (density is only ever integrated there) or the projected pixel
+        // footprint, whichever is coarser. This single value now drives the
+        // cell field's octave fade, the sub-cell sculptor's retirement, and the
+        // formation-edge width — one driver, so they cannot disagree.
+        let cell_filter_m = max(fine_step, dir_length * pixel_angle);
+        // Warp the strata lookup through the SHARED contract so the ~5 km texel
+        // lattice reads as organic cells; the far tier warps identically, so
+        // the fields stay registered. This used to be gated by range, on the
+        // premise that the Cartesian sculptor owned near-field
+        // morphology and hid the lattice. That premise died with this change:
+        // the cell field is thresholded against `env` directly, so a texel
+        // edge now cuts a VERTICAL WALL through a cloud, which the runway
+        // capture showed as boxy right-angled silhouettes. The warp is a
+        // measure-preserving direction remap, so applying it everywhere leaves
+        // the derived calibration untouched.
+        let up_strata = cloud_strata_warp(up, 1.0);
         let surface_density = sample_surface_density(up_strata, layer_h);
         let density_threshold = max(config.clouds_density, 1.0e-5)
             * BROAD_HIT_DENSITY_FRACTION;
@@ -836,9 +964,9 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 weather,
                 surface_density,
                 0.0,
+                cell_filter_m,
                 macro_noise,
                 formation,
-                coarse,
             );
             if (broad_density > density_threshold) {
                 refining = true;
@@ -869,9 +997,9 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 weather,
                 surface_density,
                 detail_weight,
+                cell_filter_m,
                 macro_noise,
                 formation,
-                coarse,
             )
             * (1.0 - smoothstep(reach_fade_begin, reach_end, dir_length));
 
@@ -906,7 +1034,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                     macro_noise,
                     formation,
                     jitter,
-                    coarse,
+                    cell_filter_m,
                 );
             let sun_T = atmosphere_sun_transmittance(world_position);
             let powder = powder_term(density_fraction, ray_dot_sun);
@@ -915,8 +1043,18 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
                 exp(-tau_sun * MS_OCTAVE_EXTINCTION.y),
                 exp(-tau_sun * MS_OCTAVE_EXTINCTION.z),
             );
-            let scattering = dot(MS_OCTAVE_WEIGHTS * ms_lobes, octave_shadow)
-                / (MS_OCTAVE_WEIGHTS.x + MS_OCTAVE_WEIGHTS.y + MS_OCTAVE_WEIGHTS.z);
+            // Single scattering: exact normalized phase against the beam that
+            // actually survives to this sample.
+            let single = ms_lobes.x * octave_shadow.x;
+            // Multiple scattering: the diffusion reservoir (see
+            // CLOUD_MS_ALBEDO). The wider octaves no longer carry phase
+            // energy — they supply the reservoir's depth response, which is
+            // the part of them that was ever physical.
+            let ms_depth = dot(MS_OCTAVE_WEIGHTS.yz, octave_shadow.yz)
+                / (MS_OCTAVE_WEIGHTS.y + MS_OCTAVE_WEIGHTS.z);
+            let ms_aniso = mix(1.0, ms_lobes.z / INV_FOUR_PI, MS_ANISO);
+            let multi = CLOUD_MS_ALBEDO * INV_PI * ms_depth * ms_aniso;
+            let scattering = single + multi;
             let direct = config.sun_color.rgb
                 * sun_T
                 * scattering
@@ -955,18 +1093,23 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         }
     }
 
-    // Entry-distance dissolve: rays that only meet the shell far away hand
-    // the whole interval to the composite's band march (which fades in over
-    // the same window). Unlike the pre-CLOUD-6 haze-out, this replaces the
-    // clouds with the far estimator rather than deleting them.
-    let entry_fade = 1.0
-        - smoothstep(CLOUD_MARCH_ENTRY_FADE_START_M, CLOUD_MARCH_ENTRY_FADE_END_M, ray.start);
-    transmittance = mix(1.0, transmittance, entry_fade);
-    scattered_light *= entry_fade;
+    // Sub-pixel dissolve: the volumetric tier hands over only once cell-scale
+    // morphology is genuinely smaller than a pixel, where the far projection's
+    // smooth answer is the correct one and no transition can be visible. The
+    // predecessor keyed this to shell-ENTRY DISTANCE (240–300 km), which for a
+    // nadir view is just altitude — so the volumetrics were switched off in the
+    // middle of every ascent, at framings where the deck is best resolved.
+    let near_own = 1.0 - far_own;
+    transmittance = mix(1.0, transmittance, near_own);
+    scattered_light *= near_own;
 
-    // Soft energy peak: per-channel Reinhard against a modest white point so
-    // stacked phase peaks no longer blow the composite to a white sheet.
-    let peak_limit = 2.2;
+    // Soft energy peak: per-channel Reinhard so the forward-scatter spike
+    // (a lit cell viewed toward the sun reaches ~8× an ordinary lit face)
+    // stays bounded. The white point must sit well ABOVE ordinary sunlit
+    // cloud, or the limiter becomes a dimmer: at the old 2.2 it was tuned
+    // against single-scatter-only radiance (~0.2) and would now eat a third
+    // of every white cloud top.
+    let peak_limit = 10.0;
     scattered_light = scattered_light / (vec3f(1.0) + scattered_light / peak_limit);
 
     return RaymarchResult(dist, vec4f(scattered_light, transmittance));
@@ -1255,6 +1398,172 @@ fn get_ray_direction(frag_coord: vec2f) -> vec3f {
     return camera_ray_direction(
         frag_coord / config.render_resolution,
         config.inverse_camera_view,
+    );
+}
+
+// ── Cloud sun-transmittance cascade (CLOUD-5 / W2 near tier) ────────────────
+//
+// One texel = one point on the reference plane under the view anchor; its value
+// is the transmittance of the sun beam arriving *at that point* after crossing
+// the whole deck. Receivers project their own sun ray onto the same plane, so
+// the deck's parallax — a low sun laying shadows kilometres downwind of the
+// cloud that casts them — falls out of the geometry instead of being faked.
+//
+// Three properties keep this honest against the visible volume:
+//
+// - It integrates `get_cloud_map_density` — the SAME field, config, weather
+//   cube and strata cube the view march samples. There is no second cloud
+//   distribution to disagree with (docs/rendering/clouds.md §2, principle 4).
+// - Extinction matches the primary beam exactly (`exp(-τ)`, the view march's
+//   `MS_OCTAVE_EXTINCTION.x` octave), so a cell that reads opaque from the
+//   air lays an equally opaque shadow.
+// - Erosion detail rides the same footprint fade the view march uses, keyed on
+//   the map's texel instead of the ray's step. The field is band-limited
+//   before the sampler outgrows it — the alias-free contract from
+//   BL-20260724T003705Z, in a second geometry.
+//
+// Only the DIRECT beam is gated. Ground under solid overcast keeps its sky
+// ambient, which is why an overcast landscape reads flat-lit rather than black.
+
+// Steps across the deck. The vertical span is a ~1–3 km slab; at 20 steps a
+// zenith sun samples every ~100 m, comfortably under the authored base-shape
+// scale, and the slant clamp below stops a low sun from stretching that past
+// the structure it is supposed to resolve.
+const CLOUD_SHADOW_STEPS: u32 = 20u;
+const CLOUD_SHADOW_MAX_STEP_M: f32 = 400.0;
+
+// Distance along `dir` from `origin` (inside radius `r`) to the sphere of
+// radius `r`. Positive root only — the caller is always inside the shell.
+fn shell_exit_distance(origin: vec3f, dir: vec3f, r: f32) -> f32 {
+    let b = dot(origin, dir);
+    let c = dot(origin, origin) - r * r;
+    let disc = max(b * b - c, 0.0);
+    return -b + sqrt(disc);
+}
+
+// Transmittance plus the two intermediates that identify a failure: the local
+// coverage the march saw, and the optical depth it accumulated. They ride the
+// map's spare channels (it is RGBA16F for the filtering, and one channel is all
+// the term needs), so `THALOS_CLOUD_SHADOW=show` can paint a *diagnosis*, not
+// just an answer — clear ground with zero coverage and clear ground with a
+// march that never entered the deck look identical in the r channel alone.
+struct CloudShadowSample {
+    transmittance: f32,
+    coverage: f32,
+    optical_depth: f32,
+}
+
+fn cloud_shadow_transmittance(base: vec3f, jitter: f32) -> CloudShadowSample {
+    var out: CloudShadowSample;
+    out.transmittance = 1.0;
+    out.coverage = 0.0;
+    out.optical_depth = 0.0;
+    let sun = config.sun_dir.xyz;
+    let r_bottom = config.planet_radius + config.clouds_bottom_height;
+    let r_top = config.planet_radius + config.clouds_top_height;
+    let entry = shell_exit_distance(base, sun, r_bottom);
+    let exit = shell_exit_distance(base, sun, r_top);
+    let span = exit - entry;
+    if (span <= 0.0) {
+        return out;
+    }
+
+    // Per-texel weather/formation context, taken at the slab midpoint exactly
+    // as the view march takes it at its segment midpoint: these fields vary
+    // over tens of km, and re-sampling them per step buys nothing but cost.
+    let mid = base + sun * (entry + 0.5 * span);
+    let weather_mid = sample_weather(normalize(mid));
+    out.coverage = weather_mid.r * config.clouds_coverage;
+    if (out.coverage <= 1.0e-3) {
+        return out;
+    }
+    let macro_period = max(config.clouds_base_shape_scale_m, 500.0) * 2.7;
+    let macro_sample = cloud_volume(
+        mid
+            + weather_phase_offset(weather_mid, macro_period)
+            + vec3f(-7300.0, 2100.0, 4900.0),
+        macro_period,
+    );
+    let macro_noise = macro_sample.a;
+    let formation = macro_sample.r;
+
+    let step_m = min(span / f32(CLOUD_SHADOW_STEPS), CLOUD_SHADOW_MAX_STEP_M);
+    // Footprint-matched erosion fade: the map's texel is the sampler here, and
+    // a slanted beam smears each texel further along the ground.
+    let footprint_m = max(
+        config.shadow_axis_u.w / max(config.shadow_up.w, 0.15),
+        step_m,
+    );
+    let detail_feature_m = max(config.clouds_detail_scale_m, 50.0);
+    let detail_weight = 1.0 - smoothstep(
+        detail_feature_m * DETAIL_FILTER_BEGIN,
+        detail_feature_m * DETAIL_FILTER_END,
+        footprint_m,
+    );
+    // The cascade already worked in footprint, which is now the ONE LOD driver
+    // everywhere: it just passes `footprint_m` to the density function as its
+    // `filter_m` and the field band-limits itself.
+    var optical_depth = 0.0;
+    for (var i = 0u; i < CLOUD_SHADOW_STEPS; i++) {
+        let t = entry + (f32(i) + jitter) * step_m;
+        if (t > exit) { break; }
+        let pos = base + sun * t;
+        let up = normalize(pos);
+        let weather = sample_weather(up);
+        let normalized_height = get_normalized_height(pos);
+        let layer_h = (normalized_height - weather.b) / max(weather.a - weather.b, 0.02);
+        let up_strata = cloud_strata_warp(up, 1.0);
+        let surface_density = sample_surface_density(up_strata, layer_h);
+        optical_depth += step_m * get_cloud_map_density(
+            pos,
+            clamp(normalized_height, 0.0, 1.0),
+            weather,
+            surface_density,
+            detail_weight,
+            footprint_m,
+            macro_noise,
+            formation,
+        );
+    }
+    out.optical_depth = optical_depth;
+    out.transmittance = exp(-optical_depth);
+    return out;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn cloud_shadow(@builtin(global_invocation_id) invocation_id: vec3<u32>) {
+    let size = textureDimensions(cloud_shadow_texture);
+    if (invocation_id.x >= size.x || invocation_id.y >= size.y) {
+        return;
+    }
+    var probe: CloudShadowSample;
+    probe.transmittance = 1.0;
+    probe.coverage = 0.0;
+    probe.optical_depth = 0.0;
+    // `shadow_axis_v.w` is the live flag: no cloud body, clouds off, or a sun
+    // at/below the anchor's horizon all leave the map fully lit rather than
+    // stale — a receiver can never read last frame's shadows for a sun that
+    // has since set.
+    if (config.shadow_axis_v.w > 0.5) {
+        let uv = (vec2f(invocation_id.xy) + 0.5) / vec2f(size);
+        let offset = (uv * 2.0 - 1.0) * config.shadow_origin.w;
+        let base = config.shadow_origin.xyz
+            + config.shadow_axis_u.xyz * offset.x
+            + config.shadow_axis_v.xyz * offset.y;
+        // Jitter the tap ladder per texel: a fixed phase across the whole map
+        // resolves the deck's vertical profile into banding, the same failure
+        // `volumetric_sun_depth` documents for its own ladder. Keyed on the
+        // TEXEL ONLY, never the frame — this map carries no temporal
+        // accumulation to absorb per-frame noise, so a time-varying ladder
+        // would shimmer every shadow edge. Static dither disappears under the
+        // receivers' bilinear fetch instead.
+        let jitter = common::hash13(vec3f(vec2f(invocation_id.xy), 0.0));
+        probe = cloud_shadow_transmittance(base, jitter);
+    }
+    textureStore(
+        cloud_shadow_texture,
+        invocation_id.xy,
+        vec4f(probe.transmittance, probe.coverage, probe.optical_depth, 1.0),
     );
 }
 
