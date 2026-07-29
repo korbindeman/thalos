@@ -11,6 +11,8 @@
 
 #define_import_path thalos::atmosphere
 
+#import thalos::cloud_shadow::{CloudShadowBlock, cloud_sun_transmittance}
+
 const PI: f32 = 3.14159265358979323846;
 
 /// Packed uniform carrying the terrestrial atmosphere parameters.
@@ -435,6 +437,49 @@ fn integrate_atmosphere_multiscatter(
     ms_lut: texture_2d<f32>,
     ms_sampler: sampler,
 ) -> ScatterResult {
+    // Zero block ⇒ `cloud_sun_transmittance` early-outs fully lit before it
+    // touches the texture, so `ms_lut` is a safe stand-in binding here.
+    var no_cloud_shadow: CloudShadowBlock;
+    return integrate_atmosphere_multiscatter_occluded(
+        cam_pos, ray_dir, center, sun_dir, sun_flux,
+        t_enter, t_exit, planet_r, layers, pixel_jitter,
+        ms_lut, ms_sampler,
+        no_cloud_shadow, ms_lut, ms_sampler,
+    );
+}
+
+/// [`integrate_atmosphere_multiscatter`] with the per-sample sun beam gated by
+/// the shared cloud sun-transmittance cascade (`thalos::cloud_shadow`) — the
+/// CLOUD-5 §3.5 "atmosphere-march shafts" receiver. Where a cloud blocks the
+/// sun, the air along the view ray loses its single-scatter in-scatter, which
+/// is exactly a crepuscular ray: bright shafts through cloud gaps, dark shafts
+/// downwind of cells, with the Mie phase already supplying the sunward glare.
+///
+/// Only the SINGLE-scatter sun term is gated. The multi-scatter LUT term
+/// deliberately is not: multiply-bounced skylight legitimately fills shadowed
+/// air (shafts must read against blue haze, not black), and the cascade's
+/// overcast-ambient response is a separate §3.5 slice.
+///
+/// A zeroed `cloud_shadow` block gates the lookup off entirely (fully lit,
+/// texture never sampled), so callers without a cascade pass any bound
+/// texture as `cloud_shadow_tex`.
+fn integrate_atmosphere_multiscatter_occluded(
+    cam_pos: vec3<f32>,
+    ray_dir: vec3<f32>,
+    center: vec3<f32>,
+    sun_dir: vec3<f32>,
+    sun_flux: f32,
+    t_enter: f32,
+    t_exit: f32,
+    planet_r: f32,
+    layers: AtmosphereBlock,
+    pixel_jitter: f32,
+    ms_lut: texture_2d<f32>,
+    ms_sampler: sampler,
+    cloud_shadow: CloudShadowBlock,
+    cloud_shadow_tex: texture_2d<f32>,
+    cloud_shadow_samp: sampler,
+) -> ScatterResult {
     if !atmosphere_scattering_active(layers) {
         return no_scatter();
     }
@@ -487,7 +532,12 @@ fn integrate_atmosphere_multiscatter(
         );
         let trans_sun = exp(-tau_sun);
 
-        let weight = trans_view * trans_sun * ds;
+        // Sunlight surviving the cloud deck to this air sample — the shafts.
+        let cloud_t = cloud_sun_transmittance(
+            cloud_shadow, cloud_shadow_tex, cloud_shadow_samp, p_pt,
+        );
+
+        let weight = trans_view * trans_sun * cloud_t * ds;
         sum_r = sum_r + rho_r * weight;
         sum_m = sum_m + rho_m * weight;
 

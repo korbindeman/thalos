@@ -201,53 +201,63 @@ impl Default for ImpostorParams {
     }
 }
 
-/// Material for far tree impostors: billboards one quad per tree (baked by
+/// Extension for far tree impostors: billboards one quad per tree (baked by
 /// [`combine_impostor_tile_mesh`](crate::ground::scatter::combine_impostor_tile_mesh))
-/// and octahedral-samples the atlas. Reuses [`GrassParams`] for the shared
-/// `thalos::lighting` inputs + the craft-anchor scale-fade, so the
-/// mesh→impostor handoff and the far cull are seamless and zoom-independent,
-/// exactly like the mesh `TreeMaterial`.
-#[derive(Asset, AsBindGroup, TypePath, Clone)]
-pub struct TreeImpostorMaterial {
-    #[uniform(0)]
+/// and octahedral-samples the atlas. Reuses [`GrassParams`] for the
+/// craft-anchor scale-fade, so the mesh→impostor handoff and the far cull are
+/// seamless and zoom-independent, exactly like the mesh `TreeMaterial`.
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+pub struct TreeImpostorExtension {
+    #[uniform(100)]
     pub params: GrassParams,
-    #[uniform(1)]
+    #[uniform(101)]
     pub impostor: ImpostorParams,
-    #[texture(2)]
-    #[sampler(3)]
+    #[texture(102)]
+    #[sampler(103)]
     pub albedo: Handle<Image>,
-    #[texture(4)]
-    #[sampler(5)]
+    #[texture(104)]
+    #[sampler(105)]
     pub normal: Handle<Image>,
+    /// Cloud sun-transmittance cascade — the same map/block the tile ground and
+    /// the mesh trees sample, fanned in per frame by the game's tree driver.
+    /// NEW versus the spine impostor, which never dimmed under the deck.
+    #[texture(106)]
+    #[sampler(107)]
+    pub cloud_shadow_map: Handle<Image>,
+    #[uniform(108)]
+    pub cloud_shadow: crate::clouds::CloudShadowBlock,
 }
 
-impl Material for TreeImpostorMaterial {
+/// Far-band impostor card on the standard path — `ExtendedMaterial` like the
+/// mesh trees ([`tree_base_material`](crate::ground::tree_material::tree_base_material)
+/// supplies the shared foliage base: double-sided, diffuse-transmitting), so
+/// the mesh→impostor handoff stays inside the one lighting universe.
+pub type TreeImpostorMaterial =
+    bevy::pbr::ExtendedMaterial<bevy::pbr::StandardMaterial, TreeImpostorExtension>;
+
+/// Wrap a [`TreeImpostorExtension`] into the full impostor material.
+pub fn tree_impostor_material(extension: TreeImpostorExtension) -> TreeImpostorMaterial {
+    TreeImpostorMaterial {
+        base: crate::ground::tree_material::tree_base_material(),
+        extension,
+    }
+}
+
+impl bevy::pbr::MaterialExtension for TreeImpostorExtension {
     fn vertex_shader() -> ShaderRef {
-        "embedded://thalos_body_render/ground/tree_impostor.wgsl".into()
+        "shaders/tree_impostor_standard.wgsl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://thalos_body_render/ground/tree_impostor.wgsl".into()
+        "shaders/tree_impostor_standard.wgsl".into()
     }
 
-    fn alpha_mode(&self) -> AlphaMode {
-        // Opaque (depth-written) with a manual coverage `discard` in the
-        // fragment. Opaque keeps the prepass binding-agnostic: the standard
-        // prepass uses POSITION (all four quad corners share the tree base →
-        // degenerate, draws nothing), so impostors never touch the prepass
-        // bind group — sidestepping the custom-material prepass pitfall.
-        AlphaMode::Opaque
-    }
-
-    fn specialize(
-        _pipeline: &MaterialPipeline,
-        descriptor: &mut RenderPipelineDescriptor,
-        _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
-    ) -> Result<(), SpecializedMeshPipelineError> {
-        // Camera-facing card: don't cull either winding.
-        descriptor.primitive.cull_mode = None;
-        Ok(())
+    // Opaque (depth-written) with a manual coverage `discard` in the fragment.
+    // Opaque keeps the prepass binding-agnostic: the standard prepass uses
+    // POSITION (all four quad corners share the tree base → degenerate, draws
+    // nothing), so impostors never touch the prepass bind group.
+    fn alpha_mode() -> Option<AlphaMode> {
+        Some(AlphaMode::Opaque)
     }
 }
 
@@ -306,7 +316,9 @@ impl Material for TreeBakeMaterial {
 }
 
 pub(crate) fn embed_tree_impostor_shaders(app: &mut App) {
-    embedded_asset!(app, "tree_impostor.wgsl");
+    // The runtime impostor shader moved to the standard path — asset-loaded
+    // (hot-reloadable) `shaders/tree_impostor_standard.wgsl`. Only the startup
+    // bake shader stays embedded.
     embedded_asset!(app, "tree_bake.wgsl");
 }
 

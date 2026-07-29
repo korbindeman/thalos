@@ -67,6 +67,19 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 /// gates are all hundreds of metres or more.
 const ANCHOR_GROUND_LOD_M: f32 = 2.0;
 
+/// Smoothing time constant (s) for the published view speed. Long enough that
+/// a one-frame hitch does not read as motion, short enough that the streaming
+/// brakes keyed on the speed engage within a few frames of the camera actually
+/// moving — and release about as quickly once it settles.
+const ANCHOR_SPEED_TAU_S: f64 = 0.4;
+
+/// Raw per-frame speed above which the anchor movement is a discontinuity
+/// (teleport, viewpoint replay, scenario spawn), not motion: the tracker
+/// reseeds at zero instead of letting one 100 km jump read as minutes of
+/// hypersonic flight to the EMA. Comfortably above any real near-surface
+/// speed (orbital velocity at Thalos is ~7.9 km/s).
+const ANCHOR_TELEPORT_SPEED_M_S: f64 = 20_000.0;
+
 /// Where the view is, resolved against the nearest terrain-backed body.
 /// `None` until a camera and body states exist (first frames of a boot, or a
 /// deferred-world menu).
@@ -102,6 +115,14 @@ pub struct AnchorBody {
     pub ground_h_m: f64,
     /// Camera altitude above the sampled terrain, metres.
     pub agl_m: f64,
+    /// Smoothed body-fixed camera speed (m/s) — how fast the view moves
+    /// through the surface frame, EMA-filtered over [`ANCHOR_SPEED_TAU_S`].
+    /// Co-rotation counts (a world-hovering camera over a spinning body IS
+    /// moving relative to the ground streaming under it). Detail systems use
+    /// this to trade fidelity for coverage while the view is in motion and
+    /// settle back to full fidelity where it lingers; zero after a teleport
+    /// (see [`ANCHOR_TELEPORT_SPEED_M_S`]).
+    pub speed_m_s: f64,
     /// Tidal-lock parent (from the body entity's `TidallyLocked` tag), carried
     /// so re-projection can rebuild the surface orientation at any epoch.
     pub lock_parent: Option<BodyId>,
@@ -153,6 +174,8 @@ fn update_view_anchor(
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
     ship_cam: Query<(&CellCoord, &Transform), With<ShipCamera>>,
+    time: Res<Time<Real>>,
+    mut speed_tracker: Local<Option<(BodyId, DVec3, f64)>>,
     mut anchor: ResMut<ViewAnchor>,
 ) {
     anchor.resolved = None;
@@ -207,6 +230,25 @@ fn update_view_anchor(
         .and_then(|hs| hs.sample_height_m(cam_dir.as_vec3(), ANCHOR_GROUND_LOD_M))
         .unwrap_or(0.0) as f64;
 
+    // View speed: body-fixed displacement per REAL second (streaming happens in
+    // wall time, so warp folds in exactly as it should — an orbiting view under
+    // warp is genuinely outrunning the streamer). Reset on body change and on
+    // teleport-sized jumps; otherwise EMA toward the raw frame speed.
+    let dt = time.delta_secs_f64();
+    let speed_m_s = match *speed_tracker {
+        Some((prev_body, prev_cam, prev_speed)) if prev_body == body && dt > 1.0e-4 => {
+            let raw = (cam_body - prev_cam).length() / dt;
+            if raw > ANCHOR_TELEPORT_SPEED_M_S {
+                0.0
+            } else {
+                let alpha = (dt / ANCHOR_SPEED_TAU_S).clamp(0.0, 1.0);
+                prev_speed + (raw - prev_speed) * alpha
+            }
+        }
+        _ => 0.0,
+    };
+    *speed_tracker = Some((body, cam_body, speed_m_s));
+
     anchor.resolved = Some(AnchorBody {
         body,
         cam_body,
@@ -214,6 +256,7 @@ fn update_view_anchor(
         radius_m,
         ground_h_m,
         agl_m: cam_r - (radius_m + ground_h_m),
+        speed_m_s,
         lock_parent,
     });
 }

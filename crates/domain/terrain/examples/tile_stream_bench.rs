@@ -158,12 +158,16 @@ fn main() {
         RADIUS_M / 1000.0,
         SIDE * SIDE,
     );
-    println!(
-        "inner rayon pool = {inner_threads} threads (production `tile_eval_pool` sizing)\n"
-    );
+    println!("inner rayon pool = {inner_threads} threads (production `tile_eval_pool` sizing)\n");
 
     // Warm caches so the first configuration isn't charged for cold pages.
-    let _ = measure(&surface, &centres[..16.min(tiles)], spacing, 4, Some(&inner_pool));
+    let _ = measure(
+        &surface,
+        &centres[..16.min(tiles)],
+        spacing,
+        4,
+        Some(&inner_pool),
+    );
 
     println!(
         "{:>26} {:>6} {:>12} {:>12} {:>9}",

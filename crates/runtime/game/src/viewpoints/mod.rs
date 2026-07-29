@@ -17,7 +17,6 @@ use std::{env, fs, path::PathBuf};
 use bevy::{
     math::{DQuat, DVec3},
     prelude::*,
-    window::PrimaryWindow,
 };
 use bevy_egui::{
     EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
@@ -32,6 +31,7 @@ use thalos_physics_local::HeightSourceRegistry;
 use crate::{
     bridge::WarpLimits,
     camera::{ActiveCamera, ShipCamera},
+    camera_optics::CameraOptics,
     freecam::FreeCam,
     rendering::{SimulationState, SolarSystemState, view_anchor::ViewAnchor},
     spawn::SpawnSituation,
@@ -233,13 +233,17 @@ fn draw_viewpoint_manager(
     space_center: Option<Res<crate::space_center::SpaceCenter>>,
     root: Single<&Grid, With<BigSpace>>,
     mut cameras: ParamSet<(
-        Query<(&CellCoord, &Transform, &Projection), (With<ShipCamera>, With<ActiveCamera>)>,
+        Query<(&CellCoord, &Transform, &CameraOptics), (With<ShipCamera>, With<ActiveCamera>)>,
         Query<
-            (&mut CellCoord, &mut Transform, &mut Projection),
+            (
+                &mut CellCoord,
+                &mut Transform,
+                &mut Projection,
+                &mut CameraOptics,
+            ),
             (With<ShipCamera>, With<ActiveCamera>),
         >,
     )>,
-    windows: Query<&Window, With<PrimaryWindow>>,
 ) -> Result {
     if !manager.open {
         return Ok(());
@@ -320,13 +324,14 @@ fn draw_viewpoint_manager(
                     && let Some(viewpoint) = manager.catalog.find(selected_id)
                 {
                     columns[1].label(format!(
-                        "{} · {:?}{} · {}×{} · {:.1}° FOV",
+                        "{} · {:?}{} · t={:.3}s · {:.0} mm · {}:{} sensor",
                         viewpoint.body,
                         viewpoint.spawn,
                         if viewpoint.boots_hub { " · hub" } else { "" },
-                        viewpoint.viewport[0],
-                        viewpoint.viewport[1],
-                        viewpoint.vertical_fov_rad.to_degrees(),
+                        viewpoint.sim_time_s,
+                        viewpoint.optics.lens.focal_length_mm,
+                        viewpoint.optics.sensor.aspect[0],
+                        viewpoint.optics.sensor.aspect[1],
                     ));
                 } else if let Some(selected_id) = manager.selected.as_deref()
                     && let Some(viewpoint) = manager.catalog.find_scripted(selected_id)
@@ -384,9 +389,9 @@ fn draw_viewpoint_manager(
             }
             ui.separator();
             ui.weak(
-                "Saved views restore an exact body-fixed camera and lens. Agent views reuse \
-                 the procedural focus/framing driver; headless capture also applies its \
-                 diagnostic setup and canonical boot scene.",
+                "Saved views record an exact body-fixed camera, lens, and simulation time. \
+                 Headless replay uses that time unless its caller overrides it. Agent views \
+                 reuse the procedural focus/framing driver and canonical boot scene.",
             );
         });
     manager.open = open;
@@ -409,7 +414,6 @@ fn draw_viewpoint_manager(
                 *situation,
                 space_center.as_deref(),
                 &readable_cameras,
-                &windows,
             )
         }
         ManagerAction::SaveMetadata => save_metadata(&mut manager),
@@ -423,7 +427,6 @@ fn draw_viewpoint_manager(
                 *situation,
                 space_center.as_deref(),
                 &readable_cameras,
-                &windows,
             )
         }
         ManagerAction::Apply => {
@@ -433,9 +436,10 @@ fn draw_viewpoint_manager(
                 .ok_or_else(|| "select a viewpoint first".to_owned());
             selected.and_then(|selected_id| {
                 let mut writable_cameras = cameras.p1();
-                let (mut cell, mut transform, mut projection) = writable_cameras
+                let (mut cell, mut transform, mut projection, mut optics) = writable_cameras
                     .single_mut()
                     .map_err(|_| "the active 3-D camera is unavailable".to_owned())?;
+                let return_optics = optics.spec();
                 let resolved = if let Some(viewpoint) = manager.catalog.find(&selected_id) {
                     let body_id = sim
                         .system
@@ -453,6 +457,7 @@ fn draw_viewpoint_manager(
                         &mut cell,
                         &mut transform,
                         &mut projection,
+                        &mut optics,
                     )?;
                     Ok((body_id, message))
                 } else if let Some(viewpoint) = manager.catalog.find_scripted(&selected_id) {
@@ -473,12 +478,6 @@ fn draw_viewpoint_manager(
                     ))
                 };
                 let (body_id, message) = resolved?;
-                let fov = match projection.as_ref() {
-                    Projection::Perspective(perspective) => perspective.fov,
-                    _ => {
-                        return Err("the active 3-D camera is not perspective-projected".to_owned());
-                    }
-                };
                 let states = solar
                     .states
                     .as_deref()
@@ -492,9 +491,9 @@ fn draw_viewpoint_manager(
                     body_state,
                     camera_world,
                     transform.rotation.as_dquat(),
-                    fov,
                     &sim,
                     &warp_limits,
+                    return_optics,
                 );
                 Ok(format!("{message}; freecam active"))
             })
@@ -549,8 +548,10 @@ fn create_from_current(
     solar: &SolarSystemState,
     situation: SpawnSituation,
     space_center: Option<&crate::space_center::SpaceCenter>,
-    cameras: &Query<(&CellCoord, &Transform, &Projection), (With<ShipCamera>, With<ActiveCamera>)>,
-    windows: &Query<&Window, With<PrimaryWindow>>,
+    cameras: &Query<
+        (&CellCoord, &Transform, &CameraOptics),
+        (With<ShipCamera>, With<ActiveCamera>),
+    >,
 ) -> Result<String, String> {
     let name = manager.edit_name.trim();
     if name.is_empty() {
@@ -575,7 +576,6 @@ fn create_from_current(
         situation,
         space_center,
         cameras,
-        windows,
     )?;
     viewpoint.validate()?;
     catalog.viewpoints.push(viewpoint);
@@ -633,8 +633,10 @@ fn replace_from_current(
     solar: &SolarSystemState,
     situation: SpawnSituation,
     space_center: Option<&crate::space_center::SpaceCenter>,
-    cameras: &Query<(&CellCoord, &Transform, &Projection), (With<ShipCamera>, With<ActiveCamera>)>,
-    windows: &Query<&Window, With<PrimaryWindow>>,
+    cameras: &Query<
+        (&CellCoord, &Transform, &CameraOptics),
+        (With<ShipCamera>, With<ActiveCamera>),
+    >,
 ) -> Result<String, String> {
     let old_id = manager
         .selected
@@ -650,7 +652,6 @@ fn replace_from_current(
         situation,
         space_center,
         cameras,
-        windows,
     )?;
     replacement.validate()?;
     let mut catalog = load_catalog()?;
@@ -713,8 +714,10 @@ pub(crate) fn capture_current_viewpoint(
     solar: &SolarSystemState,
     situation: SpawnSituation,
     space_center: Option<&crate::space_center::SpaceCenter>,
-    cameras: &Query<(&CellCoord, &Transform, &Projection), (With<ShipCamera>, With<ActiveCamera>)>,
-    windows: &Query<&Window, With<PrimaryWindow>>,
+    cameras: &Query<
+        (&CellCoord, &Transform, &CameraOptics),
+        (With<ShipCamera>, With<ActiveCamera>),
+    >,
 ) -> Result<Viewpoint, String> {
     let anchor = view_anchor
         .resolved
@@ -731,12 +734,9 @@ pub(crate) fn capture_current_viewpoint(
         .bodies
         .get(anchor.body)
         .ok_or_else(|| "the view body is unavailable".to_owned())?;
-    let (cell, transform, projection) = cameras
+    let (cell, transform, optics) = cameras
         .single()
         .map_err(|_| "switch to the active 3-D camera before saving a viewpoint".to_owned())?;
-    let Projection::Perspective(perspective) = projection else {
-        return Err("the active 3-D camera is not perspective-projected".to_owned());
-    };
 
     let camera_world = DVec3::new(cell.x as f64, cell.y as f64, cell.z as f64)
         * crate::rendering::real_space::REAL_SPACE_CELL_SIZE_M as f64
@@ -755,16 +755,6 @@ pub(crate) fn capture_current_viewpoint(
         transform.rotation.w as f64,
     );
     let rotation_body = (surface_q.inverse() * rotation_world).normalize();
-    let viewport = windows
-        .single()
-        .map(|window| {
-            [
-                window.resolution.physical_width().max(1),
-                window.resolution.physical_height().max(1),
-            ]
-        })
-        .unwrap_or([1920, 1080]);
-
     Ok(Viewpoint {
         id,
         name,
@@ -781,8 +771,7 @@ pub(crate) fn capture_current_viewpoint(
             rotation_body.z,
             rotation_body.w,
         ],
-        vertical_fov_rad: perspective.fov,
-        viewport,
+        optics: optics.spec(),
     })
 }
 
@@ -795,6 +784,7 @@ pub fn pose_viewpoint(
     cell: &mut CellCoord,
     transform: &mut Transform,
     projection: &mut Projection,
+    optics: &mut CameraOptics,
 ) -> Result<String, String> {
     let body_id = bodies
         .iter()
@@ -830,8 +820,7 @@ pub fn pose_viewpoint(
         rotation_world.w as f32,
     )
     .normalize();
-    if let Projection::Perspective(perspective) = projection {
-        perspective.fov = viewpoint.vertical_fov_rad;
-    }
+    optics.set_spec(viewpoint.optics)?;
+    optics.apply_to_projection(projection);
     Ok(format!("Viewing {}", viewpoint.id))
 }

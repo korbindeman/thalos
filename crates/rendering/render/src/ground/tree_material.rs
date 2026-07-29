@@ -1,18 +1,25 @@
-//! Tree / shrub instanced material: vertex wind sway + the shared
-//! `thalos::lighting` sky model, so scattered plants move in the wind and light
-//! exactly like the grass and ground they grow from.
+//! Tree / shrub instanced material — `ExtendedMaterial<StandardMaterial, _>`,
+//! the keystone shape (one lighting universe = Bevy's): Bevy's PBR pipeline
+//! owns lighting units, the airmass-reddened sun, the ambient fill, exposure,
+//! and tonemapping, exactly as it does for the tile ground and the hull. The
+//! extension carries only what the standard path can't express — the batched
+//! tile mesh's wind/grow vertex stage, the foliage atlas + shared
+//! `thalos::foliage` albedo model, the shared `thalos::shadow` cascade
+//! *receive*, and the cloud sun-transmittance gate (which the spine tree never
+//! sampled: forests under a cloud deck stayed lit while the ground dimmed).
 //!
-//! Reuses [`GrassParams`] as its uniform (same field layout): `sun_dir`
-//! (w = flux), `wind` (w = canopy sway amplitude), `time_fade.x` (= time), and
-//! the `sky_up` / `sky_tau` hemisphere inputs. The per-vertex **wind weight**
-//! rides the mesh's vertex-colour alpha (0 at the trunk, → 1 at the canopy top),
-//! and per-instance phase + tint jitter are hashed in-shader from the instance's
-//! world position, so all instances of a species still share one
-//! `(Mesh, Material)` and auto-batch.
+//! The spine predecessor lit these through `thalos::lighting`
+//! (`compute_surface_sky` + `shade_foliage`), which made vegetation the last
+//! large surface class in the other lighting universe — the root of the
+//! "trees look pasted on the terrain" reports. See `tree_standard.wgsl` for
+//! what was ported vs deliberately dropped.
 
-use bevy::asset::{RenderAssetUsages, embedded_asset};
+use bevy::asset::RenderAssetUsages;
 use bevy::mesh::MeshVertexBufferLayoutRef;
-use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey};
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+    StandardMaterial,
+};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
 use bevy::render::render_resource::{
@@ -21,6 +28,7 @@ use bevy::render::render_resource::{
 };
 use bevy::shader::ShaderRef;
 
+use crate::clouds::CloudShadowBlock;
 use crate::ground::body_material::ShadowCascadeBlock;
 use crate::ground::vegetation::GrassParams;
 
@@ -45,88 +53,109 @@ pub fn fallback_shadow_map() -> Image {
     img
 }
 
-/// Material for scattered trees and shrubs. One instance is shared by every
-/// plant on a body; the mesh's vertex colours carry the trunk/canopy tint × AO
-/// and the per-vertex wind weight, and `UV_1.y` carries the foliage-atlas leaf
-/// code the fragment samples for leaf shape + alpha.
+/// Material for scattered trees and shrubs on the standard path. One instance is
+/// shared by every plant on a body; the mesh's vertex colours carry the
+/// landcover tint × AO and the per-vertex wind weight, and `UV_1.y` carries the
+/// foliage-atlas leaf code the fragment samples for leaf shape + alpha.
+pub type TreeMaterial = ExtendedMaterial<StandardMaterial, TreeShadingExtension>;
+
+/// The tree extension's bindings (100+, clear of the base material's).
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
-pub struct TreeMaterial {
-    #[uniform(0)]
+pub struct TreeShadingExtension {
+    /// Wind + clipmap fade band + anchor (lighting fields are layout-parity
+    /// leftovers from the shared [`GrassParams`]; the Bevy sun lights the tree).
+    #[uniform(100)]
     pub params: GrassParams,
     /// Procedural foliage atlas (leaf clusters + shell + bark), built once at
     /// startup by [`crate::ground::build_foliage_atlas`].
-    #[texture(1)]
-    #[sampler(2)]
+    #[texture(101)]
+    #[sampler(102)]
     pub atlas: Handle<Image>,
     /// Companion **material atlas** (bark normal + roughness), built by
     /// [`crate::ground::build_foliage_material_atlas`]. Linear data; shares the
-    /// albedo atlas's sampler (binding 2). Only bark fragments sample it.
-    #[texture(7)]
+    /// albedo atlas's sampler.
+    #[texture(103)]
     pub material_atlas: Handle<Image>,
     /// Cascaded sun-shadow transforms + strength (see [`ShadowCascadeBlock`]).
-    #[uniform(3)]
+    #[uniform(104)]
     pub shadow: ShadowCascadeBlock,
     /// Per-cascade sun-shadow depth maps (near→far) — the same handles the
-    /// terrain binds. Each a plain `texture_depth_2d` (no depth array). Must
-    /// always be valid depth textures (see [`fallback_shadow_map`]);
-    /// `shadow.config.x` gates whether they're sampled.
-    #[texture(4, sample_type = "depth")]
+    /// terrain binds. Must always be valid depth textures (see
+    /// [`fallback_shadow_map`]); `shadow.config.x` gates sampling.
+    #[texture(105, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(5, sample_type = "depth")]
+    #[texture(106, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(6, sample_type = "depth")]
+    #[texture(107, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    /// Cloud sun-transmittance cascade (CLOUD-5 / W2) — the same map the tile
+    /// ground samples, fanned in per frame by the game's cloud-shadow driver so
+    /// a forest under the deck dims exactly with the ground it stands on.
+    #[texture(108)]
+    #[sampler(109)]
+    pub cloud_shadow_map: Handle<Image>,
+    /// Placement of that cascade (separate writer from `params`, same reason as
+    /// the tile material's split).
+    #[uniform(110)]
+    pub cloud_shadow: CloudShadowBlock,
 }
 
-impl Material for TreeMaterial {
+/// The base `StandardMaterial` every tree material wraps. `diffuse_transmission`
+/// must be non-zero HERE (not only per-fragment) — it is what compiles the
+/// transmission branch into the pipeline; the fragment then scales it by the
+/// leaf flag so bark stays opaque.
+pub fn tree_base_material() -> StandardMaterial {
+    StandardMaterial {
+        base_color: Color::WHITE,
+        perceptual_roughness: 0.95,
+        metallic: 0.0,
+        diffuse_transmission: 1.0,
+        // Thin canopy silhouettes keep their back faces; the standard path
+        // flips the normal for us on back-facing fragments.
+        double_sided: true,
+        cull_mode: None,
+        ..Default::default()
+    }
+}
+
+/// Wrap a [`TreeShadingExtension`] into the full tree material.
+pub fn tree_material(extension: TreeShadingExtension) -> TreeMaterial {
+    TreeMaterial {
+        base: tree_base_material(),
+        extension,
+    }
+}
+
+impl MaterialExtension for TreeShadingExtension {
     fn vertex_shader() -> ShaderRef {
-        "embedded://thalos_body_render/ground/tree.wgsl".into()
+        "shaders/tree_standard.wgsl".into()
     }
 
     fn fragment_shader() -> ShaderRef {
-        "embedded://thalos_body_render/ground/tree.wgsl".into()
+        "shaders/tree_standard.wgsl".into()
     }
 
-    // Stay OUT of the depth prepass. The camera runs a `DepthPrepass` (grass early-Z),
-    // but the broadleaf canopy is dozens of overlapping double-sided *translucent*
-    // leaf cards at near-identical depths, and pre-populating depth for them washes
-    // the canopy out pale — **empirically confirmed** with both an Equal and a forced
-    // GreaterEqual depth test (and the vertex-layout override isolated as NOT the
-    // cause: prepass-off + override = green). Early-Z for trees therefore needs a
-    // canopy redesign into a more depth-coherent surface, not a render tweak. Grass
-    // (free-standing opaque blades) has no such issue and opts in via its prepass.
+    // Stay OUT of the depth prepass. The camera runs a `DepthPrepass` (grass
+    // early-Z), but the broadleaf canopy is dozens of overlapping double-sided
+    // translucent leaf cards at near-identical depths, and pre-populating depth
+    // for them washes the canopy out pale — **empirically confirmed** on the
+    // spine version with both an Equal and a forced GreaterEqual depth test.
     fn enable_prepass() -> bool {
         false
     }
 
-    fn alpha_mode(&self) -> AlphaMode {
-        AlphaMode::Opaque
-    }
-
     fn specialize(
-        _pipeline: &MaterialPipeline,
+        _pipeline: &MaterialExtensionPipeline,
         descriptor: &mut RenderPipelineDescriptor,
         _layout: &MeshVertexBufferLayoutRef,
-        _key: MaterialPipelineKey<Self>,
+        _key: MaterialExtensionKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        // Two-sided: thin canopy silhouettes shouldn't drop their back faces.
-        // Do NOT override `descriptor.vertex.buffers` — Bevy's mesh pipeline
-        // auto-includes every attribute the mesh has (POSITION/NORMAL/UV_0/UV_1/
-        // COLOR at their standard locations). Overriding it truncated the layout the
-        // standard prepass vertex shader needs (a location-7 input) and failed
-        // pipeline creation. (Trees opt out of the prepass via `enable_prepass`.)
-        descriptor.primitive.cull_mode = None;
-
-        // Anti-aliased foliage under MSAA. The leaf cards are a 1-bit alpha
-        // cutout (`tex.a < 0.5 → discard`), and plain MSAA can't touch that — it
-        // super-samples geometry coverage, not the alpha test — so leaf edges
-        // crawl no matter the sample count. When the camera runs MSAA, switch the
-        // leaf fragments to hardware **alpha-to-coverage**: the shader writes a
-        // sharpened fractional coverage (the `TREE_ALPHA_TO_COVERAGE` branch in
-        // `tree.wgsl`) and the GPU turns it into a per-sample mask, so the canopy
-        // edges resolve smooth. `descriptor.multisample.count` is already set from
-        // the MSAA pipeline key here, so the sample-count-1 (MSAA off) path is left
-        // exactly as it was — the default look is unchanged.
+        // Anti-aliased foliage under MSAA: the leaf cards are a 1-bit alpha
+        // cutout, and plain MSAA super-samples geometry coverage, not the alpha
+        // test. With MSAA on, the shader writes a sharpened fractional coverage
+        // (`TREE_ALPHA_TO_COVERAGE` branch) and hardware alpha-to-coverage
+        // turns it into a per-sample mask. The MSAA-off path is byte-identical
+        // to a plain opaque draw.
         if descriptor.multisample.count > 1 {
             descriptor.multisample.alpha_to_coverage_enabled = true;
             if let Some(fragment) = descriptor.fragment.as_mut() {
@@ -137,15 +166,10 @@ impl Material for TreeMaterial {
     }
 }
 
-pub(crate) fn embed_tree_shader(app: &mut App) {
-    embedded_asset!(app, "tree.wgsl");
-}
-
 /// Lean plugin to render [`TreeMaterial`] in a standalone / headless app (the
-/// object-preview tool, examples) **without** the full UDLOD terrain stack:
-/// registers the material, embeds its shader, and ensures the `thalos::lighting`
-/// library is present. The game gets all this from `ThalosTerrainPlugin`; this is
-/// the minimal entry point for everything that only needs to draw plants.
+/// object-preview tool, examples) **without** the full terrain stack: registers
+/// the material and ensures the shared shader libraries are present. The game
+/// gets all this from `ThalosTerrainPlugin`.
 pub struct TreeMaterialPlugin;
 
 impl Plugin for TreeMaterialPlugin {
@@ -154,6 +178,5 @@ impl Plugin for TreeMaterialPlugin {
             app.add_plugins(crate::shading::PlanetLightingPlugin);
         }
         app.add_plugins(bevy::pbr::MaterialPlugin::<TreeMaterial>::default());
-        embed_tree_shader(app);
     }
 }

@@ -444,10 +444,10 @@ fn cascade_clip_from_view(half_extent: f32, far: f32) -> Mat4 {
 /// `THALOS_SHADOW_LOG` names a file. Mirrors the house JSONL style used by
 /// `THALOS_PERF_LOG`. A single env read when unset, so it's safe to leave wired.
 fn log_shadow_state(line: &str) {
-    let Some(path) = crate::artifact_paths::jsonl_path_from_env("THALOS_SHADOW_LOG") else {
+    let Some(path) = thalos_diagnostics::paths::jsonl_path_from_env("THALOS_SHADOW_LOG") else {
         return;
     };
-    if let Ok(mut f) = crate::artifact_paths::open_jsonl_append(&path) {
+    if let Ok(mut f) = thalos_diagnostics::paths::open_jsonl_append(&path) {
         let _ = writeln!(f, "{line}");
     }
 }

@@ -135,7 +135,13 @@ impl Default for CloudsConfig {
             // 600/1200/2400/4800 m distance bands, and band-2+ probes skip the
             // noise volume entirely (homogenized field), so long clear-air
             // reach is CHEAPER per step than the old 600 m-everywhere cadence.
-            clouds_raymarch_steps_count: 176,
+            // Broad-probe reach budget (fine/refine steps are NOT charged to
+            // it since 2026-07-29). 512 carries a grazing cruise ray to
+            // ~210 km before the far tier's fade; steep rays exit early and
+            // never spend it. Sized against the footprint-relaxed refine
+            // cadence — with the old always-0.2× refine this count would be
+            // several times more expensive.
+            clouds_raymarch_steps_count: 512,
             clouds_shadow_raymarch_steps_count: 6,
             planet_radius: 6_371_000.0,
             clouds_bottom_height: 1250.0,

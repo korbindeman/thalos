@@ -768,8 +768,8 @@ fn audit_separated_vessel_visuals(world: &mut World) {
                 .map(|position| position.distance(active_position)),
             "parts": part_samples,
         });
-        let path = crate::artifact_paths::default_jsonl_path("stage_separation.jsonl");
-        match crate::artifact_paths::open_jsonl_append(&path) {
+        let path = thalos_diagnostics::paths::default_jsonl_path("stage_separation.jsonl");
+        match thalos_diagnostics::paths::open_jsonl_append(&path) {
             Ok(mut file) => {
                 if let Err(error) = writeln!(file, "{record}") {
                     warn!("could not append {}: {error}", path.display());

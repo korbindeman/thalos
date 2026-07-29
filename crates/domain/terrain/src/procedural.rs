@@ -648,9 +648,11 @@ const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0)
 //     envelope, so forest-green ground only appears where stands stand.
 // 23: `FlattenedSurface` wears the pad ramp's albedo toward bare soil in
 //     noise-broken patches (worn margins around built sites).
+// 25: erosion band back in the filter's designed regime (branching advection),
+//     cell scale 2400 -> 700 m, depth set by EROSION_DEPTH_GAIN.
 // 24: the diffusion erosion band rounds the filter's C0 ridge folds at its own
 //     resolution (`EROSION_FOLD_ROUND`) — the "shark fin" blades.
-pub const GENERATOR_VERSION: u64 = 24;
+pub const GENERATOR_VERSION: u64 = 25;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProceduralSurface {
@@ -1140,7 +1142,12 @@ impl ProceduralSurface {
     /// canonical fields; the caller's `height_m` drives the altitude bands.
     /// (Coherent by construction when the external geometry was conditioned
     /// on this surface's macro band — the continents match.)
-    pub fn macro_albedo_for(&self, dir: DVec3, height_m: f64, lod_m: f32) -> (Vec3, f64, MacroBiome) {
+    pub fn macro_albedo_for(
+        &self,
+        dir: DVec3,
+        height_m: f64,
+        lod_m: f32,
+    ) -> (Vec3, f64, MacroBiome) {
         let (albedo, moisture, biome, _) = self.macro_albedo_bands_for(dir, height_m, lod_m);
         (albedo, moisture, biome)
     }
@@ -1407,7 +1414,11 @@ impl SurfaceQuery for ProceduralSurface {
         self.sample_biome_d(dir, lod_m).0
     }
 
-    fn sample_bands_d(&self, dir: DVec3, lod_m: f32) -> (SurfaceSample, crate::query::MaterialBands) {
+    fn sample_bands_d(
+        &self,
+        dir: DVec3,
+        lod_m: f32,
+    ) -> (SurfaceSample, crate::query::MaterialBands) {
         let dir = dir.normalize_or_zero();
         let (height_m, orogeny, c) = self.height_and_orogeny(dir, lod_m);
         let p = dir * self.radius_m;

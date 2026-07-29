@@ -16,6 +16,7 @@ thalos_physics_local = { path = "../../simulation/physics_local" }
 thalos_celestial = { path = "../../domain/celestial" }
 thalos_shipyard = { path = "../../domain/construction" }
 thalos_capture_protocol = { path = "../../capture/protocol" }
+thalos_diagnostics = { workspace = true }
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
 bevy_egui = "0.41.1"
 big_space = { workspace = true }

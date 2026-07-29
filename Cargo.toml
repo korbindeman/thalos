@@ -9,6 +9,7 @@ members = [
     "crates/domain/terrain",
     "crates/domain/terrain/erosion_filter",
     "crates/domain/world",
+    "crates/foundation/diagnostics",
     "crates/interface/input",
     "crates/interface/ui",
     "crates/offline/terrain_learned",
@@ -25,7 +26,9 @@ members = [
     "tools/terrain_train",
     "tools/texgen",
     "tools/capture",
+    "tools/diag",
     "tools/capture_host",
+    "tools/perfreport",
     "tools/world_map",
 ]
 
@@ -34,6 +37,7 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace.dependencies]
+thalos_diagnostics = { path = "crates/foundation/diagnostics" }
 thalos_udlod = { path = "crates/rendering/udlod" }
 # Vendored fork (crates/vendor/big_space). i64 cell precision is the workspace-wide
 # choice; consumers inherit it via `big_space = { workspace = true }`.

@@ -58,14 +58,15 @@ use thalos_body_render::{
     GrassMaterial, GrassMaterialPlugin, GrassParams, GrassProfile, GroundPatchMaterial,
     GroundPatchMaterialPlugin, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams,
     LIGHT_AT_1AU, RockMaterial, RockMaterialPlugin, RockMeshData, RockMeshParams,
-    ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorMaterial, TreeImpostorMaterialPlugin,
-    TreeMaterial, TreeMaterialPlugin, TreeMeshParams, VegInstance, build_foliage_atlas,
-    build_foliage_material_atlas, build_gpu_grass_template, build_gpu_grass_window,
-    build_grass_card_atlas, build_grass_clump_mesh, build_grass_field_mesh, build_rock_mesh,
-    build_rock_mesh_data, build_tree_mesh, build_tree_mesh_data, combine_impostor_tile_mesh,
-    combine_rock_tile_mesh, fallback_shadow_map, gpu_grass_anchor, gpu_grass_style_table,
-    hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
-    tree_bounding_sphere,
+    ShadowCascadeBlock, TreeBakeMaterial, TreeImpostorExtension, TreeImpostorMaterial,
+    TreeImpostorMaterialPlugin, TreeMaterial, TreeMaterialPlugin, TreeMeshParams,
+    TreeShadingExtension, VegInstance, build_foliage_atlas, build_foliage_material_atlas,
+    build_gpu_grass_template, build_gpu_grass_window, build_grass_card_atlas,
+    build_grass_clump_mesh, build_grass_field_mesh, build_rock_mesh, build_rock_mesh_data,
+    build_tree_mesh, build_tree_mesh_data, combine_impostor_tile_mesh, combine_rock_tile_mesh,
+    fallback_shadow_map, gpu_grass_anchor, gpu_grass_style_table, hemioct_decode,
+    impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    tree_impostor_material, tree_material as tree_material_fn,
 };
 
 const WIDTH: u32 = 1280;
@@ -830,8 +831,9 @@ fn setup_scene(
     let params = veg_params();
     let fallback = images.add(fallback_shadow_map());
 
-    // One shared tree material with the procedural foliage atlas + sky lighting.
-    let tree_material = tree_materials.add(TreeMaterial {
+    // One shared tree material with the procedural foliage atlas (standard-path
+    // lighting — the Bevy sun/ambient the preview scene sets up).
+    let tree_material = tree_materials.add(tree_material_fn(TreeShadingExtension {
         atlas: images.add(build_foliage_atlas()),
         material_atlas: images.add(build_foliage_material_atlas()),
         params,
@@ -841,7 +843,7 @@ fn setup_scene(
         sun_shadow_map_1: fallback.clone(),
         sun_shadow_map_2: fallback.clone(),
         ..default()
-    });
+    }));
     // One shared grass material (vertex-coloured blades, same sky model). It
     // receives the tree's cast shadow via the same cascade the ground samples;
     // the driver rebinds cascade 0's real depth map each frame.
@@ -1278,9 +1280,9 @@ fn setup_impostor_bake(
 
     let mut species_geo = [Vec4::ZERO; IMPOSTOR_MAX_SPECIES];
     species_geo[0] = Vec4::new(radius, center.y, 0.0, 0.0);
-    let material = impostor_materials.add(TreeImpostorMaterial {
-        // Constant sun / full-size fade (the diorama doesn't move): the SAME
-        // shared sky inputs the mesh trees use, so both light identically.
+    let material = impostor_materials.add(tree_impostor_material(TreeImpostorExtension {
+        // Constant fade band (the diorama doesn't move); lighting is the
+        // preview scene's Bevy sun, shared with the mesh trees.
         params: veg_params(),
         impostor: ImpostorParams {
             grid: Vec4::new(n as f32, 1.0, IMPOSTOR_ALPHA_CUTOFF, 0.0),
@@ -1289,7 +1291,8 @@ fn setup_impostor_bake(
         },
         albedo: albedo_atlas,
         normal: normal_atlas,
-    });
+        ..Default::default()
+    }));
     commands.insert_resource(ImpostorRig { material });
 }
 
@@ -1772,10 +1775,10 @@ fn update_preview_shadow(
         m.sun_shadow_map_2 = fallback.clone();
     }
     if let Some(mut m) = tree_materials.get_mut(&mats.tree) {
-        m.shadow = block;
-        m.sun_shadow_map_0 = image.clone();
-        m.sun_shadow_map_1 = fallback.clone();
-        m.sun_shadow_map_2 = fallback.clone();
+        m.extension.shadow = block;
+        m.extension.sun_shadow_map_0 = image.clone();
+        m.extension.sun_shadow_map_1 = fallback.clone();
+        m.extension.sun_shadow_map_2 = fallback.clone();
     }
     if let Some(mut m) = rock_materials.get_mut(&mats.rock) {
         m.shadow = block;

@@ -9,18 +9,92 @@ A live multi-camera split screen is still rejected: it would
 duplicate the one-view renderer and change LOD, SSAO, shadow, antialiasing, and
 other viewport-dependent inputs while supposedly holding them constant.
 
+## Agent quickstart
+
+Use the smallest workflow that answers the question:
+
+| Need | Command | Read |
+|------|---------|------|
+| Choose a relevant viewpoint without rendering | `cargo run -p thalos_capture -- list viewpoints --gallery` | `artifacts/visual/catalog/viewpoints/contact_sheet.png` + `index.json`; thumbnails are composition hints, not evidence |
+| One canonical view | `just screenshot spaceport-aerial` | `artifacts/visual/latest/spaceport_aerial.png` + `.capture.json` |
+| A player’s saved view | `just screenshot <viewpoint-id>` | the matching latest PNG + receipt; the current 1080p fit is temporary safety scaffolding |
+| Same camera, another epoch | `cargo run -p thalos_capture -- shot <viewpoint-id> --time 72000` | the requested output/receipt; use `--out` to preserve both epochs |
+| One shot with custom graphics | `just screenshot <scene> --graphics clouds=off,grass=on` | PNG + receipt recording the effective graphics settings |
+| Intentional output extent today | `cargo run -p thalos_capture -- shot <viewpoint-id> --size 3840x2160` | temporary expert override until typed fidelity profiles land |
+| Several scenes | `just capture <scene>...` | each scene’s latest PNG; compatible scenes reuse one world |
+| A/B or N-way diagnosis | `just compare <scene> <axis>` | `contact_sheet.png`, then full variants, `wipe_*`, `diff_*`, `manifest.json` |
+| Final isolated proof | `just compare-cold <scene> <axis>` | the same evidence bundle, one clean process per variant |
+| Isolate terrain shading | `just compare <scene> terrain-lighting` | lit / fullbright / geometric-normal |
+| Isolate screen-space effects | `just compare <scene> ssao` or `shadow` | off / applied / raw field |
+| Isolate cloud internals | `just compare <scene> cloud-tier` or `cloud-reconstruction` | registered N-way variants |
+| Check whether your edits are present | read `<image>.capture.json` | `source_floor_guaranteed: true` proves the invocation floor is included; `workspace_matches` says whether the checkout stayed exact |
+| Hand framing to/from a human | human presses F9; agent runs `just screenshot <id>` | exact body-fixed camera, lens, scene, and saved time |
+
+### Framing versus fidelity
+
+Do not use output resolution to define a viewpoint. The camera bookmark owns
+pose, lens, sensor gate/filmback, and crop window: these determine the rays and
+composition. A smaller sensor at the same focal length is a crop-factor zoom
+and intentionally frames a smaller part of the world. The output pixel grid is
+chosen later by capture fidelity and may change without moving or zooming the
+camera.
+
+The planned capture tiers are `draft`, `standard`, `high`, and `reference`.
+Agents should normally start at `standard`, use `draft` only for questions that
+cannot depend on fine detail, promote to `high` when a frame is soft or
+inconclusive, and finish accepted visual work at `reference`. A comparison keeps
+one tier across every variant. Its manifest records the requested tier and
+effective output/internal renderer settings so “higher fidelity” is a
+reproducible choice, not an unexplained collection of overrides.
+
+The current catalog `viewport` field and automatic 4K→1080p fit are migration
+scaffolding. When the physical-camera system lands, catalog migration retains
+only the viewport's aspect as sensor-gate information and discards its pixel
+dimensions. Until then, use `--size` consciously when `standard`-class detail is
+needed; do not revise a viewpoint merely to get a sharper PNG.
+
+For a visual defect, do not begin with an arbitrary beauty shot:
+
+1. choose the existing preset/viewpoint that reproduces it;
+2. state two or more plausible causes;
+3. choose one registered axis or inspection channel that separates them;
+4. run the matrix and inspect stderr → manifest → contact sheet → full frames →
+   wipe/diff;
+5. fix only after the evidence pins the cause;
+6. rerun the same matrix cold for the final before/after.
+
+`wipe_01_vs_02.png` is the canonical 50/50 split view. It is assembled from two
+independent full-resolution renders so both variants keep identical viewport
+inputs. For more than two variants, use the labelled contact sheet; pairwise
+wipes/diffs always compare each variant with variant 1.
+
+If no registered axis or debug view distinguishes the hypotheses, add one typed
+factor to the capture registry and its runtime override. Do not take two
+hand-configured screenshots and call them an A/B: the manifest would be unable
+to prove what stayed fixed.
+
 ## Canonical workflows
 
 - `just screenshot <preset>` captures one in-context beauty frame through the
   persistent renderer. Compatible subsequent captures reuse its world and GPU.
+- `just screenshot <preset> --graphics clouds=off,grass=on` applies a typed
+  partial graphics profile to that request. Each request starts from capture
+  defaults, so settings never leak from the player's file or an earlier shot.
 - `just capture <preset>...` captures several scenes in one invocation.
-  Presets sharing body + spawn + hub mode + viewport + startup overrides
+  Presets sharing body + spawn + hub mode + effective capture extent + startup overrides
   amortize one world boot; other boot contexts restart automatically.
+- Concurrent agents queue behind the current capture owner. Compatible queued
+  scenes are camera poses rendered sequentially through the same world and GPU
+  host; they are not simultaneous renderer instances.
 - F8 opens the shared viewpoint manager. Developers can create, inspect, apply,
   update, rename, and delete exact saved poses and agent-scripted views stored
   in `assets/viewpoints.json`; agents edit the same file directly.
 - `just screenshot <viewpoint-id>` replays a named catalog point. `just
   screenshot latest` remains a compatibility alias for the newest entry.
+- `thalos_capture list viewpoints --gallery` builds the catalog contact sheet
+  and individual thumbnails entirely offline from cached canonical captures.
+  It labels stale, unattributed, unreadable, and missing entries rather than
+  silently rendering them; consult `index.json` before choosing a view.
 - F2 desktop screenshots show saved/error toasts only after the capture outcome
   is known, so feedback is never baked into its own image. Toasts do not appear
   in F1 photo mode, whose clean frame hides the shared toast container.
@@ -45,6 +119,11 @@ Ad-hoc framings set `THALOS_SCREENSHOT_OUT` to a path under
 `artifacts/visual/runs/`; they do not mint new names beside the canonical
 views. Comparison matrices always use the run tree automatically.
 
+`artifacts/visual/catalog/viewpoints/` is a disposable discovery cache derived
+from that latest-view surface. Its contact sheet and thumbnails may be stale
+and therefore cannot close a visual verification gate; the adjacent
+`index.json` says which original and receipt each card came from.
+
 ## Shared viewpoint catalog
 
 ### F9 — save this view
@@ -64,8 +143,8 @@ re-view, replace, or delete instead.
 
 Press F8 while the ship/free camera, space-center hub, or another 3-D god-view
 is active. The egui manager reads `assets/viewpoints.json`. “Save current as
-new” captures the current body-fixed position, orientation, lens, viewport,
-target body, and canonical boot scene under a stable id. “View” applies a
+new” captures the current body-fixed position, orientation, lens, legacy
+viewport/aspect, target body, and canonical boot scene under a stable id. “View” applies a
 selected entry in the running world; “Replace from current” updates its pose.
 Reload rereads agent edits without restarting the game.
 
@@ -98,6 +177,19 @@ developer to press F8, reload, and view it. To capture a named point headlessly:
 just screenshot mira-ridge-dawn
 ```
 
+Saved viewpoints replay at their recorded `sim_time_s`, so the same body-fixed
+camera returns to the same lighting epoch. Override only the time while keeping
+the camera and lens fixed with either the capture CLI:
+
+```text
+cargo run -p thalos_capture --bin thalos_capture -- shot mira-ridge-dawn --time 72000
+```
+
+or the compatibility environment knob used by `just screenshot`
+(`THALOS_SCREENSHOT_TIME=72000`; canonical seconds). The caller value wins over
+the catalog metadata. Persistent-host requests reapply it independently, so
+successive captures may move backward or forward in time without a restart.
+
 The CLI also accepts `viewpoint:mira-ridge-dawn` when an explicit namespace is
 useful. The result overwrites
 `artifacts/visual/latest/mira_ridge_dawn.png`. `just screenshot latest` selects
@@ -109,11 +201,12 @@ Headless replay projects the pose through the fresh body's current transform and
 uses the real `ShipCamera`, so floating-origin shifts do not change the view and
 all normal render passes remain coupled.
 
-This is a viewpoint catalog, not a save game. The recorded simulation time is kept
-as provenance, but replay deliberately boots the named canonical spawn instead
-of partially restoring craft dynamics. It therefore reproduces geographic
-framing and scene configuration; a one-off moving-craft state or weather moment
-still needs a normal screenshot or a dedicated deterministic preset.
+This is a viewpoint catalog, not a save game. Replay applies the recorded time
+to the canonical world clock, but still boots the named canonical spawn instead
+of partially restoring craft dynamics. It reproduces geographic framing,
+lighting, and time-driven environment state; a one-off moving-craft state or
+non-deterministic weather moment still needs a normal screenshot or a dedicated
+deterministic preset.
 
 Procedural drivers remain code when they search for a site, drive time, or
 install a diagnostic mode. Their public identity and metadata do not: those
@@ -127,7 +220,7 @@ comparison axis and all backend-selection state.
 
 One comparison run changes exactly one declared axis. Any normal screenshot
 framing overrides (`THALOS_SCREENSHOT_SIZE`, `_AZIMUTH`, `_ELEVATION`,
-`_DISTANCE`, `_WARMUP`, `_HUD`) are inherited identically by all variants.
+`_DISTANCE`, `_TIME`, `_WARMUP`, `_HUD`) are inherited identically by all variants.
 The runner owns `THALOS_SCREENSHOT_OUT` and the axis-specific override so those
 cannot drift between captures.
 
@@ -136,17 +229,32 @@ shared stable `dev-renderer` fingerprint. File-backed and embedded WGSL changes
 reload through Bevy's asset watcher; the client waits for the reload event.
 Any Rust/manifest edit triggers a managed rebuild/restart on the next request.
 Preset changes reuse the process when their boot context matches; body, spawn,
-hub-mode, or viewport changes restart it. Manual `just capture-stop` is optional
-hygiene.
+hub-mode, or effective capture-extent changes restart it. Output extent is a
+capture-resource boundary, not part of viewpoint identity. Manual
+`just capture-stop` is optional hygiene.
 
-**The host is a singleton, so parallel agent sessions contend for it.** Two
-sessions asking for presets with different boot contexts will restart it out
-from under each other, and the loser reports `capture launcher exited` (or
-`capture server exited`) with no defect of its own — check `just capture-status`
-for whose `preset` is loaded before diagnosing a capture failure as a bug.
-Verification can be blocked this way for a long stretch; that is a scheduling
+When no request is active, the resident host parks its camera and polls at
+10 Hz; it retains the expensive world/GPU setup without continuously rendering
+at 60 Hz. **Capture operations from parallel agent sessions and worktrees
+serialize through one machine-wide lock.** Within a checkout, requests reuse
+its singleton host. On Windows the operation lock is a kernel mutex, not a PID
+file that can be stolen during stale-owner cleanup. A second client reports the
+owning PID/command and waits without starting another active renderer or
+overwriting the shared control files.
+Verification can still queue behind a long comparison; that is a scheduling
 problem, not a broken change. Say so in the report rather than marking a visual
 change verified.
+
+Every successful persistent shot writes `<image>.capture.json`. Its
+`source.fingerprint` is the invocation's **source floor**:
+`source_floor_guaranteed: true` means the renderer was prepared from that state
+or a state reached later while the build was in flight. `workspace_matches:
+true` is the stronger exact-equality case. When it is false, the receipt says
+`workspace_relation: advanced-since-source-floor`; the PNG remains valid for
+the floor, but it cannot prove whether any particular later edit reached the
+frame. Recapture only when that later edit is itself under verification.
+Comparison `manifest.json` carries the same source-before/after contract and
+points to each variant receipt.
 
 Every request reapplies live diagnostic resources and invalidates cloud temporal
 history. The first frame uses the preset's full warm-up; subsequent requests use

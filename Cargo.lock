@@ -9197,8 +9197,12 @@ dependencies = [
  "image",
  "serde",
  "serde_json",
+ "sha2",
  "thalos_capture_protocol",
+ "thalos_diagnostics",
+ "tracing",
  "uuid",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9248,6 +9252,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalos_diag"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thalos_diagnostics",
+]
+
+[[package]]
+name = "thalos_diagnostics"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "thalos_game"
 version = "0.1.0"
 dependencies = [
@@ -9263,6 +9285,13 @@ dependencies = [
  "gilrs",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "thalos_perfreport"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -9308,6 +9337,7 @@ dependencies = [
  "thalos_capture_protocol",
  "thalos_celestial",
  "thalos_control",
+ "thalos_diagnostics",
  "thalos_input",
  "thalos_physics_canonical",
  "thalos_physics_local",

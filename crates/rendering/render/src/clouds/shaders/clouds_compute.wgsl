@@ -75,7 +75,14 @@ const WORLEY_RESOLUTION_F32 = 64.0;
 const REFINE_STEP_FRACTION = 0.2; // fine cadence = broad cadence × this
 const REFINE_EMPTY_LIMIT = 4u;
 const BROAD_HIT_DENSITY_FRACTION = 0.01;
-const MAX_RAY_STEPS_CAP = 224u;   // compile-time safety cap; config selects ≤ this
+// Compile-time safety cap; config selects ≤ this. Sized for the planetary
+// reach budgets (2026-07-29): with the broad-only budget accounting and the
+// footprint-relaxed refine cadence, ~660 broad probes carry a grazing ray
+// from a ~40 km shell entry to ~300 km — beyond which cells are marginal at
+// the compute resolution and the far tier's derived sharp response owns the
+// tail. The former 224 was sized for the 600 m step floor era and halved in
+// distance when the floor halved (INC-20260729T012803Z context note).
+const MAX_RAY_STEPS_CAP = 672u;
 const MAX_RADIAL_STEP_M = 350.0;  // vertical resolution floor for steep rays
 // Rays ENTERING the shell beyond the entry-fade window dissolve out of the
 // near estimator entirely; the composite's weather-column band march owns
@@ -921,9 +928,21 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     let reach_end = cloud_march_stop_m(f32(ray_step_limit), ray.start, pixel_angle);
     let reach_fade_begin = mix(ray.start, reach_end, CLOUD_MARCH_FADE_FRACTION);
 
+    // The reach budget counts BROAD probes only. `cloud_march_stop_m` above is
+    // the closed-form integral of the broad ladder alone, and the far tier
+    // places its complementary fade-in at that frontier — so if refinement
+    // (fine cadence, plus the rewind) drains the same counter, the marcher
+    // truncates SHORT of the frontier with no fade and no far cover
+    // (INC-20260729T012803Z: the silhouette lace). Fine work is bounded per
+    // broad hit, so a separate iteration cap keeps the loop TDR-safe —
+    // uniform-derived, NOT a compile-time constant, so no downstream compiler
+    // is invited to unroll the march body thousands of times.
+    var broad_spent = 0u;
+    let iteration_cap = ray_step_limit * 3u;
 
-    for (var step: u32 = 0u; step < ray_step_limit; step++) {
+    for (var iteration: u32 = 0u; iteration < iteration_cap; iteration++) {
         if (dir_length > ray.end) { break; }
+        if (dir_length > reach_end) { break; }
         let world_position = ray_origin + dir_length * ray_dir;
         let up = normalize(world_position);
         weather = sample_weather(up);
@@ -935,7 +954,17 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
         // geometrically short in-shell segments, so the clamp stays cheap).
         let radial_rate = abs(dot(up, ray_dir));
         let broad_step = cloud_march_step_m(dir_length, pixel_angle, radial_rate);
-        let fine_step = broad_step * REFINE_STEP_FRACTION;
+        // Refinement resolves sub-broad-step density structure, so its cadence
+        // is bounded below by what a pixel can SHOW: never finer than the
+        // projected footprint. Near-field this is the unchanged 0.2× fraction
+        // (footprint ≪ step); at range fine → broad and refinement stops
+        // costing anything — which is what lets the reach budget extend to
+        // planetary distances instead of burning steps on invisible detail.
+        let fine_step = clamp(
+            dir_length * pixel_angle,
+            broad_step * REFINE_STEP_FRACTION,
+            broad_step,
+        );
         // Sampling scale everything band-limits against: the REFINE cadence
         // (density is only ever integrated there) or the projected pixel
         // footprint, whichever is coarser. This single value now drives the
@@ -958,6 +987,8 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
             * BROAD_HIT_DENSITY_FRACTION;
 
         if (!refining) {
+            if (broad_spent >= ray_step_limit) { break; }
+            broad_spent += 1u;
             let broad_density = get_cloud_map_density(
                 world_position,
                 clamp(normalized_height, 0.0, 1.0),

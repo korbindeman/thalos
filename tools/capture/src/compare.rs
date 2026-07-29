@@ -18,7 +18,7 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
-use thalos_capture_protocol::{CAPTURE_PRESETS, ViewpointCatalog};
+use thalos_capture_protocol::{CAPTURE_PRESETS, CaptureSourceSnapshot, ViewpointCatalog};
 
 const FONT_BYTES: &[u8] = include_bytes!("../../../assets/fonts/Inter-SemiBold.ttf");
 const DIFF_AMPLIFICATION: u16 = 4;
@@ -27,6 +27,7 @@ const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_AZIMUTH",
     "THALOS_SCREENSHOT_ELEVATION",
     "THALOS_SCREENSHOT_DISTANCE",
+    "THALOS_SCREENSHOT_TIME",
     "THALOS_SCREENSHOT_WARMUP",
     "THALOS_SCREENSHOT_HUD",
     "THALOS_SCREENSHOT_CLOUD_TIER",
@@ -35,6 +36,8 @@ const INVARIANT_ENV_KEYS: &[&str] = &[
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
     "THALOS_TILE_CACHE",
+    "THALOS_TILE_BUDGET_MB",
+    "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_WGPU_BACKEND",
 ];
 
@@ -227,11 +230,32 @@ const CLOUD_SHADOW_VARIANTS: &[Variant] = &[
     },
 ];
 
+/// Crepuscular-shaft axis (CLOUD-5 §3.5 atmosphere-march shafts). Toggles ONLY
+/// the atmosphere raymarch's cloud sun-transmittance term — surface receivers
+/// keep their shadows in both variants, so the diff is exactly the airborne
+/// shafts. Run against the `cloud-godray` preset (searched cloudy-land site,
+/// camera looking sunward).
+const GODRAY_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "off",
+        value: "off",
+    },
+    Variant {
+        label: "on",
+        value: "on",
+    },
+];
+
 const AXES: &[Axis] = &[
     Axis {
         name: "cloud-shadow",
         env_key: "THALOS_CLOUD_SHADOW",
         variants: CLOUD_SHADOW_VARIANTS,
+    },
+    Axis {
+        name: "godray",
+        env_key: "THALOS_CLOUD_GODRAY",
+        variants: GODRAY_VARIANTS,
     },
     Axis {
         name: "ssao",
@@ -305,6 +329,11 @@ struct Manifest {
     created_unix_s: u64,
     revision: String,
     working_tree_dirty: bool,
+    source: CaptureSourceSnapshot,
+    workspace_after: CaptureSourceSnapshot,
+    source_floor_guaranteed: bool,
+    workspace_relation: String,
+    workspace_matches: bool,
     preset: String,
     axis: String,
     axis_env_key: String,
@@ -324,6 +353,7 @@ struct ManifestVariant {
     label: String,
     env_value: String,
     image: String,
+    receipt: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -348,7 +378,16 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
     let Some(args) = parse_args(args)? else {
         return Ok(());
     };
+    crate::guard_resource_fault()?;
+    let source = crate::capture_source_snapshot()?;
     let workspace = workspace_root();
+    let mut capture_defaults = BTreeMap::new();
+    if let Ok(size) = env::var("THALOS_SCREENSHOT_SIZE") {
+        capture_defaults.insert("THALOS_SCREENSHOT_SIZE".into(), size);
+    }
+    crate::apply_safe_viewpoint_size(&args.preset, &mut capture_defaults);
+    let tile_budget_mb = env::var("THALOS_TILE_BUDGET_MB")
+        .unwrap_or_else(|_| crate::DEFAULT_CAPTURE_TILE_BUDGET_MB.into());
     // Pipeline specialization reads terrain culling before a material pipeline
     // exists, so this structural axis cannot be changed safely in-process.
     // Structural axes decide something before (or instead of) a material
@@ -423,11 +462,15 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
                 .env("THALOS_SCREENSHOT", &args.preset)
                 .env("THALOS_SCREENSHOT_OUT", &path)
                 .env("THALOS_SCREENSHOT_REPORT", &report_path)
+                .env("THALOS_TILE_BUDGET_MB", &tile_budget_mb)
                 .env(args.axis.env_key, variant.value)
                 .env(
                     dynamic_library_env_key(),
                     dynamic_library_path.as_ref().expect("cold path has dylibs"),
                 );
+            if let Some(size) = capture_defaults.get("THALOS_SCREENSHOT_SIZE") {
+                command.env("THALOS_SCREENSHOT_SIZE", size);
+            }
             command.current_dir(&workspace);
             let output = command
                 .output()
@@ -437,6 +480,14 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr)
             );
+            if let Some(kind) = crate::resource_fault_kind(&process_log) {
+                crate::record_resource_fault(kind, &process_log);
+                return Err(format!(
+                    "variant '{}': {}",
+                    variant.label,
+                    crate::resource_fault_message(kind, &process_log)
+                ));
+            }
             if !output.status.success() {
                 return Err(format!(
                     "variant '{}' exited with {}\n{}",
@@ -462,6 +513,8 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
                 Some(path.clone()),
                 Some(report_path.clone()),
                 vec![format!("{}={}", args.axis.env_key, variant.value)],
+                thalos_capture_protocol::CaptureCameraOverride::default(),
+                thalos_capture_protocol::CaptureGraphicsOverrides::default(),
             )?;
         }
         if !path.is_file() {
@@ -549,16 +602,33 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
             label: variant.label.to_owned(),
             env_value: variant.value.to_owned(),
             image: relative_display(&workspace, &capture_paths[index]),
+            receipt: (!cold)
+                .then(|| relative_display(&workspace, &crate::receipt_path(&capture_paths[index]))),
         })
         .collect();
+    let workspace_after = crate::capture_source_snapshot()?;
+    let workspace_matches = workspace_after.fingerprint == source.fingerprint;
+    let workspace_relation = crate::workspace_relation(&source, &workspace_after).to_owned();
+    if !workspace_matches {
+        eprintln!(
+            "workspace advanced during comparison: source floor={}, current={}; the floor is included, while later edits may or may not be present; see manifest.json",
+            crate::short_fingerprint(&source.fingerprint),
+            crate::short_fingerprint(&workspace_after.fingerprint),
+        );
+    }
     let manifest = Manifest {
-        schema_version: 2,
+        schema_version: 3,
         created_unix_s: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs(),
         revision,
         working_tree_dirty,
+        source,
+        workspace_after,
+        source_floor_guaranteed: true,
+        workspace_relation,
+        workspace_matches,
         preset: args.preset,
         axis: args.axis.name.to_owned(),
         axis_env_key: args.axis.env_key.to_owned(),

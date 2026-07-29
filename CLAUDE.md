@@ -90,6 +90,16 @@ the exception; when you're unsure whether something earns a record, it doesn't.
   completing them outranks new features.
 - **Delete dead code on contact** — the superseded path you touch goes in the
   same change, not left "for reference".
+- **Size work in LLM tokens, not days.** The work is done by agents, so
+  "two days" / "a week" / "a sprint" are meaningless units here — they describe
+  a human workday nobody is spending. Estimate and compare in the currency that
+  actually varies: **tokens** (and the agent-sessions they buy). Say "~200k
+  tokens, one session" or "multi-session, several M tokens", not "half a day".
+  The same applies to sequencing and scope calls: an option is cheap because it
+  is few tokens to build and verify, not because it is quick to type. Wall-clock
+  still counts where it is a real constraint — build times, capture latency,
+  a user play session — but that is machine or human *time*, never an effort
+  estimate. Backlog rows, plan docs, and ADRs follow this rule.
 
 ## Bug fixing
 
@@ -134,6 +144,12 @@ just ui-preview         # headless UI kitchen sink → artifacts/visual/latest/
 just bake Mira          # rebuild assets/terrain_packages/Mira.bin offline
 just validate-bake Mira # validate package schema/index/checksums/payload
 just texgen             # rebuild versioned vegetation atlases offline
+just diag [hours]       # diagnostics triage: what in the last <hours> of the
+                        #   runtime + tool lanes crossed a threshold (--json for
+                        #   machine use). A healthy window says so and stops.
+just perf-report [s]    # runtime.jsonl perf lane → HTML + summary.json per
+                        #   session (latest | <pid>-<ms> | --list); F3 in-game
+                        #   shows the same data live (tooling.md · perf lane)
 just trace              # profile-tracy build (needs Tracy GUI v0.11.x running)
 just release <kind>     # bump version, commit, tag, push
 ```
@@ -161,6 +177,18 @@ recompile: `THALOS_SCREENSHOT_{AZIMUTH,ELEVATION,DISTANCE,SIZE,OUT,WARMUP,HUD}`.
 `artifacts/visual/latest/` is the curated one-image-per-preset surface;
 numbered experiments and alternate framings go to `artifacts/visual/runs/` via
 `THALOS_SCREENSHOT_OUT`.
+
+**Check capture provenance before treating an image as your evidence.** The
+capture client serializes parallel agents and worktrees through one
+machine-wide kernel lock, rebuilds when the resident host's
+content fingerprint does not include the current Rust/Cargo inputs, and prints
+the exact source fingerprint used. Every PNG has a neighboring
+`<name>.capture.json` receipt with Git revision/dirty state, renderer-launch
+source, post-capture workspace source, and `workspace_matches`. If that field is
+false, the checkout advanced after the capture's source floor; the image
+includes that floor, while later edits may or may not be present. Recapture only
+when one of those later edits is itself under verification. Comparison manifests
+carry the same fields.
 
 **A terrain / biome / scatter / visual change that compiles but hasn't been
 screenshotted is `verify`, not `done`.** If no preset frames what you changed,
@@ -211,26 +239,134 @@ not call two ad-hoc manual screenshots an A/B (ADR-20260721T192218Z): a split
 viewport changes LOD, SSAO, shadows, and antialiasing under test. `just compare`
 is not a performance benchmark — use profiling for that.
 
-**Getting runtime numbers out: write them to a file.** Have the game log the
-data and read the file afterwards. JSONL is the house style, under
-`artifacts/diagnostics/` (never beside images). **The console is for humans:**
-keep `info!` to short lifecycle/status messages and `warn!`/`error!` actionable.
-Periodic gauges, numeric state dumps, calibration signals, and investigation
-traces use structured fields on
-`info!(target: "thalos::diagnostic::<subsystem>", event = "…", …)`;
-the runtime routes them to `artifacts/diagnostics/runtime.jsonl` and omits them
-from stdout/stderr. Do not invent another console diagnostic target. Existing
-specialized recorders may keep their own JSONL when they have a distinct schema.
-For performance, ask the user to run
-`cargo run --release -p thalos_game --features profile-chrome`, then analyze the
-artifact with `python3 scripts/analyze_trace.py trace-<date>.json`
-(`--around-name <span> --window-ms <ms>` scopes it to windows around an event).
+**Getting runtime numbers out: write them to a file** and read the file
+afterwards — never ask the user to read numbers off a console. How, and what
+makes a number worth emitting, is the *Observability* section below.
 
 **Player→agent handoff:** in any 3-D view the user can press **F9** to save the
 current view in one keypress (F9, Enter takes the suggested name; F9, type,
 Enter overrides it) or **F8** to manage saved viewpoints in
 `assets/viewpoints.json`; replay one headlessly with `just screenshot <slug>`
 (`latest` = newest entry). ADR-20260724T211627Z.
+
+## Observability
+
+**An agent diagnoses exactly as well as the data already in the tree.** You
+cannot attach a debugger, watch a frame, or feel a hitch; every session that has
+to ask the user to reproduce is a session spent guessing, and every hour of
+guessing is paid again by the next agent. So instrumentation is not overhead
+added after something breaks — it is the artifact that makes all later work
+cheap. When in doubt, emit the number. Contract, storage, and the current lane
+inventory: `docs/development/tooling.md`.
+
+**One lane, one target, one file.** Structured runtime telemetry is
+`info!(target: "thalos::diagnostic::<subsystem>", event = "…", field = …)`.
+`thalos_runtime` installs one process-wide tracing layer that writes it to
+`artifacts/diagnostics/runtime.jsonl` (schema, session `<pid>-<start-ms>`,
+timestamp, level, target, typed fields) and keeps it off the console. Don't
+invent a second console diagnostic target, and don't open a new JSONL merely to
+avoid choosing an event name — a separate sink needs an independent schema *and*
+lifecycle (capture receipts, GPU-memory sampling, shadow traces qualify).
+**The console is for humans:** `info!` = a short lifecycle or state change,
+`warn!`/`error!` = what broke and what to do. Periodic gauges, numeric dumps,
+calibration samples, and investigation traces never go there.
+
+**Events are data, not sentences.** `event = "<snake_case_noun>"` is the stable
+key an agent greps and a report tool groups by; keep it stable once written.
+Fields are flat scalars with the unit in the name (`_ms`, `_mib`, `_m`, `_hz`,
+`_frac`), never a formatted string an agent has to re-parse. The message string
+is a label for the human tail-reading the file, never the payload.
+
+**A diagnostic that can't falsify a hypothesis isn't a diagnostic.** Emit the
+quantity that *separates* candidate causes, not the one that's easy to reach.
+Ratios and gauges carry their denominator (resident *and* budget, spent *and*
+share, count *and* the cap that would bite); rates carry their window; anything
+per-process carries `pid`/`session`, because the user often runs several
+instances at once — always split `runtime.jsonl` by session before drawing a
+conclusion. The standing example: tile residency logged only *cumulative*
+landings, so a 19,200-landing session was equally consistent with a 1 GiB
+working set and a 6 GiB one, and the OOM was undiagnosable from the log until a
+residency gauge replaced it (INC-20260725T012104Z).
+
+**Instrument first, then patch.** In the *Bug fixing* loop, step 2's
+"falsifiable test" is usually a diagnostic, not a code change. If existing data
+can't distinguish your hypotheses, the first commit is the instrument — landed,
+handed to the user if it needs a play session, and kept afterwards. Instruments
+added to catch a bug stay in the tree as the recurrence tell; delete one only
+when the thing it measures is gone.
+
+**Every developer tool is a production surface — and the capture lane is the
+most load-bearing thing in the repo.** Agent throughput is bounded by
+`just screenshot`: every second of its latency, every spurious rebuild, every
+lock wait, and every flake is multiplied by every agent and every iteration.
+Treat capture slowness, contention, and silently-wrong output as defects of the
+highest class, not as facts of life; the same goes for `just capture` /
+`compare` / `preview` / `map` / `bake` / `texgen`. Each tool run must leave a
+machine-readable record of **what it did, how long each phase took, and how it
+ended**: outcome, per-phase timings, source fingerprint and rebuild reason, lock
+wait, retries, and the failure reason on the error path. Exit code plus stderr
+prose is not enough — **BL-20 is exactly a fatal pipeline error under exit 0.**
+
+**Non-crash failure is the failure mode that matters.** A capture that renders
+zero clouds, drops a render layer, or quietly serves a stale cache still exits 0
+and still writes a plausible PNG. Where an invariant is checkable, check it in
+process and record the verdict beside the artifact (the `.capture.json` receipt
+is the established place), so the agent reading the image can tell *correct*
+from merely *produced*. A known-silent failure gets a recorded check in the same
+change as its fix, or it will be re-diagnosed from scratch.
+
+**Cost discipline, so nobody turns it off.** Always-on lanes are periodic
+(≥ 1 s), allocation-free on the hot path, and must not perturb what they
+measure. Heavy modes — full-rate frame records, per-tile traces, GPU counters —
+are `THALOS_*` opt-in and must never need a recompile: an env var an agent can
+set beats a better metric behind a Cargo feature.
+
+**Every diagnostic owes the reader a check.** The lane has a reader —
+**`just diag [hours]`** (`tools/diag`) — which reports only what crossed a
+threshold, and a **daily triage routine** (`diag-triage` skill) that turns
+findings into rows, incidents, or an explicit "no action, because …". So an
+event is not finished when it is emitted. Adding one means answering: *what
+question does it answer, what value makes it actionable, and which check reads
+it?* If no check reads it, either add one to `tools/diag/src/checks.rs` or don't
+add the event — an event nobody reads is cost with no signal. Thresholds live in
+`tools/diag/src/finding.rs`, each a named constant with the reason it sits where
+it does, and each one is tested to fire on the defect it exists for and to stay
+silent on a healthy window.
+
+**Signal-to-noise is maintained, not achieved.** The lane is shared, so its
+budget is shared: a periodic gauge that dominates the file makes every future
+read more expensive (`just diag` flags this as `lane_noise`). Sample it, demote
+it to a `THALOS_*` opt-in mode, or delete it. Same for the reader: a check that
+fires daily and is dismissed daily is a wrong threshold or a dead check — tune
+the constant or remove it. **Delete instruments whose subsystem is gone**, the
+same way you delete dead code on contact.
+
+**Read the artifacts before asking.** `just diag` first (it names the session
+worth opening), then `artifacts/diagnostics/runtime.jsonl` and `tools.jsonl`, the
+`.capture.json` receipt beside every PNG, `just perf-report [session|latest]`
+(HTML + `summary.json`), and F3 in-game.
+Asking the user to reproduce is justified only after you've read the existing
+evidence and can name what it does *not* show. Deep profiling stays a user-run
+escalation: `cargo run --release -p thalos_game --features profile-chrome`, then
+`python3 scripts/analyze_trace.py trace-<date>.json`
+(`--around-name <span> --window-ms <ms>` scopes it around an event); the perf
+lane's job is to tell you when that's worth asking for.
+
+**One interface: `thalos_diagnostics`.** The event contract, JSONL sink, session
+id, path resolution, and rotation live in `crates/foundation/diagnostics` (no
+Bevy), so the game, the capture host, the capture client, and the offline tools
+all record on the same terms. The game installs it as a Bevy log layer
+(`runtime_diagnostics.rs` is now just that adapter) → `runtime.jsonl`; a tool
+calls `install_tool_lane()` and wraps each unit of work in a `ToolRun`
+(`phase` / `count` / `field` / `ok` / `fail`) → `tools.jsonl`. **The capture
+client is instrumented**: one record per shot with `host_action` (why it did or
+didn't pay for a boot), phase timings for source-snapshot / host-start /
+shader-reload / render / validate, retry and rebuild counters, plus a separate
+`capture_lock` event for machine-lock contention. Details:
+`docs/development/tooling.md`. Remaining under
+BL-20260729T040504Z-unified-diagnostics: the host-internal render split, run
+records for the offline tools, the shared reader (`just diag`), and folding the
+per-preset capture JSONLs into the stream.
 
 ## Build & iteration
 
@@ -380,10 +516,14 @@ collection runs in `PreUpdate` before them.
 
 ## Shared shader library rule
 
-Every surface material (`body_terrain.wgsl`, `tree.wgsl`, `grass.wgsl`,
-`rock.wgsl`, `ground_patch.wgsl`, `tree_impostor.wgsl`) **must** import from the
-shared libraries, never re-implement lighting/palette locally. When a palette or
-BRDF constant moves, it moves in one place.
+Every surface material (`body_terrain.wgsl`, `tree_standard.wgsl`,
+`grass.wgsl`, `rock.wgsl`, `ground_patch.wgsl`, `tree_impostor_standard.wgsl`)
+**must** import from the shared libraries, never re-implement lighting/palette
+locally. When a palette or BRDF constant moves, it moves in one place. (The
+tree/impostor materials are on Bevy's standard path since 2026-07-29 — they
+take *lighting* from Bevy PBR, but their albedo/palette still comes from
+`thalos::foliage`/`thalos::landcover`, and they receive the shared
+`thalos::shadow` cascade + cloud transmittance.)
 
 | Import path | Key exports |
 |---|---|

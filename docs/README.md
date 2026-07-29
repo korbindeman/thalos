@@ -58,6 +58,7 @@ Vehicle dynamics, authority, physics, and near-surface behavior.
 Celestial content and the physical surface of bodies.
 
 - [Celestial sphere](world/celestial.md)
+- [Navigable gas giants](world/navigable_gas_giants.md) — pressure-datum world model, shared atmosphere authority, exterior/interior rendering, and flight envelope.
 - [Terrain contract](world/terrain.md)
 - [Macro terrain: climate and landcover fields](world/terrain_macro.md)
 - [Biomes — the terrain authority](world/biomes.md) (`bio`)
@@ -69,6 +70,7 @@ Celestial content and the physical surface of bodies.
 Atmospheric and surface-adjacent rendering systems.
 
 - [Atmospheres, oceans, and lighting](rendering/atmosphere.md)
+- [Camera optics and photographic capture](rendering/camera.md)
 - [Clouds](rendering/clouds.md)
 - [Ocean](rendering/ocean.md)
 - [Rocket plumes](rendering/plume.md)
@@ -81,7 +83,7 @@ How to build, inspect, capture, and verify the project.
 - [Build speed and agent workflow](development/build_speed.md)
 - [Capture architecture](development/capture.md)
 - [Tooling](development/tooling.md)
-- [Visual testing](development/visual_testing.md)
+- [Visual testing and agent capture quickstart](development/visual_testing.md)
 
 ### [Reference](reference/)
 
@@ -105,9 +107,12 @@ canonical specs above; they do not replace them.
 `CLAUDE.md` at the repository root is the agent operating manual. It is loaded
 into **every** agent context, so it is deliberately kept to current direction,
 verification rules, and hard invariants — detail belongs in the documents above,
-and anything added there must earn its place in every session. The `steer` skill
-(`.claude/skills/steer/SKILL.md`) routes new work between the roadmap and the
-backlog.
+and anything added there must earn its place in every session. Two skills sit
+beside it: `steer` (`.claude/skills/steer/SKILL.md`) routes new work between the
+roadmap and the backlog, and `diag-triage`
+(`.claude/skills/diag-triage/SKILL.md`) runs the diagnostics pass — `just diag`,
+then findings into rows, incidents, or a stated non-action
+(`development/tooling.md` § Reading the lane).
 
 ## Placement rules
 
@@ -131,6 +136,7 @@ backlog.
 | `clean §N` | [architecture cleanup](roadmap/architecture_cleanup.md) |
 | `gfx §N` | [graphics fidelity](roadmap/graphics_fidelity.md) |
 | `cloud §N` | [clouds](rendering/clouds.md) |
+| `giant §N` | [navigable gas giants](world/navigable_gas_giants.md) |
 | `ADR-YYYYMMDDTHHMMSSZ-slug` | [architecture decisions](adr/) |
 | `INC-YYYYMMDDTHHMMSSZ-slug` | [incidents](incidents/), plus frozen legacy `INC-NNNN` |
 | anything else | its repository-relative path or unambiguous filename plus section |

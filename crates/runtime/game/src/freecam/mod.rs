@@ -10,7 +10,7 @@
 //! | Q / E          | Roll left / right (**free look only**) |
 //! | L              | Toggle level-to-planet-up           |
 //! | C              | Toggle the ground floor (clip stop)  |
-//! | Z (hold)       | Zoom in (telephoto FOV)             |
+//! | Z (hold)       | Spring zoom (4× focal length)       |
 //! | LMB-drag       | Yaw + pitch (mouse look)            |
 //! | Shift / Ctrl   | 5× / 0.2× speed                     |
 //! | Scroll wheel   | Adjust base cruise speed            |
@@ -39,13 +39,16 @@
 //!   body is never re-selected while freecam is active; a view with no resolved
 //!   terrain body deliberately remains heliocentric-inertial.
 //! - **Level lock** ([`FreeCam::level_to_up`], default on) constrains the pose to
-//!   the local vertical at the camera's *current* position: yaw turns about that
-//!   vertical, pitch is clamped short of the poles, and roll is zero by
-//!   construction. Because the constraint is re-applied every frame against the
-//!   up direction where the camera now is, flying a quarter of the way around a
-//!   body keeps the horizon level instead of slowly tipping — and there is no
-//!   accumulated roll to hand-correct. Turn it off for a free 6-DOF spacecraft
-//!   cam (Q/E roll only works there).
+//!   the local vertical at the camera's *current* position while the camera is
+//!   inside that body's surface-flight envelope: yaw turns about that vertical,
+//!   pitch is clamped short of the poles, and roll is zero by construction.
+//!   Because the constraint is re-applied every frame against the up direction
+//!   where the camera now is, flying a quarter of the way around a body keeps
+//!   the horizon level instead of slowly tipping — and there is no accumulated
+//!   roll to hand-correct. Atmospheric bodies use their authored Kármán line as
+//!   the surface-flight ceiling; airless bodies use 5% of body radius, capped
+//!   at 100 km. Above that envelope freecam is 6-DOF; Q/E roll works there
+//!   without changing the remembered setting.
 //! - **Ground floor** ([`FreeCam::ground_collision`], default on) clamps the
 //!   camera's radius to the terrain height under it plus
 //!   [`FREECAM_GROUND_CLEARANCE_M`]. It is a *floor*, not a swept collision: it
@@ -60,7 +63,9 @@
 
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
+use bevy::window::PrimaryWindow;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use thalos_capture_protocol::CameraOptics as CameraOpticsSpec;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::types::BodyState;
 use thalos_physics_local::HeightSourceRegistry;
@@ -68,6 +73,7 @@ use thalos_world::BodyId;
 
 use crate::bridge::WarpLimits;
 use crate::camera::{ActiveCamera, OrbitCamera, ShipCamera};
+use crate::camera_optics::CameraOptics;
 use crate::debug::DebugMode;
 use crate::hud::{UiKeyboardGate, UiPointerGate};
 use crate::rendering::transforms::surface_orientation_authored;
@@ -100,12 +106,20 @@ pub struct FreeCam {
     /// Clamp the camera's radius to the terrain under it (plus
     /// [`FREECAM_GROUND_CLEARANCE_M`]) instead of letting it sink through.
     pub ground_collision: bool,
-    /// Unzoomed lens for this freecam session. Viewpoint teleports seed this
-    /// from the authored camera instead of snapping back to Bevy's default FOV.
-    base_fov_rad: f32,
     /// Reference frame selected once per activation. Kept private so no other
     /// system can silently retarget an active freecam.
     reference_frame: FreeCamReferenceFrame,
+    /// Optics owned by the camera rig that handed control to freecam. Restored
+    /// on exit so framing edits remain local to the photographic mode.
+    return_optics: Option<CameraOpticsSpec>,
+    /// True for the exit frame after freecam releases the camera transform.
+    /// The normal rig must rebuild its pose immediately, but must not consume
+    /// the final freecam mouse delta as orbit input during that handoff.
+    flight_input_handoff_pending: bool,
+    /// Effective surface-flight envelope state. `None` derives the initial
+    /// state directly from altitude; subsequent frames use hysteresis so the
+    /// lock cannot chatter at its atmospheric/airless ceiling.
+    level_lock_envelope_engaged: Option<bool>,
 }
 
 impl Default for FreeCam {
@@ -116,8 +130,10 @@ impl Default for FreeCam {
             base_speed_m_s: FREECAM_DEFAULT_SPEED_M_S,
             level_to_up: true,
             ground_collision: true,
-            base_fov_rad: PerspectiveProjection::default().fov,
             reference_frame: FreeCamReferenceFrame::Inertial,
+            return_optics: None,
+            flight_input_handoff_pending: false,
+            level_lock_envelope_engaged: None,
         }
     }
 }
@@ -129,6 +145,16 @@ impl FreeCam {
     /// before [`freecam_drive_system`] captures it.
     pub(crate) fn owns_camera_transform(&self) -> bool {
         self.active && !matches!(self.reference_frame, FreeCamReferenceFrame::Pending)
+    }
+
+    /// Whether the normal orbit rig must ignore mouse/scroll input this frame.
+    ///
+    /// On entry, `active` blocks it. On exit, the one-frame handoff flag keeps
+    /// the last freecam drag delta from being reinterpreted as orbit input while
+    /// still allowing [`crate::camera::camera_transform_system`] to restore the
+    /// normal rig's own pose immediately.
+    pub(crate) fn blocks_flight_camera_input(&self) -> bool {
+        self.active || self.flight_input_handoff_pending
     }
 
     /// The body this session is anchored to, if any. `None` for a deep-space
@@ -150,19 +176,33 @@ impl FreeCam {
         body_state: &BodyState,
         camera_world: DVec3,
         camera_rotation_world: DQuat,
-        base_fov_rad: f32,
         sim: &SimulationState,
         warp_limits: &WarpLimits,
+        return_optics: CameraOpticsSpec,
     ) {
         self.allow_sim_time = craft_allows_time_warp(sim, warp_limits);
-        self.base_fov_rad = base_fov_rad;
+        self.return_optics = Some(return_optics);
         self.reference_frame = FreeCamReferenceFrame::BodyFixed(BodyFixedCameraPose::capture(
             body,
             body_state,
             camera_world,
             camera_rotation_world,
         ));
+        self.flight_input_handoff_pending = false;
+        self.level_lock_envelope_engaged = None;
         self.active = true;
+    }
+
+    fn begin_flight_camera_handoff(&mut self) {
+        self.active = false;
+        self.allow_sim_time = false;
+        self.reference_frame = FreeCamReferenceFrame::Inertial;
+        self.flight_input_handoff_pending = true;
+        self.level_lock_envelope_engaged = None;
+    }
+
+    fn finish_flight_camera_handoff(&mut self) {
+        self.flight_input_handoff_pending = false;
     }
 }
 
@@ -234,23 +274,71 @@ fn craft_allows_time_warp(sim: &SimulationState, limits: &WarpLimits) -> bool {
 /// are pure translations, so a world direction *is* a camera-`Transform`-space
 /// direction — no conversion needed.
 ///
-/// `None` for an inertial (deep-space) session: with no body there is no "up",
-/// which is what stands level lock and the ground floor down there.
+/// Effective local vertical for the surface-flight envelope. Atmospheric
+/// bodies use their authored Kármán line; airless bodies use a radius-scaled
+/// ceiling. Body-fixed anchoring remains active outside the envelope for warp
+/// stability; only the ground-camera leveling constraint stands down.
 fn local_up_world(
     reference_frame: FreeCamReferenceFrame,
+    sim: &SimulationState,
     states: Option<&[BodyState]>,
     grid: &Grid,
     cell: &CellCoord,
     transform: &Transform,
-) -> Option<Vec3> {
+    was_engaged: Option<bool>,
+) -> (Option<Vec3>, bool) {
     let FreeCamReferenceFrame::BodyFixed(anchor) = reference_frame else {
-        return None;
+        return (None, false);
     };
-    let state = states?.get(anchor.body)?;
+    let Some(state) = states.and_then(|states| states.get(anchor.body)) else {
+        return (None, false);
+    };
+    let Some(body) = sim.system.bodies.get(anchor.body) else {
+        return (None, false);
+    };
     let camera_world = grid.grid_position_double(cell, transform);
-    (camera_world - state.position)
-        .try_normalize()
-        .map(|up| up.as_vec3())
+    let atmosphere_top_m = body
+        .terrestrial_atmosphere
+        .as_ref()
+        .map(|atmosphere| atmosphere.karman_line_m as f64);
+    surface_flight_local_up(
+        camera_world,
+        state.position,
+        body.radius_m,
+        atmosphere_top_m,
+        was_engaged,
+    )
+}
+
+fn surface_flight_local_up(
+    camera_world: DVec3,
+    body_position: DVec3,
+    body_radius_m: f64,
+    atmosphere_top_m: Option<f64>,
+    was_engaged: Option<bool>,
+) -> (Option<Vec3>, bool) {
+    let ceiling_m = atmosphere_top_m
+        .filter(|top| *top > 0.0)
+        .unwrap_or_else(|| {
+            (body_radius_m * AIRLESS_LEVEL_CEILING_RADIUS_FRACTION).min(AIRLESS_LEVEL_CEILING_MAX_M)
+        });
+    if ceiling_m <= 0.0 {
+        return (None, false);
+    }
+
+    let radial = camera_world - body_position;
+    let radius = radial.length();
+    let altitude_m = radius - body_radius_m;
+    let engage_ceiling_m = ceiling_m * LEVEL_LOCK_REENGAGE_CEILING_FRACTION;
+    let engaged = match was_engaged {
+        None => altitude_m < ceiling_m,
+        Some(true) => altitude_m < ceiling_m,
+        Some(false) => altitude_m < engage_ceiling_m,
+    };
+    let up = engaged
+        .then(|| radial.try_normalize().map(|up| up.as_vec3()))
+        .flatten();
+    (up, engaged)
 }
 
 /// Re-derive the camera rotation as the roll-free, pitch-clamped look about
@@ -260,10 +348,9 @@ fn local_up_world(
 /// which is what lets it run every frame without drifting the view.
 fn apply_level_lock(transform: &mut Transform, up: Vec3) {
     let forward = *transform.forward();
-    let sin_pitch = forward.dot(up).clamp(
-        -FREECAM_LEVEL_MAX_SIN_PITCH,
-        FREECAM_LEVEL_MAX_SIN_PITCH,
-    );
+    let sin_pitch = forward
+        .dot(up)
+        .clamp(-FREECAM_LEVEL_MAX_SIN_PITCH, FREECAM_LEVEL_MAX_SIN_PITCH);
     let horizontal = (forward - up * forward.dot(up))
         .try_normalize()
         // Looking straight up or down: `forward` carries no heading. The
@@ -349,15 +436,26 @@ const FREECAM_SCROLL_LOG_STEP: f64 = 0.20;
 /// re-level from inverted in a couple of seconds without making fine
 /// roll adjustments impossible.
 const FREECAM_ROLL_RATE_RAD_S: f32 = 1.5;
-/// Telephoto zoom factor while Z is held: the field of view narrows to 1/this
-/// of the normal FOV (≈45° → ≈11°), magnifying the view ~4×.
+/// Telephoto zoom factor while Z is held. This multiplies focal length, which
+/// is the photographic operation the control claims to perform.
 const FREECAM_ZOOM_FACTOR: f32 = 4.0;
-/// Exponential smoothing rate (1/s) for easing the freecam FOV toward its zoom
+/// Exponential smoothing rate (1/s) for easing the freecam lens toward its zoom
 /// target, so zoom in/out reads like racking a lens rather than a hard snap.
 const FREECAM_ZOOM_LERP_RATE: f32 = 12.0;
 /// Pitch limit under level lock, as `sin(pitch)`. Just short of the pole: at
 /// exactly ±90° the heading is undefined and `look_to` has no valid basis.
 const FREECAM_LEVEL_MAX_SIN_PITCH: f32 = 0.9998; // ≈ 88.9°
+/// Airless bodies have no authored atmosphere boundary, so their plane-like
+/// surface-flight envelope scales with curvature instead. Five percent keeps
+/// the horizon locally meaningful across moons and tiny asteroids.
+const AIRLESS_LEVEL_CEILING_RADIUS_FRACTION: f64 = 0.05;
+/// Large airless worlds do not need the constraint beyond a conventional
+/// planetary surface-flight altitude.
+const AIRLESS_LEVEL_CEILING_MAX_M: f64 = 100_000.0;
+/// Once the lock releases at its ceiling, descend this far into the envelope
+/// before re-engaging it. One-sided hysteresis ensures an atmospheric lock
+/// never persists above the authored atmosphere top.
+const LEVEL_LOCK_REENGAGE_CEILING_FRACTION: f64 = 0.95;
 /// How far above the terrain the ground floor holds the camera. Small enough
 /// to park the lens on the deck, large enough that a metre of terrain LOD
 /// disagreement doesn't put the near plane inside a hill.
@@ -373,21 +471,23 @@ pub struct FreeCamPlugin;
 
 impl Plugin for FreeCamPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<FreeCam>().add_systems(
-            Update,
-            (
-                // Toggle before the normal camera chain so its input/driver
-                // sees the new ownership in the same frame. Drive afterward
-                // so activation captures the final inherited camera pose and
-                // deactivation lets the flight camera snap back immediately.
-                toggle_freecam_system.before(crate::camera::camera_input_system),
-                freecam_drive_system.after(crate::camera::camera_transform_system),
-                freecam_zoom_system,
+        app.init_resource::<FreeCam>()
+            .add_systems(
+                Update,
+                (
+                    // Toggle before the normal camera chain so its input/driver
+                    // sees the new ownership in the same frame. Drive afterward
+                    // so activation captures the final inherited camera pose and
+                    // deactivation lets the flight camera snap back immediately.
+                    toggle_freecam_system.before(crate::camera::camera_input_system),
+                    freecam_drive_system.after(crate::camera::camera_transform_system),
+                    freecam_zoom_system,
+                    crate::camera_optics::sync_camera_optics_projection,
+                )
+                    .chain()
+                    .in_set(crate::SimStage::Camera),
             )
-                .chain()
-                .in_set(crate::SimStage::Camera),
-        )
-        .add_plugins(panel::FreeCamPanelPlugin);
+            .add_plugins(panel::FreeCamPanelPlugin);
     }
 }
 
@@ -398,7 +498,8 @@ fn toggle_freecam_system(
     shipyard: Option<Res<crate::shipyard_editor::ShipyardEditor>>,
     sim: Res<SimulationState>,
     warp_limits: Res<WarpLimits>,
-    camera: Query<&Projection, (With<OrbitCamera>, With<ActiveCamera>, With<ShipCamera>)>,
+    mut camera: Query<(&Projection, &mut CameraOptics), (With<OrbitCamera>, With<ShipCamera>)>,
+    windows: Query<&Window, With<PrimaryWindow>>,
     mut freecam: ResMut<FreeCam>,
     ui_keyboard: Res<UiKeyboardGate>,
 ) {
@@ -406,9 +507,10 @@ fn toggle_freecam_system(
     // and we don't want input gating to drift while the user can't recover.
     // [`gate_enhanced_input_sources`] picks up the change next PreUpdate.
     if freecam.active && *view != ViewMode::Ship {
-        freecam.active = false;
-        freecam.allow_sim_time = false;
-        freecam.reference_frame = FreeCamReferenceFrame::Inertial;
+        freecam.begin_flight_camera_handoff();
+        if let Ok((_, mut optics)) = camera.single_mut() {
+            restore_return_optics(&mut freecam, &mut optics);
+        }
         return;
     }
 
@@ -430,16 +532,39 @@ fn toggle_freecam_system(
     }
 
     if freecam.active {
-        freecam.active = false;
-        freecam.allow_sim_time = false;
-        freecam.reference_frame = FreeCamReferenceFrame::Inertial;
+        freecam.begin_flight_camera_handoff();
+        if let Ok((_, mut optics)) = camera.single_mut() {
+            restore_return_optics(&mut freecam, &mut optics);
+        }
     } else {
+        freecam.flight_input_handoff_pending = false;
         freecam.allow_sim_time = craft_allows_time_warp(&sim, &warp_limits);
-        if let Ok(Projection::Perspective(perspective)) = camera.single() {
-            freecam.base_fov_rad = perspective.fov;
+        if let Ok((Projection::Perspective(perspective), mut optics)) = camera.single_mut() {
+            let aspect = windows
+                .single()
+                .map(|window| {
+                    [
+                        window.resolution.physical_width().max(1),
+                        window.resolution.physical_height().max(1),
+                    ]
+                })
+                .unwrap_or([16, 9]);
+            if let Ok(spec) = CameraOpticsSpec::from_vertical_fov(perspective.fov, aspect) {
+                let _ = optics.set_spec(spec);
+                freecam.return_optics = Some(spec);
+            }
         }
         freecam.reference_frame = FreeCamReferenceFrame::Pending;
+        freecam.level_lock_envelope_engaged = None;
         freecam.active = true;
+    }
+}
+
+fn restore_return_optics(freecam: &mut FreeCam, optics: &mut CameraOptics) {
+    if let Some(spec) = freecam.return_optics.take() {
+        let _ = optics.set_spec(spec);
+    } else {
+        optics.set_zoom_multiplier(1.0);
     }
 }
 
@@ -461,6 +586,7 @@ fn freecam_drive_system(
     >,
 ) {
     if !freecam.active {
+        freecam.finish_flight_camera_handoff();
         return;
     }
     let Ok(grid) = grid_q.single() else { return };
@@ -547,12 +673,20 @@ fn freecam_drive_system(
     }
 
     let reference_frame = freecam.reference_frame;
-    // Level lock needs a local vertical; without one (deep space) the camera
-    // keeps its free 6-DOF behaviour regardless of the setting.
-    let level_up = freecam
-        .level_to_up
-        .then(|| local_up_world(reference_frame, states, grid, &cell, &transform))
-        .flatten();
+    // Level lock needs both a local vertical and a surface-flight envelope.
+    // Outside it the camera keeps 6-DOF behaviour without changing the user's
+    // remembered `level_to_up` setting.
+    let (envelope_up, envelope_engaged) = local_up_world(
+        reference_frame,
+        &sim,
+        states,
+        grid,
+        &cell,
+        &transform,
+        freecam.level_lock_envelope_engaged,
+    );
+    freecam.level_lock_envelope_engaged = Some(envelope_engaged);
+    let level_up = freecam.level_to_up.then_some(envelope_up).flatten();
 
     let mut pose_changed = false;
 
@@ -694,12 +828,17 @@ fn freecam_drive_system(
     // the horizon hold while flying across a body: the vertical rotates under
     // the camera and the constraint follows it, instead of a one-shot level
     // that decays with every kilometre travelled.
-    if sanitize_pose
-        && let Some(up) = freecam
-            .level_to_up
-            .then(|| local_up_world(reference_frame, states, grid, &cell, &transform))
-            .flatten()
-    {
+    let (final_envelope_up, final_envelope_engaged) = local_up_world(
+        reference_frame,
+        &sim,
+        states,
+        grid,
+        &cell,
+        &transform,
+        freecam.level_lock_envelope_engaged,
+    );
+    freecam.level_lock_envelope_engaged = Some(final_envelope_engaged);
+    if sanitize_pose && let Some(up) = freecam.level_to_up.then_some(final_envelope_up).flatten() {
         let before = transform.rotation;
         apply_level_lock(&mut transform, up);
         // The entry frame has no other reason to persist, and the levelled pose
@@ -728,46 +867,38 @@ fn freecam_drive_system(
     }
 }
 
-/// Hold Z to zoom the freecam view in (narrow the field of view) like a
-/// telephoto lens; release to return to the normal FOV.
+/// Hold Z to multiply the freecam's effective focal length; release to return
+/// to the base lens.
 ///
 /// Runs regardless of `freecam.active` so that toggling freecam off — or
-/// switching out of ship view — while still zoomed eases the FOV back to
+/// switching out of ship view — while still zoomed eases the lens back to
 /// normal instead of stranding the camera at a magnified projection.
 fn freecam_zoom_system(
     time: Res<Time<Real>>,
     keys: Res<ButtonInput<KeyCode>>,
     ui_keyboard: Res<UiKeyboardGate>,
     freecam: Res<FreeCam>,
-    mut cam_q: Query<&mut Projection, (With<OrbitCamera>, With<ActiveCamera>, With<ShipCamera>)>,
+    mut cam_q: Query<&mut CameraOptics, (With<OrbitCamera>, With<ActiveCamera>, With<ShipCamera>)>,
 ) {
-    let Ok(mut projection) = cam_q.single_mut() else {
+    let Ok(mut optics) = cam_q.single_mut() else {
         return;
     };
-    // Read the current FOV without yet triggering change detection — most
-    // frames the projection is already settled and shouldn't be re-marked.
-    let Projection::Perspective(perspective) = projection.as_ref() else {
-        return;
-    };
-    let current = perspective.fov;
-
-    let base_fov = freecam.base_fov_rad;
     // The `z` in a typed viewpoint name is a character, not a zoom.
     let target = if freecam.active && !ui_keyboard.text_entry() && keys.pressed(KeyCode::KeyZ) {
-        base_fov / FREECAM_ZOOM_FACTOR
+        FREECAM_ZOOM_FACTOR
     } else {
-        base_fov
+        1.0
     };
 
+    let current = optics.zoom_multiplier();
     if (current - target).abs() < 1.0e-4 {
+        optics.set_zoom_multiplier(target);
         return;
     }
 
     let smoothing = 1.0 - (-FREECAM_ZOOM_LERP_RATE * time.delta_secs()).exp();
     let next = current + (target - current) * smoothing;
-    if let Projection::Perspective(perspective) = projection.as_mut() {
-        perspective.fov = next;
-    }
+    optics.set_zoom_multiplier(next);
 }
 
 #[cfg(test)]
@@ -815,6 +946,23 @@ mod tests {
 
         freecam.reference_frame = FreeCamReferenceFrame::Inertial;
         assert!(freecam.owns_camera_transform());
+    }
+
+    #[test]
+    fn exit_handoff_restores_pose_without_consuming_freecam_input() {
+        let mut freecam = FreeCam {
+            active: true,
+            reference_frame: FreeCamReferenceFrame::Inertial,
+            ..Default::default()
+        };
+
+        freecam.begin_flight_camera_handoff();
+
+        assert!(!freecam.owns_camera_transform());
+        assert!(freecam.blocks_flight_camera_input());
+
+        freecam.finish_flight_camera_handoff();
+        assert!(!freecam.blocks_flight_camera_input());
     }
 
     #[test]
@@ -871,6 +1019,93 @@ mod tests {
     }
 
     #[test]
+    fn atmospheric_level_lock_releases_at_karman_line_with_reentry_hysteresis() {
+        let body_position = DVec3::new(50.0, -20.0, 10.0);
+        let radius_m = 1_000.0;
+        let karman_line_m = 100.0;
+
+        let (inside_up, inside_engaged) = surface_flight_local_up(
+            body_position + DVec3::X * (radius_m + karman_line_m - 1.0),
+            body_position,
+            radius_m,
+            Some(karman_line_m),
+            None,
+        );
+        assert_eq!(inside_up, Some(Vec3::X));
+        assert!(inside_engaged);
+
+        let (at_boundary_up, at_boundary_engaged) = surface_flight_local_up(
+            body_position + DVec3::X * (radius_m + karman_line_m),
+            body_position,
+            radius_m,
+            Some(karman_line_m),
+            Some(true),
+        );
+        assert_eq!(at_boundary_up, None);
+        assert!(!at_boundary_engaged);
+
+        let (_, still_released) = surface_flight_local_up(
+            body_position
+                + DVec3::X
+                    * (radius_m + karman_line_m * LEVEL_LOCK_REENGAGE_CEILING_FRACTION + 1.0),
+            body_position,
+            radius_m,
+            Some(karman_line_m),
+            Some(false),
+        );
+        assert!(!still_released);
+
+        let (reentered_up, reentered) = surface_flight_local_up(
+            body_position
+                + DVec3::X
+                    * (radius_m + karman_line_m * LEVEL_LOCK_REENGAGE_CEILING_FRACTION - 1.0),
+            body_position,
+            radius_m,
+            Some(karman_line_m),
+            Some(false),
+        );
+        assert_eq!(reentered_up, Some(Vec3::X));
+        assert!(reentered);
+    }
+
+    #[test]
+    fn airless_level_lock_uses_radius_scaled_capped_surface_envelope() {
+        let body_position = DVec3::ZERO;
+        let moon_radius_m = 869_000.0;
+        let moon_ceiling_m = moon_radius_m * AIRLESS_LEVEL_CEILING_RADIUS_FRACTION;
+
+        let (near_surface_up, near_surface_engaged) = surface_flight_local_up(
+            DVec3::Y * (moon_radius_m + moon_ceiling_m - 1.0),
+            body_position,
+            moon_radius_m,
+            None,
+            None,
+        );
+        assert_eq!(near_surface_up, Some(Vec3::Y));
+        assert!(near_surface_engaged);
+
+        let (orbital_up, orbital_engaged) = surface_flight_local_up(
+            DVec3::Y * (moon_radius_m + moon_ceiling_m),
+            body_position,
+            moon_radius_m,
+            None,
+            Some(true),
+        );
+        assert_eq!(orbital_up, None);
+        assert!(!orbital_engaged);
+
+        let large_body_radius_m = 4_000_000.0;
+        let (_, capped_engaged) = surface_flight_local_up(
+            DVec3::Y * (large_body_radius_m + AIRLESS_LEVEL_CEILING_MAX_M),
+            body_position,
+            large_body_radius_m,
+            None,
+            Some(true),
+        );
+        assert!(!capped_engaged);
+    }
+
+    #[test]
     fn level_lock_removes_roll() {
         let up = tilted_up();
         let mut transform = Transform::from_translation(Vec3::ZERO);
@@ -910,7 +1145,8 @@ mod tests {
     #[test]
     fn level_lock_holds_heading_and_clamps_pitch_short_of_the_pole() {
         let up = tilted_up();
-        let heading = (Vec3::new(1.0, 0.0, 0.2) - up * Vec3::new(1.0, 0.0, 0.2).dot(up)).normalize();
+        let heading =
+            (Vec3::new(1.0, 0.0, 0.2) - up * Vec3::new(1.0, 0.0, 0.2).dot(up)).normalize();
         let mut transform = Transform::from_translation(Vec3::ZERO);
         // Straight up — past the clamp, and a direction that carries no heading
         // of its own.

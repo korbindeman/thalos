@@ -24,6 +24,7 @@ const CAMERA_HEIGHT_QUERY_TILE_LOD_M: f32 = 1.0;
 /// below the waterline, while otherwise following the real terrain height.
 const SURFACE_SEA_LEVEL_M: f64 = 0.0;
 
+use crate::camera_optics::CameraOptics;
 use crate::coords::{MAP_LAYER, RenderGhostFocus, SHIP_LAYER};
 use crate::freecam::FreeCam;
 use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
@@ -467,6 +468,7 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         space_camera_post_stack(),
         OrbitCamera,
         ShipCamera,
+        CameraOptics::default(),
         // The frosted-glass UI blurs this camera's output (thalos_ui).
         thalos_ui::UiBackdropSource,
         bevy::picking::mesh_picking::MeshPickingCamera,
@@ -566,7 +568,7 @@ pub fn camera_input_system(
     debug_surface_teleport: Option<Res<crate::debug::DebugSurfaceTeleport>>,
     mut focus: ResMut<CameraFocus>,
 ) {
-    if freecam.active {
+    if freecam.blocks_flight_camera_input() {
         return;
     }
     const ROTATION_SENSITIVITY: f32 = 0.005; // rad per pixel

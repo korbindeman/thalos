@@ -51,8 +51,8 @@ pub fn scatter_killed() -> bool {
 }
 
 fn append_line(line: &str) {
-    let path = crate::artifact_paths::default_jsonl_path(LOG_FILENAME);
-    if let Ok(mut f) = crate::artifact_paths::open_jsonl_append(&path) {
+    let path = thalos_diagnostics::paths::default_jsonl_path(LOG_FILENAME);
+    if let Ok(mut f) = thalos_diagnostics::paths::open_jsonl_append(&path) {
         let _ = writeln!(f, "{line}");
     }
 }
@@ -77,7 +77,7 @@ impl Plugin for MemDiagPlugin {
         if std::env::var("THALOS_MEM_DIAG").is_err() {
             return;
         }
-        let path = crate::artifact_paths::default_jsonl_path(LOG_FILENAME);
+        let path = thalos_diagnostics::paths::default_jsonl_path(LOG_FILENAME);
         info!(target: "thalos::mem", "GPU-memory diagnostic ON → {}", path.display());
         app.add_systems(Update, log_main_assets);
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {

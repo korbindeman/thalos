@@ -64,6 +64,18 @@ struct CloudCompositeParams {
     // volume's — never replace it with a hand-tuned curve
     // (BL-20260723T214730Z).
     fill_response:             array<vec4<f32>, 4>,
+    // Resolved-footprint pairing, derived WITH fill_response by the same
+    // calibration: per strata-mean node, the cell-field value above which a
+    // column is cloud (edge) and the occupied columns' mean opacity (solid).
+    // `(cell > edge) · solid` equals fill_response in expectation by
+    // construction — it concentrates the same opacity into cell interiors
+    // instead of a smooth translucent veil.
+    fill_cell_edge:            array<vec4<f32>, 4>,
+    fill_cell_solid:           array<vec4<f32>, 4>,
+    // Sky-ambient radiance pair (drive_clouds' `clouds_ambient_color_*`, the
+    // near march's exact ambient inputs — SkyAmbient irradiance/π).
+    cloud_ambient_top:         vec4<f32>,
+    cloud_ambient_bottom:      vec4<f32>,
 }
 @group(3) @binding(1) var<uniform> cloud_params: CloudCompositeParams;
 @group(3) @binding(2) var scene_depth_texture: texture_depth_2d;
@@ -190,7 +202,16 @@ fn near_visibility(
         band_far = max(-b + sqrt_top, 0.0);
     }
     let near = min(cloud_near, band_far);
-    return clamp((scene_t - near) / max(band_far - near, 1.0), 0.0, 1.0);
+    // Partition denominator: how far past its first hit the marched cloud
+    // plausibly extends. The band chord itself is a wild over-estimate on
+    // grazing rays (hundreds of km for a cloud a few km deep), and dividing by
+    // it faded every distant cloud seen against terrain toward transparency —
+    // the "washed out" horizon band. Bound it by the coarsest cell period
+    // (thalos::atmosphere cell field, 5.4 km): a single marched cloud is at
+    // most about one cell deep, and a scene hit beyond that is behind the
+    // cloud, not inside it.
+    let extent = min(band_far - near, 5400.0);
+    return clamp((scene_t - near) / max(extent, 1.0), 0.0, 1.0);
 }
 
 // Share of this ray owned by the far/orbital projection. The near marcher now
@@ -256,17 +277,51 @@ const ORBITAL_MARCH_SAMPLES = 6u;
 /// and re-tuning it here is what the derived `fill_lut` exists to prevent.
 const FAR_CELL_AMPLITUDE: f32 = 0.55;
 
-// Sample the derived far opacity response (see `fill_response` above):
-// 16 nodes over [0, 1], linear between nodes.
-fn fill_response_sample(strata_mean: f32) -> f32 {
-    // Local copy so dynamic indexing goes through a `var` reference (naga).
-    var lut = cloud_params.fill_response;
-    let t = clamp(strata_mean, 0.0, 1.0) * 15.0;
+/// Chords longer than this aggregate per SEGMENT instead of through one
+/// chord-mean → one LUT lookup → one cell anchor. A grazing chord crosses many
+/// cells; collapsing it to its mean before the response LUT renders exactly
+/// the mean — a structureless translucent veil over the whole distant band
+/// (the 2026-07-29 horizon "smear"), with no gaps for the terrain no matter
+/// how broken the field is. Two coarsest cell periods: below that a single
+/// anchor is inside one cell and the mean path is both correct and cheaper.
+const FAR_CHORD_STRUCTURE_MIN_M: f32 = 10800.0;
+
+// Sample a 16-node LUT packed as 4 × vec4 (nodes over [0, 1], linear between
+// nodes). The parameter copy gives naga the `var` reference dynamic indexing
+// needs.
+fn lut16_sample(lut_in: array<vec4<f32>, 4>, x: f32) -> f32 {
+    var lut = lut_in;
+    let t = clamp(x, 0.0, 1.0) * 15.0;
     let i = u32(min(t, 14.0));
     let f = t - f32(i);
     let a = lut[i / 4u][i % 4u];
     let b = lut[(i + 1u) / 4u][(i + 1u) % 4u];
     return mix(a, b, f);
+}
+
+// Sample the derived far opacity response (see `fill_response` above).
+fn fill_response_sample(strata_mean: f32) -> f32 {
+    return lut16_sample(cloud_params.fill_response, strata_mean);
+}
+
+/// Antialiasing half-width of the resolved cell-edge threshold, in cell-field
+/// units. The field's own footprint fade supplies the coarse-footprint
+/// softening; this only keeps the resolved edge from aliasing at one texel.
+const FAR_CELL_EDGE_AA: f32 = 0.05;
+
+/// Resolved-footprint far opacity for one column crossing: cells above the
+/// derived edge render at the derived solid opacity, gaps render nothing, and
+/// the whole term relaxes to the smooth expected response exactly as cell
+/// morphology goes sub-pixel (`cloud_far_ownership`, the ADR-20260726T000929Z
+/// resolvability scale).
+fn far_column_opacity(profile: f32, cell: f32, footprint_m: f32) -> f32 {
+    let smooth_a = fill_response_sample(
+        clamp(profile + (cell - 0.5) * FAR_CELL_AMPLITUDE, 0.0, 1.0),
+    );
+    let edge = lut16_sample(cloud_params.fill_cell_edge, profile);
+    let solid = lut16_sample(cloud_params.fill_cell_solid, profile);
+    let occupied = smoothstep(edge - FAR_CELL_EDGE_AA, edge + FAR_CELL_EDGE_AA, cell);
+    return mix(occupied * solid, smooth_a, cloud_far_ownership(footprint_m));
 }
 
 fn sample_orbital_cloud(
@@ -356,6 +411,13 @@ fn sample_orbital_cloud(
     var sample_weight = 0.0;
     var best_t = -1.0;
     var best_lod = 7.0;
+    // Per-segment record for the chord-structured aggregation below. Sizes are
+    // ORBITAL_MARCH_SAMPLES; zero-initialized, and segments that never enter
+    // the layer stay zero (their `continue` skips the store).
+    var seg_profile: array<f32, 6>;
+    var seg_w: array<f32, 6>;
+    var seg_t_m: array<f32, 6>;
+    var seg_type: array<f32, 6>;
     // Height at the running segment boundary, as a fraction of the shell.
     var h_prev = (length(cam_pos + t0 * ray_dir - planet_center) - planet_radius - base_alt)
         * inv_thickness;
@@ -454,6 +516,10 @@ fn sample_orbital_cloud(
         sum_type += weather.g * candidate;
         best_s = max(best_s, candidate_stacked);
         sum_s += candidate_stacked;
+        seg_profile[i] = profile;
+        seg_w[i] = w_seg;
+        seg_t_m[i] = t_m;
+        seg_type[i] = weather.g;
     }
     let stacked_opacity = best_s + 0.35 * (sum_s - best_s) * (1.0 - best_s);
     let mean_c = sum_c / max(sample_weight, 1.0e-4);
@@ -507,7 +573,6 @@ fn sample_orbital_cloud(
         px_morph,
         cloud_cell_style(n_morph, type_morph),
     );
-    let mean_mod = clamp(mean_c + (cell - 0.5) * FAR_CELL_AMPLITUDE, 0.0, 1.0);
 
     // One derived response for every footprint regime: the LUT stores the
     // expected near-column opacity for this strata mean, so the far tier's
@@ -517,7 +582,41 @@ fn sample_orbital_cloud(
     // saturating resolved branch is what painted a moderate-strata field as a
     // near-solid veil at mid-altitude (fill 1.00 vs the near tier's 0.04 at
     // the 2026-07-24 A/B framing).
-    let coverage_opacity = fill_response_sample(mean_mod);
+    //
+    // Aggregation splits by chord length. A steep/short chord sits inside one
+    // cell: one chord mean → one LUT response → one cell anchor is correct and
+    // cheap. A grazing chord crosses many cells and columns; there the mean
+    // erases every gap and the single anchor cannot restore them, so each
+    // segment gets its own LUT response — modulated by the SAME cell field at
+    // the segment's own position and footprint — and the segments composite
+    // front-to-back like the distinct columns they are. The LUT remains the
+    // sole per-column thickness authority (the cell term is still the
+    // calibrated redistribution, per FAR_CELL_AMPLITUDE's contract); stacking
+    // is damped by each segment's layer-overlap weight, mirroring the
+    // occupancy weighting the mean path applies through `sample_weight`.
+    var coverage_opacity: f32;
+    if t1 - t0 > FAR_CHORD_STRUCTURE_MIN_M {
+        var chord_trans = 1.0;
+        for (var s = 0u; s < ORBITAL_MARCH_SAMPLES; s++) {
+            if seg_profile[s] <= 1.0e-4 {
+                continue;
+            }
+            let p_s = cam_pos + seg_t_m[s] * ray_dir - planet_center;
+            let n_seg = normalize(rotate_quat(cloud_params.world_to_body_orientation, p_s));
+            let px_seg = seg_t_m[s] * pixel_angle;
+            let cell_s = cloud_cell_field(
+                n_seg,
+                planet_radius,
+                px_seg,
+                cloud_cell_style(n_seg, seg_type[s]),
+            );
+            let a_col = far_column_opacity(seg_profile[s], cell_s, px_seg);
+            chord_trans *= 1.0 - min(a_col * seg_w[s], 0.95);
+        }
+        coverage_opacity = 1.0 - chord_trans;
+    } else {
+        coverage_opacity = far_column_opacity(mean_c, cell, px_morph);
+    }
     var march_opacity = clamp(
         mix(stacked_opacity, coverage_opacity, clamp(cloud_params.cloud_march.w, 0.0, 1.0)),
         0.0,
@@ -576,10 +675,14 @@ fn sample_orbital_cloud(
     let night = smoothstep(-0.12, 0.08, sun_elev_geo);
     // Warm hour is a narrow band near the terminator (< ~9° solar elevation).
     // Completing the transition at 0.45 tinted two-thirds of the lit disc
-    // cream — daylit clouds must read white.
+    // cream — daylit clouds must read white. The day endpoint is NEUTRAL: the
+    // former (1.0, 0.97, 0.92) baked a permanent warm bias into every daylit
+    // far cloud, which against the near tier's blue-sky-ambient white read as
+    // a beige smear across the whole distant band (user, 2026-07-29). Daytime
+    // warmth, where wanted, belongs to the warm-hour ramp — not the endpoint.
     let sun_chroma = mix(
         vec3<f32>(1.0, 0.45, 0.18),
-        vec3<f32>(1.0, 0.97, 0.92),
+        vec3<f32>(1.0, 1.0, 1.0),
         smoothstep(0.02, 0.16, clamp(sun_elev_geo, 0.0, 1.0)),
     );
     // Occupancy comes from the band march; `shade.y` would double-count it.
@@ -610,6 +713,21 @@ fn sample_orbital_cloud(
         * far_radiance_k
         * shade.x
         * night;
+    // Sky-ambient in-scatter — the same SkyAmbient radiance `drive_clouds`
+    // feeds the near march's every sample. The near tier's thick lit cell
+    // converges to (ambient + direct); the anchor above supplies only the
+    // direct half, which is why this tier alone rendered warm-gray against
+    // near white-blue clouds (measured 2026-07-29: neither chroma nor
+    // airlight could account for the band's color). Tops-dominant view
+    // factor: what this overlay shows of a cell is its sunward/skyward face;
+    // undersides are already carried by `shade`. Like the near tier's, the
+    // ambient is NOT albedo-tinted (chroma lives in the sun/sky colors).
+    let amb_far = mix(
+        cloud_params.cloud_ambient_bottom.rgb,
+        cloud_params.cloud_ambient_top.rgb,
+        0.75,
+    ) * 0.85 * night;
+    radiance = radiance + amb_far;
 
     // Foreground airlight: this overlay draws OVER the already-integrated sky,
     // so its opacity would otherwise delete the air in front of the cloud —
@@ -625,6 +743,13 @@ fn sample_orbital_cloud(
     let tau = vec3<f32>(5.5e-6, 1.3e-5, 3.2e-5) * dens * d_air;
     let view_T = exp(-tau);
     let day = smoothstep(-0.05, 0.30, sun_elev_geo);
+    // NOTE (2026-07-29, measured): at this framing the whole airlight term
+    // contributes < 1/255 to the distant band at any plausible gain — a 100×
+    // red probe moved the band by only +33/255. The band's remaining warm
+    // read vs the neighbouring haze is a MISSING SKY-AMBIENT term in this
+    // tier's shading (the near march adds `clouds_ambient_color_*` to every
+    // sample; this overlay is direct-sun only) — plumb the ambient in and
+    // re-derive the anchor rather than re-tuning this constant.
     let e_air = vec3<f32>(0.40, 0.55, 0.85)
         * cloud_params.sun_dir_flux.w
         * SCENE_FLUX_SCALE

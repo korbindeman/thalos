@@ -2,7 +2,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     fs::OpenOptions,
-    io::{Read, Seek, SeekFrom},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Command, ExitCode},
     thread,
@@ -10,19 +10,41 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use thalos_capture_protocol::{
-    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureRequest, CaptureResponse,
-    CaptureServerState, ViewpointCatalog,
+    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureCameraOverride,
+    CaptureGraphicsOverrides, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
+    CaptureServerState, CaptureSourceSnapshot, CapturedCameraState, ViewpointCatalog,
 };
 use uuid::Uuid;
 
 mod compare;
+mod gallery;
+mod runlog;
 
 const REQUEST_FILE: &str = "visual_capture_request.json";
 const RESPONSE_FILE: &str = "visual_capture_response.json";
 const STATE_FILE: &str = "visual_capture_server.json";
 const LAUNCHER_FILE: &str = "visual_capture_launcher.json";
 const LOG_FILE: &str = "visual_capture_server.log";
+const CLIENT_LOCK_FILE: &str = "visual_capture_client.lock";
+const RESOURCE_FAULT_FILE: &str = "visual_capture_resource_fault.json";
+const RESOURCE_EVENT_FILE: &str = "visual_capture_resource_events.jsonl";
+#[cfg(windows)]
+const CAPTURE_MUTEX_NAME: &str = "Local\\ThalosMachineCaptureV1";
+
+/// Until typed fidelity profiles land, catalog viewpoints render their sensor
+/// aspect at this safe standard extent. Output pixels are not viewpoint state.
+const SAFE_VIEWPOINT_WIDTH: u32 = 1920;
+const SAFE_VIEWPOINT_HEIGHT: u32 = 1080;
+/// The game renderer may use the whole machine-wide 4 GiB tile allowance.
+/// Headless evidence should leave room for the desktop and other agents.
+const DEFAULT_CAPTURE_TILE_BUDGET_MB: &str = "2048";
+/// Last-resort workstation protection. A healthy capture host stays well below
+/// this; the observed device-loss retry grew to 12.6 GiB in seconds.
+const DEFAULT_CAPTURE_RSS_LIMIT_MB: u64 = 8 * 1024;
+/// Prevent waiting agents from stampeding a renderer/device that just failed.
+const RESOURCE_FAULT_COOLDOWN_SECS: u64 = 5 * 60;
 
 const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_OUT",
@@ -31,6 +53,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_AZIMUTH",
     "THALOS_SCREENSHOT_ELEVATION",
     "THALOS_SCREENSHOT_DISTANCE",
+    "THALOS_SCREENSHOT_TIME",
     "THALOS_SCREENSHOT_WARMUP",
     "THALOS_SCREENSHOT_HUD",
     "THALOS_SCREENSHOT_CAMERA_ALTITUDE",
@@ -48,12 +71,15 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_PLUME_PRESSURE",
     "THALOS_CONTACT_SHADOW",
     "THALOS_CLOUD_SHADOW",
+    "THALOS_CLOUD_GODRAY",
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
     "THALOS_TERRAIN",
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
+    "THALOS_TILE_BUDGET_MB",
+    "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",
 ];
@@ -66,6 +92,8 @@ const STARTUP_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_TERRAIN",
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
+    "THALOS_TILE_BUDGET_MB",
+    "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",
 ];
@@ -80,10 +108,356 @@ struct LauncherState {
     log_start_bytes: u64,
     #[serde(default)]
     startup_overrides: BTreeMap<String, String>,
+    #[serde(default)]
+    source: CaptureSourceSnapshot,
     command: Vec<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct CaptureReceipt<'a> {
+    schema: &'static str,
+    request_id: &'a str,
+    preset: &'a str,
+    output: String,
+    completed_unix_ms: u128,
+    renderer_pid: u32,
+    source: &'a CaptureSourceSnapshot,
+    renderer_launch_source: &'a CaptureSourceSnapshot,
+    workspace_after: &'a CaptureSourceSnapshot,
+    source_floor_guaranteed: bool,
+    workspace_relation: &'static str,
+    camera: Option<CapturedCameraState>,
+    graphics: CaptureGraphicsSettings,
+    /// Compatibility field for existing receipt readers. `false` now means
+    /// the workspace advanced after the source floor; it is not a capture
+    /// failure and must not trigger a rebuild loop.
+    workspace_matches: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CaptureClientLockState {
+    pid: u32,
+    token: String,
+    started_unix_ms: u128,
+    command: String,
+}
+
+#[derive(Debug)]
+struct CaptureClientLock {
+    path: PathBuf,
+    token: String,
+    #[cfg(windows)]
+    mutex: Option<windows_sys::Win32::Foundation::HANDLE>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CaptureResourceFault {
+    observed_unix_ms: u128,
+    #[serde(default)]
+    observed_uptime_ms: Option<u64>,
+    kind: String,
+    detail: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CaptureResourceEvent<'a> {
+    schema: &'static str,
+    event: &'a str,
+    recorded_unix_ms: u128,
+    recorded_uptime_ms: Option<u64>,
+    client_pid: u32,
+    command: String,
+    workspace: String,
+    fault_observed_unix_ms: u128,
+    fault_observed_uptime_ms: Option<u64>,
+    fault_age_ms: u128,
+    kind: &'a str,
+    policy: &'static str,
+    cooldown_secs: Option<u64>,
+    note: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fault_detail: Option<&'a str>,
+}
+
+impl CaptureClientLock {
+    /// Acquire the machine-wide capture lock, recording what the wait cost.
+    ///
+    /// Contention is process-level cost paid before any scene work starts, so
+    /// it is its own record rather than a phase of whichever shot happened to
+    /// be first — otherwise one agent's queueing reads as another agent's slow
+    /// capture.
+    fn acquire(command: String) -> Result<Self, String> {
+        let wait = env::var("THALOS_CAPTURE_CLIENT_WAIT_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or_else(|| Duration::from_secs(1800));
+        let started = Instant::now();
+        let mut queued_behind = None;
+        #[cfg(windows)]
+        let acquired = Self::acquire_machine_mutex(command, wait, &mut queued_behind);
+        #[cfg(not(windows))]
+        let acquired = Self::acquire_at(
+            machine_capture_path(CLIENT_LOCK_FILE),
+            command,
+            wait,
+            &mut queued_behind,
+        );
+        runlog::record_lock_wait(
+            started.elapsed(),
+            queued_behind,
+            if acquired.is_ok() {
+                "acquired"
+            } else {
+                "failed"
+            },
+        );
+        acquired
+    }
+
+    #[cfg(windows)]
+    fn acquire_machine_mutex(
+        command: String,
+        wait: Duration,
+        queued_behind: &mut Option<u32>,
+    ) -> Result<Self, String> {
+        Self::acquire_named_mutex(
+            machine_capture_path(CLIENT_LOCK_FILE),
+            CAPTURE_MUTEX_NAME,
+            command,
+            wait,
+            queued_behind,
+        )
+    }
+
+    #[cfg(windows)]
+    fn acquire_named_mutex(
+        path: PathBuf,
+        mutex_name: &str,
+        command: String,
+        wait: Duration,
+        queued_behind: &mut Option<u32>,
+    ) -> Result<Self, String> {
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT},
+            System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        let name = mutex_name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, name.as_ptr()) };
+        if mutex.is_null() {
+            return Err(format!(
+                "create machine capture mutex: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let started = Instant::now();
+        let token = Uuid::new_v4().simple().to_string();
+        let mut announced = false;
+        loop {
+            let remaining = wait.saturating_sub(started.elapsed());
+            let poll_ms = remaining.min(Duration::from_millis(250)).as_millis() as u32;
+            let result = unsafe { WaitForSingleObject(mutex, poll_ms) };
+            match result {
+                WAIT_OBJECT_0 | WAIT_ABANDONED => {
+                    let state = CaptureClientLockState {
+                        pid: std::process::id(),
+                        token: token.clone(),
+                        started_unix_ms: timestamp_millis(),
+                        command,
+                    };
+                    if let Err(error) = write_json_atomic(&path, &state) {
+                        unsafe {
+                            ReleaseMutex(mutex);
+                            CloseHandle(mutex);
+                        }
+                        return Err(format!(
+                            "publish machine capture owner {}: {error}",
+                            path.display()
+                        ));
+                    }
+                    return Ok(Self {
+                        path,
+                        token,
+                        mutex: Some(mutex),
+                    });
+                }
+                WAIT_TIMEOUT => {
+                    if started.elapsed() >= wait {
+                        let owner = read_json::<CaptureClientLockState>(&path);
+                        unsafe {
+                            CloseHandle(mutex);
+                        }
+                        return Err(match owner {
+                            Some(owner) => format!(
+                                "machine capture lock timed out after {:.1}s; pid {} is running {:?}",
+                                started.elapsed().as_secs_f64(),
+                                owner.pid,
+                                owner.command
+                            ),
+                            None => format!(
+                                "machine capture lock timed out after {:.1}s; owner metadata is unavailable",
+                                started.elapsed().as_secs_f64()
+                            ),
+                        });
+                    }
+                    if !announced {
+                        match read_json::<CaptureClientLockState>(&path) {
+                            Some(owner) => {
+                                *queued_behind = Some(owner.pid);
+                                println!(
+                                    "capture queued behind pid {} ({}); one machine-wide capture operation is allowed",
+                                    owner.pid, owner.command
+                                )
+                            }
+                            None => {
+                                println!("another machine-wide capture client is starting; waiting")
+                            }
+                        }
+                        announced = true;
+                    }
+                }
+                WAIT_FAILED => {
+                    let error = std::io::Error::last_os_error();
+                    unsafe {
+                        CloseHandle(mutex);
+                    }
+                    return Err(format!("wait for machine capture mutex: {error}"));
+                }
+                other => {
+                    unsafe {
+                        CloseHandle(mutex);
+                    }
+                    return Err(format!(
+                        "wait for machine capture mutex returned unexpected status {other:#x}"
+                    ));
+                }
+            }
+        }
+    }
+
+    #[cfg(any(not(windows), test))]
+    fn acquire_at(
+        path: PathBuf,
+        command: String,
+        wait: Duration,
+        queued_behind: &mut Option<u32>,
+    ) -> Result<Self, String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("create {}: {error}", parent.display()))?;
+        }
+        let started = Instant::now();
+        let token = Uuid::new_v4().simple().to_string();
+        let mut announced = false;
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    let state = CaptureClientLockState {
+                        pid: std::process::id(),
+                        token: token.clone(),
+                        started_unix_ms: timestamp_millis(),
+                        command,
+                    };
+                    let bytes = serde_json::to_vec_pretty(&state)
+                        .map_err(|error| format!("serialize capture client lock: {error}"))?;
+                    if let Err(error) = file.write_all(&bytes).and_then(|_| file.sync_all()) {
+                        let _ = fs::remove_file(&path);
+                        return Err(format!(
+                            "write capture client lock {}: {error}",
+                            path.display()
+                        ));
+                    }
+                    return Ok(Self {
+                        path,
+                        token,
+                        #[cfg(windows)]
+                        mutex: None,
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let owner = read_json::<CaptureClientLockState>(&path);
+                    let corrupt_stale = owner.is_none()
+                        && fs::metadata(&path)
+                            .ok()
+                            .and_then(|metadata| metadata.modified().ok())
+                            .and_then(|modified| modified.elapsed().ok())
+                            .is_some_and(|age| age >= Duration::from_secs(5));
+                    let dead_owner = owner
+                        .as_ref()
+                        .is_some_and(|owner| !process_alive(owner.pid));
+                    if corrupt_stale || dead_owner {
+                        let _ = fs::remove_file(&path);
+                        continue;
+                    }
+                    if started.elapsed() >= wait {
+                        return Err(match owner {
+                            Some(owner) => format!(
+                                "capture client lock timed out after {:.1}s; pid {} is running {:?}",
+                                started.elapsed().as_secs_f64(),
+                                owner.pid,
+                                owner.command
+                            ),
+                            None => format!(
+                                "capture client lock {} is incomplete; retry shortly",
+                                path.display()
+                            ),
+                        });
+                    }
+                    if !announced {
+                        match owner {
+                            Some(owner) => {
+                                *queued_behind = Some(owner.pid);
+                                println!(
+                                    "capture queued behind pid {} ({}); compatible cameras reuse one renderer sequentially",
+                                    owner.pid, owner.command
+                                )
+                            }
+                            None => println!("another capture client is starting; waiting"),
+                        }
+                        announced = true;
+                    }
+                    thread::sleep(Duration::from_millis(250));
+                }
+                Err(error) => {
+                    return Err(format!(
+                        "acquire capture client lock {}: {error}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+    }
+}
+
+impl Drop for CaptureClientLock {
+    fn drop(&mut self) {
+        if read_json::<CaptureClientLockState>(&self.path)
+            .is_some_and(|owner| owner.token == self.token)
+        {
+            let _ = fs::remove_file(&self.path);
+        }
+        #[cfg(windows)]
+        if let Some(mutex) = self.mutex.take() {
+            use windows_sys::Win32::{Foundation::CloseHandle, System::Threading::ReleaseMutex};
+            unsafe {
+                ReleaseMutex(mutex);
+                CloseHandle(mutex);
+            }
+        }
+    }
+}
+
 fn main() -> ExitCode {
+    runlog::install();
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -94,8 +468,12 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let mut args = env::args().skip(1);
+    let command_line = env::args().skip(1).collect::<Vec<_>>();
+    let mut args = command_line.clone().into_iter();
     let command = args.next().unwrap_or_else(|| "shot".to_owned());
+    let _client_lock = matches!(command.as_str(), "shot" | "capture" | "compare" | "reset")
+        .then(|| CaptureClientLock::acquire(command_line.join(" ")))
+        .transpose()?;
     match command.as_str() {
         "shot" | "capture" => {
             let ShotArgs {
@@ -103,17 +481,20 @@ fn run() -> Result<(), String> {
                 output,
                 report,
                 assignments,
+                camera,
+                graphics,
             } = parse_capture_options(args)?;
             if presets.len() > 1 && (output.is_some() || report.is_some()) {
                 return Err("--out and --report require exactly one preset".into());
             }
             if presets.len() == 1 {
-                capture(&presets[0], output, report, assignments)?;
+                capture(&presets[0], output, report, assignments, camera, graphics)?;
             } else {
-                capture_batch(presets, assignments)?;
+                capture_batch(presets, assignments, camera, graphics)?;
             }
         }
         "compare" => compare::run_cli(args)?,
+        "list" => gallery::run_cli(args)?,
         "status" => status(),
         "stop" => stop_server(false)?,
         "reset" => reset_build_state()?,
@@ -127,14 +508,19 @@ fn run() -> Result<(), String> {
 /// the authority on compatibility: after the first scene in a boot context,
 /// pull every remaining compatible scene forward before crossing into the next
 /// context.
-fn capture_batch(mut pending: Vec<String>, assignments: Vec<String>) -> Result<(), String> {
+fn capture_batch(
+    mut pending: Vec<String>,
+    assignments: Vec<String>,
+    camera: CaptureCameraOverride,
+    graphics: CaptureGraphicsOverrides,
+) -> Result<(), String> {
     let total = pending.len();
     let mut completed = 0;
     while !pending.is_empty() {
         let first = pending.remove(0);
         completed += 1;
         println!("[{completed}/{total}] scene={first}");
-        capture(&first, None, None, assignments.clone())?;
+        capture(&first, None, None, assignments.clone(), camera, graphics)?;
 
         let compatible = read_json::<CaptureServerState>(&diagnostic_path(STATE_FILE))
             .map(|state| state.compatible_presets)
@@ -146,18 +532,20 @@ fn capture_batch(mut pending: Vec<String>, assignments: Vec<String>) -> Result<(
         for preset in same_context {
             completed += 1;
             println!("[{completed}/{total}] scene={preset} (reusing world)");
-            capture(&preset, None, None, assignments.clone())?;
+            capture(&preset, None, None, assignments.clone(), camera, graphics)?;
         }
     }
     Ok(())
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, PartialEq)]
 struct ShotArgs {
     presets: Vec<String>,
     output: Option<PathBuf>,
     report: Option<PathBuf>,
     assignments: Vec<String>,
+    camera: CaptureCameraOverride,
+    graphics: CaptureGraphicsOverrides,
 }
 
 fn parse_capture_options(mut args: impl Iterator<Item = String>) -> Result<ShotArgs, String> {
@@ -165,6 +553,12 @@ fn parse_capture_options(mut args: impl Iterator<Item = String>) -> Result<ShotA
     let mut output = None;
     let mut report = None;
     let mut assignments = Vec::new();
+    let mut camera = CaptureCameraOverride::default();
+    let mut graphics = env::var("THALOS_SCREENSHOT_GRAPHICS")
+        .ok()
+        .map(|raw| CaptureGraphicsOverrides::parse(&raw))
+        .transpose()?
+        .unwrap_or_default();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--out" => output = Some(PathBuf::from(args.next().ok_or("--out requires a path")?)),
@@ -172,6 +566,38 @@ fn parse_capture_options(mut args: impl Iterator<Item = String>) -> Result<ShotA
                 report = Some(PathBuf::from(
                     args.next().ok_or("--report requires a path")?,
                 ))
+            }
+            "--time" => {
+                let value = args.next().ok_or("--time requires canonical seconds")?;
+                let parsed = value
+                    .trim()
+                    .parse::<f64>()
+                    .map_err(|_| format!("--time expects canonical seconds, got {value:?}"))?;
+                if !parsed.is_finite() {
+                    return Err(format!("--time expects a finite value, got {value:?}"));
+                }
+                assignments.push(format!("THALOS_SCREENSHOT_TIME={value}"));
+            }
+            "--size" => {
+                let value = args.next().ok_or("--size requires WIDTHxHEIGHT")?;
+                parse_capture_size(&value)?;
+                assignments.push(format!("THALOS_SCREENSHOT_SIZE={value}"));
+            }
+            "--focal-length" | "--lens" => {
+                let value = args.next().ok_or("--focal-length requires millimetres")?;
+                let focal_length_mm = value
+                    .trim()
+                    .parse::<f32>()
+                    .map_err(|_| format!("--focal-length expects millimetres, got {value:?}"))?;
+                camera.focal_length_mm = Some(focal_length_mm);
+                camera.validate()?;
+            }
+            "--graphics" => {
+                graphics = CaptureGraphicsOverrides::parse(
+                    &args
+                        .next()
+                        .ok_or("--graphics requires NAME=VALUE[,NAME=VALUE...]")?,
+                )?;
             }
             "--set" => assignments.push(args.next().ok_or("--set requires KEY=VALUE")?),
             option if option.starts_with('-') => {
@@ -188,7 +614,27 @@ fn parse_capture_options(mut args: impl Iterator<Item = String>) -> Result<ShotA
         output,
         report,
         assignments,
+        camera,
+        graphics,
     })
+}
+
+fn parse_capture_size(raw: &str) -> Result<(u32, u32), String> {
+    let Some((width, height)) = raw.split_once(['x', 'X', '*']) else {
+        return Err(format!("--size expects WIDTHxHEIGHT, got {raw:?}"));
+    };
+    let width = width
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("--size expects WIDTHxHEIGHT, got {raw:?}"))?;
+    let height = height
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("--size expects WIDTHxHEIGHT, got {raw:?}"))?;
+    if width == 0 || height == 0 {
+        return Err(format!("--size dimensions must be non-zero, got {raw:?}"));
+    }
+    Ok((width, height))
 }
 
 pub(crate) fn capture(
@@ -196,8 +642,11 @@ pub(crate) fn capture(
     output: Option<PathBuf>,
     report: Option<PathBuf>,
     assignments: Vec<String>,
+    camera: CaptureCameraOverride,
+    graphics: CaptureGraphicsOverrides,
 ) -> Result<PathBuf, String> {
     let preset = canonical_preset(preset)?;
+    guard_resource_fault()?;
     let mut overrides = OVERRIDE_KEYS
         .iter()
         .filter_map(|key| env::var(key).ok().map(|value| ((*key).to_owned(), value)))
@@ -211,6 +660,11 @@ pub(crate) fn capture(
         }
         overrides.insert(key.to_owned(), value.to_owned());
     }
+    apply_safe_viewpoint_size(&preset, &mut overrides);
+    validate_viewpoint_output_aspect(&preset, &overrides)?;
+    overrides
+        .entry("THALOS_TILE_BUDGET_MB".into())
+        .or_insert_with(|| DEFAULT_CAPTURE_TILE_BUDGET_MB.into());
     if let Some(path) = output {
         overrides.insert(
             "THALOS_SCREENSHOT_OUT".into(),
@@ -224,20 +678,77 @@ pub(crate) fn capture(
         );
     }
 
-    let mut state = ensure_server(&preset, &overrides)?;
-    match capture_once(&preset, &overrides, &state) {
-        Ok(path) => Ok(path),
+    runlog::begin(format!("shot {preset}"));
+    runlog::field("preset", preset.clone());
+    let result = capture_instrumented(&preset, &overrides, camera, graphics);
+    runlog::finish(&result);
+    result
+}
+
+/// The shot itself, wrapped so every exit path closes the run record.
+fn capture_instrumented(
+    preset: &str,
+    overrides: &BTreeMap<String, String>,
+    camera: CaptureCameraOverride,
+    graphics: CaptureGraphicsOverrides,
+) -> Result<PathBuf, String> {
+    let (mut state, mut source) = prepare_server(preset, overrides)?;
+    runlog::field("renderer_pid", state.pid);
+    runlog::field("source", short_fingerprint(&source.fingerprint).to_owned());
+    match capture_once(preset, overrides, &state, &source, camera, graphics) {
+        Ok(path) => {
+            clear_resource_fault();
+            runlog::field("output", path.display().to_string());
+            Ok(path)
+        }
         Err(error) if error.recoverable => {
             eprintln!(
                 "capture host became unhealthy ({}); restarting once and retrying scene={preset}",
                 error.message.lines().next().unwrap_or("unknown error")
             );
+            // A recovered shot still costs an agent a full host boot, so the
+            // retry is counted rather than hidden by the eventual success.
+            runlog::count("retry");
+            runlog::field(
+                "retry_reason",
+                error.message.lines().next().unwrap_or("unknown").to_owned(),
+            );
             stop_server(true)?;
-            state = start_server(&preset, &overrides)?;
-            capture_once(&preset, &overrides, &state).map_err(|error| error.message)
+            (state, source) = prepare_server(preset, overrides)?;
+            runlog::field("renderer_pid", state.pid);
+            capture_once(preset, overrides, &state, &source, camera, graphics)
+                .inspect(|path| {
+                    clear_resource_fault();
+                    runlog::field("output", path.display().to_string());
+                })
+                .map_err(|error| error.message)
         }
-        Err(error) => Err(error.message),
+        Err(error) => {
+            let _ = stop_server(true);
+            Err(error.message)
+        }
     }
+}
+
+fn prepare_server(
+    preset: &str,
+    overrides: &BTreeMap<String, String>,
+) -> Result<(CaptureServerState, CaptureSourceSnapshot), String> {
+    // This snapshot is a causal floor, not a demand that a shared checkout
+    // remain byte-identical for the whole build. The renderer may consume this
+    // state or edits made after it; chasing every newer aggregate fingerprint
+    // can starve forever while parallel agents work.
+    let source = capture_source_snapshot()?;
+    let state = ensure_server(preset, overrides, &source)?;
+    let current = capture_source_snapshot()?;
+    if current.fingerprint != source.fingerprint {
+        eprintln!(
+            "workspace advanced while preparing the renderer (source floor {}, current {}); continuing without rebuilding again",
+            short_fingerprint(&source.fingerprint),
+            short_fingerprint(&current.fingerprint),
+        );
+    }
+    Ok((state, source))
 }
 
 #[derive(Debug)]
@@ -250,6 +761,9 @@ fn capture_once(
     preset: &str,
     overrides: &BTreeMap<String, String>,
     state: &CaptureServerState,
+    source: &CaptureSourceSnapshot,
+    camera: CaptureCameraOverride,
+    graphics: CaptureGraphicsOverrides,
 ) -> Result<PathBuf, CaptureFailure> {
     let log_start = if state.completed_captures == 0 {
         read_json::<LauncherState>(&diagnostic_path(LAUNCHER_FILE))
@@ -263,6 +777,9 @@ fn capture_once(
         action: CaptureAction::Capture,
         preset: preset.to_owned(),
         overrides: overrides.clone(),
+        source: source.clone(),
+        camera,
+        graphics,
     };
     write_json_atomic(&diagnostic_path(REQUEST_FILE), &request).map_err(|message| {
         CaptureFailure {
@@ -273,11 +790,14 @@ fn capture_once(
     // Software-Vulkan (llvmpipe) fallback boxes render warmup at seconds per
     // frame, so the response wait must cover a full preset warmup there; a
     // hardware run answers long before either limit.
-    let deadline = Instant::now() + Duration::from_secs(capture_timeout_secs());
+    let requested = Instant::now();
+    let deadline = requested + Duration::from_secs(capture_timeout_secs());
     while Instant::now() < deadline {
         if let Some(response) = read_json::<CaptureResponse>(&diagnostic_path(RESPONSE_FILE))
             && response.id == request.id
         {
+            runlog::phase("render", requested.elapsed());
+            let validating = Instant::now();
             if response.schema_version != CAPTURE_PROTOCOL_SCHEMA {
                 return Err(CaptureFailure {
                     message: format!(
@@ -289,32 +809,121 @@ fn capture_once(
             }
             if !response.ok {
                 return Err(CaptureFailure {
-                    recoverable: response.message.contains("different boot world"),
+                    recoverable: response.message.contains("different boot world")
+                        || response.message.contains("restart required"),
                     message: response.message,
                 });
             }
-            let path = response
-                .output
-                .map(PathBuf::from)
-                .ok_or_else(|| CaptureFailure {
-                    message: "capture succeeded without an output path".into(),
+            if response.source.fingerprint != source.fingerprint {
+                return Err(CaptureFailure {
+                    message: format!(
+                        "capture response used source {}, requested {}; restarting to avoid unattributed evidence",
+                        short_fingerprint(&response.source.fingerprint),
+                        short_fingerprint(&source.fingerprint),
+                    ),
                     recoverable: true,
-                })?;
+                });
+            }
+            let path =
+                response
+                    .output
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .ok_or_else(|| CaptureFailure {
+                        message: "capture succeeded without an output path".into(),
+                        recoverable: true,
+                    })?;
             validate_capture_output(&path)?;
             validate_render_log(log_start)?;
-            println!("captured {}", path.display());
+            let workspace_after = capture_source_snapshot().map_err(|message| CaptureFailure {
+                message,
+                recoverable: false,
+            })?;
+            let workspace_matches = workspace_after.fingerprint == source.fingerprint;
+            let workspace_relation = workspace_relation(source, &workspace_after);
+            let effective_graphics = response.graphics.ok_or_else(|| CaptureFailure {
+                message: "capture succeeded without effective graphics settings".into(),
+                recoverable: true,
+            })?;
+            write_capture_receipt(
+                &path,
+                CaptureReceipt {
+                    schema: "thalos.capture-receipt.v2",
+                    request_id: &request.id,
+                    preset,
+                    output: path.display().to_string(),
+                    completed_unix_ms: response.completed_unix_ms,
+                    renderer_pid: state.pid,
+                    source,
+                    renderer_launch_source: &state.source,
+                    workspace_after: &workspace_after,
+                    source_floor_guaranteed: true,
+                    workspace_relation,
+                    workspace_matches,
+                    camera: response.camera,
+                    graphics: effective_graphics,
+                },
+            )
+            .map_err(|message| CaptureFailure {
+                message,
+                recoverable: false,
+            })?;
+            runlog::phase("validate", validating.elapsed());
+            runlog::field("workspace_relation", workspace_relation);
+            println!(
+                "captured {} [source {} · {}{}]",
+                path.display(),
+                short_fingerprint(&source.fingerprint),
+                short_revision(&source.git_revision),
+                if source.working_tree_dirty {
+                    "+dirty"
+                } else {
+                    ""
+                },
+            );
+            if !workspace_matches {
+                eprintln!(
+                    "workspace advanced after the capture source floor: floor={}, current={}; the image includes the floor, while later edits may or may not be present (see {})",
+                    short_fingerprint(&source.fingerprint),
+                    short_fingerprint(&workspace_after.fingerprint),
+                    receipt_path(&path).display(),
+                );
+            }
             return Ok(path);
         }
         if !process_alive(state.pid) {
+            let log = log_from(log_start);
+            if let Some(kind) = resource_fault_kind(&log) {
+                record_resource_fault(kind, &log);
+                return Err(CaptureFailure {
+                    message: resource_fault_message(kind, &log),
+                    recoverable: false,
+                });
+            }
             return Err(CaptureFailure {
-                message: format!("capture server exited\n{}", log_tail(50)),
+                message: format!("capture server exited\n{log}"),
                 recoverable: true,
+            });
+        }
+        if let Some(message) = capture_rss_failure(state.pid, overrides) {
+            record_resource_fault("capture host memory runaway", &message);
+            return Err(CaptureFailure {
+                message: resource_fault_message("capture host memory runaway", &message),
+                recoverable: false,
             });
         }
         thread::sleep(Duration::from_millis(100));
     }
+    let log = log_from(log_start);
+    if let Some(kind) = resource_fault_kind(&log) {
+        record_resource_fault(kind, &log);
+        return Err(CaptureFailure {
+            message: resource_fault_message(kind, &log),
+            recoverable: false,
+        });
+    }
     Err(CaptureFailure {
-        message: format!("capture timed out\n{}", log_tail(50)),
+        message: format!("capture timed out\n{log}"),
         recoverable: true,
     })
 }
@@ -322,13 +931,17 @@ fn capture_once(
 fn ensure_server(
     preset: &str,
     overrides: &BTreeMap<String, String>,
+    source: &CaptureSourceSnapshot,
 ) -> Result<CaptureServerState, String> {
     let state = read_json::<CaptureServerState>(&diagnostic_path(STATE_FILE));
-    let state = if compatible_state(state.as_ref(), preset, requested_size(overrides))
-        && launcher_matches(overrides)
-        && !host_sources_stale()
-    {
-        state.expect("compatible state exists")
+    // Why a shot did or did not pay for a host boot is the first question asked
+    // of a slow capture, so the decision is recorded rather than inferred from
+    // timing — and the same classifier makes it, so the record cannot drift
+    // from the branch actually taken.
+    let action = host_action(state.as_ref(), preset, overrides, source);
+    runlog::field("host_action", action);
+    let state = if action == HOST_REUSE {
+        state.expect("reuse implies a compatible state exists")
     } else {
         // Stale Rust/Cargo sources restart the host through a rebuild: there
         // is no in-process code reload (Rust hot-patching was retired —
@@ -336,28 +949,48 @@ fn ensure_server(
         // INC-20260724T044418Z). `cargo run` below recompiles whatever
         // changed and relaunches, so a Rust edit can never leave a silently
         // stale or crashed server behind.
-        start_server(preset, overrides)?
+        start_server(preset, overrides, source)?
     };
-    wait_for_shader_reload(state)
+    let started = Instant::now();
+    let state = wait_for_shader_reload(state);
+    runlog::phase("shader_reload", started.elapsed());
+    state
 }
 
-/// True when any workspace Rust/manifest source is newer than the running
-/// host's launch time — the host binary can no longer match the tree.
-fn host_sources_stale() -> bool {
-    let launched = read_json::<LauncherState>(&diagnostic_path(LAUNCHER_FILE))
-        .map_or(0, |launcher| launcher.launched_unix_ms);
-    let roots = [
-        workspace_root().join("apps"),
-        workspace_root().join("crates"),
-        workspace_root().join("tools/capture_host"),
-    ];
-    let tree_mtime = newest_mtime_ms(&roots, "rs").max(newest_mtime_ms(&roots, "toml"));
-    let root_mtime = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml"]
-        .iter()
-        .map(|path| modified_millis(&workspace_root().join(path)))
-        .max()
-        .unwrap_or(0);
-    tree_mtime.max(root_mtime) > launched
+/// The one `host_action` value that means "no boot was paid for".
+const HOST_REUSE: &str = "reuse";
+
+/// Decide — and name — whether this shot reuses the resident host or replaces
+/// it, and why. This is the *only* place that decision is made: `ensure_server`
+/// branches on the returned value, so the recorded reason and the branch taken
+/// cannot disagree.
+fn host_action(
+    state: Option<&CaptureServerState>,
+    preset: &str,
+    overrides: &BTreeMap<String, String>,
+    source: &CaptureSourceSnapshot,
+) -> &'static str {
+    if state.is_none() {
+        "start"
+    } else if host_sources_stale(state, source) {
+        "restart_stale_source"
+    } else if !compatible_state(state, preset, requested_size(overrides)) {
+        "restart_incompatible_scene"
+    } else if !launcher_matches(overrides) {
+        "restart_startup_override"
+    } else {
+        HOST_REUSE
+    }
+}
+
+/// Content equality, not timestamps, decides whether the resident binary
+/// contains the caller's Rust/Cargo inputs. This remains correct across clock
+/// skew, timestamp-preserving tools, and a shared checkout with several agents.
+fn host_sources_stale(state: Option<&CaptureServerState>, source: &CaptureSourceSnapshot) -> bool {
+    state.is_none_or(|state| {
+        state.source.build_fingerprint.is_empty()
+            || state.source.build_fingerprint != source.build_fingerprint
+    })
 }
 
 /// Boot the host, recovering once from a self-inconsistent build tree.
@@ -373,11 +1006,14 @@ fn host_sources_stale() -> bool {
 fn start_server(
     preset: &str,
     overrides: &BTreeMap<String, String>,
+    source: &CaptureSourceSnapshot,
 ) -> Result<CaptureServerState, String> {
     let offset = file_len(&diagnostic_path(LOG_FILE));
-    match start_server_once(preset, overrides) {
-        Ok(state) => Ok(state),
+    runlog::count("host_start");
+    match start_server_once(preset, overrides, source) {
+        Ok(state) => verify_host_launch_source(state, source),
         Err(_) if toolchain_corruption(&log_from(offset)) => {
+            runlog::count("rebuild_recovery");
             eprintln!(
                 "build failed on stale-artifact corruption (objects reference internal symbols \
                  from a previous bevy_dylib link, not a code error); dropping \
@@ -385,18 +1021,46 @@ fn start_server(
             );
             purge_incremental_cache()?;
             let retry_offset = file_len(&diagnostic_path(LOG_FILE));
-            start_server_once(preset, overrides).map_err(|retry| {
-                if toolchain_corruption(&log_from(retry_offset)) {
-                    format!(
-                        "{retry}\n\nstill corrupt after dropping the incremental cache — \
-                         run `just build-reset` for a full lane reset"
-                    )
-                } else {
-                    retry
-                }
-            })
+            start_server_once(preset, overrides, source)
+                .and_then(|state| verify_host_launch_source(state, source))
+                .map_err(|retry| {
+                    if toolchain_corruption(&log_from(retry_offset)) {
+                        format!(
+                            "{retry}\n\nstill corrupt after dropping the incremental cache — \
+                             run `just build-reset` for a full lane reset"
+                        )
+                    } else {
+                        retry
+                    }
+                })
         }
         Err(error) => Err(error),
+    }
+}
+
+fn verify_host_launch_source(
+    state: CaptureServerState,
+    requested: &CaptureSourceSnapshot,
+) -> Result<CaptureServerState, String> {
+    if state.source.build_fingerprint == requested.build_fingerprint {
+        return Ok(state);
+    }
+    let _ = stop_server(true);
+    Err(format!(
+        "capture host advertised build source {}, but launch requested {}; refusing unattributed evidence",
+        short_fingerprint(&state.source.build_fingerprint),
+        short_fingerprint(&requested.build_fingerprint),
+    ))
+}
+
+fn workspace_relation(
+    source_floor: &CaptureSourceSnapshot,
+    workspace_after: &CaptureSourceSnapshot,
+) -> &'static str {
+    if source_floor.fingerprint == workspace_after.fingerprint {
+        "exact"
+    } else {
+        "advanced-since-source-floor"
     }
 }
 
@@ -464,6 +1128,20 @@ fn reset_build_state() -> Result<(), String> {
 fn start_server_once(
     preset: &str,
     overrides: &BTreeMap<String, String>,
+    source: &CaptureSourceSnapshot,
+) -> Result<CaptureServerState, String> {
+    let started = Instant::now();
+    let state = start_server_once_inner(preset, overrides, source);
+    // Recorded on both outcomes: a boot that fails after two minutes of
+    // rebuilding is exactly the cost worth seeing in the record.
+    runlog::phase("host_start", started.elapsed());
+    state
+}
+
+fn start_server_once_inner(
+    preset: &str,
+    overrides: &BTreeMap<String, String>,
+    source: &CaptureSourceSnapshot,
 ) -> Result<CaptureServerState, String> {
     stop_server(true)?;
     fs::create_dir_all(diagnostics_dir()).map_err(|error| error.to_string())?;
@@ -493,6 +1171,22 @@ fn start_server_once(
     environment.insert("THALOS_SCREENSHOT".into(), preset.to_owned());
     environment.insert("THALOS_CAPTURE_SERVER".into(), "1".into());
     environment.insert(
+        "THALOS_CAPTURE_SOURCE_FINGERPRINT".into(),
+        source.fingerprint.clone(),
+    );
+    environment.insert(
+        "THALOS_CAPTURE_BUILD_FINGERPRINT".into(),
+        source.build_fingerprint.clone(),
+    );
+    environment.insert(
+        "THALOS_CAPTURE_GIT_REVISION".into(),
+        source.git_revision.clone(),
+    );
+    environment.insert(
+        "THALOS_CAPTURE_GIT_DIRTY".into(),
+        source.working_tree_dirty.to_string(),
+    );
+    environment.insert(
         "BEVY_ASSET_ROOT".into(),
         workspace_root().display().to_string(),
     );
@@ -504,22 +1198,36 @@ fn start_server_once(
         launched_unix_ms: timestamp_millis(),
         log_start_bytes,
         startup_overrides,
+        source: source.clone(),
         command: std::iter::once("cargo".to_owned()).chain(command).collect(),
     };
     write_json_atomic(&diagnostic_path(LAUNCHER_FILE), &launcher)?;
     println!(
-        "starting capture renderer for {preset} (rebuilding changed sources; a cold build may take a while)"
+        "starting capture renderer for {preset} at source {} (rebuilding changed sources; a cold build may take a while)",
+        short_fingerprint(&source.fingerprint),
     );
     let deadline = Instant::now() + Duration::from_secs(1800);
     while Instant::now() < deadline {
         if !launcher_process.is_running() {
-            return Err(format!("capture launcher exited\n{}", log_tail(50)));
+            let log = log_from(log_start_bytes);
+            if let Some(kind) = resource_fault_kind(&log) {
+                record_resource_fault(kind, &log);
+                return Err(resource_fault_message(kind, &log));
+            }
+            return Err(format!("capture launcher exited\n{log}"));
         }
-        if let Some(state) = read_json::<CaptureServerState>(&diagnostic_path(STATE_FILE))
-            && compatible_state(Some(&state), preset, requested_size(overrides))
-            && state.ready
-        {
-            return Ok(state);
+        if let Some(state) = read_json::<CaptureServerState>(&diagnostic_path(STATE_FILE)) {
+            if let Some(message) = capture_rss_failure(state.pid, overrides) {
+                record_resource_fault("capture host memory runaway", &message);
+                terminate_process_tree(launcher_process.pid);
+                return Err(resource_fault_message(
+                    "capture host memory runaway",
+                    &message,
+                ));
+            }
+            if compatible_state(Some(&state), preset, requested_size(overrides)) && state.ready {
+                return Ok(state);
+            }
         }
         thread::sleep(Duration::from_millis(250));
     }
@@ -582,6 +1290,9 @@ fn stop_server(quiet: bool) -> Result<(), String> {
             action: CaptureAction::Shutdown,
             preset: String::new(),
             overrides: BTreeMap::new(),
+            source: CaptureSourceSnapshot::default(),
+            camera: CaptureCameraOverride::default(),
+            graphics: CaptureGraphicsOverrides::default(),
         };
         write_json_atomic(&diagnostic_path(REQUEST_FILE), &request)?;
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -611,6 +1322,34 @@ fn status() {
             )
         }
         _ => println!("visual capture server is not running"),
+    }
+    let fault_path = machine_capture_path(RESOURCE_FAULT_FILE);
+    if let Some(fault) = read_json::<CaptureResourceFault>(&fault_path) {
+        let age_s = timestamp_millis().saturating_sub(fault.observed_unix_ms) / 1000;
+        if fault.kind == "GPU device loss" {
+            let rebooted = fault
+                .observed_uptime_ms
+                .zip(system_uptime_ms())
+                .is_some_and(|(observed, current)| current < observed);
+            if !rebooted {
+                println!(
+                    "resource quarantine active: GPU device loss ({}s ago; until OS reboot)",
+                    age_s
+                );
+            }
+        } else if age_s < RESOURCE_FAULT_COOLDOWN_SECS as u128 {
+            println!(
+                "resource quarantine active: {} ({}s ago; {}s remaining)",
+                fault.kind,
+                age_s,
+                RESOURCE_FAULT_COOLDOWN_SECS as u128 - age_s
+            );
+        }
+        println!("resource quarantine record: {}", fault_path.display());
+    }
+    let events = diagnostic_path(RESOURCE_EVENT_FILE);
+    if events.exists() {
+        println!("resource quarantine history: {}", events.display());
     }
 }
 
@@ -745,6 +1484,73 @@ fn read_viewpoint_catalog() -> Result<ViewpointCatalog, String> {
     Ok(catalog)
 }
 
+fn apply_safe_viewpoint_size(preset: &str, overrides: &mut BTreeMap<String, String>) {
+    if overrides.contains_key("THALOS_SCREENSHOT_SIZE") {
+        return;
+    }
+    let Ok(catalog) = read_viewpoint_catalog() else {
+        return;
+    };
+    let viewpoint = match preset {
+        "latest-perspective" => catalog.latest(),
+        scene => scene
+            .strip_prefix("viewpoint:")
+            .and_then(|id| catalog.find(id)),
+    };
+    let Some(viewpoint) = viewpoint else {
+        return;
+    };
+    let [width, height] = viewpoint.optics.sensor.aspect;
+    let fitted = fit_inside(width, height, SAFE_VIEWPOINT_WIDTH, SAFE_VIEWPOINT_HEIGHT);
+    println!(
+        "viewpoint sensor is {width}:{height}; rendering {}x{} at the temporary standard fidelity (use --size WIDTHxHEIGHT for an explicit output extent)",
+        fitted.0, fitted.1,
+    );
+    overrides.insert(
+        "THALOS_SCREENSHOT_SIZE".into(),
+        format!("{}x{}", fitted.0, fitted.1),
+    );
+}
+
+fn validate_viewpoint_output_aspect(
+    preset: &str,
+    overrides: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    let Some((output_width, output_height)) = requested_size(overrides) else {
+        return Ok(());
+    };
+    let catalog = read_viewpoint_catalog()?;
+    let viewpoint = match preset {
+        "latest-perspective" => catalog.latest(),
+        scene => scene
+            .strip_prefix("viewpoint:")
+            .and_then(|id| catalog.find(id)),
+    };
+    let Some(viewpoint) = viewpoint else {
+        return Ok(());
+    };
+    let [sensor_width, sensor_height] = viewpoint.optics.sensor.aspect;
+    if u64::from(sensor_width) * u64::from(output_height)
+        != u64::from(output_width) * u64::from(sensor_height)
+    {
+        return Err(format!(
+            "viewpoint {} uses a {sensor_width}:{sensor_height} sensor window, but --size is {output_width}x{output_height}; choose a matching output aspect until an explicit crop/fit policy exists",
+            viewpoint.id
+        ));
+    }
+    Ok(())
+}
+
+fn fit_inside(width: u32, height: u32, max_width: u32, max_height: u32) -> (u32, u32) {
+    let width_scale = max_width as f64 / width as f64;
+    let height_scale = max_height as f64 / height as f64;
+    let scale = width_scale.min(height_scale);
+    (
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
+    )
+}
+
 fn capture_timeout_secs() -> u64 {
     env::var("THALOS_CAPTURE_TIMEOUT_SECS")
         .ok()
@@ -764,8 +1570,212 @@ fn diagnostics_dir() -> PathBuf {
     workspace_root().join("artifacts/diagnostics")
 }
 
+fn machine_capture_dir() -> PathBuf {
+    env::temp_dir().join("thalos-machine-capture")
+}
+
+fn machine_capture_path(filename: &str) -> PathBuf {
+    machine_capture_dir().join(filename)
+}
+
 fn diagnostic_path(filename: &str) -> PathBuf {
     diagnostics_dir().join(filename)
+}
+
+fn guard_resource_fault() -> Result<(), String> {
+    let path = machine_capture_path(RESOURCE_FAULT_FILE);
+    let fault = read_json::<CaptureResourceFault>(&path);
+    if env::var("THALOS_CAPTURE_IGNORE_RESOURCE_FAULT")
+        .ok()
+        .is_some_and(|value| matches!(value.trim(), "1" | "true" | "yes" | "on"))
+    {
+        if let Some(fault) = fault.as_ref() {
+            append_resource_event(
+                "override-bypassed",
+                fault,
+                "THALOS_CAPTURE_IGNORE_RESOURCE_FAULT allowed a diagnostic attempt",
+            );
+        }
+        return Ok(());
+    }
+    let Some(fault) = fault else {
+        return Ok(());
+    };
+    if fault.kind == "GPU device loss" {
+        let rebooted = fault
+            .observed_uptime_ms
+            .zip(system_uptime_ms())
+            .is_some_and(|(observed, current)| current < observed);
+        if rebooted {
+            append_resource_event(
+                "cleared-after-reboot",
+                &fault,
+                "system uptime moved behind the recorded fault uptime",
+            );
+            let _ = fs::remove_file(path);
+            return Ok(());
+        }
+        append_resource_event(
+            "blocked",
+            &fault,
+            "device-loss policy remains active for this OS boot",
+        );
+        return Err(
+            "capture renderer is quarantined after GPU device loss for the rest of this OS boot. No renderer was started; reboot first. Override only after independently confirming recovery with THALOS_CAPTURE_IGNORE_RESOURCE_FAULT=1"
+                .into(),
+        );
+    }
+    let age_ms = timestamp_millis().saturating_sub(fault.observed_unix_ms);
+    let cooldown_ms = RESOURCE_FAULT_COOLDOWN_SECS as u128 * 1000;
+    if age_ms >= cooldown_ms {
+        append_resource_event(
+            "expired",
+            &fault,
+            "bounded resource-pressure cooldown elapsed",
+        );
+        let _ = fs::remove_file(path);
+        return Ok(());
+    }
+    let remaining = (cooldown_ms - age_ms).div_ceil(1000);
+    append_resource_event(
+        "blocked",
+        &fault,
+        "bounded resource-pressure cooldown remains active",
+    );
+    Err(format!(
+        "capture renderer is quarantined for another {remaining}s after {}. No renderer was started; this prevents queued agents from retrying a failed GPU. If Windows reports that the GPU is lost, reboot first. Override only after recovery with THALOS_CAPTURE_IGNORE_RESOURCE_FAULT=1",
+        fault.kind
+    ))
+}
+
+fn record_resource_fault(kind: &str, log: &str) {
+    let detail = log
+        .lines()
+        .rev()
+        .take(50)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fault = CaptureResourceFault {
+        observed_unix_ms: timestamp_millis(),
+        observed_uptime_ms: system_uptime_ms(),
+        kind: kind.to_owned(),
+        detail,
+    };
+    if write_json_atomic(&machine_capture_path(RESOURCE_FAULT_FILE), &fault).is_ok() {
+        append_resource_event("recorded", &fault, "fatal capture resource signature");
+    }
+}
+
+fn clear_resource_fault() {
+    let path = machine_capture_path(RESOURCE_FAULT_FILE);
+    if let Some(fault) = read_json::<CaptureResourceFault>(&path) {
+        append_resource_event(
+            "cleared-after-success",
+            &fault,
+            "a diagnostic override completed a valid capture",
+        );
+    }
+    let _ = fs::remove_file(path);
+}
+
+fn append_resource_event(event: &str, fault: &CaptureResourceFault, note: &str) {
+    let record = CaptureResourceEvent {
+        schema: "thalos.capture-resource-event.v1",
+        event,
+        recorded_unix_ms: timestamp_millis(),
+        recorded_uptime_ms: system_uptime_ms(),
+        client_pid: std::process::id(),
+        command: env::args().skip(1).collect::<Vec<_>>().join(" "),
+        workspace: workspace_root().display().to_string(),
+        fault_observed_unix_ms: fault.observed_unix_ms,
+        fault_observed_uptime_ms: fault.observed_uptime_ms,
+        fault_age_ms: timestamp_millis().saturating_sub(fault.observed_unix_ms),
+        kind: &fault.kind,
+        policy: if fault.kind == "GPU device loss" {
+            "until-os-reboot"
+        } else {
+            "bounded-cooldown"
+        },
+        cooldown_secs: (fault.kind != "GPU device loss").then_some(RESOURCE_FAULT_COOLDOWN_SECS),
+        note,
+        fault_detail: (event == "recorded").then_some(fault.detail.as_str()),
+    };
+    let path = diagnostic_path(RESOURCE_EVENT_FILE);
+    let result = (|| -> Result<(), String> {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .map_err(|error| error.to_string())?;
+        serde_json::to_writer(&mut file, &record).map_err(|error| error.to_string())?;
+        writeln!(file).map_err(|error| error.to_string())
+    })();
+    if let Err(error) = result {
+        eprintln!(
+            "warning: could not append resource quarantine event {}: {error}",
+            path.display()
+        );
+    }
+}
+
+fn resource_fault_kind(log: &str) -> Option<&'static str> {
+    let lower = log.to_ascii_lowercase();
+    // WGPU tears a device down after allocation failure and reports that as
+    // `Caught DeviceLost error: Unknown Out of memory`. Generic DeviceLost
+    // text is therefore not proof that the adapter/driver remains lost. Only
+    // an explicit lost-device diagnosis outranks the causal OOM signature.
+    if [
+        "gpu is lost",
+        "unknown device is lost",
+        "device has been lost",
+    ]
+    .into_iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return Some("GPU device loss");
+    }
+    if ["out of memory", "failed to allocate device memory"]
+        .into_iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return Some("GPU out-of-memory");
+    }
+    if lower.contains("timed out while waiting on the last successful submission") {
+        return Some("GPU submission timeout");
+    }
+    if lower.contains("capture host rss limit exceeded") {
+        return Some("capture host memory runaway");
+    }
+    if lower.contains("device lost") || lower.contains("devicelost") {
+        return Some("GPU device loss");
+    }
+    None
+}
+
+fn resource_fault_message(kind: &str, log: &str) -> String {
+    let tail = log
+        .lines()
+        .rev()
+        .take(50)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n");
+    if kind == "GPU device loss" {
+        return format!(
+            "capture stopped after GPU device loss; it will not auto-retry or start another renderer. The shared quarantine blocks queued agents until the OS reboots.\n{tail}"
+        );
+    }
+    format!(
+        "capture stopped after {kind}; it will not auto-retry or start another renderer. The workstation safety quarantine now blocks queued agents for {RESOURCE_FAULT_COOLDOWN_SECS}s. If the GPU is lost, reboot before overriding the quarantine.\n{tail}"
+    )
 }
 
 fn absolute(path: PathBuf) -> PathBuf {
@@ -813,6 +1823,13 @@ fn validate_capture_output(path: &Path) -> Result<(), CaptureFailure> {
 
 fn validate_render_log(offset: u64) -> Result<(), CaptureFailure> {
     let log = log_from(offset);
+    if let Some(kind) = resource_fault_kind(&log) {
+        record_resource_fault(kind, &log);
+        return Err(CaptureFailure {
+            message: resource_fault_message(kind, &log),
+            recoverable: false,
+        });
+    }
     let Some(message) = render_log_failure(&log) else {
         return Ok(());
     };
@@ -898,6 +1915,117 @@ fn write_json_atomic(path: &Path, value: &impl Serialize) -> Result<(), String> 
     fs::rename(&temporary, path).map_err(|error| error.to_string())
 }
 
+/// Content-hash the source and asset trees. Called several times per shot
+/// (floor, post-prepare, post-capture), so its cost is accumulated into one
+/// `source_snapshot` phase rather than hiding inside whichever caller paid it.
+fn capture_source_snapshot() -> Result<CaptureSourceSnapshot, String> {
+    let started = Instant::now();
+    let snapshot = capture_source_snapshot_inner();
+    runlog::phase("source_snapshot", started.elapsed());
+    snapshot
+}
+
+fn capture_source_snapshot_inner() -> Result<CaptureSourceSnapshot, String> {
+    let root = workspace_root();
+    let mut build_files = vec![
+        root.join("Cargo.toml"),
+        root.join("Cargo.lock"),
+        root.join("rust-toolchain.toml"),
+    ];
+    for source_root in [
+        root.join("apps"),
+        root.join("crates"),
+        root.join("tools/capture_host"),
+    ] {
+        build_files.extend(recursive_files(&source_root).into_iter().filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| matches!(extension, "rs" | "toml"))
+        }));
+    }
+    build_files.sort();
+    build_files.dedup();
+
+    let mut capture_files = build_files.clone();
+    // Runtime assets are evidence inputs too: an agent changing a terrain
+    // package, texture, font, or authored catalog must be able to prove that
+    // exact payload reached the image. The checked-in tree is small enough to
+    // hash by content without a lossy mtime cache.
+    capture_files.extend(recursive_files(&root.join("assets")));
+    capture_files.extend(
+        recursive_files(&root.join("crates"))
+            .into_iter()
+            .filter(|path| {
+                path.extension()
+                    .is_some_and(|extension| extension == "wgsl")
+            }),
+    );
+    capture_files.sort();
+    capture_files.dedup();
+
+    let git_revision = git_output(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_owned());
+    let working_tree_dirty =
+        git_output(&["status", "--porcelain"]).is_none_or(|output| !output.is_empty());
+    Ok(CaptureSourceSnapshot {
+        fingerprint: fingerprint_files(&root, &capture_files)?,
+        build_fingerprint: fingerprint_files(&root, &build_files)?,
+        git_revision,
+        working_tree_dirty,
+    })
+}
+
+fn fingerprint_files(root: &Path, files: &[PathBuf]) -> Result<String, String> {
+    let mut hasher = Sha256::new();
+    for path in files {
+        let relative = path
+            .strip_prefix(root)
+            .unwrap_or(path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        let bytes =
+            fs::read(path).map_err(|error| format!("fingerprint {}: {error}", path.display()))?;
+        hasher.update((relative.len() as u64).to_le_bytes());
+        hasher.update(relative.as_bytes());
+        hasher.update((bytes.len() as u64).to_le_bytes());
+        hasher.update(&bytes);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(workspace_root())
+        .output()
+        .ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
+fn receipt_path(output: &Path) -> PathBuf {
+    output.with_extension("capture.json")
+}
+
+fn write_capture_receipt(output: &Path, receipt: CaptureReceipt<'_>) -> Result<PathBuf, String> {
+    let path = receipt_path(output);
+    write_json_atomic(&path, &receipt)?;
+    Ok(path)
+}
+
+fn short_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
+fn short_revision(revision: &str) -> &str {
+    revision.get(..10).unwrap_or(revision)
+}
+
 fn newest_mtime_ms(roots: &[PathBuf], extension: &str) -> u128 {
     roots
         .iter()
@@ -911,14 +2039,6 @@ fn newest_mtime_ms(roots: &[PathBuf], extension: &str) -> u128 {
         })
         .max()
         .unwrap_or(0)
-}
-
-fn modified_millis(path: &Path) -> u128 {
-    fs::metadata(path)
-        .ok()
-        .and_then(|metadata| metadata.modified().ok())
-        .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-        .map_or(0, |duration| duration.as_millis())
 }
 
 fn file_len(path: &Path) -> u64 {
@@ -947,6 +2067,23 @@ fn timestamp_millis() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
+fn system_uptime_ms() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        Some(unsafe { windows_sys::Win32::System::SystemInformation::GetTickCount64() })
+    }
+    #[cfg(not(windows))]
+    {
+        let seconds = fs::read_to_string("/proc/uptime")
+            .ok()?
+            .split_whitespace()
+            .next()?
+            .parse::<f64>()
+            .ok()?;
+        Some((seconds * 1000.0) as u64)
+    }
+}
+
 fn log_tail(lines: usize) -> String {
     fs::read_to_string(diagnostic_path(LOG_FILE))
         .map(|text| {
@@ -962,13 +2099,96 @@ fn log_tail(lines: usize) -> String {
         .unwrap_or_else(|_| "(capture-server log is unavailable)".to_owned())
 }
 
+fn capture_rss_failure(pid: u32, overrides: &BTreeMap<String, String>) -> Option<String> {
+    let limit_mb = overrides
+        .get("THALOS_CAPTURE_RSS_LIMIT_MB")
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .or_else(|| {
+            env::var("THALOS_CAPTURE_RSS_LIMIT_MB")
+                .ok()
+                .and_then(|raw| raw.trim().parse::<u64>().ok())
+        })
+        .unwrap_or(DEFAULT_CAPTURE_RSS_LIMIT_MB);
+    if limit_mb == 0 {
+        return None;
+    }
+    let resident = process_resident_bytes(pid)?;
+    let limit = limit_mb * 1024 * 1024;
+    (resident > limit).then(|| {
+        format!(
+            "capture host RSS limit exceeded: pid {pid} uses {:.1} GiB, limit is {:.1} GiB",
+            resident as f64 / (1024.0 * 1024.0 * 1024.0),
+            limit as f64 / (1024.0 * 1024.0 * 1024.0),
+        )
+    })
+}
+
+fn process_resident_bytes(pid: u32) -> Option<u64> {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::{
+            Foundation::CloseHandle,
+            System::{
+                ProcessStatus::{K32GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS},
+                Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION},
+            },
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return None;
+            }
+            let mut counters = PROCESS_MEMORY_COUNTERS {
+                cb: std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32,
+                ..Default::default()
+            };
+            let cb = counters.cb;
+            let queried = K32GetProcessMemoryInfo(handle, &mut counters, cb) != 0;
+            CloseHandle(handle);
+            queried.then_some(counters.WorkingSetSize as u64)
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let status = fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+        let kib = status
+            .lines()
+            .find_map(|line| line.strip_prefix("VmRSS:"))?
+            .split_whitespace()
+            .next()?
+            .parse::<u64>()
+            .ok()?;
+        Some(kib * 1024)
+    }
+}
+
 fn process_alive(pid: u32) -> bool {
     #[cfg(windows)]
     {
-        Command::new("tasklist")
-            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-            .output()
-            .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&pid.to_string()))
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, ERROR_INVALID_PARAMETER, GetLastError},
+            System::Threading::{
+                GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+            },
+        };
+
+        // `tasklist` is not a liveness API: it can return "Access denied" in a
+        // restricted shell even for our own healthy process. The old code read
+        // that as "dead" and repeatedly restarted the renderer. Query the
+        // kernel object directly; if policy denies even limited access, err on
+        // the side of "alive" so we never kill/replace a process we cannot
+        // inspect.
+        const STILL_ACTIVE: u32 = 259;
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return GetLastError() != ERROR_INVALID_PARAMETER;
+            }
+            let mut exit_code = 0;
+            let queried = GetExitCodeProcess(handle, &mut exit_code) != 0;
+            CloseHandle(handle);
+            queried && exit_code == STILL_ACTIVE
+        }
     }
     #[cfg(not(windows))]
     {
@@ -1104,13 +2324,18 @@ fn terminate_process_tree(pid: u32) {
 
 fn print_help() {
     println!(
-        "thalos_capture shot [PRESET ...] [--out PATH] [--report PATH] [--set KEY=VALUE]\n\
+        "thalos_capture shot [PRESET ...] [--time SECONDS] [--focal-length MM] [--size WIDTHxHEIGHT] [--graphics NAME=VALUE,...] [--out PATH] [--report PATH] [--set KEY=VALUE]\n\
          thalos_capture compare [PRESET] [AXIS] [--out DIR] [--cold]\n\
+         thalos_capture list viewpoints [--gallery] [--json] [--out DIR]\n\
          thalos_capture status\n\
          thalos_capture stop\n\
          thalos_capture reset   (stop + drop incremental + clean the dylib set)\n\n\
-         Multiple compatible presets reuse one booted world; incompatible presets\n\
-         are restarted automatically. --out/--report are single-preset options."
+         Compatible scenes are rendered sequentially through one real camera and\n\
+         one booted world. Viewpoint sensor aspect and lens define framing;\n\
+         output pixels are selected independently and default safely near 1080p.\n\
+         Viewpoint galleries reuse cached canonical captures and never render.\n\
+         Graphics settings currently include clouds=on|off and grass=on|off.\n\
+         --out/--report are single-preset options."
     );
 }
 
@@ -1121,9 +2346,22 @@ mod tests {
     #[test]
     fn shot_parser_accepts_multiple_scenes_and_aliases() {
         let parsed = parse_capture_options(
-            ["spaceport", "runway-atmosphere", "--set", "THALOS_SSAO=off"]
-                .into_iter()
-                .map(str::to_owned),
+            [
+                "spaceport",
+                "runway-atmosphere",
+                "--time",
+                "72000",
+                "--size",
+                "1600x900",
+                "--focal-length",
+                "85",
+                "--graphics",
+                "clouds=off,grass=on",
+                "--set",
+                "THALOS_SSAO=off",
+            ]
+            .into_iter()
+            .map(str::to_owned),
         )
         .expect("parse");
         assert_eq!(
@@ -1132,8 +2370,250 @@ mod tests {
                 presets: vec!["spaceport-aerial".into(), "runway-atmosphere".into()],
                 output: None,
                 report: None,
-                assignments: vec!["THALOS_SSAO=off".into()],
+                assignments: vec![
+                    "THALOS_SCREENSHOT_TIME=72000".into(),
+                    "THALOS_SCREENSHOT_SIZE=1600x900".into(),
+                    "THALOS_SSAO=off".into(),
+                ],
+                camera: CaptureCameraOverride {
+                    focal_length_mm: Some(85.0),
+                },
+                graphics: CaptureGraphicsOverrides {
+                    clouds: Some(false),
+                    grass: Some(true),
+                },
             }
+        );
+    }
+
+    #[test]
+    fn shot_parser_rejects_non_finite_time() {
+        assert!(
+            parse_capture_options(
+                ["spaceport", "--time", "NaN"]
+                    .into_iter()
+                    .map(str::to_owned)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn shot_parser_rejects_zero_or_malformed_size() {
+        for size in ["0x1080", "1920x0", "native", "1920"] {
+            assert!(
+                parse_capture_options(["spaceport", "--size", size].into_iter().map(str::to_owned))
+                    .is_err(),
+                "{size}"
+            );
+        }
+    }
+
+    #[test]
+    fn sensor_aspect_fills_safety_extent_without_changing_aspect() {
+        assert_eq!(fit_inside(3840, 2160, 1920, 1080), (1920, 1080));
+        assert_eq!(fit_inside(1920, 1200, 1920, 1080), (1728, 1080));
+        assert_eq!(fit_inside(16, 9, 1920, 1080), (1920, 1080));
+        assert_eq!(fit_inside(4, 3, 1920, 1080), (1440, 1080));
+    }
+
+    #[test]
+    fn viewpoint_output_must_match_the_saved_sensor_aspect() {
+        let mut overrides =
+            BTreeMap::from([("THALOS_SCREENSHOT_SIZE".to_owned(), "1600x1200".to_owned())]);
+        assert!(validate_viewpoint_output_aspect("viewpoint:dark-thalos", &overrides).is_err());
+        overrides.insert("THALOS_SCREENSHOT_SIZE".to_owned(), "2560x1440".to_owned());
+        assert!(validate_viewpoint_output_aspect("viewpoint:dark-thalos", &overrides).is_ok());
+    }
+
+    #[test]
+    fn shot_parser_rejects_out_of_range_focal_length() {
+        for focal_length in ["0", "11.9", "401", "NaN"] {
+            assert!(
+                parse_capture_options(
+                    ["spaceport", "--focal-length", focal_length]
+                        .into_iter()
+                        .map(str::to_owned)
+                )
+                .is_err(),
+                "{focal_length}"
+            );
+        }
+    }
+
+    /// The `host_action` a shot records is the branch `ensure_server` takes,
+    /// so a wrong classification would mis-explain every slow capture. Stale
+    /// build sources outrank scene compatibility: a host built from other code
+    /// must restart even when it could otherwise serve the scene.
+    #[test]
+    fn host_action_names_why_a_shot_pays_for_a_boot() {
+        let source = CaptureSourceSnapshot {
+            fingerprint: "aaa".into(),
+            build_fingerprint: "bbb".into(),
+            git_revision: "rev".into(),
+            working_tree_dirty: false,
+        };
+        let overrides = BTreeMap::new();
+
+        assert_eq!(
+            host_action(None, "spaceport-aerial", &overrides, &source),
+            "start",
+            "no resident host at all"
+        );
+
+        let stale = CaptureServerState {
+            schema_version: CAPTURE_PROTOCOL_SCHEMA,
+            pid: std::process::id(),
+            preset: "spaceport-aerial".into(),
+            compatible_presets: vec!["spaceport-aerial".into()],
+            width: 1920,
+            height: 1080,
+            ready: true,
+            busy: false,
+            completed_captures: 0,
+            shader_reload_unix_ms: 0,
+            heartbeat_unix_ms: timestamp_millis(),
+            source: CaptureSourceSnapshot {
+                build_fingerprint: "older".into(),
+                ..source.clone()
+            },
+        };
+        assert_eq!(
+            host_action(Some(&stale), "spaceport-aerial", &overrides, &source),
+            "restart_stale_source",
+            "a host built from other sources restarts even for a scene it serves"
+        );
+
+        let wrong_scene = CaptureServerState {
+            compatible_presets: vec!["ocean".into()],
+            source: source.clone(),
+            ..stale
+        };
+        assert_eq!(
+            host_action(Some(&wrong_scene), "spaceport-aerial", &overrides, &source),
+            "restart_incompatible_scene"
+        );
+    }
+
+    #[test]
+    fn capture_client_lock_serializes_and_releases() {
+        let path = workspace_root().join(format!(
+            "target/capture-client-lock-test-{}.json",
+            Uuid::new_v4().simple()
+        ));
+        let first =
+            CaptureClientLock::acquire_at(path.clone(), "first".into(), Duration::ZERO, &mut None)
+                .unwrap();
+        let blocked =
+            CaptureClientLock::acquire_at(path.clone(), "second".into(), Duration::ZERO, &mut None)
+                .expect_err("second live owner must not acquire the lock");
+        assert!(blocked.contains("pid"));
+        drop(first);
+        let second =
+            CaptureClientLock::acquire_at(path.clone(), "second".into(), Duration::ZERO, &mut None)
+                .unwrap();
+        drop(second);
+        assert!(!path.exists());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn machine_mutex_cannot_be_stolen_by_a_second_waiter() {
+        use std::sync::mpsc;
+
+        let id = Uuid::new_v4().simple().to_string();
+        let path = workspace_root().join(format!("target/capture-machine-lock-test-{id}.json"));
+        let mutex_name = format!("Local\\ThalosMachineCaptureTest{id}");
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let owner_path = path.clone();
+        let owner_name = mutex_name.clone();
+        let owner = thread::spawn(move || {
+            let lock = CaptureClientLock::acquire_named_mutex(
+                owner_path,
+                &owner_name,
+                "owner".into(),
+                Duration::ZERO,
+                &mut None,
+            )
+            .unwrap();
+            acquired_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(lock);
+        });
+        acquired_rx.recv().unwrap();
+
+        let blocked = CaptureClientLock::acquire_named_mutex(
+            path.clone(),
+            &mutex_name,
+            "waiter".into(),
+            Duration::ZERO,
+            &mut None,
+        )
+        .expect_err("a second waiter must not steal a live kernel mutex");
+        assert!(blocked.contains("timed out"));
+
+        release_tx.send(()).unwrap();
+        owner.join().unwrap();
+        let successor = CaptureClientLock::acquire_named_mutex(
+            path.clone(),
+            &mutex_name,
+            "successor".into(),
+            Duration::ZERO,
+            &mut None,
+        )
+        .unwrap();
+        drop(successor);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn source_fingerprint_tracks_content_not_only_timestamps() {
+        let root = workspace_root();
+        let path = root.join(format!(
+            "target/capture-source-fingerprint-test-{}.txt",
+            Uuid::new_v4().simple()
+        ));
+        fs::write(&path, b"first").unwrap();
+        let first = fingerprint_files(&root, std::slice::from_ref(&path)).unwrap();
+        fs::write(&path, b"second").unwrap();
+        let second = fingerprint_files(&root, std::slice::from_ref(&path)).unwrap();
+        let _ = fs::remove_file(&path);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn workspace_source_snapshot_covers_build_and_capture_inputs() {
+        let source = capture_source_snapshot().unwrap();
+        assert_eq!(source.fingerprint.len(), 64);
+        assert_eq!(source.build_fingerprint.len(), 64);
+        assert_ne!(source.fingerprint, source.build_fingerprint);
+        assert!(!source.git_revision.is_empty());
+    }
+
+    #[test]
+    fn capture_receipt_sits_next_to_its_image() {
+        assert_eq!(
+            receipt_path(Path::new("artifacts/visual/latest/view.png")),
+            PathBuf::from("artifacts/visual/latest/view.capture.json")
+        );
+    }
+
+    #[test]
+    fn source_mismatch_means_workspace_advanced_not_capture_rejected() {
+        let floor = CaptureSourceSnapshot {
+            fingerprint: "floor".into(),
+            ..Default::default()
+        };
+        let exact = floor.clone();
+        let advanced = CaptureSourceSnapshot {
+            fingerprint: "newer".into(),
+            ..Default::default()
+        };
+        assert_eq!(workspace_relation(&floor, &exact), "exact");
+        assert_eq!(
+            workspace_relation(&floor, &advanced),
+            "advanced-since-source-floor"
         );
     }
 
@@ -1146,6 +2626,42 @@ mod tests {
     fn fatal_render_errors_are_promoted() {
         assert!(render_log_failure("wgpu error: Validation Error").is_some());
         assert!(render_log_failure("capture complete").is_none());
+    }
+
+    #[test]
+    fn resource_faults_are_terminal_and_specific() {
+        assert_eq!(
+            resource_fault_kind("Caught rendering error: Out of Memory"),
+            Some("GPU out-of-memory")
+        );
+        assert_eq!(
+            resource_fault_kind(
+                "We timed out while waiting on the last successful submission to complete!"
+            ),
+            Some("GPU submission timeout")
+        );
+        assert_eq!(
+            resource_fault_kind(
+                "Caught rendering error: Out of Memory; adapter reports GPU is lost"
+            ),
+            Some("GPU device loss")
+        );
+        assert_eq!(
+            resource_fault_kind(
+                "Caught DeviceLost error: Unknown Out of memory\n\
+                 Quitting the application due to DeviceLost RenderError"
+            ),
+            Some("GPU out-of-memory"),
+            "OOM-induced device teardown must use the bounded cooldown"
+        );
+        assert_eq!(
+            resource_fault_kind(
+                "Caught DeviceLost error: Unknown Device is lost\n\
+                 Quitting the application due to DeviceLost RenderError"
+            ),
+            Some("GPU device loss")
+        );
+        assert_eq!(resource_fault_kind("ordinary compile error"), None);
     }
 
     #[test]

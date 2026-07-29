@@ -1,5 +1,5 @@
 {
-  "schema": "thalos.viewpoints.v1",
+  "schema": "thalos.viewpoints.v2",
   "viewpoints": [
     {
       "id": "dark-thalos",
@@ -9,7 +9,7 @@
       "body": "Thalos",
       "spawn": "runway",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -1369054.0661562858,
         2896639.517815519,
@@ -21,11 +21,20 @@
         0.08685245476022425,
         0.06769126268706084
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "imported-latest",
@@ -35,7 +44,7 @@
       "body": "Thalos",
       "spawn": "runway",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -3194543.2107708445,
         511525.8512686994,
@@ -47,11 +56,20 @@
         0.4185714500537908,
         0.17562288949602237
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "orbit-cloud-check",
@@ -61,7 +79,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -12201996.172423258,
         2927788.258804262,
@@ -73,11 +91,20 @@
         0.8358650087352448,
         -0.14126116659577376
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "realism",
@@ -99,11 +126,20 @@
         -0.539229711078397,
         -0.6213863963654397
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "rough-lookffff",
@@ -113,7 +149,7 @@
       "body": "Thalos",
       "spawn": "runway",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -3157154.9173677005,
         421960.84286761633,
@@ -125,11 +161,20 @@
         -0.05542556290173473,
         -0.06544740940953264
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "scene",
@@ -139,7 +184,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -3156994.058472502,
         420270.8997825164,
@@ -151,11 +196,20 @@
         -0.6596695368013379,
         -0.7505545088677757
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "scene2",
@@ -165,7 +219,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -3157175.6758905724,
         419477.6581321743,
@@ -177,11 +231,55 @@
         0.493473925802329,
         0.6452074235715783
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "space-center-hill-view",
+      "name": "space center hill view",
+      "description": "",
+      "saved_unix_ms": 1785284255235,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100,
+      "camera_position_body_m": [
+        -3158333.297381494,
+        412166.5571917023,
+        107570.115043552
+      ],
+      "camera_rotation_body_xyzw": [
+        0.5366605875232613,
+        -0.5985170273338211,
+        0.3804227975085771,
+        0.4572212559871008
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.447268088287682
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "tex-look",
@@ -191,7 +289,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -3163459.952707384,
         497963.31705217983,
@@ -203,11 +301,55 @@
         0.28105881704799174,
         0.591381074520832
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "thalos-8-km",
+      "name": "Thalos 8 km",
+      "description": "",
+      "saved_unix_ms": 1785284804455,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100,
+      "camera_position_body_m": [
+        -3128338.4934464535,
+        637459.674209958,
+        165996.98248592706
+      ],
+      "camera_rotation_body_xyzw": [
+        0.37272890690754923,
+        -0.7194691347654493,
+        0.0707770140904034,
+        0.5817455976213365
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     },
     {
       "id": "weak-clouds",
@@ -217,7 +359,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100.0,
+      "sim_time_s": 59100,
       "camera_position_body_m": [
         -3160836.632054684,
         415937.8424921744,
@@ -229,11 +371,20 @@
         0.3439189084390789,
         0.4322808709062281
       ],
-      "vertical_fov_rad": 0.7853982,
-      "viewport": [
-        3840,
-        2160
-      ]
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443911053717244
+        },
+        "sensor": {
+          "gate_width_mm": 36,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
     }
   ],
   "scripted_viewpoints": [
@@ -278,6 +429,12 @@
       "name": "Cloud sunset",
       "description": "Near-surface cloud view toward a sun just above the local horizon.",
       "driver": "cloud-sunset"
+    },
+    {
+      "id": "cloud-godray",
+      "name": "Cloud godray",
+      "description": "Searched cloudy-land site, near-ground camera looking sunward for crepuscular shafts.",
+      "driver": "cloud-godray"
     },
     {
       "id": "dry-belt",

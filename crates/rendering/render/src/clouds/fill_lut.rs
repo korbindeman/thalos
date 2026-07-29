@@ -57,7 +57,7 @@ pub const THRESHOLD_NODES: usize = 8;
 /// of the disk-cache key the game uses to skip the multi-second Monte-Carlo
 /// at boot, and a stale hit silently calibrates yesterday's renderer —
 /// exactly the `GENERATOR_VERSION` rule the terrain tile cache follows.
-pub const FILL_LUT_VERSION: u32 = 8;
+pub const FILL_LUT_VERSION: u32 = 9;
 
 /// Derived near-threshold curve + far opacity response for one body/climate.
 #[derive(Clone, Copy, Debug)]
@@ -67,18 +67,33 @@ pub struct CloudFillCalibration {
     pub threshold_nodes: [f32; THRESHOLD_NODES],
     /// Expected near-column opacity per strata-mean node (`i / 15`).
     pub far_response: [f32; FILL_RESPONSE_ENTRIES],
+    /// Resolved-footprint pairing, per strata-mean node: the CELL-FIELD value
+    /// above which a column renders as cloud. Chosen as the measured cell
+    /// distribution's `1 − q` quantile (q = occupied column fraction), so
+    /// `P(cell > edge) = q` under the actual field — the same
+    /// measure-the-distribution rule the cell field's own thresholds follow.
+    pub far_cell_edge: [f32; FILL_RESPONSE_ENTRIES],
+    /// Resolved-footprint pairing: mean opacity of the occupied columns at
+    /// this node (`E[alpha | occupied]`). Rendering
+    /// `(cell > edge) · solid` reproduces `far_response` in the mean by
+    /// construction while giving cells hard interiors and clear gaps.
+    pub far_cell_solid: [f32; FILL_RESPONSE_ENTRIES],
 }
 
 impl CloudFillCalibration {
     /// Pack the response for the composite uniform (`fill_response` field).
     pub fn far_response_vec4s(&self) -> [Vec4; 4] {
-        let r = &self.far_response;
-        [
-            Vec4::new(r[0], r[1], r[2], r[3]),
-            Vec4::new(r[4], r[5], r[6], r[7]),
-            Vec4::new(r[8], r[9], r[10], r[11]),
-            Vec4::new(r[12], r[13], r[14], r[15]),
-        ]
+        pack16(&self.far_response)
+    }
+
+    /// Pack the resolved cell-edge LUT for the composite uniform.
+    pub fn far_cell_edge_vec4s(&self) -> [Vec4; 4] {
+        pack16(&self.far_cell_edge)
+    }
+
+    /// Pack the resolved per-cell solid-opacity LUT for the composite uniform.
+    pub fn far_cell_solid_vec4s(&self) -> [Vec4; 4] {
+        pack16(&self.far_cell_solid)
     }
 
     /// Pack the threshold curve for the compute uniform.
@@ -89,6 +104,15 @@ impl CloudFillCalibration {
             Vec4::new(t[4], t[5], t[6], t[7]),
         ]
     }
+}
+
+fn pack16(r: &[f32; FILL_RESPONSE_ENTRIES]) -> [Vec4; 4] {
+    [
+        Vec4::new(r[0], r[1], r[2], r[3]),
+        Vec4::new(r[4], r[5], r[6], r[7]),
+        Vec4::new(r[8], r[9], r[10], r[11]),
+        Vec4::new(r[12], r[13], r[14], r[15]),
+    ]
 }
 
 /// Piecewise-linear threshold evaluation (the CPU twin of the shader's
@@ -157,6 +181,11 @@ struct ColumnRecord {
     /// profile-weighted strata mean over the full layer (the vertical-ray
     /// analogue of the composite's per-segment quadrature).
     strata_mean: f32,
+    /// The aperiodic cell-field value at this column's direction — the same
+    /// scalar the composite evaluates per segment. Recorded so the resolved
+    /// far response can be derived as a threshold ON this field (edge/solid
+    /// below) instead of a smooth expected value.
+    cell: f32,
     samples: Vec<SampleRecord>,
 }
 
@@ -283,6 +312,52 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
     }
     fill_gaps_monotone(&mut far_response);
 
+    // Resolved-footprint pairing: per strata-mean bin, split the SAME columns
+    // into occupied (visible alpha) and clear, and express the response as a
+    // threshold on the recorded cell-field value: `edge` is the measured cell
+    // distribution's (1 − q) quantile so `P(cell > edge) = q`, and `solid` is
+    // the occupied columns' mean opacity — so `(cell > edge) · solid` has the
+    // same expectation as `far_response` by construction, with the opacity
+    // concentrated into cell interiors instead of smeared as a translucent
+    // veil (the 2026-07-29 horizon smear).
+    let mut bin_cells: Vec<Vec<f32>> = vec![Vec::new(); FILL_RESPONSE_ENTRIES];
+    let mut bin_occupied = [0u32; FILL_RESPONSE_ENTRIES];
+    let mut bin_occupied_alpha = [0.0f64; FILL_RESPONSE_ENTRIES];
+    for column in &columns {
+        let bin = ((column.strata_mean * FILL_RESPONSE_ENTRIES as f32) as usize)
+            .min(FILL_RESPONSE_ENTRIES - 1);
+        let alpha = column_alpha(column, input, &nodes);
+        bin_cells[bin].push(column.cell);
+        if alpha > VISIBLE_ALPHA {
+            bin_occupied[bin] += 1;
+            bin_occupied_alpha[bin] += f64::from(alpha);
+        }
+    }
+    let mut far_cell_edge = [f32::NAN; FILL_RESPONSE_ENTRIES];
+    let mut far_cell_solid = [f32::NAN; FILL_RESPONSE_ENTRIES];
+    for i in 0..FILL_RESPONSE_ENTRIES {
+        let n = bin_cells[i].len();
+        if n < 32 {
+            continue;
+        }
+        let occupied = bin_occupied[i] as usize;
+        if occupied == 0 {
+            // Nothing forms at this strata mean: an edge above the field's
+            // range renders nothing, matching the response.
+            far_cell_edge[i] = 1.1;
+            far_cell_solid[i] = 0.0;
+            continue;
+        }
+        let q = occupied as f32 / n as f32;
+        bin_cells[i].sort_by(f32::total_cmp);
+        let rank = (((1.0 - q) * n as f32) as usize).min(n - 1);
+        far_cell_edge[i] = bin_cells[i][rank];
+        far_cell_solid[i] =
+            ((bin_occupied_alpha[i] / f64::from(bin_occupied[i])) as f32).clamp(0.0, 0.98);
+    }
+    fill_gaps_linear(&mut far_cell_edge, 1.1);
+    fill_gaps_linear(&mut far_cell_solid, 0.0);
+
     // Convergence record: per strata-mean bin, the identity target vs the
     // fill the fitted curve achieves (and the opacity the LUT will render).
     // Low bins are gate-limited and cannot reach their target; that is
@@ -315,6 +390,8 @@ pub fn derive_fill_calibration(input: &FillCalibrationInput<'_>) -> CloudFillCal
     CloudFillCalibration {
         threshold_nodes: nodes,
         far_response,
+        far_cell_edge,
+        far_cell_solid,
     }
 }
 
@@ -586,6 +663,11 @@ fn march_column(
     let local_base = weather[2].clamp(0.0, 0.92);
     let local_top = weather[3].clamp(0.02, 1.0).max(local_base + 0.02);
     let shell_thickness = (input.top_height_m - input.bottom_height_m).max(1.0);
+    // Evaluated for EVERY column (not only cov > 0): the edge/solid derivation
+    // needs the cell distribution of clear columns too, or the occupied
+    // quantile is measured against a censored sample.
+    let column_style = cell_style(dir, weather[1]);
+    let column_cell = cell_field(dir, input.planet_radius_m, &column_style);
     let mut samples = Vec::new();
     if cov > 1.0e-3 {
         // Type weights and the shape spectrum are per column (weather is one
@@ -614,8 +696,7 @@ fn march_column(
         // style-invariant by construction (`cell_field::spread_norm`), but the
         // Monte-Carlo still has to see the real styled field or it fits the
         // threshold against a planet that does not exist.
-        let style = cell_style(dir, weather[1]);
-        let cell = cell_field(dir, input.planet_radius_m, &style);
+        let cell = column_cell;
 
         let mid_alt = input.bottom_height_m + 0.5 * (local_base + local_top) * shell_thickness;
         let mid_pos = dir * (input.planet_radius_m + mid_alt);
@@ -695,6 +776,7 @@ fn march_column(
     }
     ColumnRecord {
         strata_mean,
+        cell: column_cell,
         samples,
     }
 }
@@ -758,6 +840,36 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 }
 
 /// Interpolate NaN gaps and enforce a monotone non-decreasing response.
+/// Linear interpolation over NaN gaps, with `fallback` when a run touches an
+/// end with no known node before/after it. Unlike [`fill_gaps_monotone`] no
+/// monotonicity is imposed — the cell-edge curve legitimately falls as strata
+/// densify (denser strata occupy MORE of the cell distribution).
+fn fill_gaps_linear(nodes: &mut [f32; FILL_RESPONSE_ENTRIES], fallback: f32) {
+    let known: Vec<usize> = (0..FILL_RESPONSE_ENTRIES)
+        .filter(|&i| !nodes[i].is_nan())
+        .collect();
+    if known.is_empty() {
+        nodes.fill(fallback);
+        return;
+    }
+    for i in 0..FILL_RESPONSE_ENTRIES {
+        if !nodes[i].is_nan() {
+            continue;
+        }
+        let before = known.iter().copied().filter(|&k| k < i).next_back();
+        let after = known.iter().copied().find(|&k| k > i);
+        nodes[i] = match (before, after) {
+            (Some(b), Some(a)) => {
+                let f = (i - b) as f32 / (a - b) as f32;
+                nodes[b] + (nodes[a] - nodes[b]) * f
+            }
+            (Some(b), None) => nodes[b],
+            (None, Some(a)) => nodes[a],
+            (None, None) => fallback,
+        };
+    }
+}
+
 fn fill_gaps_monotone(nodes: &mut [f32; FILL_RESPONSE_ENTRIES]) {
     let mut last_known = 0usize;
     for i in 1..FILL_RESPONSE_ENTRIES {

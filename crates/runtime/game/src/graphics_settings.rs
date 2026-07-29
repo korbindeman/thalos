@@ -5,7 +5,9 @@
 //! of the unified `settings.ron`; this module owns only the resource + its
 //! `Reflect` registration, not the file IO.
 //!
-//! The settings menu's Graphics tab is the sole writer; render systems read.
+//! The settings menu's Graphics tab is the interactive writer; the headless
+//! capture runtime replaces the resource from a typed per-request profile.
+//! Render systems only read.
 //! Knobs: the volumetric-cloud toggle, consumed by
 //! `rendering::clouds::drive_clouds` — when off it parks the cloud raymarch the
 //! same way an absent cloud body does, so the sky composites with no cloud
@@ -16,6 +18,7 @@
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use serde::{Deserialize, Serialize};
+use thalos_capture_protocol::CaptureGraphicsOverrides;
 
 // ── Resource ───────────────────────────────────────────────────────────────────
 
@@ -81,7 +84,8 @@ impl MsaaSetting {
 /// User graphics/rendering preferences. Persisted as the `graphics` section of
 /// [`crate::settings`]'s unified file.
 ///
-/// Writer: the settings menu's Graphics tab. Everything else reads.
+/// Writers: the settings menu's Graphics tab in interactive play; the capture
+/// runtime in headless mode. Everything else reads.
 /// `Reflect`-registered (for a future in-game debug UI).
 #[derive(Resource, Reflect, Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[reflect(Resource)]
@@ -119,6 +123,24 @@ impl Default for GraphicsSettings {
     }
 }
 
+impl GraphicsSettings {
+    /// Deterministic headless profile for one capture request.
+    ///
+    /// Captures never inherit the player's persisted preferences: every request
+    /// starts from this type's defaults, then applies its typed patch. This also
+    /// means a persistent host cannot leak one shot's settings into the next.
+    pub fn for_capture(overrides: CaptureGraphicsOverrides) -> Self {
+        let mut settings = Self::default();
+        if let Some(clouds) = overrides.clouds {
+            settings.clouds = clouds;
+        }
+        if let Some(grass) = overrides.grass {
+            settings.grass = grass;
+        }
+        settings
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +152,18 @@ mod tests {
                 .expect("removed debug setting should not invalidate an existing settings file");
 
         assert_eq!(parsed, GraphicsSettings::default());
+    }
+
+    #[test]
+    fn capture_settings_are_a_patch_over_deterministic_defaults() {
+        let settings = GraphicsSettings::for_capture(CaptureGraphicsOverrides {
+            clouds: Some(false),
+            grass: None,
+        });
+        assert!(!settings.clouds);
+        assert!(settings.grass);
+        assert!(settings.gpu_grass);
+        assert_eq!(settings.msaa, MsaaSetting::Off);
     }
 }
 

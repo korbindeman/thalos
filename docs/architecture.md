@@ -65,6 +65,9 @@ apps/
 crates/
   vendor/
     big_space/                  # foundational, upstream-derived dependency
+  foundation/
+    diagnostics/                # event contract + JSONL sink, no Bevy;
+                                #   used by the game, tools, and offline bins
   domain/
     world/                      # authored body/system truth
     celestial/                  # physical far-field sky model

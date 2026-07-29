@@ -1,12 +1,12 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod aero;
-mod artifact_paths;
 mod autopilot;
 mod base_editor;
 mod body_tree_panel;
 mod bridge;
 mod camera;
+mod camera_optics;
 pub mod capture_health;
 mod control_bus;
 mod controls;
@@ -31,6 +31,7 @@ mod mem_diag;
 mod navball;
 mod navigation;
 mod pause_menu;
+mod perf;
 mod photo_mode;
 mod player_controller;
 mod reflection_probe;
@@ -73,7 +74,6 @@ use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::{
     RenderPlugin,
-    diagnostic::RenderDiagnosticsPlugin,
     settings::{Backends, RenderCreation, WgpuSettings},
 };
 use bevy::window::ExitCondition;
@@ -480,7 +480,18 @@ impl AppBuilder {
         // `crate::settings`), plus the THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE /
         // THALOS_VSYNC session overrides. Loaded before the app so the initial
         // window honours them.
-        let app_settings = settings::load();
+        let mut app_settings = settings::load();
+        if headless {
+            let graphics = std::env::var("THALOS_SCREENSHOT_GRAPHICS")
+                .ok()
+                .map(|raw| {
+                    thalos_capture_protocol::CaptureGraphicsOverrides::parse(&raw).unwrap_or_else(
+                        |error| panic!("invalid THALOS_SCREENSHOT_GRAPHICS: {error}"),
+                    )
+                })
+                .unwrap_or_default();
+            app_settings.graphics = graphics_settings::GraphicsSettings::for_capture(graphics);
+        }
         let win_overrides = window_settings::overrides_from_env();
         let window = window_settings::initial_window(&app_settings.window, &win_overrides);
         let wgpu_settings = wgpu_settings_from_env();
@@ -736,13 +747,15 @@ impl AppBuilder {
             // FPS/FRAME_TIME diagnostics for `hud/fps_overlay` (not part of
             // `DefaultPlugins`, so add it explicitly).
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
+            // Always-on perf telemetry: the F3 debug view, the runtime.jsonl
+            // perf lane, and the opt-in full-rate recorder. Also owns
+            // RenderDiagnosticsPlugin (GPU pass timings) for every lane —
+            // interactive and headless.
+            .add_plugins(perf::PerfPlugin)
             .add_plugins(ScenarioMenuPlugin)
             .add_plugins(NavballPlugin)
             .add_plugins(PhotoModePlugin)
             .add_plugins(ScreenshotPlugin)
-            // Unified persistence: one settings.ron with window/graphics/units
-            // sections, autosaved when any resource changes (see `crate::settings`).
-            .add_plugins(settings::AppSettingsPlugin)
             // Applies WindowSettings to the live window (mode / vsync / monitor /
             // windowed size) and folds the user UI scale into the fractional-HiDPI
             // crisp-text compensation.
@@ -767,6 +780,13 @@ impl AppBuilder {
             .add_plugins(mem_diag::MemDiagPlugin)
             .add_plugins(DebugPlugin);
 
+        // Headless graphics settings are request-scoped and must never rewrite
+        // the player's persisted preferences. Interactive launches keep the
+        // unified settings autosave; capture hosts deliberately do not.
+        if !headless {
+            app.add_plugins(settings::AppSettingsPlugin);
+        }
+
         // F8/F9 are a developer collaboration surface: the interactive app
         // gets the egui catalog manager and the quick-save prompt, while the
         // headless host only consumes the same authored JSON data.
@@ -784,7 +804,6 @@ impl AppBuilder {
             app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
                 1.0 / 60.0,
             )))
-            .add_plugins(RenderDiagnosticsPlugin)
             .add_plugins(screenshot::HeadlessScreenshotPlugin {
                 persistent: persistent_capture,
             })

@@ -385,9 +385,7 @@ fn fields(relief_m: f32, ao_strength: f32, ao_radius: usize) -> LayerFields {
 
 /// Every texel of one layer, as `(u, v)` in `[0, 1)` tile space, row-major.
 fn texels() -> impl Iterator<Item = (f32, f32)> {
-    (0..N).flat_map(|y| {
-        (0..N).map(move |x| (x as f32 / N as f32, y as f32 / N as f32))
-    })
+    (0..N).flat_map(|y| (0..N).map(move |x| (x as f32 / N as f32, y as f32 / N as f32)))
 }
 
 fn normalise_height(h: &mut [f32]) {
@@ -420,9 +418,7 @@ fn normalise_albedo(albedo: &mut [[f32; 3]]) {
 
     // Chroma damping first, in ratio space, so the mean solve below sees the
     // values that will actually be written. See `CHROMA_KEEP`.
-    let mean = [0, 1, 2].map(|ch| {
-        (albedo.iter().map(|c| c[ch]).sum::<f32>() / n).max(1.0e-5)
-    });
+    let mean = [0, 1, 2].map(|ch| (albedo.iter().map(|c| c[ch]).sum::<f32>() / n).max(1.0e-5));
     for c in albedo.iter_mut() {
         let ratio = [c[0] / mean[0], c[1] / mean[1], c[2] / mean[2]];
         let lum = 0.2126 * ratio[0] + 0.7152 * ratio[1] + 0.0722 * ratio[2];
@@ -438,8 +434,7 @@ fn normalise_albedo(albedo: &mut [[f32; 3]]) {
         // pathological layer (one where over half the texels saturate), which
         // would be an authoring bug worth seeing rather than silently fitting.
         for _ in 0..32 {
-            let realised: f32 =
-                albedo.iter().map(|c| soft_clip(c[ch] * gain)).sum::<f32>() / n;
+            let realised: f32 = albedo.iter().map(|c| soft_clip(c[ch] * gain)).sum::<f32>() / n;
             if (realised - ALBEDO_MEAN).abs() < 1.0e-4 {
                 break;
             }
@@ -488,17 +483,16 @@ fn derive_normal_ao(f: &LayerFields) -> (Vec<[f32; 2]>, Vec<f32>) {
     }
 
     let blurred = box_blur_wrapped(&f.h, f.ao_radius);
-    let ao = f
-        .h
-        .iter()
-        .zip(blurred.iter())
-        .map(|(h, b)| {
-            // Below the local mean = cavity. The 0.5 scale keeps a flat
-            // material at AO 1 rather than at a grey wash.
-            let cavity = ((b - h) / 0.5).clamp(0.0, 1.0);
-            1.0 - f.ao_strength * cavity
-        })
-        .collect();
+    let ao =
+        f.h.iter()
+            .zip(blurred.iter())
+            .map(|(h, b)| {
+                // Below the local mean = cavity. The 0.5 scale keeps a flat
+                // material at AO 1 rather than at a grey wash.
+                let cavity = ((b - h) / 0.5).clamp(0.0, 1.0);
+                1.0 - f.ao_strength * cavity
+            })
+            .collect();
     (normal, ao)
 }
 

@@ -1063,8 +1063,8 @@ const TREE_LANDCOVER_TINT: f32 = 0.55;
 /// Clamped to a sane band so a degenerate sample can't paint a red tree.
 fn canopy_landcover_tint(veg_color: Vec3) -> Vec2 {
     let g = veg_color.y.max(1.0e-4);
-    let ratio = Vec2::new(veg_color.x / g, veg_color.z / g)
-        .clamp(Vec2::splat(0.2), Vec2::splat(1.6));
+    let ratio =
+        Vec2::new(veg_color.x / g, veg_color.z / g).clamp(Vec2::splat(0.2), Vec2::splat(1.6));
     Vec2::ONE.lerp(ratio, TREE_LANDCOVER_TINT)
 }
 

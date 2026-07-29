@@ -286,15 +286,50 @@ const FINE_OCTAVES: [(f64, f64); 4] = [(700.0, 7.0), (300.0, 4.0), (130.0, 2.4),
 // gully networks (`bevy_erosion_filter`, Johansen's analytic erosion filter) —
 // the structure that makes aerial terrain read as carved rather than crumpled.
 
-/// The filter's `scale` in metres of the 2-D chart. Largest gully spacing is
+/// The filter's `scale` in metres of the 2-D chart.
+///
+/// **700 m, deliberately below the crate's own sizing rule.** Its README says
+/// `scale ≈ mountain_width / 5..10`, which for this ~15 km massif is 1.5–4 km —
+/// but that rule is for the case where the filter *drives the look*, over a base
+/// with nothing of its own at that scale. As a sharpening pass over model
+/// terrain that already has structure there, larger cells compete with the base
+/// instead of detailing it, and the filter's jittered-lattice cell grid becomes
+/// legible as tiling. Measured on `thalos-8-km` (matched 4K pair,
+/// `artifacts/visual/runs/sharpen-probe/cmp_700.png` vs `cmp_1500.png`):
+/// at 1.5 km the cells are large, high-contrast and regularly spaced with
+/// pronounced serrated edges; at 700 m the drainage still reads and the lattice
+/// drops to a texture. Going *up* was tried on that evidence and rejected. Largest gully spacing is
 /// `scale × cell_scale` (~1.7 km) — just below the 90 m raster's resolvable
 /// relief, running down `EROSION_MAX_OCTAVES` halvings to ~50 m.
-const EROSION_SCALE_M: f32 = 2_400.0;
-/// Carve amplitude: `strength × scale × ~2` bounds the octave ladder (≈ 60 m
-/// realized on steep faces). Round-1 finding at 0.03: the massif carved ~190 m
-/// mean and the inter-gully ridges became a spike-cone field — the filter's
-/// over-carve signature. Keep incision *below* the 90 m band's own relief.
-const EROSION_STRENGTH: f32 = 0.012;
+const EROSION_SCALE_M: f32 = 700.0;
+/// **`strength` is a SHAPE parameter, not a depth knob.** Each octave turns the
+/// filter's own gully direction by `strength · gully_weight / cell_scale`
+/// (the `scale` in both terms cancels), against a base direction of magnitude
+/// `assumed_slope.x`. That turning is what makes gullies *branch*: it is the
+/// only mechanism by which one octave's network departs from its parent's fall
+/// line.
+///
+/// Run below that regime and nothing branches. Every octave keeps the same fall
+/// line, the phacelle cells stay in phase across the whole ladder, and the band
+/// renders as a lattice of same-size same-orientation cells — the "tyre tread"
+/// over the showcase massif (INC-20260729T010500Z). Rounds 1–3 read that as an
+/// amplitude problem and pulled `strength` from 0.03 to 0.012, which is **1.7 %
+/// turn per octave against the filter's designed 22 %** — 13× below regime, and
+/// each cut made the lattice cleaner rather than weaker.
+///
+/// So the shape parameters now sit at the filter's own defaults, where the
+/// reference imagery comes from, and depth is set afterwards by
+/// [`EROSION_DEPTH_GAIN`] — which is what a depth knob should be.
+const EROSION_STRENGTH: f32 = 0.22;
+/// Carve depth, as a plain multiplier on the filter's rescaled delta. Keeps
+/// incision below the 90 m band's own relief (tuning target from the original
+/// round: ~60 m mean carve on the showcase massif) **without** touching the
+/// dynamics that produce the branching — see [`EROSION_STRENGTH`].
+const EROSION_DEPTH_GAIN: f64 = 0.06;
+/// Half-range of the fade target: the local relief, in metres, over which
+/// height sweeps the filter's valley→peak axis. Measured against the planetary
+/// band, so it is deviation from the regional trend, not altitude.
+const EROSION_FADE_RANGE_M: f64 = 500.0;
 const EROSION_MAX_OCTAVES: i32 = 6;
 /// Footprint the base-slope finite differences are taken at: the band steers by
 /// the model's own 90 m relief, never by content finer than itself.
@@ -627,7 +662,14 @@ impl DiffusionSurface {
     /// on its largest wavelength, and the filter's internal octave count adapts
     /// so no octave below `2·footprint` is evaluated — refinement adds
     /// bandwidth only, and coarse tiles never pay for the filter at all.
-    fn erosion_band(&self, dir: DVec3, footprint_m: f64, rough_scale: f64, base_h: f64) -> f64 {
+    fn erosion_band(
+        &self,
+        dir: DVec3,
+        footprint_m: f64,
+        rough_scale: f64,
+        base_h: f64,
+        planetary_h: f64,
+    ) -> f64 {
         let largest_wl = f64::from(EROSION_SCALE_M) * 0.7; // × default cell_scale
         let gate = footprint_gate(largest_wl, footprint_m);
         if gate <= 0.0 {
@@ -675,17 +717,20 @@ impl DiffusionSurface {
             scale: EROSION_SCALE_M,
             strength: EROSION_STRENGTH,
             octaves,
-            // Round-1 findings: default gully_weight (0.5) left cone fields
-            // between gullies, and the default onset ramp let the base-octave
-            // wave through on gentle ground, where its periodicity reads as a
-            // dot grid from altitude. Softer weight + slower onset, and the
-            // explicit slope gate below zeroes sub-carving ground entirely.
-            gully_weight: 0.34,
+            // `gully_weight` and `assumed_slope` stay at the filter's own
+            // defaults: rounds 1–3 softened them to fight symptoms of the
+            // under-regime `strength`, but both damp the branching advection,
+            // so they deepened the very lattice they were aimed at. (The blog
+            // is explicit that lowering `gully_weight` must be COMPENSATED by
+            // raising `strength` — rounds 1–3 lowered both.)
+            //
+            // `onset` is the exception, and round 2's finding stands on its own
+            // merits: it sets how gentle a slope still carves, and the default
+            // ramp lets the base octave through on near-flat ground, where the
+            // cell pattern has nothing to break its periodicity and reads as a
+            // lattice from altitude. That is a different failure from the
+            // strength one and needs its own fix. Kept at round 2's value.
             onset: defaults.onset * 0.6,
-            // The 90 m mesh understates true grades (see the tile shader's
-            // slope-threshold note), so the assumed-slope blend leans on the
-            // normalised direction more than the raw magnitude.
-            assumed_slope: Vec2::new(0.35, 0.85),
             ..defaults
         };
 
@@ -742,13 +787,38 @@ impl DiffusionSurface {
             // rills without touching the carve amplitude.
             // 900 m over 5.6 km ≈ 0.3 displacement strain — round-3's 450 m
             // (~0.15) still left a legible lattice on the volcano cone.
+            //
+            // A cell-scale warp octave was TRIED HERE and removed: it made no
+            // visible difference (`artifacts/visual/runs/sharpen-probe/`,
+            // vp_scale700 vs vp_warp2 are indistinguishable). A domain warp is a
+            // smooth displacement, so it *bends* the filter's cell lattice
+            // without disturbing its local periodicity — no warp octave, at any
+            // wavelength, can break the tiling. The lever that remains is
+            // per-octave rotation inside the filter itself.
             let wx = grad_noise(dir * (self.radius_m / 5_600.0), self.seed ^ 0xA51D);
             let wy = grad_noise(dir * (self.radius_m / 5_600.0), self.seed ^ 0x3C7B);
             let p = Vec2::new(
                 (pa + 900.0 * wx) as f32 + (off & 0xffff) as f32,
                 (pb + 900.0 * wy) as f32 + ((off >> 16) & 0xffff) as f32,
             );
-            let fade = ((h_c / 3_000.0) as f32).clamp(-1.0, 1.0);
+            // Fade target, per the filter author's own definition:
+            // `inverse_lerp(valleyAlt, peakAlt, h) · 2 − 1`, i.e. **signed**,
+            // −1 in valleys and +1 on peaks, over the range the local terrain
+            // actually spans. It is what places gullies against ridges, and the
+            // filter expects it to sweep that whole range.
+            //
+            // It used to be `clamp(h_c / 3000)` — absolute altitude against a
+            // fixed divisor — which is wrong in both directions: it never goes
+            // negative anywhere on land, so the valley end of the filter's
+            // behaviour was unreachable, and above 3 km it saturates, so across
+            // the whole showcase massif (3.0–5.8 km) it was **pinned at +1**.
+            // An input the filter varies its pattern by was a constant exactly
+            // where the pattern looked most uniform.
+            //
+            // Locality comes from measuring against the *regional trend*
+            // (the planetary band) rather than sea level, so the same relief
+            // reads the same way on a coastal hill and at 5 km.
+            let fade = (((h_c - planetary_h) / EROSION_FADE_RANGE_M) as f32).clamp(-1.0, 1.0);
             // Where the slope-onset masks zero the carving, the filter still
             // advances height by `fade_target · strength` per octave (its
             // fade-anchor ramp), so `delta.x` carries a pure `fade · magnitude`
@@ -783,7 +853,7 @@ impl DiffusionSurface {
         }
         // Relief-energy conditioning like the fine band, capped so the most
         // rugged windows don't carve at double depth.
-        gate * land * rough_scale.min(1.4) * (sum / wsum)
+        gate * land * rough_scale.min(1.4) * EROSION_DEPTH_GAIN * (sum / wsum)
     }
 
     fn height(&self, dir: DVec3, footprint_m: f64) -> f64 {
@@ -791,7 +861,7 @@ impl DiffusionSurface {
         let (residual, rough_scale) = self.detail_residual(dir, footprint_m, planetary);
         let base = planetary + residual;
         base + self.fine_band(dir, footprint_m, rough_scale)
-            + self.erosion_band(dir, footprint_m, rough_scale, base)
+            + self.erosion_band(dir, footprint_m, rough_scale, base, planetary)
     }
 
     /// Sample + dominant biome class — the `world_map` export's view, mirroring

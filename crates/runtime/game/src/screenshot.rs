@@ -24,7 +24,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -50,14 +50,17 @@ use thalos_body_render::{
     BodyTerrainMaterial, CloudsConfig, HeightSource, cloud_target_memory_for,
 };
 use thalos_capture_protocol::{
-    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureRequest, CaptureResponse,
-    CaptureServerState, Viewpoint,
+    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CameraOptics as CameraOpticsSpec, CaptureAction,
+    CaptureCameraOverride, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
+    CaptureServerState, CaptureSourceSnapshot, CapturedCameraState, Viewpoint,
 };
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
+use crate::camera_optics::CameraOptics;
+use crate::graphics_settings::GraphicsSettings;
 use crate::loading::AppState;
 use crate::rendering::contact_shadow::ContactShadowConfig;
 use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
@@ -347,6 +350,15 @@ pub enum ScreenshotPreset {
     CloudPlanet,
     /// Near-surface view toward a sun placed just above the local horizon.
     CloudSunset,
+    /// **The CLOUD-5 §3.5 crepuscular-shaft probe** — and the deterministic
+    /// cloudy-LAND framing the CLOUD-5 verification notes called for. Searches
+    /// the constant-sun-elevation circle for the highest-coverage weather
+    /// texel over land, then poses a near-ground camera looking sunward under
+    /// that broken deck, where forward Mie scatter makes shafts through cloud
+    /// gaps read strongest. Pair with the `godray` compare axis
+    /// (`THALOS_CLOUD_GODRAY`), which toggles only the atmosphere march's
+    /// cascade term while ground shadows stay on.
+    CloudGodray,
     /// Three-quarter hero shot of a firing rocket engine, for iterating on the
     /// plume look. Boots a plain orbit (space/planet backdrop), forces the engine
     /// to full throttle, and drives the plume's ambient pressure via
@@ -421,14 +433,18 @@ impl CloudCaptureQuality {
     }
 
     fn view_steps(self) -> u32 {
-        // Banded march budgets (thalos::atmosphere march contract): 176 steps
-        // reach the full 300 km cap; Low's 112 reaches ~92 km — still past
-        // the old 67 km everywhere-600 m reach.
+        // Broad-probe reach budgets (2026-07-29 resize; the predecessor
+        // comment's "176 reaches 300 km" dated from the 600 m step floor and
+        // silently halved when the floor did). Under the 300 m floor +
+        // broad-only accounting + footprint-relaxed refine: 512 ≈ 210 km of
+        // grazing reach from a cruise shell entry, 672 ≈ 300 km (the
+        // compile-time cap, where cells go marginal and the far tier's
+        // derived sharp response owns the tail).
         match self {
-            Self::Low => 112,
-            Self::Baseline => 176,
-            Self::High => 192,
-            Self::Reference => 224,
+            Self::Low => 256,
+            Self::Baseline => 512,
+            Self::High => 576,
+            Self::Reference => 672,
         }
     }
 
@@ -561,6 +577,7 @@ impl ScreenshotPreset {
         Self::CloudLimb,
         Self::CloudPlanet,
         Self::CloudSunset,
+        Self::CloudGodray,
         Self::Plume,
         Self::PlumeSkyline,
         Self::MassifAerial,
@@ -593,6 +610,7 @@ impl ScreenshotPreset {
             Self::CloudLimb => "cloud-limb",
             Self::CloudPlanet => "cloud-planet",
             Self::CloudSunset => "cloud-sunset",
+            Self::CloudGodray => "cloud-godray",
             Self::Plume => "plume",
             Self::PlumeSkyline => "plume-skyline",
             Self::MassifAerial => "massif-aerial",
@@ -612,9 +630,7 @@ impl ScreenshotPreset {
             "runway-atmosphere" | "runway_atmosphere" | "runway-sky" | "surface-atmosphere" => {
                 Self::RunwayAtmosphere
             }
-            "paved-ground" | "paved_ground" | "pavement" | "taxiway" | "apron" => {
-                Self::PavedGround
-            }
+            "paved-ground" | "paved_ground" | "pavement" | "taxiway" | "apron" => Self::PavedGround,
             "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
             "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
             "forest" | "forest-stand" | "foreststand" | "trees" => Self::ForestStand,
@@ -639,6 +655,8 @@ impl ScreenshotPreset {
             "cloud-planet" | "cloud_planet" | "cloud-globe" | "cloud_globe" | "cloud-disc"
             | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
             "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
+            "cloud-godray" | "cloud_godray" | "godray" | "godrays" | "god-rays"
+            | "cloud-shafts" | "light-shafts" | "crepuscular" => Self::CloudGodray,
             "plume" | "engine" | "exhaust" | "rocket" => Self::Plume,
             "plume-skyline" | "plume_skyline" | "plume-sky" | "plume-ascent" => Self::PlumeSkyline,
             "massif-aerial" | "massif_aerial" | "massif" | "mountains" => Self::MassifAerial,
@@ -684,7 +702,8 @@ impl ScreenshotPreset {
             | Self::CloudInterior
             | Self::CloudLimb
             | Self::CloudPlanet
-            | Self::CloudSunset => SpawnSituation::ShipOrbit,
+            | Self::CloudSunset
+            | Self::CloudGodray => SpawnSituation::ShipOrbit,
             // Plain orbit: space/planet backdrop, engine forced to fire.
             Self::Plume => SpawnSituation::ShipOrbit,
             // Final approach: the rocket airborne at ~1.5 km AGL over flat dry
@@ -735,7 +754,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("latest_perspective.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("latest_perspective.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -753,7 +772,7 @@ impl ScreenshotPreset {
                 warmup_frames: 180,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("spaceport_aerial.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("spaceport_aerial.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -774,7 +793,7 @@ impl ScreenshotPreset {
                 warmup_frames: 480,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("runway_atmosphere.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("runway_atmosphere.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -796,7 +815,7 @@ impl ScreenshotPreset {
                 warmup_frames: 480,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("paved_ground.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("paved_ground.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -816,7 +835,7 @@ impl ScreenshotPreset {
                 warmup_frames: 240,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("hub.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("hub.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -838,7 +857,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("dry_belt.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("dry_belt.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -861,7 +880,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("forest_stand.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("forest_stand.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -884,7 +903,7 @@ impl ScreenshotPreset {
                 warmup_frames: 300,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("cloud_runway.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_runway.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     // Human-scale weather acceptance view: just above the
                     // runway, pitched into the cloud-bearing sky. The old
@@ -904,7 +923,7 @@ impl ScreenshotPreset {
                 let mut cfg = Self::CloudRunway.defaults();
                 cfg.preset = self;
                 cfg.out = PathBuf::from("artifacts/visual/latest/cloud_motion.png");
-                cfg.report = crate::artifact_paths::default_jsonl_path("cloud_motion.jsonl");
+                cfg.report = thalos_diagnostics::paths::default_jsonl_path("cloud_motion.jsonl");
                 // End directly toward the projected sun, where forward-scatter
                 // contrast makes stale history easiest to see.
                 cfg.azimuth_deg = 0.0;
@@ -923,7 +942,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("cloud_cruise.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_cruise.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     // Above the ordinary cumulus deck but below the tallest
                     // authored storm tops: the aviation-scale view across
@@ -951,7 +970,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("cloud_interior.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_interior.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 2_650.0,
                     look_elevation_deg: 0.0,
@@ -977,7 +996,7 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("cloud_limb.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_limb.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 200_000.0,
                     look_elevation_deg: 0.35,
@@ -1006,7 +1025,7 @@ impl ScreenshotPreset {
                 warmup_frames: 240,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("cloud_planet.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_planet.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     // Outside the terrain LOD swap (4× radius ≈ 12.7 Mm for
                     // Thalos): SolidPlanet owns the disc so the CLOUD-6 orbital
@@ -1035,11 +1054,43 @@ impl ScreenshotPreset {
                 warmup_frames: 360,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("cloud_sunset.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_sunset.jsonl"),
                 framing: ScreenshotFraming::LocalCloud {
                     camera_altitude_m: 700.0,
                     look_elevation_deg: 1.5,
                     site_sun_elevation_deg: Some(1.0),
+                    tangent_limb: false,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::CloudGodray => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/cloud_godray.png"),
+                width: 1920,
+                height: 1080,
+                // Azimuth 0 faces the projected sun (`pose_local_cloud_camera`),
+                // where forward Mie scatter gives shafts their contrast.
+                azimuth_deg: 0.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                // Cold tile streaming to a searched wild land site (same
+                // reasoning as `DryBelt`), plus cloud/temporal convergence.
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_godray.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    // Near-ground under the deck, pitched into the cloud-bearing
+                    // sky: the air column between camera and cloud base is where
+                    // the shafts live. Sun mid-height — well above the cascade's
+                    // ~3.4° stand-down, low enough for long slanted beams.
+                    camera_altitude_m: 250.0,
+                    look_elevation_deg: 14.0,
+                    site_sun_elevation_deg: Some(25.0),
                     tangent_limb: false,
                     look_at_body_center: false,
                 },
@@ -1071,7 +1122,7 @@ impl ScreenshotPreset {
                 warmup_frames: 90,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("plume.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("plume.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1105,7 +1156,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("plume_skyline.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("plume_skyline.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1131,7 +1182,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("massif_aerial.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("massif_aerial.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1156,7 +1207,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("massif_ridge.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("massif_ridge.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1180,7 +1231,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("massif_valley.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("massif_valley.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1200,7 +1251,7 @@ impl ScreenshotPreset {
                 warmup_frames: 480,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("earth_reference.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("earth_reference.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1223,7 +1274,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("ocean.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("ocean.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1241,7 +1292,7 @@ impl ScreenshotPreset {
                 warmup_frames: 600,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("ocean_slopes.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("ocean_slopes.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1262,7 +1313,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("mira_orbit.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("mira_orbit.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1283,7 +1334,7 @@ impl ScreenshotPreset {
                 warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("mira_surface.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("mira_surface.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1304,7 +1355,7 @@ impl ScreenshotPreset {
                 warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("mira_eva.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("mira_eva.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1332,7 +1383,7 @@ impl ScreenshotPreset {
                 warmup_frames: 720,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("mira_disc.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("mira_disc.jsonl"),
                 // Exactly half-lit with the terminator running vertically down
                 // frame centre, unlit half to the left.
                 framing: ScreenshotFraming::BodyDisc {
@@ -1360,7 +1411,7 @@ impl ScreenshotPreset {
                 warmup_frames: 900,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("mira_approach.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("mira_approach.jsonl"),
                 // Cross-lit at 70° off the sun bearing: grazing enough for long
                 // rim shadows, with the terrain falling into darkness on the
                 // left of frame.
@@ -1394,7 +1445,7 @@ impl ScreenshotPreset {
                 warmup_frames: 1_200,
                 tail_frames: 24,
                 keep_hud: false,
-                report: crate::artifact_paths::default_jsonl_path("mira_rim.jsonl"),
+                report: thalos_diagnostics::paths::default_jsonl_path("mira_rim.jsonl"),
                 // Look *across* the crater with the sun low and off to one
                 // side, so the near rim shadows the floor and the far terraces
                 // catch the light — the reference crater-rim read.
@@ -1458,6 +1509,17 @@ pub struct ScreenshotConfig {
     pub cloud_coverage_scale: Option<f32>,
 }
 
+const SAFE_HEADLESS_VIEWPORT: [u32; 2] = [1920, 1080];
+
+fn default_headless_extent_for_aspect([width, height]: [u32; 2]) -> [u32; 2] {
+    let [max_width, max_height] = SAFE_HEADLESS_VIEWPORT;
+    let scale = (max_width as f64 / width as f64).min(max_height as f64 / height as f64);
+    [
+        ((width as f64 * scale).round() as u32).max(1),
+        ((height as f64 * scale).round() as u32).max(1),
+    ]
+}
+
 impl ScreenshotConfig {
     /// Resolve a request from the environment. `None` unless `THALOS_SCREENSHOT`
     /// is set (that presence is what switches the whole binary into headless
@@ -1470,6 +1532,8 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_SIZE` — `WIDTHxHEIGHT` (e.g. `2560x1440`).
     /// - `THALOS_SCREENSHOT_AZIMUTH` / `_ELEVATION` — camera angles, degrees.
     /// - `THALOS_SCREENSHOT_DISTANCE` — boom distance, metres.
+    /// - `THALOS_SCREENSHOT_TIME` — canonical simulation time in seconds.
+    ///   Saved viewpoints use their recorded time when this is unset.
     /// - `THALOS_SCREENSHOT_WARMUP` — warmup frames before the capture.
     /// - `THALOS_SCREENSHOT_CAMERA_ALTITUDE` / `_LOOK_ELEVATION` — local cloud
     ///   camera AGL and look angle above the horizon.
@@ -1488,6 +1552,8 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION` — stacked or
     ///   coverage-preserving; capture-only far opacity A/B.
     /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
+    /// - `THALOS_SCREENSHOT_GRAPHICS` — cold-capture compatibility form for
+    ///   typed graphics settings, e.g. `clouds=off,grass=on`.
     /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults under
     ///   `artifacts/diagnostics/`).
     /// - `THALOS_SCREENSHOT_OCEAN_TIME` — optional fixed canonical ocean time
@@ -1499,8 +1565,15 @@ impl ScreenshotConfig {
         let overrides = CAPTURE_OVERRIDE_KEYS
             .iter()
             .filter_map(|key| env::var(key).ok().map(|value| ((*key).to_owned(), value)))
-            .collect();
+            .collect::<BTreeMap<_, _>>();
         cfg.apply_overrides(&overrides);
+        cfg.validate_output_aspect()
+            .unwrap_or_else(|error| panic!("invalid capture framing: {error}"));
+        resolve_capture_time_s(
+            cfg.viewpoint.as_ref().map(|viewpoint| viewpoint.sim_time_s),
+            overrides.get("THALOS_SCREENSHOT_TIME").map(String::as_str),
+        )
+        .unwrap_or_else(|error| panic!("invalid capture time: {error}"));
         Some(cfg)
     }
 
@@ -1511,7 +1584,7 @@ impl ScreenshotConfig {
                 .unwrap_or_else(|error| panic!("could not load the latest viewpoint: {error}"));
             cfg.apply_viewpoint(viewpoint);
             cfg.out = PathBuf::from("artifacts/visual/latest/latest_perspective.png");
-            cfg.report = crate::artifact_paths::default_jsonl_path("latest_perspective.jsonl");
+            cfg.report = thalos_diagnostics::paths::default_jsonl_path("latest_perspective.jsonl");
         }
         cfg
     }
@@ -1527,13 +1600,13 @@ impl ScreenshotConfig {
     }
 
     fn apply_viewpoint(&mut self, viewpoint: Viewpoint) {
-        self.width = viewpoint.viewport[0];
-        self.height = viewpoint.viewport[1];
+        [self.width, self.height] =
+            default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect);
         self.out = PathBuf::from(format!(
             "artifacts/visual/latest/{}.png",
             viewpoint.id.replace('-', "_")
         ));
-        self.report = crate::artifact_paths::default_jsonl_path(&format!(
+        self.report = thalos_diagnostics::paths::default_jsonl_path(&format!(
             "viewpoint_{}.jsonl",
             viewpoint.id.replace('-', "_")
         ));
@@ -1545,6 +1618,21 @@ impl ScreenshotConfig {
             .as_ref()
             .map(crate::viewpoints::viewpoint_scene_name)
             .unwrap_or_else(|| self.preset.name().to_owned())
+    }
+
+    fn validate_output_aspect(&self) -> Result<(), String> {
+        let Some(viewpoint) = self.viewpoint.as_ref() else {
+            return Ok(());
+        };
+        let sensor = viewpoint.optics.sensor.aspect;
+        let output = [self.width, self.height];
+        if !same_aspect(sensor, output) {
+            return Err(format!(
+                "viewpoint {} uses a {}:{} sensor window, but output is {}:{}; choose a matching output aspect until an explicit crop/fit policy exists",
+                viewpoint.id, sensor[0], sensor[1], output[0], output[1]
+            ));
+        }
+        Ok(())
     }
 
     fn apply_overrides(&mut self, overrides: &BTreeMap<String, String>) {
@@ -1659,6 +1747,7 @@ const CAPTURE_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_AZIMUTH",
     "THALOS_SCREENSHOT_ELEVATION",
     "THALOS_SCREENSHOT_DISTANCE",
+    "THALOS_SCREENSHOT_TIME",
     "THALOS_SCREENSHOT_WARMUP",
     "THALOS_SCREENSHOT_HUD",
     "THALOS_SCREENSHOT_CAMERA_ALTITUDE",
@@ -1720,22 +1809,109 @@ fn parse_bool(raw: &str) -> Option<bool> {
     }
 }
 
+fn resolve_capture_time_s(
+    viewpoint_time_s: Option<f64>,
+    override_raw: Option<&str>,
+) -> Result<Option<f64>, String> {
+    let Some(raw) = override_raw else {
+        return Ok(viewpoint_time_s);
+    };
+    let time = raw
+        .trim()
+        .parse::<f64>()
+        .map_err(|_| format!("THALOS_SCREENSHOT_TIME expects canonical seconds, got {raw:?}"))?;
+    if !time.is_finite() {
+        return Err(format!(
+            "THALOS_SCREENSHOT_TIME expects a finite value, got {raw:?}"
+        ));
+    }
+    Ok(Some(time))
+}
+
 /// Parse a `WIDTHxHEIGHT` string (`x` or `*` separator).
 fn parse_size(s: &str) -> Option<(u32, u32)> {
     let (w, h) = s.trim().split_once(['x', 'X', '*'])?;
     Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
 }
 
+fn same_aspect([left_w, left_h]: [u32; 2], [right_w, right_h]: [u32; 2]) -> bool {
+    u64::from(left_w) * u64::from(right_h) == u64::from(right_w) * u64::from(left_h)
+}
+
+#[cfg(test)]
+mod capture_time_tests {
+    use super::{
+        PersistentCaptureServer, default_headless_extent_for_aspect, resolve_capture_time_s,
+        same_aspect, sync_persistent_capture_activity,
+    };
+    use crate::camera::ShipCamera;
+    use bevy::prelude::*;
+
+    #[test]
+    fn viewpoint_time_is_the_default_and_caller_time_wins() {
+        assert_eq!(
+            resolve_capture_time_s(Some(59_100.0), None).unwrap(),
+            Some(59_100.0)
+        );
+        assert_eq!(
+            resolve_capture_time_s(Some(59_100.0), Some("72000")).unwrap(),
+            Some(72_000.0)
+        );
+        assert_eq!(
+            resolve_capture_time_s(None, Some("-120.5")).unwrap(),
+            Some(-120.5)
+        );
+    }
+
+    #[test]
+    fn caller_time_must_be_finite_canonical_seconds() {
+        assert!(resolve_capture_time_s(None, Some("dawn")).is_err());
+        assert!(resolve_capture_time_s(None, Some("NaN")).is_err());
+        assert!(resolve_capture_time_s(None, Some("inf")).is_err());
+    }
+
+    #[test]
+    fn sensor_aspect_gets_a_safe_default_output_extent() {
+        assert_eq!(default_headless_extent_for_aspect([16, 9]), [1920, 1080]);
+        assert_eq!(default_headless_extent_for_aspect([8, 5]), [1728, 1080]);
+        assert_eq!(default_headless_extent_for_aspect([4, 3]), [1440, 1080]);
+    }
+
+    #[test]
+    fn output_pixels_may_scale_but_not_silently_change_sensor_aspect() {
+        assert!(same_aspect([16, 9], [3840, 2160]));
+        assert!(same_aspect([4, 3], [1600, 1200]));
+        assert!(!same_aspect([16, 9], [1600, 1200]));
+    }
+
+    #[test]
+    fn persistent_camera_only_renders_for_an_active_request() {
+        let mut app = App::new();
+        app.insert_resource(PersistentCaptureServer::default())
+            .add_systems(Update, sync_persistent_capture_activity);
+        let camera = app.world_mut().spawn((Camera::default(), ShipCamera)).id();
+
+        app.update();
+        assert!(!app.world().get::<Camera>(camera).unwrap().is_active);
+
+        app.world_mut()
+            .resource_mut::<PersistentCaptureServer>()
+            .active_id = Some("request".into());
+        app.update();
+        assert!(app.world().get::<Camera>(camera).unwrap().is_active);
+    }
+}
+
 fn capture_request_path() -> PathBuf {
-    crate::artifact_paths::default_diagnostic_path(CAPTURE_REQUEST_FILENAME)
+    thalos_diagnostics::paths::default_diagnostic_path(CAPTURE_REQUEST_FILENAME)
 }
 
 fn capture_response_path() -> PathBuf {
-    crate::artifact_paths::default_diagnostic_path(CAPTURE_RESPONSE_FILENAME)
+    thalos_diagnostics::paths::default_diagnostic_path(CAPTURE_RESPONSE_FILENAME)
 }
 
 fn capture_server_state_path() -> PathBuf {
-    crate::artifact_paths::default_diagnostic_path(CAPTURE_SERVER_STATE_FILENAME)
+    thalos_diagnostics::paths::default_diagnostic_path(CAPTURE_SERVER_STATE_FILENAME)
 }
 
 #[derive(Resource, Debug, Default)]
@@ -1750,6 +1926,18 @@ struct PersistentCaptureServer {
     shader_reload_unix_ms: u128,
     settle_frames: u32,
     heartbeat_frame: u32,
+    /// Renderer build inputs recorded by the controller before this host booted.
+    source: CaptureSourceSnapshot,
+    /// Full capture inputs attributed to the active/most recent request. This
+    /// may advance beyond `source` when WGSL hot reloads without a Rust rebuild.
+    active_source: CaptureSourceSnapshot,
+    requested_camera: CaptureCameraOverride,
+    active_camera: Option<CapturedCameraState>,
+    active_graphics: Option<CaptureGraphicsSettings>,
+    /// Last requested render state. The normal camera authority reasserts the
+    /// active gameplay camera in `Update`; the persistent host overrides that
+    /// decision in `Last`, immediately before extraction.
+    render_active: bool,
 }
 
 impl PersistentCaptureServer {
@@ -1769,6 +1957,7 @@ impl PersistentCaptureServer {
             completed_captures: self.completed_captures,
             shader_reload_unix_ms: self.shader_reload_unix_ms,
             heartbeat_unix_ms: timestamp_millis(),
+            source: self.source.clone(),
         };
         if let Err(error) = write_json(capture_server_state_path(), &state) {
             warn!(target: "thalos::screenshot", "could not publish capture-server state: {error}");
@@ -1783,6 +1972,9 @@ impl PersistentCaptureServer {
             message: message.into(),
             output: output.map(|path| path.display().to_string()),
             completed_unix_ms: timestamp_millis(),
+            source: self.active_source.clone(),
+            camera: self.active_camera,
+            graphics: self.active_graphics,
         };
         if let Err(error) = write_json(capture_response_path(), &response) {
             warn!(target: "thalos::screenshot", "could not publish capture response: {error}");
@@ -1813,6 +2005,9 @@ struct ScreenshotDriver {
     retargeted: bool,
     /// Frames spent posing the camera in `Running` before the capture.
     running_frames: u32,
+    /// Whether the request's saved/overridden epoch has been installed. This
+    /// is reset for every persistent-host request, including identical scenes.
+    capture_time_applied: bool,
     /// The capture has been requested (screenshot entity spawned).
     captured: bool,
     /// Frames since the capture, for the readback-flush tail.
@@ -1906,6 +2101,12 @@ impl Plugin for HeadlessScreenshotPlugin {
                     .after(crate::SimStage::Camera)
                     .run_if(in_state(AppState::Running)),
             )
+            .add_systems(
+                Update,
+                apply_capture_time
+                    .before(crate::SimStage::Physics)
+                    .run_if(in_state(AppState::Running)),
+            )
             // Diagnostic transect across the spaceport basin (headless runs
             // only): resident tile LOD + rendered height vs the basin plane.
             .add_systems(Update, probe_apron_lod.run_if(in_state(AppState::Running)));
@@ -1916,13 +2117,22 @@ impl Plugin for HeadlessScreenshotPlugin {
                 .add_systems(
                     Update,
                     (
-                        poll_capture_requests.before(apply_live_capture_diagnostics),
+                        poll_capture_requests
+                            .before(apply_live_capture_diagnostics)
+                            .before(apply_capture_time),
                         publish_capture_server_state,
                     )
                         .chain()
                         .before(drive_headless_screenshot),
                 )
-                .add_systems(Update, record_shader_reloads);
+                .add_systems(Update, record_shader_reloads)
+                // Camera ownership systems may reactivate the ship camera in
+                // Update/PostUpdate. Park it in Last so this is the final
+                // decision before render extraction.
+                .add_systems(
+                    Last,
+                    (sync_persistent_capture_activity, throttle_idle_capture_host).chain(),
+                );
         }
     }
 }
@@ -1945,7 +2155,21 @@ fn initialize_capture_server(
     server.boot_height = cfg.height;
     server.compatible_presets = compatible_presets(&cfg);
     server.settle_frames = env_parse("THALOS_CAPTURE_SETTLE_FRAMES").unwrap_or(60);
+    server.source = capture_source_snapshot_from_env();
+    server.active_source = server.source.clone();
     server.publish(false);
+}
+
+fn capture_source_snapshot_from_env() -> CaptureSourceSnapshot {
+    CaptureSourceSnapshot {
+        fingerprint: env::var("THALOS_CAPTURE_SOURCE_FINGERPRINT").unwrap_or_default(),
+        build_fingerprint: env::var("THALOS_CAPTURE_BUILD_FINGERPRINT").unwrap_or_default(),
+        git_revision: env::var("THALOS_CAPTURE_GIT_REVISION").unwrap_or_default(),
+        working_tree_dirty: env::var("THALOS_CAPTURE_GIT_DIRTY")
+            .ok()
+            .and_then(|value| parse_bool(&value))
+            .unwrap_or(false),
+    }
 }
 
 /// Presets whose app-builder inputs and render-target extent match the booted
@@ -1985,7 +2209,8 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
                     viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
                         && SpawnSituation::from(viewpoint.spawn) == boot.spawn_situation()
                         && viewpoint.boots_hub == boot.boots_hub()
-                        && viewpoint.viewport == [boot.width, boot.height]
+                        && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
+                            == [boot.width, boot.height]
                 })
                 .map(crate::viewpoints::viewpoint_scene_name),
         );
@@ -1993,7 +2218,8 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
             viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
                 && SpawnSituation::from(viewpoint.spawn) == boot.spawn_situation()
                 && viewpoint.boots_hub == boot.boots_hub()
-                && viewpoint.viewport == [boot.width, boot.height]
+                && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
+                    == [boot.width, boot.height]
         }) {
             scenes.push("latest-perspective".to_owned());
         }
@@ -2017,8 +2243,48 @@ fn publish_capture_server_state(
     }
 }
 
+/// Keep the expensive render world asleep between requests while preserving
+/// the booted ECS world, GPU resources, and off-screen target for reuse.
+///
+/// `Camera::is_active = false` prevents extraction and all downstream render
+/// passes. A new request flips it back on in the same `Update` that arms the
+/// screenshot driver, before render extraction for that frame.
+fn sync_persistent_capture_activity(
+    mut server: ResMut<PersistentCaptureServer>,
+    mut cameras: Query<&mut Camera, With<ShipCamera>>,
+) {
+    let should_render = server.active_id.is_some();
+    let Ok(mut camera) = cameras.single_mut() else {
+        return;
+    };
+    if camera.is_active != should_render {
+        camera.is_active = should_render;
+    }
+    if server.render_active != should_render {
+        server.render_active = should_render;
+        info!(
+            target: "thalos::diagnostic::capture",
+            event = "persistent_render_activity",
+            active = should_render,
+            "persistent capture render activity changed"
+        );
+    }
+}
+
+const IDLE_CAPTURE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// `ScheduleRunnerPlugin` otherwise advances the complete app at 60 Hz forever,
+/// even after the camera has been parked. Poll slowly while idle: this keeps
+/// request latency below 100 ms without burning a CPU core on an empty loop.
+fn throttle_idle_capture_host(server: Res<PersistentCaptureServer>) {
+    if server.active_id.is_none() {
+        std::thread::sleep(IDLE_CAPTURE_POLL_INTERVAL);
+    }
+}
+
 fn poll_capture_requests(
     mut cfg: ResMut<ScreenshotConfig>,
+    mut graphics: ResMut<GraphicsSettings>,
     mut runtime: ResMut<CaptureRuntimeOverrides>,
     mut driver: ResMut<ScreenshotDriver>,
     mut server: ResMut<PersistentCaptureServer>,
@@ -2059,8 +2325,30 @@ fn poll_capture_requests(
         server.respond(&request.id, false, "unknown capture action", None);
         return;
     }
+    if let Err(error) = request.camera.validate() {
+        server.respond(&request.id, false, error, None);
+        return;
+    }
     if server.active_id.is_some() {
         server.respond(&request.id, false, "capture server is already busy", None);
+        return;
+    }
+    server.active_source = request.source.clone();
+    server.requested_camera = request.camera;
+    server.active_camera = None;
+    if !request.source.build_fingerprint.is_empty()
+        && request.source.build_fingerprint != server.source.build_fingerprint
+    {
+        server.respond(
+            &request.id,
+            false,
+            format!(
+                "capture host build {} does not include requested source {}; restart required",
+                short_fingerprint(&server.source.build_fingerprint),
+                short_fingerprint(&request.source.build_fingerprint),
+            ),
+            None,
+        );
         return;
     }
 
@@ -2090,6 +2378,22 @@ fn poll_capture_requests(
         }
     };
     next.apply_overrides(&request.overrides);
+    if let Err(error) = next.validate_output_aspect() {
+        server.respond(&request.id, false, error, None);
+        return;
+    }
+    if let Err(error) = resolve_capture_time_s(
+        next.viewpoint
+            .as_ref()
+            .map(|viewpoint| viewpoint.sim_time_s),
+        request
+            .overrides
+            .get("THALOS_SCREENSHOT_TIME")
+            .map(String::as_str),
+    ) {
+        server.respond(&request.id, false, error, None);
+        return;
+    }
     if !next
         .target_body_name()
         .eq_ignore_ascii_case(cfg.target_body_name())
@@ -2142,11 +2446,25 @@ fn poll_capture_requests(
         next.warmup_frames = server.settle_frames;
     }
 
+    let next_graphics = GraphicsSettings::for_capture(request.graphics);
+    server.active_graphics = Some(CaptureGraphicsSettings {
+        clouds: next_graphics.clouds,
+        grass: next_graphics.grass,
+    });
+    *graphics = next_graphics;
     runtime.values = request.overrides;
     *cfg = next;
     driver.running_frames = 0;
+    driver.capture_time_applied = false;
     driver.captured = false;
     driver.tail = 0;
+    // A caller-time jump can change every sun-relative/site search. Re-resolve
+    // those body-fixed choices instead of carrying a site selected at the
+    // previous request's epoch across the persistent host.
+    driver.dry_site_dir = None;
+    driver.forest_site_dir = None;
+    driver.ocean_site_dir = None;
+    driver.airless_site = None;
     // Re-arm the massif streaming hold: a new request may frame a different
     // (cold) site. When the ground is already streamed the gate re-passes in
     // one settled check, so warm re-captures stay fast.
@@ -2156,6 +2474,55 @@ fn poll_capture_requests(
     driver.terrain_lod_hold_s = 0.0;
     server.active_id = Some(request.id);
     server.publish(driver.retargeted);
+}
+
+fn short_fingerprint(fingerprint: &str) -> &str {
+    fingerprint.get(..12).unwrap_or(fingerprint)
+}
+
+/// Apply the authored viewpoint epoch (or the caller's explicit override)
+/// after deferred scene construction has installed its canonical boot time,
+/// but before the frame's simulation and solar-system sync consume it.
+///
+/// This intentionally changes only canonical time. The spawn still owns craft
+/// state, so a viewpoint remains a camera/environment bookmark rather than a
+/// partial save game.
+fn apply_capture_time(
+    cfg: Res<ScreenshotConfig>,
+    runtime: Res<CaptureRuntimeOverrides>,
+    mut driver: ResMut<ScreenshotDriver>,
+    mut sim: ResMut<SimulationState>,
+) {
+    if driver.capture_time_applied {
+        return;
+    }
+    let requested = match resolve_capture_time_s(
+        cfg.viewpoint.as_ref().map(|viewpoint| viewpoint.sim_time_s),
+        runtime.get("THALOS_SCREENSHOT_TIME"),
+    ) {
+        Ok(requested) => requested,
+        Err(error) => {
+            error!(target: "thalos::screenshot", "{error}");
+            driver.capture_time_applied = true;
+            return;
+        }
+    };
+    driver.capture_time_applied = true;
+    let Some(time_s) = requested else {
+        return;
+    };
+    sim.simulation.set_sim_time(time_s);
+    info!(
+        target: "thalos::diagnostic::capture",
+        event = "capture_time_applied",
+        sim_time_s = time_s,
+        source = if runtime.get("THALOS_SCREENSHOT_TIME").is_some() {
+            "caller_override"
+        } else {
+            "viewpoint_metadata"
+        },
+        "capture time applied"
+    );
 }
 
 /// Apply capture-only cloud quality controls once, after the cloud plugin's
@@ -2280,6 +2647,7 @@ fn apply_live_capture_diagnostics(
     ssao.apply_capture_mode(runtime.get("THALOS_SSAO"));
     contact_shadow.apply_capture_mode(runtime.get("THALOS_CONTACT_SHADOW"));
     cloud_shadow.apply_capture_mode(runtime.get("THALOS_CLOUD_SHADOW"));
+    cloud_shadow.apply_godray_mode(runtime.get("THALOS_CLOUD_GODRAY"));
     let inspection = terrain_inspection_override(runtime.get("THALOS_TERRAIN_INSPECTION"));
     for (_, material) in terrain_materials.iter_mut() {
         material.extras.inspection.x = inspection;
@@ -2522,7 +2890,7 @@ fn hide_overlays(
 fn drive_headless_screenshot(
     cfg: Res<ScreenshotConfig>,
     mut driver: ResMut<ScreenshotDriver>,
-    server: Option<Res<PersistentCaptureServer>>,
+    mut server: Option<ResMut<PersistentCaptureServer>>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     height_sources: Res<HeightSourceRegistry>,
@@ -2530,7 +2898,15 @@ fn drive_headless_screenshot(
     surfaces: Res<BodySurfaceRegistry>,
     homeworld: Res<Homeworld>,
     root_grid: Query<&Grid, With<BigSpace>>,
-    mut camera: Query<(&mut Transform, &mut CellCoord, &mut Projection), With<ShipCamera>>,
+    mut camera: Query<
+        (
+            &mut Transform,
+            &mut CellCoord,
+            &mut Projection,
+            &mut CameraOptics,
+        ),
+        With<ShipCamera>,
+    >,
     diagnostics: Res<DiagnosticsStore>,
     clouds: Res<CloudsConfig>,
     readiness: TerrainReadiness,
@@ -2625,6 +3001,19 @@ fn drive_headless_screenshot(
             fixed_site_context(&sim, &solar, &height_sources, homeworld.0, lat_deg, lon_deg)
                 .map(CaptureFocus::from)
         }
+        // Searched cloudy-LAND site (the CLOUD-5 verification gap: every other
+        // land preset sits in an authored clear lane).
+        ScreenshotPreset::CloudGodray => {
+            let sun_elevation_deg = match cfg.framing {
+                ScreenshotFraming::LocalCloud {
+                    site_sun_elevation_deg: Some(elevation),
+                    ..
+                } => elevation,
+                _ => 25.0,
+            };
+            cloud_godray_site_context(&sim, &solar, &height_sources, homeworld.0, sun_elevation_deg)
+                .map(CaptureFocus::from)
+        }
         _ => match cfg.framing {
             // The sun-relative and disc framings are only reachable from the
             // airless presets above, which resolve their own site; a non-Mira
@@ -2656,7 +3045,7 @@ fn drive_headless_screenshot(
     let Ok(root) = root_grid.single() else {
         return;
     };
-    let Ok((mut transform, mut cell, mut projection)) = camera.single_mut() else {
+    let Ok((mut transform, mut cell, mut projection, mut optics)) = camera.single_mut() else {
         return;
     };
     let mut motion_cfg = None;
@@ -2676,13 +3065,26 @@ fn drive_headless_screenshot(
             &mut cell,
             &mut transform,
             &mut projection,
+            &mut optics,
         ) {
             warn!(target: "thalos::screenshot", "could not pose viewpoint: {error}");
             return;
         }
     } else if pose_cfg.preset == ScreenshotPreset::MiraEva {
+        if let Ok(default_optics) = CameraOpticsSpec::from_vertical_fov(
+            PerspectiveProjection::default().fov,
+            [cfg.width, cfg.height],
+        ) {
+            let _ = optics.set_spec(default_optics);
+        }
         pose_eva_camera(pose_cfg, &ctx.hub, root, &mut transform, &mut cell);
     } else {
+        if let Ok(default_optics) = CameraOpticsSpec::from_vertical_fov(
+            PerspectiveProjection::default().fov,
+            [cfg.width, cfg.height],
+        ) {
+            let _ = optics.set_spec(default_optics);
+        }
         pose_camera(
             pose_cfg,
             &ctx,
@@ -2692,6 +3094,16 @@ fn drive_headless_screenshot(
             &mut transform,
             &mut cell,
         );
+    }
+    if let Some(focal_length_mm) = server
+        .as_ref()
+        .and_then(|server| server.requested_camera.focal_length_mm)
+    {
+        optics.set_base_focal_length_mm(focal_length_mm);
+    }
+    optics.apply_to_projection(&mut projection);
+    if let Some(server) = server.as_deref_mut() {
+        server.active_camera = Some(optics.captured_state([cfg.width, cfg.height]));
     }
 
     if driver.captured {
@@ -2925,6 +3337,17 @@ pub(crate) fn pose_scripted_viewpoint(
         | ScreenshotPreset::MassifValley => {
             let (lat_deg, lon_deg) = massif_site(preset);
             fixed_site_context(sim, solar, height_sources, body_id, lat_deg, lon_deg)
+                .map(CaptureFocus::from)
+        }
+        ScreenshotPreset::CloudGodray => {
+            let sun_elevation_deg = match cfg.framing {
+                ScreenshotFraming::LocalCloud {
+                    site_sun_elevation_deg: Some(elevation),
+                    ..
+                } => elevation,
+                _ => 25.0,
+            };
+            cloud_godray_site_context(sim, solar, height_sources, body_id, sun_elevation_deg)
                 .map(CaptureFocus::from)
         }
         _ => match cfg.framing {
@@ -3495,7 +3918,8 @@ fn framing_json(cfg: &ScreenshotConfig) -> String {
             "body": viewpoint.body.as_str(),
             "position_body_m": viewpoint.camera_position_body_m,
             "rotation_body_xyzw": viewpoint.camera_rotation_body_xyzw,
-            "vertical_fov_rad": viewpoint.vertical_fov_rad,
+            "optics": viewpoint.optics,
+            "derived_vertical_fov_rad": viewpoint.optics.vertical_fov_rad(),
             "recorded_sim_time_s": viewpoint.sim_time_s,
         })
         .to_string();
@@ -4338,6 +4762,129 @@ fn cloud_site_context(
         .and_then(|source| source.sample_height_m(up_body.as_vec3(), 2_000.0))
         .unwrap_or(0.0) as f64;
     let pad_r = radius_m + height_m.max(0.0);
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * pad_r,
+        up_world,
+        pad_r,
+    })
+}
+
+/// Like [`cloud_site_context`], but instead of taking the first point at the
+/// requested solar elevation, scans that whole constant-elevation circle for
+/// the **broken-cloud texel over land** — the deterministic cloudy-LAND
+/// framing the CLOUD-5 verification notes call for (every authored land
+/// preset sits in a clear lane). Broken beats overcast on purpose: a solid
+/// deck has no gaps to admit a shaft, so candidates are scored by proximity
+/// to mid coverage, not by maximum coverage. Deterministic for a fixed
+/// authored weather field: fixed scan order, strict improvement to replace.
+fn cloud_godray_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    sun_elevation_deg: f32,
+) -> Option<HubContext> {
+    use thalos_terrain::cubemap::dir_to_face_uv;
+
+    // Broken-deck sweet spot for the coverage channel and its floor. The
+    // channel is the authored areal coverage (mean ≈ 0.46); a shaft needs
+    // both cloud (shadowed columns) and gaps (lit columns).
+    const COVERAGE_TARGET: f32 = 0.55;
+    const COVERAGE_MIN: f32 = 0.30;
+    // Land floor: keeps the site off shorelines/tidal flats, where the frame
+    // reads as ocean. Sea level is the constant 0 m.
+    const LAND_MIN_HEIGHT_M: f32 = 30.0;
+    // ~0.1° along the circle ≈ 11 km on Thalos: finer than the synoptic
+    // features being ranked, coarser than a weather texel (~5 km), and cheap.
+    const SCAN_STEPS: usize = 3600;
+
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let star_position = states.first()?.position;
+    let sun_world = (star_position - body_state.position).normalize_or_zero();
+    if sun_world == DVec3::ZERO {
+        return None;
+    }
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
+    let sun_body = (surface_q.inverse() * sun_world).normalize();
+    let seed = if sun_body.dot(DVec3::Y).abs() < 0.99 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
+    let tangent_a = (seed - sun_body * seed.dot(sun_body)).normalize();
+    let tangent_b = sun_body.cross(tangent_a).normalize();
+    let elevation = (sun_elevation_deg as f64).to_radians();
+
+    let field = solar
+        .environment
+        .get(body_id)
+        .and_then(|environment| environment.cloud_weather.as_ref());
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+
+    let mut best: Option<(f32, f32, DVec3, f32)> = None; // (score, coverage, up_body, height)
+    if let Some(field) = field {
+        let size = field.face_size as usize;
+        for step in 0..SCAN_STEPS {
+            let theta = step as f64 * std::f64::consts::TAU / SCAN_STEPS as f64;
+            let across = tangent_a * theta.cos() + tangent_b * theta.sin();
+            let up_body = (sun_body * elevation.sin() + across * elevation.cos()).normalize();
+            let (face, u, v) = dir_to_face_uv(up_body.as_vec3());
+            let x = ((u * size as f32) as usize).min(size - 1);
+            let y = ((v * size as f32) as usize).min(size - 1);
+            let index = face as usize * size * size + y * size + x;
+            let Some(texel) = field.texels.get(index) else {
+                continue;
+            };
+            let coverage = f32::from(texel[0]) / 255.0;
+            if coverage < COVERAGE_MIN {
+                continue;
+            }
+            let score = -(coverage - COVERAGE_TARGET).abs();
+            if best.is_some_and(|(best_score, ..)| score <= best_score) {
+                continue;
+            }
+            // Height check last: it is the expensive probe, so only candidates
+            // that would win pay for it.
+            let height_m = height_sources
+                .get(body_id)
+                .and_then(|source| source.sample_height_m(up_body.as_vec3(), 2_000.0))
+                .unwrap_or(0.0);
+            if height_m < LAND_MIN_HEIGHT_M {
+                continue;
+            }
+            best = Some((score, coverage, up_body, height_m));
+        }
+    }
+
+    let Some((_score, coverage, up_body, height_m)) = best else {
+        // No broken cloud over land on this circle (clear day, or an
+        // ocean-only cloudy band). Fall back to the plain deterministic site
+        // so the capture still frames the requested sun geometry.
+        warn!(
+            target: "thalos::screenshot",
+            "cloud-godray: no cloudy land site at {sun_elevation_deg}° solar elevation; \
+             falling back to the unsearched cloud site"
+        );
+        return cloud_site_context(sim, solar, height_sources, body_id, sun_elevation_deg);
+    };
+    info!(
+        target: "thalos::diagnostic::screenshot",
+        event = "godray_site_selected",
+        coverage_frac = coverage,
+        site_height_m = height_m,
+        sun_elevation_deg = sun_elevation_deg,
+        "cloud-godray site"
+    );
+
+    let up_world = (surface_q * up_body).normalize();
+    let pad_r = radius_m + f64::from(height_m.max(0.0));
     Some(HubContext {
         body_id,
         center_world: body_state.position + up_world * pad_r,

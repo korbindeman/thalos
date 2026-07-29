@@ -84,12 +84,14 @@ preview-window:
 # without recompiling via env vars, e.g. (PowerShell):
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP,
+# _TIME (canonical simulation seconds; overrides a saved viewpoint's time),
+# _GRAPHICS (clouds=off,grass=on; cold-capture compatibility adapter),
 # Cloud probes additionally accept _CAMERA_ALTITUDE, _LOOK_ELEVATION,
 # _SUN_ELEVATION, _CLOUD_QUALITY (low/baseline/high/reference),
 # _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL). Ocean probes
 # additionally accept THALOS_SCREENSHOT_OCEAN_TIME for deterministic phase.
-screenshot preset="spaceport-aerial":
-    cargo run -p thalos_capture --bin thalos_capture -- shot "{{preset}}"
+screenshot preset="spaceport-aerial" *options:
+    cargo run -p thalos_capture --bin thalos_capture -- shot "{{preset}}" {{options}}
 
 # Capture several scenes through one controller invocation. Compatible scenes
 # reuse the same world/GPU; the controller restarts only at boot-world boundaries.
@@ -154,6 +156,20 @@ texgen:
 # WORLD_TRANSECT probe modes. See tools/world_map/src/main.rs.
 map:
     cargo run --release -p thalos_world_map
+
+# Diagnostics triage: read the last <hours> of the diagnostics lane (runtime +
+# tools, rotated files included) and report only what crossed a threshold.
+# A healthy window prints its header and "no action needed". `--json` for
+# machine use; thresholds and their rationale live in tools/diag/src/finding.rs.
+diag hours="24" *args:
+    cargo run --release -q -p thalos_diag -- --since {{hours}} {{args}}
+
+# Offline perf report: renders one session of the runtime.jsonl perf lane
+# (frame gauges, spikes, optional THALOS_PERF_RECORD full-rate blocks) to
+# artifacts/diagnostics/reports/<session>/report.html + summary.json.
+# `session` = a `<pid>-<unix_ms>` id, `latest` (default), or `--list`.
+perf-report session="latest":
+    cargo run --release -p thalos_perfreport -- {{session}}
 
 # CLOUD-0's repeatable five-view baseline. Each preset writes a PNG under
 # artifacts/visual/latest/ and a same-named JSONL report under artifacts/diagnostics/.

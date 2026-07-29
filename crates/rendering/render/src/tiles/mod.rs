@@ -117,6 +117,18 @@ const RUGGED_HI: f32 = 0.055;
 /// rule and `max_level` are untouched, so near-field mesh, colliders and
 /// scatter keep the resolution they have.
 const RUGGED_SPACING_FLOOR_M: f64 = 45.0;
+/// Motion brake: minimum time (s) a newly split tile should remain useful at
+/// the eye's current speed. Selection refuses splits whose children would be
+/// crossed faster than this (`child_arc < speed × MOTION_CROSS_MIN_S`), so a
+/// fast-moving view streams a coarse-but-**stable** ground instead of fine
+/// tiles that land mid-frame and read as pop-in — and a settling view
+/// (speed → 0) refines back to the full distance rule in place. The brake is
+/// speed-proportional and per-level: walking (~2 m/s) never trips it (the
+/// finest Thalos tile arc is ~19 m), a 100 m/s freecam stops one or two
+/// levels short, and only genuinely fast travel — which happens far from the
+/// surface — coarsens further. Authored [`RefinementSite`] floors outrank it,
+/// exactly as they outrank the distance rule.
+const MOTION_CROSS_MIN_S: f64 = 1.0;
 const MAX_IN_FLIGHT: usize = 24;
 
 // --- residency budget --------------------------------------------------------
@@ -712,6 +724,9 @@ pub struct TileEyeTarget {
     pub root: Entity,
     /// Camera position in the body-fixed frame, meters.
     pub cam_body: DVec3,
+    /// Smoothed body-fixed eye speed (m/s) — drives the motion brake
+    /// ([`MOTION_CROSS_MIN_S`]). Zero disables it (a settled or headless eye).
+    pub speed_m_s: f64,
     /// Body centre in world space, **f64**.
     pub body_position: DVec3,
     /// Body-fixed → world surface orientation, **f64** — the same authority
@@ -1215,6 +1230,7 @@ pub fn select_leaves_with_relief(
         relief_m,
         ruggedness,
         1.0,
+        0.0,
         &[],
     )
 }
@@ -1229,9 +1245,14 @@ pub fn select_leaves_with_relief(
 /// handful of frames. `max_level` and the horizon test are untouched: the budget
 /// only moves *where* detail stops, never removes the surface.
 ///
+/// `motion_arc_m` is the motion brake's floor on **child** tile arc
+/// (`eye speed × `[`MOTION_CROSS_MIN_S`]): a split producing tiles the eye
+/// would cross faster than that is refused. `0.0` disables it.
+///
 /// `sites` are authored [`RefinementSite`] floors. They outrank both the
 /// distance rule and `split_scale` — the brake may make distant mountains softer
 /// (nobody can tell), but it may not let the ground swallow a base.
+#[allow(clippy::too_many_arguments)]
 pub fn select_leaves_scaled(
     cam_body: DVec3,
     radius_m: f64,
@@ -1239,6 +1260,7 @@ pub fn select_leaves_scaled(
     relief_m: f64,
     ruggedness: &dyn Fn(TileKey) -> Option<f32>,
     split_scale: f64,
+    motion_arc_m: f64,
     sites: &[RefinementSite],
 ) -> HashSet<TileKey> {
     let split_scale = split_scale.clamp(MIN_SPLIT_SCALE, 1.0);
@@ -1252,6 +1274,13 @@ pub fn select_leaves_scaled(
             return above_horizon(key, cam_body, radius_m, relief_m);
         }
         let arc = tile_arc_m(key.level, radius_m);
+        // Motion brake: don't create tiles the moving eye would out-run (see
+        // MOTION_CROSS_MIN_S). Placed after the site floor so authored ground
+        // resolves regardless of speed, and before the distance rule because
+        // it is cheaper than the ruggedness lookup it short-circuits.
+        if arc * 0.5 < motion_arc_m {
+            return false;
+        }
         let d = ((cam_body - key.center_dir() * radius_m).length() - arc * 0.75).max(1.0);
         // The boost only applies while a split still lands above the source's
         // detail floor (see `RUGGED_SPACING_FLOOR_M`).
@@ -1522,6 +1551,7 @@ fn stream_tile_terrain(
     // plain `SPLIT_FACTOR` rule, and skips refinement below the body's own
     // horizon. Split the borrow: `ruggedness_at` walks `&self` while `desired`
     // is being written.
+    let motion_arc_m = target.speed_m_s.max(0.0) * MOTION_CROSS_MIN_S;
     let desired_now = {
         let known: &TileTerrainRoot = root_ref;
         select_leaves_scaled(
@@ -1531,6 +1561,7 @@ fn stream_tile_terrain(
             known.relief_m,
             &|key| known.ruggedness_at(key),
             known.split_scale,
+            motion_arc_m,
             &known.refinement_sites,
         )
     };
@@ -1765,6 +1796,8 @@ fn stream_tile_terrain(
             budget = %budget_note,
             instances = vram_share::live_instances(),
             split_scale = root_ref.split_scale,
+            eye_speed_m_s = target.speed_m_s,
+            motion_arc_m,
             "tile residency gauge"
         );
     }
@@ -1879,7 +1912,8 @@ mod budget_tests {
         let shell = 6 * (1usize << MIN_LEVEL).pow(2);
         let mut previous = usize::MAX;
         for scale in [1.0, 0.8, 0.6, MIN_SPLIT_SCALE] {
-            let leaves = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, scale, &[]);
+            let leaves =
+                select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, scale, 0.0, &[]);
             assert!(
                 leaves.len() < previous,
                 "scale {scale} did not reduce the working set ({} vs {previous})",
@@ -1892,6 +1926,61 @@ mod budget_tests {
             );
             previous = leaves.len();
         }
+    }
+
+    /// The motion brake coarsens proportionally with speed, never uncovers the
+    /// sphere, never creates a tile finer than the eye could keep for
+    /// [`MOTION_CROSS_MIN_S`] — and an authored site floor still resolves at
+    /// any speed (a base must not be swallowed because the camera flew over).
+    #[test]
+    fn motion_brake_coarsens_but_never_beats_a_site_floor() {
+        let max_level = max_level_for(R);
+        let cam = DVec3::new(0.31, 0.72, 0.62).normalize() * (R + 2_000.0);
+        let shell = 6 * (1usize << MIN_LEVEL).pow(2);
+        let mut previous =
+            select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, 0.0, &[]).len() + 1;
+        for speed in [50.0, 200.0, 1_000.0] {
+            let motion_arc = speed * MOTION_CROSS_MIN_S;
+            let leaves =
+                select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, motion_arc, &[]);
+            assert!(
+                leaves.len() <= previous,
+                "speed {speed} m/s grew the working set ({} vs {previous})",
+                leaves.len()
+            );
+            assert!(
+                leaves.len() >= shell,
+                "speed {speed} m/s left the sphere uncovered ({} leaves < {shell})",
+                leaves.len()
+            );
+            let min_arc = leaves
+                .iter()
+                .map(|k| tile_arc_m(k.level, R))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                min_arc >= motion_arc * 0.999,
+                "speed {speed} m/s still produced a {min_arc:.0} m tile the eye \
+                 crosses in under {MOTION_CROSS_MIN_S} s"
+            );
+            previous = leaves.len();
+        }
+
+        let site = RefinementSite {
+            center_dir: cam.normalize(),
+            angular_radius: 500.0 / R,
+            spacing_m: 30.0,
+        };
+        let braked =
+            select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, 5_000.0, &[site]);
+        let finest_at_site = braked
+            .iter()
+            .filter(|k| site.overlaps(**k))
+            .map(|k| k.sample_spacing_m(R))
+            .fold(f64::INFINITY, f64::min);
+        assert!(
+            finest_at_site <= site.spacing_m,
+            "a 5 km/s motion brake coarsened the site floor to {finest_at_site:.0} m/vertex"
+        );
     }
 
     /// Placing a tile through an **f32** body rotation misses by more than the
@@ -2057,7 +2146,7 @@ mod budget_tests {
             let cam = pad_dir * (R + altitude);
             for scale in [1.0, MIN_SPLIT_SCALE] {
                 let leaves =
-                    select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, scale, &[site]);
+                    select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, scale, 0.0, &[site]);
                 let worst = leaves
                     .iter()
                     .filter(|k| site.overlaps(**k))
@@ -2092,9 +2181,9 @@ mod budget_tests {
         // has started buying detail the distance rule should be buying.
         for altitude in [200_000.0, 2_000_000.0] {
             let cam = pad_dir * (R + altitude);
-            let plain = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[]);
+            let plain = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, 0.0, &[]);
             let with_site =
-                select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[site]);
+                select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, 0.0, &[site]);
             let extra = with_site.len().saturating_sub(plain.len());
             assert!(
                 extra <= 128,
@@ -2105,8 +2194,9 @@ mod budget_tests {
             );
         }
         let cam = pad_dir * (R + 30_000.0);
-        let plain = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[]);
-        let with_site = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, &[site]);
+        let plain = select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, 0.0, &[]);
+        let with_site =
+            select_leaves_scaled(cam, R, max_level, RELIEF, &|_| None, 1.0, 0.0, &[site]);
         // Every leaf the plain rule chose is still a leaf unless the site (or
         // the 2:1 balance around it) refined it — i.e. unless its descendants
         // are present instead.

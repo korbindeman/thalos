@@ -48,7 +48,7 @@ use bevy::render::renderer::RenderDevice;
 use bevy::render::texture::{FallbackImage, GpuImage};
 use bevy::shader::ShaderRef;
 
-
+use crate::clouds::CloudShadowBlock;
 use crate::shading::AtmosphereBlock;
 
 use crate::ground::body_material::BodySkyExtra;
@@ -96,14 +96,23 @@ pub struct BodySkyMaterial {
     /// shader falls back to the coast atlas. Sole writer: the game's
     /// `update_body_terrain_atmosphere`.
     pub terrain_entity: Option<Entity>,
+    /// Cloud sun-transmittance cascade lookup frame (CLOUD-5 §3.5 atmosphere
+    /// shafts): the atmosphere raymarch gates its per-sample sun term by this
+    /// so the air under a cloud gap is a bright shaft and the air downwind of
+    /// a cell is a dark one — the same field, and therefore the same weather,
+    /// every surface receiver shades by. A default (zeroed) block stands the
+    /// term down; only the active cloud body's sky carries a live one. Sole
+    /// writer: the game's `update_body_terrain_atmosphere`.
+    pub cloud_shadow: CloudShadowBlock,
+    /// The cascade texture behind [`cloud_shadow`](Self::cloud_shadow)
+    /// (`CloudShadowMap::handle`). An unresolvable handle binds a fallback and
+    /// zeroes the block, so a missing cascade can never darken the sky.
+    pub cloud_shadow_map: Handle<Image>,
 }
 
 impl AsBindGroup for BodySkyMaterial {
     type Data = ();
-    type Param = (
-        SRes<RenderAssets<GpuImage>>,
-        SRes<FallbackImage>,
-    );
+    type Param = (SRes<RenderAssets<GpuImage>>, SRes<FallbackImage>);
 
     fn label() -> &'static str {
         "body_sky_material"
@@ -126,6 +135,15 @@ impl AsBindGroup for BodySkyMaterial {
         let multi_scatter_lut = image(&self.multi_scatter_lut)?;
         let coast_atlas = image(&self.coast_atlas)?;
         let ocean_slope = image(&self.ocean_slope)?;
+        // Optional by design: bodies without an active cloud cascade (or a
+        // boot frame before the clouds plugin uploads it) bind a fallback and
+        // zero the block — never RetryNextUpdate, which would hold the whole
+        // sky hostage to a cloud resource.
+        let cloud_shadow_image = images.get(&self.cloud_shadow_map);
+        let mut cloud_shadow = self.cloud_shadow;
+        if cloud_shadow_image.is_none() {
+            cloud_shadow = CloudShadowBlock::default();
+        }
 
         // The signed-sea-field height lookup (ADR-20260720T185958Z) used to
         // resolve this body's resident height atlas + tile tree out of udlod's
@@ -169,6 +187,9 @@ impl AsBindGroup for BodySkyMaterial {
         let mut extra_bytes = encase::UniformBuffer::new(Vec::new());
         extra_bytes.write(&extra).unwrap();
         let extra_buffer = uniform(extra_bytes.as_ref());
+        let mut cloud_shadow_bytes = encase::UniformBuffer::new(Vec::new());
+        cloud_shadow_bytes.write(&cloud_shadow).unwrap();
+        let cloud_shadow_buffer = uniform(cloud_shadow_bytes.as_ref());
 
         let (tile_atlas_view, tile_tree_buffer, origins_buffer) = match tile_resources {
             Some((texture, tree, origins)) => {
@@ -258,6 +279,25 @@ impl AsBindGroup for BodySkyMaterial {
                     ocean_slope.sampler.clone(),
                 ),
             ),
+            (13, OwnedBindingResource::Buffer(cloud_shadow_buffer)),
+            (
+                14,
+                OwnedBindingResource::TextureView(
+                    TextureViewDimension::D2,
+                    cloud_shadow_image
+                        .map(|gpu| gpu.texture_view.clone())
+                        .unwrap_or_else(|| fallback.d2.texture_view.clone()),
+                ),
+            ),
+            (
+                15,
+                OwnedBindingResource::Sampler(
+                    SamplerBindingType::Filtering,
+                    cloud_shadow_image
+                        .map(|gpu| gpu.sampler.clone())
+                        .unwrap_or_else(|| fallback.d2.sampler.clone()),
+                ),
+            ),
         ];
 
         Ok(UnpreparedBindGroup {
@@ -297,6 +337,14 @@ impl AsBindGroup for BodySkyMaterial {
                     texture_2d(TextureSampleType::Float { filterable: true }),
                 ),
                 (12, sampler(SamplerBindingType::Filtering)),
+                // 13–15: cloud sun-transmittance cascade (CLOUD-5 §3.5
+                // atmosphere shafts) — lookup-frame block, map, sampler.
+                (13, uniform_buffer::<CloudShadowBlock>(false)),
+                (
+                    14,
+                    texture_2d(TextureSampleType::Float { filterable: true }),
+                ),
+                (15, sampler(SamplerBindingType::Filtering)),
             ),
         )
         .to_vec()

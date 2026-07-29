@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>__TITLE__</title>
+<style>
+  :root { color-scheme: dark; }
+  body { background:#0d1117; color:#d5dbe3; font:13px/1.5 "Segoe UI",system-ui,sans-serif;
+         margin:0; padding:24px; max-width:1100px; margin-inline:auto; }
+  h1 { font-size:18px; font-weight:600; }
+  h2 { font-size:14px; font-weight:600; margin:28px 0 6px; color:#9fb0c3; }
+  code, .mono { font-family:"Cascadia Mono",Consolas,monospace; }
+  .cards { display:flex; flex-wrap:wrap; gap:10px; margin:14px 0; }
+  .card { background:#161c24; border:1px solid #2a3441; border-radius:8px;
+          padding:10px 14px; min-width:120px; }
+  .card .v { font-size:18px; font-weight:600; }
+  .card .k { font-size:11px; color:#8494a7; text-transform:uppercase; letter-spacing:.05em; }
+  canvas { background:#10151c; border:1px solid #2a3441; border-radius:8px;
+           display:block; width:100%; }
+  table { border-collapse:collapse; width:100%; }
+  th, td { text-align:left; padding:4px 10px; border-bottom:1px solid #222b36; }
+  th { color:#8494a7; font-weight:500; font-size:11px; text-transform:uppercase; }
+  .spark { width:260px; height:36px; border:none; background:transparent; }
+  .note { color:#8494a7; font-size:12px; }
+  .warn { color:#e0aa3e; }
+</style>
+</head>
+<body>
+<h1>__TITLE__</h1>
+<div class="cards" id="cards"></div>
+
+<h2>Frame time (ms) — per-2s windows: mean / p95 / worst; red dots = spikes</h2>
+<canvas id="frame" height="240"></canvas>
+<p class="note" id="frameNote"></p>
+
+<h2>Memory (MiB) — tile-resident vs mesh-slab (a growing gap = stranded slabs)</h2>
+<canvas id="mem" height="180"></canvas>
+
+<h2>Counts — entities / main-world meshes</h2>
+<canvas id="counts" height="160"></canvas>
+
+<h2>Sim stage wall time (ms) — physics / sync / camera</h2>
+<canvas id="stages" height="160"></canvas>
+
+<h2>Spikes</h2>
+<div id="spikes"></div>
+
+<script>
+const DATA = "__DATA__";
+const G = DATA.gauges, S = DATA.spikes, B = DATA.blocks, SUM = DATA.summary;
+
+function fmt(x, d=1) { return x == null ? "—" : (+x).toFixed(d); }
+function card(k, v) {
+  return `<div class="card"><div class="v mono">${v}</div><div class="k">${k}</div></div>`;
+}
+document.getElementById("cards").innerHTML =
+  card("duration", fmt(SUM.duration_s/60) + " min") +
+  card("fps mean", fmt(SUM.fps_mean, 0)) +
+  card("frame mean", fmt(SUM.cpu_ms_mean, 2) + " ms") +
+  card("worst window p95", fmt(SUM.worst_window_p95_ms, 1) + " ms") +
+  card("worst frame", fmt(SUM.worst_window_max_ms, 1) + " ms") +
+  card("gpu mean", fmt(SUM.gpu_ms_mean, 2) + " ms") +
+  card("spikes", S.length) +
+  card("tile MiB (last/max)", fmt(SUM.memory.tile_mib_last,0) + " / " + fmt(SUM.memory.tile_mib_max,0)) +
+  card("slab MiB (last/max)", fmt(SUM.memory.slab_mib_last,0) + " / " + fmt(SUM.memory.slab_mib_max,0)) +
+  (SUM.full_rate ? card("p99 (full-rate)", fmt(SUM.full_rate.cpu_ms_p99, 2) + " ms") : "");
+
+// ── tiny chart helper ────────────────────────────────────────────────────
+function chart(canvasId, seriesList, opts = {}) {
+  const cv = document.getElementById(canvasId);
+  const W = cv.width = cv.clientWidth * devicePixelRatio;
+  const H = cv.height = +cv.getAttribute("height") * devicePixelRatio;
+  const ctx = cv.getContext("2d");
+  const padL = 46 * devicePixelRatio, padB = 22 * devicePixelRatio,
+        padT = 8 * devicePixelRatio, padR = 8 * devicePixelRatio;
+  const xs = seriesList.flatMap(s => s.pts.map(p => p[0]));
+  const ys = seriesList.flatMap(s => s.pts.map(p => p[1]));
+  if (!xs.length) { ctx.fillStyle="#8494a7"; ctx.font = `${12*devicePixelRatio}px sans-serif`;
+    ctx.fillText("no data", W/2-20, H/2); return; }
+  const x0 = Math.min(...xs), x1 = Math.max(...xs, x0 + 1);
+  let y1 = Math.max(...ys, opts.minScale || 0) * 1.1, y0 = 0;
+  if (opts.capScale && y1 > opts.capScale) y1 = opts.capScale;
+  const X = t => padL + (t - x0) / (x1 - x0) * (W - padL - padR);
+  const Y = v => H - padB - Math.min(v, y1) / y1 * (H - padB - padT);
+  ctx.font = `${10*devicePixelRatio}px sans-serif`;
+  // y grid
+  ctx.strokeStyle = "#222b36"; ctx.fillStyle = "#8494a7";
+  const step = niceStep(y1 / 4);
+  for (let v = 0; v <= y1; v += step) {
+    ctx.beginPath(); ctx.moveTo(padL, Y(v)); ctx.lineTo(W - padR, Y(v)); ctx.stroke();
+    ctx.fillText(fmt(v, step < 1 ? 1 : 0), 6*devicePixelRatio, Y(v) + 3*devicePixelRatio);
+  }
+  // x labels (minutes)
+  for (let i = 0; i <= 6; i++) {
+    const t = x0 + (x1 - x0) * i / 6;
+    ctx.fillText(fmt(t/60, 1) + "m", X(t) - 8*devicePixelRatio, H - 6*devicePixelRatio);
+  }
+  // marks (e.g. 16.7/33.3ms)
+  (opts.marks || []).forEach(m => {
+    if (m > y1) return;
+    ctx.strokeStyle = "#5b6675"; ctx.setLineDash([4,4]);
+    ctx.beginPath(); ctx.moveTo(padL, Y(m)); ctx.lineTo(W - padR, Y(m)); ctx.stroke();
+    ctx.setLineDash([]);
+  });
+  for (const s of seriesList) {
+    ctx.strokeStyle = s.color; ctx.fillStyle = s.color;
+    ctx.lineWidth = (s.width || 1.2) * devicePixelRatio;
+    if (s.dots) {
+      s.pts.forEach(p => { ctx.beginPath(); ctx.arc(X(p[0]), Y(p[1]), 3*devicePixelRatio, 0, 7); ctx.fill(); });
+    } else {
+      ctx.beginPath();
+      s.pts.forEach((p, i) => i ? ctx.lineTo(X(p[0]), Y(p[1])) : ctx.moveTo(X(p[0]), Y(p[1])));
+      ctx.stroke();
+    }
+  }
+  // legend
+  let lx = padL + 8 * devicePixelRatio;
+  for (const s of seriesList) {
+    if (!s.name) continue;
+    ctx.fillStyle = s.color; ctx.fillRect(lx, padT + 2*devicePixelRatio, 10*devicePixelRatio, 3*devicePixelRatio);
+    ctx.fillStyle = "#9fb0c3"; ctx.fillText(s.name, lx + 14*devicePixelRatio, padT + 7*devicePixelRatio);
+    lx += (s.name.length * 6 + 30) * devicePixelRatio;
+  }
+}
+function niceStep(raw) {
+  const mag = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const n = raw / mag;
+  return (n < 1.5 ? 1 : n < 3.5 ? 2 : n < 7.5 ? 5 : 10) * mag;
+}
+
+const g = k => G.map(x => [x.t, x[k]]);
+
+// Full-rate overlay: one point per frame, reconstructed inside each block.
+let frOverlay = [];
+for (const b of B) {
+  const n = b.cpu.length;
+  b.cpu.forEach((v, i) => frOverlay.push([b.t - (n - 1 - i) / 60, v]));
+}
+
+chart("frame", [
+  ...(frOverlay.length ? [{ pts: frOverlay, color: "#3a4656", width: 0.6, name: "per-frame" }] : []),
+  { pts: g("max"),  color: "#e0563e", name: "window max" },
+  { pts: g("p95"),  color: "#e0aa3e", name: "p95" },
+  { pts: g("mean"), color: "#54c06a", name: "mean", width: 1.8 },
+  { pts: g("gpu"),  color: "#4db8e8", name: "gpu" },
+  { pts: S.map(x => [x.t, x.spike_ms]), color: "#ff5544", dots: true, name: "spike" },
+], { marks: [16.67, 33.33], minScale: 34, capScale: 200 });
+document.getElementById("frameNote").textContent =
+  B.length ? `full-rate recording present: ${SUM.full_rate.frames} frames, exact p99 ${fmt(SUM.full_rate.cpu_ms_p99,2)} ms`
+           : "window aggregates only (set THALOS_PERF_RECORD=1 for per-frame recording); window max capped at 200 ms for readability";
+
+chart("mem", [
+  { pts: g("tile"), color: "#54c06a", name: "tile-resident MiB" },
+  { pts: g("slab"), color: "#e08b3e", name: "mesh-slab MiB" },
+]);
+chart("counts", [
+  { pts: g("entities"), color: "#4db8e8", name: "entities" },
+  { pts: g("meshes"),   color: "#b48ce8", name: "main meshes" },
+]);
+chart("stages", [
+  { pts: g("physics"), color: "#e0563e", name: "physics" },
+  { pts: g("sync"),    color: "#e0aa3e", name: "sync" },
+  { pts: g("camera"),  color: "#54c06a", name: "camera" },
+]);
+
+// ── spike table with per-spike sparklines ───────────────────────────────
+const spikesDiv = document.getElementById("spikes");
+if (!S.length) {
+  spikesDiv.innerHTML = '<p class="note">no spikes recorded — no frame exceeded max(3×median, 50 ms) after warm-up.</p>';
+} else {
+  spikesDiv.innerHTML = `<table><tr><th>at</th><th>spike</th><th>median then</th><th>±3 s window</th></tr>` +
+    S.map((x, i) =>
+      `<tr><td class="mono">${fmt(x.t/60,1)} min</td>` +
+      `<td class="mono warn">${fmt(x.spike_ms,1)} ms</td>` +
+      `<td class="mono">${fmt(x.median_ms,2)} ms</td>` +
+      `<td><canvas class="spark" id="sp${i}"></canvas></td></tr>`).join("") + "</table>";
+  S.forEach((x, i) => {
+    const cv = document.getElementById("sp" + i);
+    const W = cv.width = 260 * devicePixelRatio, H = cv.height = 36 * devicePixelRatio;
+    const ctx = cv.getContext("2d");
+    const max = Math.max(...x.cpu, 1);
+    ctx.strokeStyle = "#e0aa3e"; ctx.lineWidth = devicePixelRatio;
+    ctx.beginPath();
+    x.cpu.forEach((v, j) => {
+      const px = j / (x.cpu.length - 1) * W, py = H - v / max * (H - 2);
+      j ? ctx.lineTo(px, py) : ctx.moveTo(px, py);
+    });
+    ctx.stroke();
+  });
+}
+</script>
+</body>
+</html>

@@ -1159,6 +1159,11 @@ pub(super) fn update_body_terrain_atmosphere(
     // .6 = screen-space contact-shadow image (W18a); patched on alongside the AO
     //      image. Its gate travels inside `.3`'s block (`gate.z`), published by
     //      the shadow rig, so there is no separate config arg here.
+    // .7 = per-body derived cloud fill calibration (composite LUTs).
+    // .8 = cloud sun-transmittance cascade (CLOUD-5): bound onto the active
+    //      cloud body's sky material so the atmosphere march renders
+    //      crepuscular shafts through the same field the ground shades by.
+    // .9 = cloud shadow config: `.shafts` gates that sky term (`godray` axis).
     cloud_io: (
         Option<Res<thalos_body_render::CloudsConfig>>,
         Res<super::clouds::ActiveCloudBody>,
@@ -1168,6 +1173,8 @@ pub(super) fn update_body_terrain_atmosphere(
         Res<super::ssao::SsaoConfig>,
         Option<Res<super::contact_shadow::ContactShadowImage>>,
         Res<super::clouds::BodyCloudFill>,
+        Option<Res<thalos_body_render::clouds::CloudShadowMap>>,
+        Res<super::clouds::CloudShadowConfig>,
     ),
     flatten_registry: Res<TerrainFlattenRegistry>,
     // ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident-height-tile lookup inputs for the sky material's
@@ -1458,6 +1465,28 @@ pub(super) fn update_body_terrain_atmosphere(
                     .get(&i)
                     .map(|calibration| calibration.far_response_vec4s())
                     .unwrap_or([Vec4::ZERO; 4]),
+                fill_cell_edge: cloud_io
+                    .7
+                    .0
+                    .get(&i)
+                    .map(|calibration| calibration.far_cell_edge_vec4s())
+                    .unwrap_or([Vec4::splat(1.1); 4]),
+                fill_cell_solid: cloud_io
+                    .7
+                    .0
+                    .get(&i)
+                    .map(|calibration| calibration.far_cell_solid_vec4s())
+                    .unwrap_or([Vec4::ZERO; 4]),
+                cloud_ambient_top: cloud_io
+                    .0
+                    .as_ref()
+                    .map(|config| config.clouds_ambient_color_top)
+                    .unwrap_or(Vec4::ZERO),
+                cloud_ambient_bottom: cloud_io
+                    .0
+                    .as_ref()
+                    .map(|config| config.clouds_ambient_color_bottom)
+                    .unwrap_or(Vec4::ZERO),
             },
         );
     }
@@ -1602,6 +1631,23 @@ pub(super) fn update_body_terrain_atmosphere(
             continue;
         };
         mat.atmosphere_extra = *extra;
+        // CLOUD-5 §3.5 atmosphere shafts: bind the cloud sun-transmittance
+        // cascade so the sky march's per-sample sun term takes the same cloud
+        // shadow the ground receivers do (crepuscular rays through the visible
+        // deck, never a second screen-space mask). Only the active cloud
+        // body's sky gets a live block — the cascade's frame is that body's;
+        // every other body (and `shafts = off`, the `godray` capture axis)
+        // keeps a zeroed block, which the shader gates off before any fetch.
+        if let Some(shadow) = cloud_io.8.as_deref() {
+            mat.cloud_shadow_map = shadow.handle.clone();
+            mat.cloud_shadow = if Some(sky.body_id) == cloud_io.1.0 && cloud_io.9.shafts {
+                shadow.block()
+            } else {
+                Default::default()
+            };
+        } else {
+            mat.cloud_shadow = Default::default();
+        }
         // ADR-20260720T185958Z-water-projects-one-signed-sea-field: point the material at this body's live terrain entity so
         // its bind-group prepare can resolve the height atlas + tile tree in
         // the render world. Refreshed every frame, so terrain despawn/respawn

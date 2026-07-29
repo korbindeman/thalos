@@ -363,12 +363,40 @@ field.
   paints the transmittance the cascade holds, which is the split that matters
   here — producer and receiver reach the same lookup frame by different routes.
 
+**Landed (slice 2, 2026-07-29): the atmosphere march's shafts (godrays).**
+
+- Receiver: `integrate_atmosphere_multiscatter_occluded`
+  (`thalos::atmosphere`) — the BodySky/ocean raymarch's per-sample sun term is
+  multiplied by `cloud_sun_transmittance` at each view sample, so a cloud gap
+  is a bright crepuscular shaft and a shadowed column loses its airlight, with
+  the existing Mie phase supplying the sunward glare. Only the single-scatter
+  sun term is gated; the multi-scatter LUT term deliberately is not (shadowed
+  air reads against blue haze, not black — the overcast-ambient response stays
+  a separate slice). The un-suffixed integrator is a thin wrapper passing a
+  zeroed block, so the impostor call sites are untouched and there is still
+  one integrator.
+- Wiring: `BodySkyMaterial` bindings 13–15 (block/map/sampler), filled by
+  `update_body_terrain_atmosphere` on the active cloud body only and mirrored
+  onto the ocean material; every other body carries a zeroed block that gates
+  the lookup off before any fetch.
+- Capture: `cloud-godray` preset — the deterministic **cloudy-land** framing
+  the slice-1 verification notes called for: scans the constant-sun-elevation
+  circle (25°) for the broken-cloud texel (coverage nearest 0.55, the
+  gaps-and-shadows sweet spot — max coverage would find overcast, which has no
+  shafts) over land ≥ 30 m, then poses a near-ground camera looking sunward.
+  Axis `just compare cloud-godray godray` (`THALOS_CLOUD_GODRAY` off/on)
+  toggles only the march term, so the diff is exactly the airborne shafts.
+- Known limits: the cascade stands down below ~3.4° solar elevation
+  (tangent-plane lookup degenerates), which excludes the classic
+  horizon-sunset crepuscular regime until the sun-aligned/cube tail exists;
+  shaft contrast scales with haze, so clear-air days read subtle by
+  construction.
+
 Not yet built, in priority order: the coarse cube tail (so the term survives
 past the cascade instead of feathering to lit at its border), the overcast
-ambient/IBL response, the atmosphere march's shafts, incremental/temporal
-cascade updates (it currently re-marches every frame), and the scatter/craft
-receivers — terrain darkens under a cloud while the grass and trees standing on
-it do not.
+ambient/IBL response, incremental/temporal cascade updates (it currently
+re-marches every frame), and the scatter/craft receivers — terrain darkens
+under a cloud while the grass and trees standing on it do not.
 
 ### 3.6 Orbital representation
 

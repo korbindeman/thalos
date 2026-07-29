@@ -245,7 +245,7 @@ impl Plugin for GameAeroPlugin {
                 PostUpdate,
                 draw_aero_debug.after(bevy::transform::TransformSystems::Propagate),
             )
-            .add_systems(Update, (attach_ship_aero, toggle_debug_overlay));
+            .add_systems(Update, attach_ship_aero);
     }
 }
 
@@ -255,18 +255,9 @@ fn init_debug_overlay(mut store: ResMut<GizmoConfigStore>) {
     store.config_mut::<PhysicsGizmos>().0.enabled = false;
 }
 
-/// **F3** toggles the aero debug overlay: net-force / relative-wind vectors on
-/// the aircraft. (The physics *hitbox* overlay — craft / gear / ground colliders
-/// — shares this key but is drawn by `debug::draw_debug_hitboxes`, since Avian's
-/// built-in `PhysicsGizmos` can't be placed correctly under big_space.)
-fn toggle_debug_overlay(keys: Res<ButtonInput<KeyCode>>, mut store: ResMut<GizmoConfigStore>) {
-    if !keys.just_pressed(KeyCode::F3) {
-        return;
-    }
-    let on = !store.config::<AeroGizmos>().0.enabled;
-    store.config_mut::<AeroGizmos>().0.enabled = on;
-    info!("aero debug overlay (F3): {}", if on { "ON" } else { "off" });
-}
+// The F3 toggle for `AeroGizmos` lives in `perf::overlay::toggle_debug_view`:
+// one press flips the debug view, the hitbox overlay, and these gizmos
+// together, so the three surfaces can't drift out of sync.
 
 /// Build the whole-body aero config for a craft from its wing panels.
 ///

@@ -276,3 +276,26 @@ field displaced along the direction. Sensitivity drops to `span/2 × angle`. The
 slope frame may *orient* a pattern; it may never *phase* one. Same rule applies
 to any varying frame (flow fields, tangents, view vectors). Hit July 2026 on
 `tile_terrain.wgsl`'s rock gully striation (INC-20260727T004856Z).
+
+### A mid-edit hot-reload can kill a pipeline for the rest of the boot — check the log before judging any capture
+
+Bevy's `embedded_watcher` reloads a WGSL file the moment it is saved. With
+several agents (or one agent probing) editing shaders live, a reload can catch
+a file — or any naga_oil module it imports — in a transient broken state. The
+pipeline then fails to build and its pass silently no-ops; PNGs keep coming out
+and the process exits zero (the BL-20 gap). Two tells, both hit July 2026 while
+bisecting a cloud-march change (INC-20260729T012803Z follow-up work):
+
+- **A near-zero GPU timing for a pass that should cost milliseconds** (the
+  cloud probe report showed 0.07 ms for the whole march) means the pass did not
+  run, not that it got fast.
+- **`no definition in scope for identifier: X` where X verifiably exists in
+  the source module** means the *import chain* failed on a stale/mid-edit
+  snapshot, not that the symbol is missing. Do not "fix" the import.
+
+The poison spreads: every subsequent hot-reload probe on the same boot can
+inherit the dead pipeline, so an A/B bisect returns noise — five successive
+probes "confirmed" an innocent change. Discipline: grep the capture host log
+for `failed to process shader` / `Validation Error` **per shot** before
+treating its PNG as evidence, and when a bisect behaves inconsistently,
+cold-restart the host (`just capture-stop`) before trusting another variant.

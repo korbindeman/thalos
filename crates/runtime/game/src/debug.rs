@@ -44,10 +44,6 @@ pub const DEBUG_SURFACE_DROP_HEIGHT_M: f64 = 18.0;
 /// rendered terrain; `step_eva_controller` re-seeds and snaps it onto the
 /// surface on the next frame, so this is just a safe initial clearance.
 const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
-/// **F3** — show physics hitboxes: craft colliders, landing-gear contact
-/// geometry, and the ground collider surface. Shares the key with the aero
-/// force overlay (`aero::toggle_debug_overlay`); both flip on the same press.
-const DEBUG_HITBOXES_KEY: KeyCode = KeyCode::F3;
 
 #[derive(Resource, Debug, Clone, Copy, Reflect)]
 #[reflect(Resource)]
@@ -114,10 +110,6 @@ impl Plugin for DebugPlugin {
         .init_gizmo_group::<CraftColliderGizmos>()
         .init_resource::<DebugSurfaceTeleport>()
         .add_systems(Startup, configure_craft_collider_gizmos)
-        .add_systems(
-            Update,
-            toggle_debug_hitboxes.run_if(not_game_paused.and_then(not_in_photo_mode)),
-        )
         // PostUpdate after big_space's transform propagation: this system
         // anchors gizmos to the PlayerShip `GlobalTransform`, which under
         // big_space is recomputed (floating-origin-relative) only in
@@ -160,18 +152,8 @@ fn configure_craft_collider_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     config.render_layers = bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER);
 }
 
-fn toggle_debug_hitboxes(keys: Res<ButtonInput<KeyCode>>, mut debug: ResMut<DebugMode>) {
-    if !debug.enabled || !keys.just_pressed(DEBUG_HITBOXES_KEY) {
-        return;
-    }
-    debug.show_hitboxes = !debug.show_hitboxes;
-    let state = if debug.show_hitboxes {
-        "enabled"
-    } else {
-        "disabled"
-    };
-    info!("hitbox debug overlay {state}");
-}
+// The F3 toggle for `show_hitboxes` lives in `perf::overlay::toggle_debug_view`:
+// one press flips the debug view, these hitboxes, and the aero gizmos together.
 
 /// Half-width of the ground-collider grid drawn under the craft, in metres.
 const GROUND_GRID_HALF_M: f64 = 50.0;

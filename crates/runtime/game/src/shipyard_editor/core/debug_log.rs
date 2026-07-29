@@ -133,11 +133,12 @@ impl SelectionLog {
     /// `artifacts/diagnostics/`. Appends (never truncates) so a run's trace
     /// accumulates; delete the file between runs for a clean log.
     pub fn from_env() -> Self {
-        let Some(path) = crate::artifact_paths::jsonl_path_from_env("THALOS_SHIPYARD_SELECT_LOG")
+        let Some(path) =
+            thalos_diagnostics::paths::jsonl_path_from_env("THALOS_SHIPYARD_SELECT_LOG")
         else {
             return Self::default();
         };
-        match crate::artifact_paths::open_jsonl_append(&path) {
+        match thalos_diagnostics::paths::open_jsonl_append(&path) {
             Ok(file) => {
                 info!(target: "thalos::shipyard", "selection trace → {}", path.display());
                 Self {

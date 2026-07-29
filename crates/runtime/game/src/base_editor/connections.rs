@@ -22,8 +22,8 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DMat3, DQuat, DVec2, DVec3};
-use bevy::platform::collections::HashMap;
 use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 
 use big_space::prelude::{BigSpace, CellCoord, Grid};

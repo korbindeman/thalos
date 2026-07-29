@@ -163,9 +163,14 @@ fn inspection_mode() -> u32 {
             return 0;
         };
         match value.trim().to_ascii_lowercase().as_str() {
-            "" | "lit" | "default" | "off" => 0,
-            "fullbright" | "albedo" | "on" => 1,
-            "geo-normal" | "geometric-normal" | "smooth-normal" => 2,
+            "" | "lit" | "default" | "off" | "0" => 0,
+            // Numeric spellings accepted deliberately: `=1`/`=2` is what a
+            // udlod-era muscle-memory probe types, and rejecting them silently
+            // rendered lit — which cost a whole debugging session
+            // (BL-20260727T004857Z: "inspection does not reach the tile
+            // material" was really this match arm warning and falling through).
+            "fullbright" | "albedo" | "on" | "1" => 1,
+            "geo-normal" | "geometric-normal" | "smooth-normal" | "2" => 2,
             // udlod's `legacy-regolith` has no tile-path meaning; render lit
             // rather than warn, so the shared axis stays usable.
             "legacy-regolith" | "unfiltered-regolith" => 0,
@@ -633,6 +638,7 @@ fn update_tile_eye(
             eye.target = Some(TileEyeTarget {
                 root: entity,
                 cam_body: resolved.cam_body,
+                speed_m_s: resolved.speed_m_s,
                 body_position: state.position,
                 body_orientation: orientation,
             });

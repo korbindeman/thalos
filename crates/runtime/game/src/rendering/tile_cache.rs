@@ -377,8 +377,10 @@ fn prune_disk_cache(registry: Res<TileCacheRegistry>) {
         }
     }
     if let Some(root) = &registry.surface_disk_root {
-        let freed =
-            thalos_body_render::tiles::cache::prune_disk_cache(root, SURFACE_DISK_CACHE_BUDGET_BYTES);
+        let freed = thalos_body_render::tiles::cache::prune_disk_cache(
+            root,
+            SURFACE_DISK_CACHE_BUDGET_BYTES,
+        );
         if freed > 0 {
             info!(
                 "pruned {:.1} MB from the surface tile disk cache at {}",

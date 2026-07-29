@@ -106,6 +106,21 @@ pub struct BodySkyExtra {
     /// keeps the far projection's thickness equal to the near volume's — do
     /// not replace it with a hand-tuned curve (BL-20260723T214730Z).
     pub fill_response: [Vec4; 4],
+    /// Resolved-footprint far response, derived with `fill_response` by the
+    /// same calibration: per strata-mean node, the cell-field value above
+    /// which a column renders as cloud…
+    pub fill_cell_edge: [Vec4; 4],
+    /// …and the occupied columns' mean opacity. `(cell > edge) · solid`
+    /// equals `fill_response` in expectation by construction; the composite
+    /// blends toward the smooth response as cells go sub-pixel.
+    pub fill_cell_solid: [Vec4; 4],
+    /// Sky-ambient in-scatter radiance for the far cloud overlay — the SAME
+    /// `clouds_ambient_color_top`/`_bottom` pair `drive_clouds` feeds the near
+    /// march (SkyAmbient irradiance/π, scene-flux units). Without them the far
+    /// tier is direct-sun only and its whole distant band reads warm-gray
+    /// against the near tier's blue-white (measured 2026-07-29).
+    pub cloud_ambient_top: Vec4,
+    pub cloud_ambient_bottom: Vec4,
 }
 
 impl Default for BodySkyExtra {
@@ -128,6 +143,10 @@ impl Default for BodySkyExtra {
             tile_atlas_uv: Vec4::ZERO,
             cloud_march: Vec4::ZERO,
             fill_response: [Vec4::ZERO; 4],
+            fill_cell_edge: [Vec4::ZERO; 4],
+            fill_cell_solid: [Vec4::ZERO; 4],
+            cloud_ambient_top: Vec4::ZERO,
+            cloud_ambient_bottom: Vec4::ZERO,
         }
     }
 }

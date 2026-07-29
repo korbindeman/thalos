@@ -209,9 +209,7 @@ fn cell_arrangement(
         return iso;
     }
     let rolled = cell_shape(
-        cell_noise(
-            cell_domain(dir, radius, period_m, CELL_ROLL_ASPECT, CELL_ROLL_TILT) + offset,
-        ),
+        cell_noise(cell_domain(dir, radius, period_m, CELL_ROLL_ASPECT, CELL_ROLL_TILT) + offset),
         billow,
     );
     let blended = mix(iso, rolled, roll);
@@ -230,7 +228,14 @@ pub fn cell_field(dir: Vec3, radius: f32, style: &CellStyle) -> f32 {
         CELL_BILLOW[1] * style.billow,
         CELL_BILLOW[2] * style.billow,
     ];
-    let o0 = cell_arrangement(dir, radius, p0, Vec3::new(11.3, -4.1, 27.9), b[0], style.roll);
+    let o0 = cell_arrangement(
+        dir,
+        radius,
+        p0,
+        Vec3::new(11.3, -4.1, 27.9),
+        b[0],
+        style.roll,
+    );
     let o1 = cell_octave(dir, radius, p1, Vec3::new(-23.7, 8.4, 3.2), b[1]);
     let o2 = cell_octave(dir, radius, p2, Vec3::new(5.9, 31.2, -17.6), b[2]);
     let raw = style.weights[0] * o0 + style.weights[1] * o1 + style.weights[2] * o2;
@@ -368,8 +373,8 @@ mod tests {
             };
             cell_field(dir, RADIUS, &style) as f64
         });
-        let live = local_gradient(|dir| cell_field(dir, RADIUS, &cell_style(dir, 0.45)) as f64)
-            / baseline;
+        let live =
+            local_gradient(|dir| cell_field(dir, RADIUS, &cell_style(dir, 0.45)) as f64) / baseline;
 
         // The metric has to be able to FAIL, or it guards nothing. This is the
         // defect as it actually shipped: the same field with the period scaled
@@ -379,7 +384,9 @@ mod tests {
             let period = CELL_PERIOD_M * mix(1.55, 0.78, smoothstep(0.20, 0.80, org));
             let b = CELL_BILLOW;
             let o0 = cell_shape(
-                cell_noise(cell_domain(dir, RADIUS, period, 1.0, 0.0) + Vec3::new(11.3, -4.1, 27.9)),
+                cell_noise(
+                    cell_domain(dir, RADIUS, period, 1.0, 0.0) + Vec3::new(11.3, -4.1, 27.9),
+                ),
                 b[0],
             );
             let p1 = period / CELL_LACUNARITY;

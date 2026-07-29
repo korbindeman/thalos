@@ -49,8 +49,8 @@ use thalos_terrain::TerrainFlatten;
 use thalos_world::BodyId;
 
 use crate::SimStage;
-use crate::coords::SHIP_LAYER;
 use crate::base_editor::PavedFootprints;
+use crate::coords::SHIP_LAYER;
 use crate::graphics_settings::GraphicsSettings;
 use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
@@ -587,8 +587,12 @@ fn drive_grass_tiles(
     // the structure registry, so authored and player-placed bases both apply;
     // empty off-base, so wild terrain is untouched. Shared (`Arc`) into every
     // tile build dispatched this frame.
-    let scatter_regions: Arc<Vec<ScatterRegion>> =
-        Arc::new(grass_scatter_regions(&structures, &paved, body_id, radius_m));
+    let scatter_regions: Arc<Vec<ScatterRegion>> = Arc::new(grass_scatter_regions(
+        &structures,
+        &paved,
+        body_id,
+        radius_m,
+    ));
 
     let ground = mirror.as_ref();
     let pool = AsyncComputeTaskPool::get();
@@ -1032,9 +1036,9 @@ fn log_grass_diagnostics(
     // mix with curated screenshots. A bare override filename is rooted there;
     // explicit relative/absolute paths are honored.
     let path =
-        crate::artifact_paths::jsonl_path_from_env_or("THALOS_GRASS_LOG", "grass_churn.jsonl");
+        thalos_diagnostics::paths::jsonl_path_from_env_or("THALOS_GRASS_LOG", "grass_churn.jsonl");
     use std::io::Write;
-    if let Ok(mut f) = crate::artifact_paths::open_jsonl_append(&path) {
+    if let Ok(mut f) = thalos_diagnostics::paths::open_jsonl_append(&path) {
         let _ = writeln!(f, "{line}");
     }
 

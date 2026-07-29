@@ -18,6 +18,14 @@
 //! built a tile beyond the fade edge (invisible build → no pop-in), re-LOD'd by
 //! rebuilding the tile mesh at the new LOD (old kept until the new is ready → no
 //! vanish), and rebuilt when the height source revision advances.
+//!
+//! Dispatch policy: **coverage outranks refinement** (missing tiles beat re-LOD
+//! upgrades, `TREE_UPGRADE_PENALTY`), a cold fill builds cheap impostors first
+//! and upgrades nearest-first afterwards (`TREE_COLD_FILL_MISSING`), and a
+//! fast-moving view keys its LOD off where it is about to be
+//! (`TREE_MOTION_LEAD_S`, fed by the smoothed `ViewAnchor` speed) — so the
+//! forest *exists* around the view quickly at speed and settles to full mesh
+//! fidelity where the camera lingers.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -36,11 +44,12 @@ use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_body_render::{
     AU_M, BakeParams, CanopyStyle, GrassParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout,
     ImpostorParams, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeBakeMaterial,
-    TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams, VegLayer, VegScatterInput,
-    VegSpeciesPlacement, build_foliage_atlas, build_foliage_material_atlas, build_scatter_tile,
-    build_tree_mesh_data, combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map,
-    hemioct_decode, impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh,
-    tree_bounding_sphere,
+    TreeImpostorExtension, TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams,
+    TreeShadingExtension, VegLayer, VegScatterInput, VegSpeciesPlacement, build_foliage_atlas,
+    build_foliage_material_atlas, build_scatter_tile, build_tree_mesh_data,
+    combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map, hemioct_decode,
+    impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    tree_impostor_material, tree_material,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -234,8 +243,31 @@ const TREE_MAX_AGL_M: f64 = 6000.0;
 const TREE_DESPAWN_AGL_M: f64 = 16000.0;
 /// Maximum concurrent tile builds. Higher than the original near-only driver
 /// because the clipmap fills many more (coarse) tiles on a cold view — slow fill
-/// is what shows the transient ring gaps.
-const TREE_MAX_IN_FLIGHT: usize = 12;
+/// is what shows the transient ring gaps. Sized as queue depth for the
+/// `AsyncComputeTaskPool`, whose thread count is the real parallelism cap: a
+/// deep queue keeps the pool fed when individual builds are short (impostor
+/// combines), which is most of a cold fill under the coarse-first path below.
+const TREE_MAX_IN_FLIGHT: usize = 24;
+/// Motion look-ahead (s) folded into the slant distance the mesh-LOD pick is
+/// keyed on: at eye speed `v` a tile is treated as `v ×` this farther away, so
+/// a fast view builds cheap impostor tiles it will actually pass instead of
+/// mesh tiles it out-runs before they land — and a settling view (speed → 0)
+/// re-LODs back to full mesh fidelity in place, nearest first. Uses the same
+/// smoothed `ViewAnchor` speed as the terrain motion brake.
+const TREE_MOTION_LEAD_S: f64 = 3.0;
+/// Missing-tile count above which the fill is "cold" (fresh spawn, teleport,
+/// body handoff): missing ring-0 tiles outside the innermost mesh band build
+/// impostor-FIRST — the combine is a few quads per tree instead of a batched
+/// LOD mesh, so coverage lands in a fraction of the time — and the normal
+/// re-LOD pass upgrades them to meshes nearest-first afterwards. The innermost
+/// band (LOD0, < `TREE_LOD_BANDS_M[0]`) is exempt: a billboard 30 m from the
+/// eye reads worse than a short wait, and that band is only a handful of tiles.
+const TREE_COLD_FILL_MISSING: usize = 24;
+/// Distance multiplier penalizing re-LOD upgrades against missing tiles in the
+/// dispatch order: coverage outranks refinement (trees *existing* around the
+/// view beats sharpening ones that already exist), except very near the eye,
+/// where an upgrade at `d` still beats a missing tile beyond `penalty × d`.
+const TREE_UPGRADE_PENALTY: f64 = 3.0;
 /// Don't build until the terrain under a tile is resident at this texel size or
 /// finer (mirrors the grass residency gate); scaled up for far tiles below.
 const TREE_MAX_TERRAIN_TEXEL_M: f32 = 16.0;
@@ -461,7 +493,7 @@ fn setup_species_library(
     // Procedural foliage atlas (leaf clusters + crown shell + bark), built once
     // and shared by every plant on the body.
     let atlas = images.add(build_foliage_atlas());
-    let material = materials.add(TreeMaterial {
+    let material = materials.add(tree_material(TreeShadingExtension {
         atlas: atlas.clone(),
         material_atlas: images.add(build_foliage_material_atlas()),
         // Valid depth textures from the start (the `texture_depth_2d` bindings
@@ -471,7 +503,7 @@ fn setup_species_library(
         sun_shadow_map_1: images.add(fallback_shadow_map()),
         sun_shadow_map_2: images.add(fallback_shadow_map()),
         ..default()
-    });
+    }));
 
     // --- Octahedral impostor atlas (tree species only; shrubs are mesh-only) ---
     // Assign each tree species an atlas layer; build the albedo+coverage and
@@ -521,12 +553,13 @@ fn setup_species_library(
     // ring's cross-fade band, written per frame by `update_tree_material`).
     let ring_impostor_materials: Vec<Handle<TreeImpostorMaterial>> = (0..TREE_RINGS.len())
         .map(|_| {
-            impostor_materials.add(TreeImpostorMaterial {
+            impostor_materials.add(tree_impostor_material(TreeImpostorExtension {
                 params: GrassParams::default(),
                 impostor: impostor_block,
                 albedo: albedo_atlas.clone(),
                 normal: normal_atlas.clone(),
-            })
+                ..default()
+            }))
         })
         .collect();
 
@@ -799,9 +832,12 @@ fn drive_veg_tiles(
     let cam_dir = view.cam_dir;
     let ground_h = view.ground_h_m;
     let agl = view.agl_m;
-    // Investigation trace: report the scatter centre state to JSONL each ~1.5 s.
+    // Investigation trace, opt-in: this is an instrument for "why don't trees
+    // build here", not a health gauge — nothing in `just diag` reads it, and at
+    // ~1.5 s cadence it was 60 % of every record in the whole diagnostics lane.
+    // Set THALOS_VEG_DIAG=1 when investigating scatter residency.
     *diag = diag.wrapping_add(1);
-    if *diag % 90 == 1 {
+    if veg_diag_enabled() && *diag % 90 == 1 {
         // Split empty (cleared/wrong-biome) vs tree-bearing tiles, and the
         // distance to the nearest tree-bearing one — the decisive signal for
         // "trees don't build" vs "trees build but are far / cleared".
@@ -825,6 +861,7 @@ fn drive_veg_tiles(
             nearest_tree_km,
             in_flight = veg.in_flight.len(),
             bake_ready = bake.ready,
+            view_speed_m_s = view.speed_m_s,
             "vegetation drive gauge"
         );
     }
@@ -901,7 +938,8 @@ fn drive_veg_tiles(
     // longer matches its distance — the rebuild keeps the old mesh until the new
     // is ready (no vanish). Rings overlap by a fade band (cross-fade) and extend a
     // tile beyond their outer edge (invisible build).
-    let mut candidates: Vec<(f64, RingTileKey, usize, bool)> = Vec::new();
+    let speed = view.speed_m_s.max(0.0);
+    let mut candidates: Vec<(f64, RingTileKey, usize, bool, bool)> = Vec::new();
     for ring_idx in 0..rings_active {
         let ring = &TREE_RINGS[ring_idx];
         let lat = lattices[ring_idx];
@@ -944,21 +982,44 @@ fn drive_veg_tiles(
                 // (which read worse than the impostor) straight down. Folding AGL
                 // in makes everything below the climbing craft fall back to the
                 // impostor band, while a low pass (agl ≈ 0) is unchanged.
-                let view_d = (d * d + agl.max(0.0) * agl.max(0.0)).sqrt();
+                // Plus the motion look-ahead: a fast view keys its LOD off
+                // where it is about to be, not where it is (TREE_MOTION_LEAD_S).
+                let view_d =
+                    (d * d + agl.max(0.0) * agl.max(0.0)).sqrt() + speed * TREE_MOTION_LEAD_S;
                 let (desired, want_impostor) = if ring_idx == 0 {
                     let l = lod_for_dist(view_d);
                     (l, l == far_lod && bake.ready)
                 } else {
                     (far_lod, true)
                 };
+                let missing = !veg.tiles.contains_key(&rk);
                 match veg.tiles.get(&rk) {
                     Some(tile) if tile.lod == desired && tile.impostor == want_impostor => continue,
-                    _ => candidates.push((d, rk, desired, want_impostor)),
+                    _ => candidates.push((d, rk, desired, want_impostor, missing)),
                 }
             }
         }
     }
-    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Cold fill: coverage first, at the cheapest representation that reads as a
+    // forest. Missing mesh-band tiles (outside the innermost LOD0 band) are
+    // demoted to an impostor build now; once the fill drains below the
+    // threshold, the normal LOD-mismatch pass upgrades them nearest-first.
+    let missing_count = candidates.iter().filter(|c| c.4).count();
+    if bake.ready && missing_count > TREE_COLD_FILL_MISSING {
+        for (_, rk, desired, want_impostor, missing) in candidates.iter_mut() {
+            if *missing && rk.ring == 0 && !*want_impostor && *desired > 0 {
+                *desired = far_lod;
+                *want_impostor = true;
+            }
+        }
+    }
+    // Nearest first, with re-LOD upgrades penalized against missing tiles
+    // (coverage outranks refinement — see TREE_UPGRADE_PENALTY).
+    candidates.sort_by(|a, b| {
+        let pa = a.0 * if a.4 { 1.0 } else { TREE_UPGRADE_PENALTY };
+        let pb = b.0 * if b.4 { 1.0 } else { TREE_UPGRADE_PENALTY };
+        pa.total_cmp(&pb)
+    });
 
     // Sea level is the project datum: the constant 0 m (= reference radius), the
     // shoreline the bimodal continent/ocean generator (Slice 1) puts at height 0.
@@ -973,7 +1034,7 @@ fn drive_veg_tiles(
     let ground = mirror.as_ref();
     let pool = AsyncComputeTaskPool::get();
     let mut dispatched = 0usize;
-    for (_, rk, desired, want_impostor) in candidates {
+    for (_, rk, desired, want_impostor, _) in candidates {
         if dispatched >= slots {
             break;
         }
@@ -1253,6 +1314,7 @@ fn update_tree_material(
     bake: Res<ImpostorBake>,
     anchor: Res<ViewAnchor>,
     sun_shadow: Option<Res<SunShadowState>>,
+    cloud_shadow: Option<Res<thalos_body_render::clouds::CloudShadowMap>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
     mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
 ) {
@@ -1336,16 +1398,24 @@ fn update_tree_material(
         } else {
             TREE_MESH_ONLY_FADE
         };
-        material.params = make_params(near, far, band);
+        material.extension.params = make_params(near, far, band);
         // Bind the live sun-shadow map so trees self-shadow, shadow one another,
         // and pick up the ground's shadows. `params.x` is 0 off-surface, so the
         // shader skips sampling there. Only the near mesh ring receives — the
         // far impostor band is outside the ~1.2 km shadow region anyway.
         if let Some(sun_shadow) = sun_shadow.as_deref() {
-            material.sun_shadow_map_0 = sun_shadow.images[0].clone();
-            material.sun_shadow_map_1 = sun_shadow.images[1].clone();
-            material.sun_shadow_map_2 = sun_shadow.images[2].clone();
-            material.shadow = sun_shadow.block;
+            material.extension.sun_shadow_map_0 = sun_shadow.images[0].clone();
+            material.extension.sun_shadow_map_1 = sun_shadow.images[1].clone();
+            material.extension.sun_shadow_map_2 = sun_shadow.images[2].clone();
+            material.extension.shadow = sun_shadow.block;
+        }
+        // Cloud sun-transmittance: same map/block the tile ground samples, so a
+        // stand under the deck dims exactly with the ground it grows from (the
+        // spine tree never gated on clouds — one of the two "trees look pasted
+        // on" mechanisms).
+        if let Some(cloud) = cloud_shadow.as_deref() {
+            material.extension.cloud_shadow = cloud.block();
+            material.extension.cloud_shadow_map = cloud.handle.clone();
         }
     }
 
@@ -1355,7 +1425,13 @@ fn update_tree_material(
             continue;
         };
         let (near, far, band) = tree_ring_fade(idx);
-        material.params = make_params(near, far, band);
+        material.extension.params = make_params(near, far, band);
+        // Same cloud transmittance as the mesh trees — the far forest dims
+        // under the deck exactly like the ground it stands on.
+        if let Some(cloud) = cloud_shadow.as_deref() {
+            material.extension.cloud_shadow = cloud.block();
+            material.extension.cloud_shadow_map = cloud.handle.clone();
+        }
     }
 }
 
@@ -1411,4 +1487,12 @@ fn check_veg_rebuilds(
             }
         }
     }
+}
+
+/// Opt-in gate for the vegetation drive trace (`THALOS_VEG_DIAG=1`).
+fn veg_diag_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("THALOS_VEG_DIAG").is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
+    })
 }

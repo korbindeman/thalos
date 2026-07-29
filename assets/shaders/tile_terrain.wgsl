@@ -229,16 +229,66 @@ const SLOPE_JITTER: f32 = 0.09;
 // ground is rock almost everywhere; debris collects only on the true flats.
 const ALPINE_ROCK_COS: f32 = 0.990;  // cos 8° — steeper than this = rock
 const ALPINE_BENCH_COS: f32 = 0.9976; // cos 4° — flatter than this = talus flat
+
+// Half-widths of the slope-selection ramps, in cos(grade).
+//
+// **These must be WIDE relative to the terrain's own slope spread**, for the
+// reason written up on SNOW_SHED_COS: a narrow smoothstep centred inside the
+// data distribution drives most of the surface to one rail or the other, and a
+// near-binary mask between two very different albedos renders as hard-edged
+// patches — the "terraces" over the massif, which are a material artifact and
+// not terrain (INC-20260729T032000Z; the height field is dendritic at every
+// footprint). Softening the snow ramp cleared it on the snowfield; these are
+// the same defect in the neighbouring layers.
+//
+// **Measured, and unlike snow these are NOT the binary case** — widening them
+// was tried and reverted. Mask saturation over the same 9.6 km massif patch
+// (fraction of area fully-on / in transition / fully-off):
+//
+//   snow  cos34→16 (the defect): 68 / 22 / 10   ← saturated, and it showed
+//   rock  ±0.04:                 10 / 10 / 80   ← layer barely participates
+//   scree ±0.05:                 17 / 26 / 57   ← transition already wide
+//
+// Rock is 80 % fully-off on this terrain, so there is no hard mask to soften;
+// scree already carries a quarter of its area in transition. Widening rock to
+// ±0.11 and scree to ±0.12 produced no visible or measured change at two
+// framings (`rock_old/new.png`, mean |grad| 2.04 vs 2.02) while pushing scree
+// to 91 % transition / 0 % fully-off — i.e. a partial scree wash over the whole
+// alpine zone, a real composition change bought for nothing. Reverted.
+//
+// Keep these as named constants anyway: the widths are load-bearing and the
+// talus bench in particular was ±0.004/+0.002, a 0.006-wide band that is a step
+// function in all but name. If a layer ever *does* read as hard patches, this
+// is the first thing to measure — but measure the mask, don't assume.
+const ROCK_RAMP: f32 = 0.04;
+const ALPINE_ROCK_RAMP: f32 = 0.012;
+const SCREE_RAMP: f32 = 0.05;
+const BENCH_RAMP: f32 = 0.004;
 /// How much of an alpine bench the talus claims (the rest stays parent rock).
 /// Full coverage turned the whole upper massif into one pale debris sheet.
 const ALPINE_BENCH_AMT: f32 = 0.45;
 
 // Snow shedding, as cos(grade): snow lies on the summit fields and sloughs
-// off the ribs between them. The measured slope distribution above the
-// snowline is gentle (median 12°, p75 19°), so the window has to open there
-// or nothing sheds and the summit is one white dome again.
-const SNOW_HOLD_COS: f32 = 0.961; // cos 16° — full cover at/below this grade
-const SNOW_SHED_COS: f32 = 0.829; // cos 34° — bare rock above it
+// off the ribs between them.
+//
+// **The window must be WIDE relative to the terrain's own slope spread.** It
+// used to be cos 16°→34°, chosen to straddle the measured distribution above
+// the snowline (median 12°, p75 19°) so that something would actually shed.
+// Straddling is exactly wrong: a steep transfer function centred on the data
+// drives most of the surface to one rail or the other. Measured on the real
+// field over a 9.6 km patch of the showcase massif, that window left **81 % of
+// the area fully covered and only 22 % anywhere in the transition** — a
+// near-binary mask, hard-edged, tracing the drainage lines, sitting between
+// SNOW_ALBEDO 0.62 and ROCK_ALBEDO 0.084. That is what read as terraces /
+// tyre tread over the massif, and it is why every erosion-band geometry knob
+// only seemed to half-fix it: those knobs change how often the terrain crosses
+// this threshold, not the threshold itself (INC-20260729T032000Z).
+//
+// Widened so the slope distribution spans a fraction of the band and coverage
+// varies continuously: gentle summit ground still reads ~full (0.997 at 12°,
+// 0.96 at 19°), ribs shed gradually (0.72 at 30°, 0.28 at 40°).
+const SNOW_HOLD_COS: f32 = 0.990; // cos 8°  — full cover at/below this grade
+const SNOW_SHED_COS: f32 = 0.643; // cos 50° — bare rock above it
 
 // Layer palettes (linear RGB), anchored to the canonical macro band anchors
 // in `procedural.rs::albedo_from_bands` so layers and palette agree.
@@ -625,8 +675,9 @@ fn material_layers(
     // the forested flanks) and alpine ground that is not a bench. The alpine
     // term is what keeps the 3.4–4.6 km zone reading as rock — its median
     // slope is far below the cliff threshold.
-    let rock_steep = 1.0 - smoothstep(ROCK_COS - 0.04, ROCK_COS + 0.04, cosg_j);
-    let rock_alpine = alpine * (1.0 - smoothstep(ALPINE_ROCK_COS - 0.012, ALPINE_ROCK_COS + 0.012, cosg_j));
+    let rock_steep = 1.0 - smoothstep(ROCK_COS - ROCK_RAMP, ROCK_COS + ROCK_RAMP, cosg_j);
+    let rock_alpine = alpine
+        * (1.0 - smoothstep(ALPINE_ROCK_COS - ALPINE_ROCK_RAMP, ALPINE_ROCK_COS + ALPINE_ROCK_RAMP, cosg_j));
     let rock_m = max(rock_steep, rock_alpine);
 
     // Scree: the slope shoulder below rock faces, plus the alpine benches the
@@ -636,9 +687,9 @@ fn material_layers(
     // pale debris wash over the whole mountain. Below the treeline soil holds
     // to the point where rock takes over, so there is no debris band there;
     // real talus fans *under cliffs* need a curvature term (NTR-X4 P3).
-    let scree_slope = (1.0 - smoothstep(SCREE_COS - 0.05, SCREE_COS + 0.05, cosg_j)) * alpine;
+    let scree_slope = (1.0 - smoothstep(SCREE_COS - SCREE_RAMP, SCREE_COS + SCREE_RAMP, cosg_j)) * alpine;
     let scree_bench = alpine
-        * smoothstep(ALPINE_BENCH_COS - 0.004, ALPINE_BENCH_COS + 0.002, cosg_j)
+        * smoothstep(ALPINE_BENCH_COS - BENCH_RAMP, ALPINE_BENCH_COS + BENCH_RAMP * 0.5, cosg_j)
         * ALPINE_BENCH_AMT;
     let scree_m = max(scree_slope, scree_bench) * (1.0 - rock_m);
 

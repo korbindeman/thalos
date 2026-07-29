@@ -17,7 +17,6 @@
 
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use big_space::prelude::CellCoord;
 use thalos_capture_protocol::{
     CAPTURE_PRESETS, Viewpoint, ViewpointCatalog, viewpoint_id_from_name,
@@ -29,6 +28,7 @@ use thalos_ui::{
 };
 
 use crate::camera::{ActiveCamera, ShipCamera};
+use crate::camera_optics::CameraOptics;
 use crate::rendering::{SimulationState, SolarSystemState, view_anchor::ViewAnchor};
 use crate::spawn::SpawnSituation;
 use crate::viewpoints::{ViewpointManager, capture_current_viewpoint, load_catalog, write_catalog};
@@ -91,8 +91,7 @@ fn open_quick_save_prompt(
     solar: Res<SolarSystemState>,
     situation: Res<SpawnSituation>,
     space_center: Option<Res<crate::space_center::SpaceCenter>>,
-    cameras: Query<(&CellCoord, &Transform, &Projection), (With<ShipCamera>, With<ActiveCamera>)>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    cameras: Query<(&CellCoord, &Transform, &CameraOptics), (With<ShipCamera>, With<ActiveCamera>)>,
     toast_area: Query<Entity, With<ToastArea>>,
 ) {
     if !intent.quick_save_viewpoint || quick.open() {
@@ -114,7 +113,6 @@ fn open_quick_save_prompt(
         *situation,
         space_center.as_deref(),
         &cameras,
-        &windows,
     );
     let mut viewpoint = match captured {
         Ok(viewpoint) => viewpoint,
@@ -176,8 +174,11 @@ fn open_quick_save_prompt(
                     .with_children(|header| {
                         header.spawn(theme.heading("SAVE VIEWPOINT"));
                         header.spawn(theme.faint(format!(
-                            "{} · {}×{}",
-                            viewpoint.body, viewpoint.viewport[0], viewpoint.viewport[1]
+                            "{} · {:.0} mm · {}:{}",
+                            viewpoint.body,
+                            viewpoint.optics.lens.focal_length_mm,
+                            viewpoint.optics.sensor.aspect[0],
+                            viewpoint.optics.sensor.aspect[1],
                         )));
                     });
                 field = spawn_text_field(
@@ -373,8 +374,8 @@ mod tests {
                 sim_time_s: 0.0,
                 camera_position_body_m: [0.0, 0.0, 1.0],
                 camera_rotation_body_xyzw: [0.0, 0.0, 0.0, 1.0],
-                vertical_fov_rad: 1.0,
-                viewport: [1920, 1080],
+                optics: thalos_capture_protocol::CameraOptics::from_vertical_fov(1.0, [16, 9])
+                    .unwrap(),
             });
         }
         catalog

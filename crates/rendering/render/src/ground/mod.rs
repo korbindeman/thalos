@@ -112,10 +112,13 @@ pub use tree_atlas::{
 };
 pub use tree_impostor::{
     BakeParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams, TreeBakeMaterial,
-    TreeImpostorMaterial, TreeImpostorMaterialPlugin, hemioct_decode, impostor_bake_rotation,
-    make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    TreeImpostorExtension, TreeImpostorMaterial, TreeImpostorMaterialPlugin, hemioct_decode,
+    impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
+    tree_impostor_material,
 };
-pub use tree_material::{TreeMaterial, TreeMaterialPlugin, fallback_shadow_map};
+pub use tree_material::{
+    TreeMaterial, TreeMaterialPlugin, TreeShadingExtension, fallback_shadow_map, tree_material,
+};
 pub use tree_mesh::{
     CanopyStyle, TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data,
 };
@@ -174,7 +177,8 @@ impl Plugin for ThalosTerrainPlugin {
         sky_material::embed_body_sky_shader(app);
         vegetation::embed_grass_shader(app);
         gpu_grass::embed_gpu_grass_shader(app);
-        tree_material::embed_tree_shader(app);
+        // Trees moved to the standard path: their shader is the asset-loaded
+        // (hot-reloadable) `shaders/tree_standard.wgsl`, not an embed.
         rock_material::embed_rock_shader(app);
         tree_impostor::embed_tree_impostor_shaders(app);
         #[cfg(feature = "playground")]

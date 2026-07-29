@@ -636,19 +636,18 @@ impl FlattenedSurface {
         }
         let p = dir * self.inner.radius_m() as f64 / WORN_PATCH_WL_M;
         let n = crate::noise::fbm3(
-            p.x as f32,
-            p.y as f32,
-            p.z as f32,
+            p.x as f32, p.y as f32, p.z as f32,
             0x57EA12, // arbitrary fixed seed — the wear pattern is authored once
-            2,
-            0.5,
-            2.0,
+            2, 0.5, 2.0,
         );
         // Positive-tail threshold: roughly the upper half of the noise wears
         // through; the rest keeps its cover, so the band is patchy.
         let patchy = ((n - 0.45) * 2.5).clamp(0.0, 1.0);
         let wear = (band as f32) * (WORN_BASE + WORN_PATCH * patchy);
-        albedo.lerp(crate::procedural::LATERITE_SOIL_ALBEDO, wear.clamp(0.0, 1.0))
+        albedo.lerp(
+            crate::procedural::LATERITE_SOIL_ALBEDO,
+            wear.clamp(0.0, 1.0),
+        )
     }
 
     /// Height levelling + worn margin for one sample, shared by every entry.

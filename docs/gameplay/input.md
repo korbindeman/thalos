@@ -139,9 +139,13 @@ or the keyboard:
   vertical, pitch stops short of the poles, roll is zero. The constraint
   is re-derived every frame against the up direction *where the camera
   now is*, so the horizon stays level while flying across a body instead
-  of tipping over as the vertical rotates underneath. Q/E roll only
-  applies with this off (and it is forced off in deep space, where there
-  is no vertical to level against).
+  of tipping over as the vertical rotates underneath. The effective
+  surface-flight envelope ends at the authored Kármán line on atmospheric
+  bodies. Airless bodies use `min(5% of body radius, 100 km)`, so moons
+  retain plane-like surface flying while tiny asteroids release the lock
+  close to their surface. Crossing the ceiling releases into 6-DOF;
+  descending below 95% of it re-engages the lock, preventing chatter at
+  the boundary. The checkbox remains remembered throughout.
 - **Stop at the ground** (`C`) — the camera's radius is clamped to the
   terrain height beneath it plus a small clearance. A *floor*, not a
   swept collision: it stops the camera sinking through the surface it is
@@ -157,9 +161,20 @@ replay and capture baselines don't shift under them.
 `freecam::panel` draws the matching control surface on the left flank
 while freecam is active: the cruise speed with a real-world reference for
 scale, a log-scale drag slider over the whole 1 m/s – 10 000 km/s range,
-and the two mode switches. Panel and keyboard are two surfaces on **one**
-state — each pushes into `FreeCam` and reads back from it with
-value-guarded writes, so neither chases the other.
+the two mode switches, and the shared camera lens. The lens control is a
+logarithmic 12–400 mm full-frame-equivalent slider with common focal-length
+marks plus horizontal/vertical angle-of-view readouts. Holding `Z` temporarily
+multiplies the effective focal length by four; releasing it returns to the
+slider's base lens.
+
+F4 converts the currently presented framing into that physical lens on entry,
+then restores the receiving flight rig's optics on exit, so neither transition
+should jump or leak a photographic edit into normal flight. The exit frame also
+keeps freecam's final pointer delta out of the receiving orbit controller while
+allowing that controller to rebuild its own pose immediately. Panel and
+keyboard are two surfaces on **one** state — movement settings push into
+`FreeCam`, while lens controls edit the one `CameraOptics` component on
+`ShipCamera`; readback is value-guarded so the surfaces do not chase each other.
 
 ## UI input ownership
 

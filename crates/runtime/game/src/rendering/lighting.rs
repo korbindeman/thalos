@@ -358,7 +358,55 @@ const AMBIENT_DAY_TINT: Color = Color::srgb(0.62, 0.72, 0.95);
 /// **If the env map is ever put on physical units** (W7/F7), this must come
 /// back down by whatever share the env then carries, or the sky *will* be
 /// double-counted — the failure the 0.2 was guarding against.
-const AMBIENT_SKY_LUX_GAIN: f32 = 0.7;
+///
+/// **0.7 → 0.38 (2026-07-29).** The 0.7 calibration predates the shadow
+/// direct/ambient split (BL-20260726T222119Z): it was matched against a shadow
+/// model that multiplied the *whole* colour down, so the fill's own strength
+/// barely reached the frame. Once shadows switched to "kill the sun, keep the
+/// full sky fill", every shadowed fragment became a pure sample of this
+/// ambient — and at 0.7 the tile ground's shadow fill measured 3.5× the spine
+/// ground's beside it (`space-center-hill-view` A/B, shadowed-ground p05
+/// luminance 0.0274 vs 0.0079), reading as a pale wash rather than a deep
+/// sky-lit shadow. 0.38 puts shadowed ground at roughly twice the spine's
+/// whole-multiply artifact — deep, still clearly sky-filled.
+const AMBIENT_SKY_LUX_GAIN: f32 = 0.38;
+
+/// Share of the flat surface ambient's *chroma* taken from the warm ground
+/// bounce rather than the blue sky. The spine fills every fragment through
+/// `sky_ambient_irradiance`: blue `sky_radiance` on up-facing normals blended
+/// toward warm `ground_radiance` below the horizon plane. Bevy's flat
+/// `GlobalAmbientLight` stands in for that whole surrounding fill with ONE
+/// colour — and it was taking the sky's chroma alone, which is why every
+/// shadow and diffuse-lit slope rendered blue-teal (the sky-view LUT's
+/// cosine-weighted irradiance runs B/R ≈ 3.7, bluer than the sky dome the
+/// renderer itself draws). Folding the bounce share back in is the flat-fill
+/// equivalent of the spine's per-normal mix, not a new palette: the bounce
+/// colour below mirrors `lighting.wgsl`'s `SURFACE_GROUND_ALBEDO`, lit by the
+/// same reddened beam as the ground it bounces off.
+const AMBIENT_GROUND_BOUNCE_SHARE: f32 = 0.25;
+
+/// Mirror of `lighting.wgsl`'s `SURFACE_GROUND_ALBEDO` — the representative
+/// sunlit-land albedo the spine's warm ground bounce reflects. Keep in
+/// lockstep.
+const SURFACE_GROUND_ALBEDO: Vec3 = Vec3::new(0.10, 0.085, 0.055);
+
+/// Direct-beam airmass reddening for the Bevy sun, mirroring
+/// `lighting.wgsl::compute_surface_sky` (`SURFACE_SUN_REDDEN_GAIN = 1.0`):
+/// `exp(-τ_eff · (airmass − 1))`, airmass `= clamp(1/(sun_up + 0.10), 1, 8)`.
+/// The spine reddens every surface's direct beam as the sun drops; the Bevy
+/// `DirectionalLight` colour was never written, so tile ground / hull /
+/// structures kept a pure-white noon sun at any elevation — at a 13° sun the
+/// spine beam is (0.91, 0.80, 0.58) and the standard path's was (1, 1, 1),
+/// which is most of why sunlit tile ground read cold beside udlod's
+/// (`ground-photometry` A/B: sunlit B−R +0.02 vs −0.18). Energy loss rides the
+/// colour (Bevy multiplies it into the light), exactly as `sun_color` does on
+/// the spine.
+fn surface_sun_tint(tau_v: Vec3, strength: f32, sun_elev: f32) -> Vec3 {
+    let tau_eff = tau_v.max(Vec3::ZERO) * strength.max(0.0);
+    let sun_up = sun_elev.clamp(0.0, 1.0);
+    let airmass = (1.0 / (sun_up + 0.10)).clamp(1.0, 8.0);
+    (-tau_eff * (airmass - 1.0)).exp()
+}
 
 /// `smoothstep`, matching the WGSL builtin the terrain shader uses so the
 /// CPU-side day/night gate lines up with the ground's terminator exactly.
@@ -532,11 +580,36 @@ pub(super) fn update_sun_light(
     let au_over_d = (AU_M / helio_d_m.max(1.0)) as f32;
     let flux = LIGHT_AT_1AU * au_over_d * au_over_d * exposure.gain;
 
+    // Surface-regime beam tint (see `surface_sun_tint`): the dominant body's
+    // authored Rayleigh τ_v + strength — the same values every spine surface
+    // recovers from its `AtmosphereBlock` — faded to white with altitude
+    // (`surface_blend`), because the reddening is the beam's slant path through
+    // *this* atmosphere and a hull in orbit is above it.
+    let (tau_v, atm_strength) = sim
+        .system
+        .bodies
+        .get(dominant)
+        .and_then(|b| b.terrestrial_atmosphere.as_ref())
+        .and_then(|a| a.scattering.as_ref())
+        .map(|s| (Vec3::from_array(s.vertical_optical_depth), s.strength))
+        .unwrap_or((Vec3::ZERO, 0.0));
+    let sun_elev_f = if logged_sun_elev.is_finite() {
+        logged_sun_elev as f32
+    } else {
+        1.0
+    };
+    let surface_blend = sky_ambient.surface_blend.clamp(0.0, 1.0);
+    let sun_tint = Vec3::ONE.lerp(
+        surface_sun_tint(tau_v, atm_strength, sun_elev_f),
+        surface_blend,
+    );
+
     let dir_f32 = offset.normalize().as_vec3();
     let illuminance = LUX_PER_SPINE_FLUX * flux * daylight * horizon_vis;
     for (mut transform, mut light) in &mut light_query {
         // DirectionalLight shines along its local -Z, so we look in the light's travel direction.
         transform.look_to(dir_f32, Vec3::Y);
+        light.color = Color::linear_rgb(sun_tint.x, sun_tint.y, sun_tint.z);
         light.illuminance = illuminance;
     }
 
@@ -561,14 +634,29 @@ pub(super) fn update_sun_light(
     let sky_lux = luminance(sky_irr) * LUX_PER_SPINE_FLUX * AMBIENT_SKY_LUX_GAIN;
     let surface_ambient = AMBIENT_NIGHT_BRIGHTNESS + sky_lux; // sky_lux → 0 at night
 
-    let blend = sky_ambient.surface_blend.clamp(0.0, 1.0);
+    let blend = surface_blend;
     let target_brightness = space_ambient * (1.0 - blend) + surface_ambient * blend;
 
-    // Colour target: the physical sky chroma on the surface (luminance-normalised
-    // so brightness owns the magnitude), fading to the space stand-in tint.
+    // Colour target: the surface fill chroma (luminance-normalised so brightness
+    // owns the magnitude), fading to the space stand-in tint. The fill is the
+    // flat stand-in for the spine's whole surrounding light — blue sky above,
+    // warm sunlit-ground bounce below (`sky_ambient_irradiance`) — so its
+    // chroma blends both (see `AMBIENT_GROUND_BOUNCE_SHARE`); sky-only was the
+    // teal-shadow defect. The bounce is the representative ground albedo lit by
+    // the same reddened beam, gated by daylight so it vanishes at night (each
+    // term luminance-normalised first, so the blend weights are exact shares).
     let space_tint = AMBIENT_DAY_TINT.to_linear();
     let space_tint = Vec3::new(space_tint.red, space_tint.green, space_tint.blue);
-    let target_tint = space_tint.lerp(normalized_chroma(sky_irr).unwrap_or(space_tint), blend);
+    let bounce =
+        SURFACE_GROUND_ALBEDO * surface_sun_tint(tau_v, atm_strength, sun_elev_f) * daylight;
+    let surface_tint = match (normalized_chroma(sky_irr), normalized_chroma(bounce)) {
+        (Some(sky), Some(gnd)) => {
+            sky * (1.0 - AMBIENT_GROUND_BOUNCE_SHARE) + gnd * AMBIENT_GROUND_BOUNCE_SHARE
+        }
+        (Some(sky), None) => sky,
+        _ => space_tint,
+    };
+    let target_tint = space_tint.lerp(surface_tint, blend);
 
     // Temporal smoothing (~0.7 s time constant, frame-rate independent): the
     // probe republishes `SkyAmbient` on a coarse real-time cadence, and under

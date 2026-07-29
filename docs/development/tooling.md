@@ -196,12 +196,181 @@ warnings and errors remain visible. Set
 `artifacts/diagnostics/`) or an explicit path to override the sink. `RUST_LOG`
 still controls which events exist.
 
+### Performance telemetry (perf lane)
+
+`thalos::diagnostic::perf` is the always-on performance lane inside the shared
+runtime stream (`crates/runtime/game/src/perf/`). One collector (`PerfSamples`,
+per-frame CPU/GPU ms rings + memory/count gauges) feeds three consumers:
+
+- **F3 debug view** — one F3 press toggles the live stats/graph screen *and*
+  the physics-hitbox + aero-gizmo overlays together (single toggle in
+  `perf::overlay::toggle_debug_view`; the per-module F3 readers are gone).
+  Graphs render as `UiMaterial` quads (`assets/shaders/perf_graph.wgsl`, so
+  they hot-reload). `THALOS_DEBUG_VIEW=1` starts the view visible, which is
+  how a headless capture can screenshot it.
+- **`frame_gauge`** every ~2 s: fps, cpu ms mean/p50/p95/max, gpu ms, SimStage
+  wall times, entities, mesh/image counts, tile-resident MiB, mesh-slab MiB.
+  Under 1 MB per played hour.
+- **`spike`** dumps: the collector keeps ~8.5 s of per-frame samples; a frame
+  over max(3×median, 50 ms) dumps a 3 s window (2 s pre + 1 s post) of exact
+  per-frame CPU/GPU values as comma-joined string fields. ≥5 s cooldown.
+- **`frame_block`** (opt-in, `THALOS_PERF_RECORD=1`): every frame recorded,
+  emitted in 1 s blocks (~15–30 MB/hour) — for runs where the offline report
+  should carry the complete timeline.
+
+**`just perf-report [session|latest|--list]`** (tools/perfreport) renders one
+session of that lane to `artifacts/diagnostics/reports/<session>/report.html`
+(self-contained charts: frame timeline with spike markers, tile-vs-slab memory
+curves, counts, stage breakdown, per-spike sparklines) plus a `summary.json`
+for agents. Note the honesty split in `summary.json`: `worst_window_*` fields
+are window-level aggregates; exact frame percentiles (`full_rate.*`) appear
+only when a full-rate recording exists. Deep profiling remains Tracy /
+`profile-chrome` — the perf lane tells you when to reach for them.
+
+**Storage**: `runtime_diagnostics::jsonl_layer` calls
+`artifact_paths::rotate_and_prune_diagnostics()` at every process start — any
+top-level diagnostics JSONL over 64 MB rotates to `<stem>.rot<unix_ms>.jsonl`,
+then rotated files are pruned oldest-first until the directory is back under
+its 256 MB budget. Active sinks are never deleted; `perf-report` reads rotated
+`runtime.rot*.jsonl` siblings transparently.
+
 Keep a specialized JSONL recorder when it has a real independent schema or
 lifecycle—capture reports, stage-separation audits, grass churn, GPU-memory
 sampling, shadow traces, and shipyard selection traces are examples. Reuse
 `artifact_paths` so bare names stay under the diagnostics tree. A new
 diagnostic should default to the shared runtime stream; it should not add a new
 file merely to avoid choosing an event name.
+
+### Event shape
+
+An event is data an agent greps and a report tool groups by, so its shape is
+part of the contract:
+
+- `event = "<snake_case_noun>"` is the stable key. Once written, treat renaming
+  it as a breaking change to every reader.
+- Fields are flat scalars with the unit in the name (`_ms`, `_mib`, `_m`,
+  `_hz`, `_frac`, `_count`). No pre-formatted strings a reader has to re-parse;
+  the trailing message string is a human label, never the payload.
+- Emit the denominator with the numerator — `resident_mib` beside `budget_mib`,
+  a count beside the cap that would bite, a rate beside its window. A number
+  with no denominator can be consistent with every hypothesis at once, which is
+  how the tile-residency OOM stayed undiagnosable (INC-20260725T012104Z).
+- Anything per-process is joined by the line's own `pid`/`session`. Concurrent
+  game instances are normal here; aggregate per session, never across the file.
+- Always-on gauges are periodic (≥ 1 s) and allocation-free on the hot path.
+  Full-rate or per-item traces are `THALOS_*` opt-in and must not need a
+  recompile.
+
+### Reading the lane: `just diag`
+
+Writing events is half a diagnostics system; the other half is a reader that
+says what deserves attention. `just diag [hours]` (`tools/diag`) loads the
+window — runtime and tool lanes, rotated files included, foreign schemas
+skipped — and reports **only what crossed a threshold**:
+
+```bash
+just diag           # last 24 h
+just diag 168       # the week, for judging a trend
+just diag 24 --json # machine-readable, for a routine or another tool
+```
+
+A healthy window prints its header and `nothing crossed a threshold`. An empty
+window says *nothing ran* rather than implying health — the distinction matters,
+because "no records" is equally consistent with "quiet day" and "the lane
+stopped writing".
+
+Findings carry a stable `id`, a headline with its **denominator**, at most four
+evidence lines, and where to look next. Current checks: `error_events`,
+`warn_events`, `capture_failures`, `capture_retries`, `capture_boot_rate`,
+`capture_latency`, `capture_lock_contention`, `frame_spikes`, `slow_frames`,
+`memory_growth`, `tile_budget_brake`, `silent_sessions`, `lane_noise`,
+`empty_window`.
+
+Thresholds live in `tools/diag/src/finding.rs`, one named constant each with the
+reason it sits where it does. Two properties are tested and must stay true:
+**a healthy window produces no findings** (otherwise real findings drown), and
+**every check fires on the defect it exists for** (otherwise it is decoration
+that passes forever).
+
+**The daily pass** is the `diag-triage` skill (`.claude/skills/diag-triage/`):
+run the reader, interpret each finding against known mechanisms, dedupe against
+`docs/backlog.md` and `docs/incidents/`, and end each one in a row, an incident,
+or an explicit *no action, because …*. Its second job is signal-to-noise
+maintenance — see below.
+
+**Keeping the lane worth reading.** The lane is shared, so its volume is a
+shared cost, and `lane_noise` flags any single event that dominates it. The
+policy, in order of preference: sample it, demote it to a `THALOS_*` opt-in
+mode, or delete it. Investigation traces are the usual offender — they are
+instruments for one question and rarely get retired when it is answered. The
+vegetation drive trace was exactly this (60 % of every record in the lane, read
+by nothing) and is now behind `THALOS_VEG_DIAG=1`. The reciprocal rule applies
+to the reader: a check that fires daily and is dismissed daily is a wrong
+threshold or a dead check.
+
+**Adding a diagnostic** therefore means answering three questions: what does it
+let a reader conclude, what value makes it actionable, and which check reads it?
+If nothing reads it, add the check or don't add the event.
+
+### Developer-tool instrumentation
+
+The headless capture lane is the throughput floor for agent work, so its
+latency and reliability are measured, not recalled. Every developer-tool run
+(`just screenshot` / `capture` / `compare` / `preview` / `map` / `bake` /
+`texgen`) should leave a machine-readable record of what it did, how long each
+phase took, and how it ended: outcome, per-phase timings (lock wait, host reuse
+vs. restart, rebuild and its reason, settle, render, encode), source
+fingerprint, retries, and the failure reason on the error path. An exit code
+plus stderr prose does not qualify — Bevy can log a fatal pipeline validation
+error and still exit 0 (BL-20), which is why silent-success detection belongs in
+recorded invariants rather than in the reader's eyes.
+
+The contract, sink, session id, path resolution, and rotation live in
+**`thalos_diagnostics`** (`crates/foundation/diagnostics`, no Bevy), so a tool
+records on the same terms as the game. A tool calls
+`thalos_diagnostics::install_tool_lane()` once at startup and wraps each unit of
+work in a [`ToolRun`]:
+
+```rust
+let mut run = ToolRun::start("capture", format!("shot {preset}"));
+run.field("host_action", "restart_stale_source");
+run.phase("host_start", started.elapsed());   // repeats accumulate
+run.count("retry");
+run.ok();                                     // or .fail(reason)
+```
+
+`ToolRun` emits `tool_run_start` when the work begins — the line that survives a
+hard kill — and `tool_run` when it ends, flattening phases and counters into
+`phase_<name>_ms` / `<name>_count` beside `outcome`, `total_ms`, and any typed
+fields. Tool records go to **`artifacts/diagnostics/tools.jsonl`**
+(`THALOS_TOOL_DIAGNOSTICS` overrides), separate from `runtime.jsonl` because the
+lifecycle is per-invocation and the question is different: *is the capture lane
+fast and stable this week?* should not mean paging past a session of frame
+gauges.
+
+**The capture client is instrumented.** One record per shot — including each
+scene of a `just capture` batch and each variant of a `just compare` matrix,
+since both route through the same `capture()`:
+
+| Field | Meaning |
+|---|---|
+| `host_action` | `reuse` · `start` · `restart_stale_source` · `restart_incompatible_scene` · `restart_startup_override` — why this shot did or did not pay for a boot. The same classifier drives the branch, so the record cannot drift from what happened. |
+| `phase_source_snapshot_ms` | content-hashing the source + asset trees (several times per shot; accumulated) |
+| `phase_host_start_ms` | stop → `cargo run` rebuild → host ready, on success *and* failure |
+| `phase_shader_reload_ms` | waiting for a WGSL edit to land in the resident host |
+| `phase_render_ms` | request written → response observed |
+| `phase_validate_ms` | output decode, render-log scan, workspace re-snapshot, receipt |
+| `host_start_count`, `retry_count`, `rebuild_recovery_count` | boots, unhealthy-host retries, stale-artifact rebuild recoveries |
+| `outcome`, `error` | `ok` · `error` (first line of the failure) · `abandoned` (process died mid-run) |
+
+Machine-lock contention is its own `capture_lock` event (`wait_ms`, `queued`,
+`owner_pid`) rather than a phase of whichever shot happened to be first —
+otherwise one agent's queueing reads as another agent's slow capture.
+
+Still open, and worth knowing when reading a slow record: `phase_render_ms` is
+the client's outside view of the host. The host-internal split (scene settle vs.
+warmup frames vs. readback/encode) is not separated yet, and the offline tools
+(`bake`, `texgen`, `map`, `preview`) have no run record.
 
 ### Generated artifact layout
 
@@ -210,6 +379,10 @@ Generated evidence has three deliberately separate homes:
 - `artifacts/visual/latest/` contains only the latest canonical whole-scene views.
   Each `just screenshot <preset>` overwrites its stable preset filename; do not
   keep numbered experiments or crops beside it.
+- `artifacts/visual/catalog/` contains disposable offline discovery products.
+  The viewpoint gallery downsamples canonical latest images here and records
+  cache/provenance state in its index; thumbnails are navigation aids, not
+  verification evidence.
 - `artifacts/visual/runs/` is disposable visual working space. Put ad-hoc
   `THALOS_SCREENSHOT_OUT` captures there; `just compare` writes its complete
   matrices under `artifacts/visual/runs/comparisons/` automatically.
@@ -224,7 +397,7 @@ Generated evidence has three deliberately separate homes:
   `THALOS_SHIPYARD_SELECT_LOG` is resolved there. An explicit relative path
   with a parent, or an absolute path, is still honored.
 
-All three output trees are ignored by Git. The temporary procedural-object and
+All generated output trees above are ignored by Git. The temporary procedural-object and
 UI preview examples also write beneath `artifacts/visual/latest/`; future
 in-context runtime presets will replace those examples without creating another
 output root.

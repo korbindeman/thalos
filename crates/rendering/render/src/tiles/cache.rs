@@ -318,7 +318,8 @@ impl TerrainTileProvider for CachedTileProvider {
         if let Some(root) = &self.disk_root {
             write_tile(root, ns, key, &encode(&payload, radius_m));
         }
-        self.memory.insert(ns, key, payload, self.memory_budget_bytes);
+        self.memory
+            .insert(ns, key, payload, self.memory_budget_bytes);
         tile
     }
 }

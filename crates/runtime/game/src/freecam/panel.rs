@@ -23,14 +23,15 @@
 //! this surface too, which is why it is a module rather than a function.
 
 use bevy::prelude::*;
+use thalos_capture_protocol::{MAX_FOCAL_LENGTH_MM, MIN_FOCAL_LENGTH_MM};
 use thalos_ui::{
     SliderFormat, UiCheckbox, UiSlider, UiTheme, spawn_checkbox_row, spawn_divider, spawn_heading,
     spawn_slider_row, spawn_value_row, tokens,
 };
 
-use super::{
-    FREECAM_MAX_SPEED_M_S, FREECAM_MIN_SPEED_M_S, FreeCam, format_speed, speed_reference,
-};
+use super::{FREECAM_MAX_SPEED_M_S, FREECAM_MIN_SPEED_M_S, FreeCam, format_speed, speed_reference};
+use crate::camera::ShipCamera;
+use crate::camera_optics::CameraOptics;
 use crate::pause_menu::GamePause;
 use crate::photo_mode::PhotoMode;
 use crate::rendering::{SimulationState, view_anchor::ViewAnchor};
@@ -47,6 +48,9 @@ struct FreeCamPanelRoot;
 struct SpeedSliderControl;
 
 #[derive(Component)]
+struct LensSliderControl;
+
+#[derive(Component)]
 struct LevelLockControl;
 
 #[derive(Component)]
@@ -59,12 +63,18 @@ struct SpeedValueText;
 struct SpeedReferenceText;
 
 #[derive(Component)]
+struct LensValueText;
+
+#[derive(Component)]
+struct LensAovText;
+
+#[derive(Component)]
 struct AnchorValueText;
 
 #[derive(Component)]
 struct AltitudeValueText;
 
-const PANEL_WIDTH: f32 = 244.0;
+const PANEL_WIDTH: f32 = 264.0;
 /// Clear of the top-left warp/view row (16 px + its height).
 const PANEL_TOP: f32 = 132.0;
 
@@ -90,6 +100,7 @@ impl Plugin for FreeCamPanelPlugin {
 
 fn setup(mut commands: Commands, theme: Res<UiTheme>) {
     let freecam = FreeCam::default();
+    let optics = CameraOptics::default();
     commands
         .spawn((
             Node {
@@ -149,6 +160,29 @@ fn setup(mut commands: Commands, theme: Res<UiTheme>) {
 
             spawn_divider(panel);
 
+            spawn_heading(panel, &theme, "LENS", false);
+            let mut lens_value = theme.mono(format_lens_value(&optics));
+            lens_value.1.font_size = FontSize::Px(20.0);
+            panel.spawn((lens_value, LensValueText));
+            panel.spawn((theme.faint(format_aov(&optics)), LensAovText));
+            spawn_slider_row(
+                panel,
+                &theme,
+                "FOCAL",
+                UiSlider {
+                    min: MIN_FOCAL_LENGTH_MM.log10(),
+                    max: MAX_FOCAL_LENGTH_MM.log10(),
+                    value: optics.base_focal_length_mm().log10(),
+                    step: 0.0,
+                    format: SliderFormat::Custom(format_log_focal_length),
+                },
+                LensSliderControl,
+            );
+            panel.spawn(theme.faint("14 · 24 · 35 · 50 · 85 · 135 · 200 mm"));
+            panel.spawn(theme.faint("Hold Z for spring telephoto ×4"));
+
+            spawn_divider(panel);
+
             spawn_heading(panel, &theme, "FLIGHT", false);
             spawn_checkbox_row(
                 panel,
@@ -198,7 +232,16 @@ fn sync_visibility(
 /// moving a control, not [`refresh_controls`]'s own write echoing back.
 fn apply_controls(
     mut freecam: ResMut<FreeCam>,
+    mut camera_optics: Query<&mut CameraOptics, With<ShipCamera>>,
     speed: Query<&UiSlider, (Changed<UiSlider>, With<SpeedSliderControl>)>,
+    lens: Query<
+        &UiSlider,
+        (
+            Changed<UiSlider>,
+            With<LensSliderControl>,
+            Without<SpeedSliderControl>,
+        ),
+    >,
     level: Query<&UiCheckbox, (Changed<UiCheckbox>, With<LevelLockControl>)>,
     ground: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GroundFloorControl>)>,
 ) {
@@ -211,6 +254,16 @@ fn apply_controls(
         // must not count as a user edit.
         if (freecam.base_speed_m_s - value).abs() > freecam.base_speed_m_s * 1.0e-3 {
             freecam.base_speed_m_s = value;
+        }
+    }
+    if let Ok(slider) = lens.single()
+        && let Ok(mut optics) = camera_optics.single_mut()
+    {
+        let focal_length_mm = 10.0_f32.powf(slider.value);
+        if (optics.base_focal_length_mm() - focal_length_mm).abs()
+            > optics.base_focal_length_mm() * 1.0e-4
+        {
+            optics.set_base_focal_length_mm(focal_length_mm);
         }
     }
     if let Ok(checkbox) = level.single()
@@ -232,12 +285,16 @@ fn refresh_controls(
     anchor: Res<ViewAnchor>,
     sim: Res<SimulationState>,
     root: Query<&Visibility, With<FreeCamPanelRoot>>,
+    camera_optics: Query<&CameraOptics, With<ShipCamera>>,
     mut speed: Query<&mut UiSlider, With<SpeedSliderControl>>,
+    mut lens: Query<&mut UiSlider, (With<LensSliderControl>, Without<SpeedSliderControl>)>,
     mut level: Query<&mut UiCheckbox, (With<LevelLockControl>, Without<GroundFloorControl>)>,
     mut ground: Query<&mut UiCheckbox, (With<GroundFloorControl>, Without<LevelLockControl>)>,
     mut texts: ParamSet<(
         Query<&mut Text, With<SpeedValueText>>,
         Query<&mut Text, With<SpeedReferenceText>>,
+        Query<&mut Text, With<LensValueText>>,
+        Query<&mut Text, With<LensAovText>>,
         Query<&mut Text, With<AnchorValueText>>,
         Query<&mut Text, With<AltitudeValueText>>,
     )>,
@@ -253,6 +310,16 @@ fn refresh_controls(
         if (slider.value - value).abs() > 1.0e-4 {
             slider.value = value;
         }
+    }
+    if let Ok(optics) = camera_optics.single() {
+        if let Ok(mut slider) = lens.single_mut() {
+            let value = optics.base_focal_length_mm().log10();
+            if (slider.value - value).abs() > 1.0e-4 {
+                slider.value = value;
+            }
+        }
+        set_text(&mut texts.p2(), format_lens_value(optics));
+        set_text(&mut texts.p3(), format_aov(optics));
     }
     if let Ok(mut checkbox) = level.single_mut()
         && checkbox.checked != freecam.level_to_up
@@ -280,14 +347,14 @@ fn refresh_controls(
             .unwrap_or_else(|| "—".to_string()),
         None => "inertial".to_string(),
     };
-    set_text(&mut texts.p2(), anchor_label);
+    set_text(&mut texts.p4(), anchor_label);
 
     let altitude = anchor
         .resolved
         .filter(|resolved| Some(resolved.body) == freecam.anchor_body())
         .map(|resolved| format_altitude(resolved.agl_m))
         .unwrap_or_else(|| "—".to_string());
-    set_text(&mut texts.p3(), altitude);
+    set_text(&mut texts.p5(), altitude);
 }
 
 fn set_text<F: bevy::ecs::query::QueryFilter>(query: &mut Query<&mut Text, F>, value: String) {
@@ -301,6 +368,33 @@ fn set_text<F: bevy::ecs::query::QueryFilter>(query: &mut Query<&mut Text, F>, v
 /// The slider's own inline readout — its stored value is a log₁₀ exponent.
 fn format_log_speed(log10_m_s: f32) -> String {
     format_speed(10.0_f64.powf(log10_m_s as f64))
+}
+
+fn format_log_focal_length(log10_mm: f32) -> String {
+    format!("{:.0} mm", 10.0_f32.powf(log10_mm))
+}
+
+fn format_lens_value(optics: &CameraOptics) -> String {
+    let base = optics.base_focal_length_mm();
+    let effective = optics.effective_focal_length_mm();
+    if (effective - base).abs() > 0.05 {
+        format!(
+            "{effective:.0} mm  ({base:.0} ×{:.1})",
+            optics.zoom_multiplier()
+        )
+    } else {
+        format!("{base:.0} mm")
+    }
+}
+
+fn format_aov(optics: &CameraOptics) -> String {
+    format!(
+        "{:.1}° horizontal · {:.1}° vertical · {}:{} sensor",
+        optics.horizontal_fov_rad().to_degrees(),
+        optics.vertical_fov_rad().to_degrees(),
+        optics.spec().sensor.aspect[0],
+        optics.spec().sensor.aspect[1],
+    )
 }
 
 /// The line under the big number: what this speed is *like*, plus km/h while
@@ -330,12 +424,7 @@ mod tests {
     /// the speed and dragging the bar would disagree at the ends.
     #[test]
     fn log_slider_round_trips_the_speed_range() {
-        for speed in [
-            FREECAM_MIN_SPEED_M_S,
-            100.0,
-            7_800.0,
-            FREECAM_MAX_SPEED_M_S,
-        ] {
+        for speed in [FREECAM_MIN_SPEED_M_S, 100.0, 7_800.0, FREECAM_MAX_SPEED_M_S] {
             let slider_value = speed.log10() as f32;
             let round_trip = 10.0_f64.powf(slider_value as f64);
             assert!(
@@ -349,5 +438,14 @@ mod tests {
     fn reference_line_drops_km_h_once_it_stops_helping() {
         assert!(reference_line(30.0).contains("km/h"));
         assert!(!reference_line(7_800.0).contains("km/h"));
+    }
+
+    #[test]
+    fn lens_slider_round_trips_the_supported_range() {
+        for focal_length_mm in [12.0_f32, 24.0, 35.0, 50.0, 85.0, 135.0, 400.0] {
+            let slider_value = focal_length_mm.log10();
+            let round_trip = 10.0_f32.powf(slider_value);
+            assert!((round_trip - focal_length_mm).abs() <= focal_length_mm * 1.0e-5);
+        }
     }
 }

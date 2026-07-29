@@ -48,6 +48,8 @@ fn sync_ocean_materials(
                         material.atmosphere,
                         material.atmosphere_extra,
                         material.terrain_entity,
+                        material.cloud_shadow,
+                        material.cloud_shadow_map.clone(),
                     ),
                 )
             })
@@ -55,7 +57,8 @@ fn sync_ocean_materials(
         .collect();
 
     for (ocean, handle) in &oceans {
-        let Some((atmosphere, extra, terrain_entity)) = sky_state.get(&ocean.body_id).copied()
+        let Some((atmosphere, extra, terrain_entity, cloud_shadow, cloud_shadow_map)) =
+            sky_state.get(&ocean.body_id).cloned()
         else {
             continue;
         };
@@ -65,5 +68,8 @@ fn sync_ocean_materials(
         material.optical.atmosphere = atmosphere;
         material.optical.atmosphere_extra = extra;
         material.optical.terrain_entity = terrain_entity;
+        // Shafts over water shade through the same cascade as the sky pass.
+        material.optical.cloud_shadow = cloud_shadow;
+        material.optical.cloud_shadow_map = cloud_shadow_map;
     }
 }

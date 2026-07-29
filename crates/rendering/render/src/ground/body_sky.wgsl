@@ -23,8 +23,9 @@
 #import thalos::atmosphere::{
     AtmosphereBlock,
     atmosphere_jitter,
-    integrate_atmosphere_multiscatter,
+    integrate_atmosphere_multiscatter_occluded,
 }
+#import thalos::cloud_shadow::CloudShadowBlock
 #import thalos::lighting::SCENE_FLUX_SCALE
 #import thalos::water::shade_ocean_detailed
 
@@ -50,6 +51,10 @@ struct SkyAtmosExtra {
     tile_atlas_uv:             vec4<f32>,  // x = atlas-UV scale (center/texture), y = offset (border/texture), z = height min (m), w = height max (m)
     cloud_march:               vec4<f32>,  // x = cloud view raymarch step count (composite partition contract); y = tier diagnostic, z/w = far filter/aggregation modes
     fill_response:             array<vec4<f32>, 4>,  // far-tier opacity response LUT (cloud composite only; unused here)
+    fill_cell_edge:            array<vec4<f32>, 4>,  // resolved far cell-edge LUT (cloud composite only; unused here)
+    fill_cell_solid:           array<vec4<f32>, 4>,  // resolved far solid-opacity LUT (cloud composite only; unused here)
+    cloud_ambient_top:         vec4<f32>,            // far-tier sky ambient (cloud composite only; unused here)
+    cloud_ambient_bottom:      vec4<f32>,            // far-tier sky ambient (cloud composite only; unused here)
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 
@@ -106,6 +111,15 @@ struct SkyTileTreeEntry {
 // severely foreshortened view direction.
 @group(3) @binding(11) var ocean_slope_tex: texture_2d<f32>;
 @group(3) @binding(12) var ocean_slope_sampler: sampler;
+
+// Cloud sun-transmittance cascade (CLOUD-5 §3.5 atmosphere shafts): the SAME
+// field every surface receiver samples (`thalos::cloud_shadow`), here gating
+// the raymarch's per-sample sun term so cloud gaps become bright crepuscular
+// shafts in the air and shadowed columns lose their airlight. A zeroed block
+// (no active cascade / shafts disabled) stands the term down before any fetch.
+@group(3) @binding(13) var<uniform> sky_cloud_shadow: CloudShadowBlock;
+@group(3) @binding(14) var cloud_shadow_tex: texture_2d<f32>;
+@group(3) @binding(15) var cloud_shadow_samp: sampler;
 
 // Mirror of `ocean_slope::OCEAN_CASCADE_DOMAINS_M`; change together.
 const OCEAN_CASCADE_DOMAINS_M: array<f32, 4> = array<f32, 4>(
@@ -816,12 +830,13 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let jitter = atmosphere_jitter(in.clip_position.xy);
-    var scatter = integrate_atmosphere_multiscatter(
+    var scatter = integrate_atmosphere_multiscatter_occluded(
         cam_pos, ray_dir, planet_center,
         sky_atmos_extra.sun_dir_flux.xyz,
         sky_atmos_extra.sun_dir_flux.w * SCENE_FLUX_SCALE,
         t_enter, t_exit, planet_radius, sky_atmos, jitter,
         ms_lut_tex, ms_lut_sampler,
+        sky_cloud_shadow, cloud_shadow_tex, cloud_shadow_samp,
     );
 
     // Aerial-perspective decoupling. The authored in-scatter strength is tuned

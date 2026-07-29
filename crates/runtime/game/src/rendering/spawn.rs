@@ -384,6 +384,11 @@ pub(super) fn spawn_bodies(
                 // Filled by `update_body_terrain_atmosphere` once the body's
                 // udlod terrain spawns (ADR-20260720T185958Z-water-projects-one-signed-sea-field height-tile lookup).
                 terrain_entity: None,
+                // Cloud shafts (CLOUD-5 §3.5): the default (zeroed) block keeps
+                // the term down until `update_body_terrain_atmosphere` binds the
+                // live cascade on the active cloud body.
+                cloud_shadow: Default::default(),
+                cloud_shadow_map: Default::default(),
             };
             if body.terrain.ocean_sea_level_m().is_some() {
                 commands.spawn((

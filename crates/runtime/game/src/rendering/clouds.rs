@@ -97,10 +97,21 @@ const AMBIENT_BOTTOM_SCALE: f32 = 0.042;
 /// `THALOS_CLOUD_SHADOW`: `off`/`0`/`false` stands the term down (the cascade
 /// still marches, so the only factor under test is whether receivers apply it);
 /// `show` paints the raw transmittance on receivers; anything else applies it.
+///
+/// `THALOS_CLOUD_GODRAY`: `off`/`0`/`false` stands down only the atmosphere
+/// march's crepuscular-shaft term (the CLOUD-5 §3.5 sky receiver) while every
+/// surface receiver keeps its shadow — the isolating lever for the `godray`
+/// compare axis. Anything else (or unset) applies it.
 #[derive(Resource, Clone, Copy)]
 pub struct CloudShadowConfig {
     pub enabled: bool,
     pub debug_show: bool,
+    /// Whether the atmosphere raymarch applies the cascade to its per-sample
+    /// sun term (godrays). Independent of `enabled` so one capture axis can
+    /// isolate the sky term from the surface receivers, but a disabled term
+    /// (`enabled = false`) zeroes the cascade strength and takes the shafts
+    /// down with it — one field, one authority.
+    pub shafts: bool,
 }
 
 impl Default for CloudShadowConfig {
@@ -108,6 +119,7 @@ impl Default for CloudShadowConfig {
         Self {
             enabled: true,
             debug_show: false,
+            shafts: true,
         }
     }
 }
@@ -116,10 +128,12 @@ impl CloudShadowConfig {
     fn from_env() -> Self {
         let mut config = Self::default();
         config.apply_capture_mode(std::env::var("THALOS_CLOUD_SHADOW").ok().as_deref());
+        config.apply_godray_mode(std::env::var("THALOS_CLOUD_GODRAY").ok().as_deref());
         config
     }
 
     pub(crate) fn apply_capture_mode(&mut self, mode: Option<&str>) {
+        let shafts = self.shafts;
         *self = match mode
             .unwrap_or_default()
             .trim()
@@ -129,13 +143,28 @@ impl CloudShadowConfig {
             "off" | "0" | "false" | "no" => Self {
                 enabled: false,
                 debug_show: false,
+                shafts,
             },
             "show" | "raw" | "debug" => Self {
                 enabled: true,
                 debug_show: true,
+                shafts,
             },
-            _ => Self::default(),
+            _ => Self {
+                shafts,
+                ..Self::default()
+            },
         };
+    }
+
+    pub(crate) fn apply_godray_mode(&mut self, mode: Option<&str>) {
+        self.shafts = !matches!(
+            mode.unwrap_or_default()
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "off" | "0" | "false" | "no"
+        );
     }
 }
 
@@ -233,6 +262,8 @@ mod fill_lut_cache {
     struct CachedCalibration {
         threshold_nodes: Vec<f32>,
         far_response: Vec<f32>,
+        far_cell_edge: Vec<f32>,
+        far_cell_solid: Vec<f32>,
     }
 
     pub(super) fn key(input: &thalos_body_render::FillCalibrationInput<'_>) -> String {
@@ -287,6 +318,8 @@ mod fill_lut_cache {
         Some(CloudFillCalibration {
             threshold_nodes: cached.threshold_nodes.try_into().ok()?,
             far_response: cached.far_response.try_into().ok()?,
+            far_cell_edge: cached.far_cell_edge.try_into().ok()?,
+            far_cell_solid: cached.far_cell_solid.try_into().ok()?,
         })
     }
 
@@ -298,6 +331,8 @@ mod fill_lut_cache {
         let cached = CachedCalibration {
             threshold_nodes: calibration.threshold_nodes.to_vec(),
             far_response: calibration.far_response.to_vec(),
+            far_cell_edge: calibration.far_cell_edge.to_vec(),
+            far_cell_solid: calibration.far_cell_solid.to_vec(),
         };
         let write = || -> std::io::Result<()> {
             if let Some(parent) = path.parent() {
