@@ -1521,12 +1521,20 @@ fn get_ray_direction(frag_coord: vec2f) -> vec3f {
 // Only the DIRECT beam is gated. Ground under solid overcast keeps its sky
 // ambient, which is why an overcast landscape reads flat-lit rather than black.
 
-// Steps across the deck. The vertical span is a ~1–3 km slab; at 20 steps a
-// zenith sun samples every ~100 m, comfortably under the authored base-shape
-// scale, and the slant clamp below stops a low sun from stretching that past
-// the structure it is supposed to resolve.
+// Steps across the deck. The budget distributes over the WHOLE beam span:
+// ~525 m steps across the 10.5 km zenith chord, growing with the slant span
+// (toward ~175 km at the 3.4° stand-down) while `filter_m` band-limits the
+// density field to the stride — the same alias contract the view march runs.
+// A fixed per-step cap here (400 m until 2026-07-30) silently truncated the
+// march at 8 km of beam: the shell is 900–11,400 m and the authored bands
+// reach it (storm tops ~11.2 km, cirrus veil 8.7–10.9 km), so anvil mass
+// never shadowed at noon and below ~25° sun the deck progressively stopped
+// casting — at ~12° an opaque high-base overcast lay NO shadow at all,
+// because clear air below the deck exhausted the whole budget
+// (reviews/20260730T011353Z §3). Clipping the interval to the local layer
+// band was considered and rejected: a mid/region-derived band cannot
+// conservatively bound a lone storm top — exactly the mass the cap lost.
 const CLOUD_SHADOW_STEPS: u32 = 20u;
-const CLOUD_SHADOW_MAX_STEP_M: f32 = 400.0;
 
 // Distance along `dir` from `origin` (inside radius `r`) to the sphere of
 // radius `r`. Positive root only — the caller is always inside the shell.
@@ -1564,13 +1572,32 @@ fn cloud_shadow_transmittance(base: vec3f, jitter: f32) -> CloudShadowSample {
         return out;
     }
 
-    // Per-texel weather/formation context, taken at the slab midpoint exactly
-    // as the view march takes it at its segment midpoint: these fields vary
-    // over tens of km, and re-sampling them per step buys nothing but cost.
-    let mid = base + sun * (entry + 0.5 * span);
-    let weather_mid = sample_weather(normalize(mid));
+    // Per-texel weather/formation context. These fields vary over tens of km,
+    // so one evaluation serves the beam — but the anchor must stay LOCAL as
+    // the slant span grows: never more than 25 km past shell entry (the view
+    // march's finding-G clamp, mirrored here). The unclamped midpoint sat up
+    // to ~87 km down-beam at low sun, and its clear-air cull then punched
+    // migrating fully-lit holes into the shadow of a solid deck whenever the
+    // midpoint landed in an authored clear lane (reviews/20260730T011353Z §6).
+    let context_t = entry + min(0.5 * span, 25000.0);
+    let mid = base + sun * context_t;
+    let n_mid = normalize(mid);
+    let weather_mid = sample_weather(n_mid);
     out.coverage = weather_mid.r * config.clouds_coverage;
-    if (out.coverage <= 1.0e-3) {
+    // The regime producer authors REAL zero-coverage lanes, so a clear context
+    // point does not imply a clear beam: probe coarse mips (~80 km and
+    // ~320 km footprints) along the beam before culling, exactly as the view
+    // march guards its own early-out.
+    let weather_region = textureSampleLevel(weather_texture, weather_sampler, n_mid, 4.0);
+    let far_anchor = entry + min(0.75 * span, 150000.0);
+    let far_region = textureSampleLevel(
+        weather_texture,
+        weather_sampler,
+        normalize(base + sun * far_anchor),
+        5.0,
+    );
+    let region_coverage = max(max(weather_mid.r, weather_region.r), far_region.r);
+    if (region_coverage * config.clouds_coverage <= 1.0e-3) {
         return out;
     }
     let macro_period = max(config.clouds_base_shape_scale_m, 500.0) * 2.7;
@@ -1583,7 +1610,7 @@ fn cloud_shadow_transmittance(base: vec3f, jitter: f32) -> CloudShadowSample {
     let macro_noise = macro_sample.a;
     let formation = macro_sample.r;
 
-    let step_m = min(span / f32(CLOUD_SHADOW_STEPS), CLOUD_SHADOW_MAX_STEP_M);
+    let step_m = span / f32(CLOUD_SHADOW_STEPS);
     // Footprint-matched erosion fade: the map's texel is the sampler here, and
     // a slanted beam smears each texel further along the ground.
     let footprint_m = max(
