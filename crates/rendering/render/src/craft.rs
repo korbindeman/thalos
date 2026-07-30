@@ -168,6 +168,15 @@ pub struct ShipPartExtension {
     pub sun_shadow_map_1: Handle<Image>,
     #[texture(104, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    /// Cloud sun-transmittance cascade (CLOUD-5 / W2) — the same map the tile
+    /// ground and trees sample, so a parked craft dims under the deck exactly
+    /// with the ground beside it. Block gate zero (no cloud body / clouds off)
+    /// reads fully lit, so the default handles are never sampled.
+    #[texture(105)]
+    #[sampler(106)]
+    pub cloud_shadow_map: Handle<Image>,
+    #[uniform(107)]
+    pub cloud_shadow: crate::clouds::CloudShadowBlock,
 }
 
 impl MaterialExtension for ShipPartExtension {
@@ -206,6 +215,14 @@ pub struct ShadowReceiveExtension {
     pub sun_shadow_map_1: Handle<Image>,
     #[texture(103, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    /// Cloud sun-transmittance cascade — see [`ShipPartExtension`]. Structures
+    /// and the runway were the visible side of the receiver seam once terrain
+    /// and trees both dimmed under the deck (reviews/20260730T011353Z §4).
+    #[texture(104)]
+    #[sampler(105)]
+    pub cloud_shadow_map: Handle<Image>,
+    #[uniform(106)]
+    pub cloud_shadow: crate::clouds::CloudShadowBlock,
 }
 
 impl MaterialExtension for ShadowReceiveExtension {
@@ -302,6 +319,12 @@ fn setup_craft_shadow_fallback(
 /// cascade. Per-frame, like the terrain material update.
 fn apply_craft_shadow(
     maps: Res<CraftShadowMaps>,
+    // Option: a binary with no cloud renderer (standalone editor) has no map;
+    // the block stays zeroed and the shader reads fully lit. Fanned here — in
+    // `Last`, same frame as the cloud driver's `PostUpdate` re-march — so the
+    // hull/structures never sample the map through a stale frame (the tree fan
+    // learned this the hard way; see `apply_tree_cloud_shadow`).
+    cloud: Option<Res<crate::clouds::CloudShadowMap>>,
     mut materials: ResMut<Assets<ShipPartMaterial>>,
     mut shadowed_materials: ResMut<Assets<ShadowedStandardMaterial>>,
     // Option: the tile-terrain material is registered by `TileTerrainPlugin`
@@ -309,12 +332,17 @@ fn apply_craft_shadow(
     // editor) don't have it.
     tile_materials: Option<ResMut<Assets<crate::tiles::material::TileTerrainMaterial>>>,
 ) {
+    let cloud_block = cloud.as_deref().map(|c| (c.block(), c.handle.clone()));
     for (_, mat) in materials.iter_mut() {
         let ext = &mut mat.extension;
         ext.shadow = maps.block;
         ext.sun_shadow_map_0 = maps.images[0].clone();
         ext.sun_shadow_map_1 = maps.images[1].clone();
         ext.sun_shadow_map_2 = maps.images[2].clone();
+        if let Some((block, handle)) = &cloud_block {
+            ext.cloud_shadow = *block;
+            ext.cloud_shadow_map = handle.clone();
+        }
     }
     for (_, mat) in shadowed_materials.iter_mut() {
         let ext = &mut mat.extension;
@@ -322,6 +350,10 @@ fn apply_craft_shadow(
         ext.sun_shadow_map_0 = maps.images[0].clone();
         ext.sun_shadow_map_1 = maps.images[1].clone();
         ext.sun_shadow_map_2 = maps.images[2].clone();
+        if let Some((block, handle)) = &cloud_block {
+            ext.cloud_shadow = *block;
+            ext.cloud_shadow_map = handle.clone();
+        }
     }
     if let Some(mut tile_materials) = tile_materials {
         for (_, mat) in tile_materials.iter_mut() {

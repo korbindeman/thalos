@@ -517,7 +517,7 @@ fn init_cloud_appearance(mut config: ResMut<CloudsConfig>) {
 /// Runs in `PostUpdate` after `TransformSystems::Propagate` so body
 /// `GlobalTransform`s (and the camera's) are the recentred big_space values —
 /// same ordering reason as `update_body_terrain_atmosphere`.
-fn drive_clouds(
+pub(super) fn drive_clouds(
     ship_cam_q: Query<(&GlobalTransform, &Camera), With<ShipCamera>>,
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
     sim: Res<SimulationState>,

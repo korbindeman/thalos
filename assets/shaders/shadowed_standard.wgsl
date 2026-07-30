@@ -24,6 +24,7 @@
 // Shared cascaded sun-shadow sampler (registered by
 // `body_render::shading::PlanetLightingPlugin`).
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
+#import thalos::cloud_shadow::{CloudShadowBlock, cloud_sun_transmittance}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
@@ -48,6 +49,16 @@ var recv_shadow_map_0: texture_depth_2d;
 var recv_shadow_map_1: texture_depth_2d;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103)
 var recv_shadow_map_2: texture_depth_2d;
+// Cloud sun-transmittance cascade — same block/texture the tile ground and
+// trees sample (fanned by `apply_craft_shadow`), so structures and the runway
+// dim under the deck with the ground they stand on instead of glowing full-sun
+// inside a drifting cloud shadow. Block gate zero reads fully lit.
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var recv_cloud_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(105)
+var recv_cloud_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(106)
+var<uniform> recv_cloud: CloudShadowBlock;
 
 @fragment
 fn fragment(
@@ -77,7 +88,7 @@ fn fragment(
     // Receive the shared sun-shadow cascade. The geometric world normal drives
     // the stable-CSM receiver offset + slope-scaled bias (normal-mapped N would
     // wobble the offset).
-    let shadow_f = sun_shadow_factor_nrm(
+    let hard_shadow = sun_shadow_factor_nrm(
         pbr_input.world_position.xyz,
         normalize(pbr_input.world_normal),
         recv_shadow,
@@ -85,6 +96,15 @@ fn fragment(
         recv_shadow_map_1,
         recv_shadow_map_2,
     );
+    // × the cloud deck's sun transmittance — one gate for the whole direct
+    // beam, exactly as the tile ground and trees compose it.
+    let cloud_t = cloud_sun_transmittance(
+        recv_cloud,
+        recv_cloud_tex,
+        recv_cloud_samp,
+        pbr_input.world_position.xyz,
+    );
+    let shadow_f = hard_shadow * cloud_t;
     out.color = vec4<f32>(
         max(out.color.rgb - (1.0 - shadow_f) * direct.rgb, vec3<f32>(0.0)),
         out.color.a,

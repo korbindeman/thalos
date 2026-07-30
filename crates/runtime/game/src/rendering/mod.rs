@@ -256,7 +256,14 @@ impl Plugin for RenderingPlugin {
             )
             .add_systems(
                 bevy::app::PostUpdate,
-                update_body_terrain_atmosphere.after(bevy::transform::TransformSystems::Propagate),
+                // `.after(drive_clouds)`: this system copies the cloud-shadow
+                // block into the sky/ocean godray bindings, and unordered
+                // against the writer it read a one-frame-stale frame on
+                // schedule-order luck (the composite sync was ordered, this
+                // writer was missed — reviews/20260730T011353Z §5).
+                update_body_terrain_atmosphere
+                    .after(bevy::transform::TransformSystems::Propagate)
+                    .after(clouds::drive_clouds),
             );
     }
 }

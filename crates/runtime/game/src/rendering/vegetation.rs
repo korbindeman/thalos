@@ -469,7 +469,10 @@ impl Plugin for VegetationRenderPlugin {
                 )
                     .in_set(SimStage::Sync)
                     .after(sync_solar_system_state),
-            );
+            )
+            // `Last`, not `Update`/`PostUpdate`: same-frame with the cloud
+            // driver's re-march — see `apply_tree_cloud_shadow`.
+            .add_systems(bevy::app::Last, apply_tree_cloud_shadow);
     }
 }
 
@@ -1420,7 +1423,6 @@ fn update_tree_material(
     exposure: Res<CameraExposure>,
     bake: Res<ImpostorBake>,
     anchor: Res<ViewAnchor>,
-    cloud_shadow: Option<Res<thalos_body_render::clouds::CloudShadowMap>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
     mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
 ) {
@@ -1505,14 +1507,6 @@ fn update_tree_material(
             TREE_MESH_ONLY_FADE
         };
         material.extension.params = make_params(near, far, band);
-        // Cloud sun-transmittance: same map/block the tile ground samples, so a
-        // stand under the deck dims exactly with the ground it grows from (the
-        // spine tree never gated on clouds — one of the two "trees look pasted
-        // on" mechanisms).
-        if let Some(cloud) = cloud_shadow.as_deref() {
-            material.extension.cloud_shadow = cloud.block();
-            material.extension.cloud_shadow_map = cloud.handle.clone();
-        }
     }
 
     // One impostor material per clipmap ring, each with its own cross-fade band.
@@ -1522,12 +1516,41 @@ fn update_tree_material(
         };
         let (near, far, band) = tree_ring_fade(idx);
         material.extension.params = make_params(near, far, band);
-        // Same cloud transmittance as the mesh trees — the far forest dims
-        // under the deck exactly like the ground it stands on.
-        if let Some(cloud) = cloud_shadow.as_deref() {
-            material.extension.cloud_shadow = cloud.block();
-            material.extension.cloud_shadow_map = cloud.handle.clone();
-        }
+    }
+}
+
+/// Fan the live cloud sun-transmittance cascade onto the tree + impostor
+/// materials — in `Last`, beside the tile fan (`tiles::apply_cloud_shadow`) and
+/// the hull/structure fan (`craft::apply_craft_shadow`), and for the same
+/// reason: the game's cloud driver resolves the cascade frame in `PostUpdate`
+/// and the compute pass marches THAT frame the same frame. This fan used to
+/// ride `update_tree_material` (Update, i.e. strictly BEFORE the driver), so
+/// trees sampled the freshly-marched map through a deterministically
+/// one-frame-stale block — and the block's render-space anchors move at
+/// orbital speed (~500 m per frame at warp 1), so canopy cloud shadows
+/// jittered 2–16 texels against the exact shadow on the ground beside them.
+/// Paused captures hid it, which is how it passed screenshot verification
+/// (reviews/20260730T011353Z §5).
+fn apply_tree_cloud_shadow(
+    library: Option<Res<SpeciesLibrary>>,
+    cloud_shadow: Option<Res<thalos_body_render::clouds::CloudShadowMap>>,
+    mut materials: ResMut<Assets<TreeMaterial>>,
+    mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
+) {
+    let (Some(library), Some(cloud)) = (library, cloud_shadow) else {
+        return;
+    };
+    let block = cloud.block();
+    if let Some(mut material) = materials.get_mut(&library.material) {
+        material.extension.cloud_shadow = block;
+        material.extension.cloud_shadow_map = cloud.handle.clone();
+    }
+    for handle in &library.impostor_materials {
+        let Some(mut material) = impostor_materials.get_mut(handle) else {
+            continue;
+        };
+        material.extension.cloud_shadow = block;
+        material.extension.cloud_shadow_map = cloud.handle.clone();
     }
 }
 

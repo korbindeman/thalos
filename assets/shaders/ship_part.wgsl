@@ -48,6 +48,7 @@
 // `body_render::shading::PlanetLightingPlugin` (pulled in defensively by
 // `CraftRenderPlugin`, so this resolves even in the standalone editor).
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
+#import thalos::cloud_shadow::{CloudShadowBlock, cloud_sun_transmittance}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::{
@@ -92,6 +93,15 @@ var craft_shadow_map_0: texture_depth_2d;
 var craft_shadow_map_1: texture_depth_2d;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104)
 var craft_shadow_map_2: texture_depth_2d;
+// Cloud sun-transmittance cascade — same block/texture the tile ground and
+// trees sample (fanned by `apply_craft_shadow`), so a parked craft dims under
+// the deck with the taxiway beside it. Block gate zero reads fully lit.
+@group(#{MATERIAL_BIND_GROUP}) @binding(105)
+var craft_cloud_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(106)
+var craft_cloud_samp: sampler;
+@group(#{MATERIAL_BIND_GROUP}) @binding(107)
+var<uniform> craft_cloud: CloudShadowBlock;
 
 const PI: f32 = 3.14159265358979;
 const TAU: f32 = 6.28318530717958;
@@ -357,7 +367,7 @@ fn fragment(
     // structures) at this fragment's render-space position. The geometric
     // world normal (not the rivet-perturbed N) drives the stable-CSM receiver
     // offset + slope-scaled bias.
-    let craft_shadow_f = sun_shadow_factor_nrm(
+    let craft_hard_shadow = sun_shadow_factor_nrm(
         pbr_input.world_position.xyz,
         normalize(pbr_input.world_normal),
         craft_shadow,
@@ -365,6 +375,15 @@ fn fragment(
         craft_shadow_map_1,
         craft_shadow_map_2,
     );
+    // × the cloud deck's sun transmittance — one gate for the whole direct
+    // beam, exactly as the tile ground and trees compose it.
+    let craft_cloud_t = cloud_sun_transmittance(
+        craft_cloud,
+        craft_cloud_tex,
+        craft_cloud_samp,
+        pbr_input.world_position.xyz,
+    );
+    let craft_shadow_f = craft_hard_shadow * craft_cloud_t;
     out.color = vec4<f32>(
         max(out.color.rgb - (1.0 - craft_shadow_f) * direct.rgb, vec3<f32>(0.0)),
         out.color.a,
