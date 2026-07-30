@@ -774,12 +774,15 @@ const MS_ANISO = 0.7;
 
 /// Silver-lining / powder: thin edges facing the light brighten; the same thin
 /// path looking *away* from the light darkens (HZD powder). Restrained: the
-/// former 0.85 away-darkening painted every anti-sun lobe near-black and read
-/// as dirt rather than shading.
+/// former 0.85 away-darkening painted lobes near-black and read as dirt rather
+/// than shading. Caveat: the 0.35/0.35 constants (and MS_ANISO above) were
+/// tuned while the phase argument was negated — that "dirt" was landing on the
+/// SUNWARD side — so they are retune candidates against sunset captures now
+/// that the geometry is correct.
 fn powder_term(density_fraction: f32, cos_theta: f32) -> f32 {
     let d = clamp(density_fraction, 0.0, 1.0);
     let powder = 1.0 - exp(-d * 2.0);
-    // cos_theta = ray·(-sun): +1 looking toward the sun (silver lining).
+    // cos_theta = ray·sun: +1 looking toward the sun (silver lining).
     let toward_sun = clamp(cos_theta, 0.0, 1.0);
     let away = clamp(-cos_theta, 0.0, 1.0);
     return mix(1.0, powder, away * 0.35) * (1.0 + toward_sun * d * 0.35);
@@ -941,8 +944,13 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     let formation = macro_sample.r;
 
     // CLOUD-4: multi-scatter dual-lobe phase octaves (shared for the whole
-    // ray). cosθ = view·sun_incoming with sun_incoming = -sun_dir.
-    let ray_dot_sun = dot(ray_dir, -config.sun_dir.xyz);
+    // ray). The scattering cosine is between propagation directions: photons
+    // travel along -sun_dir and scatter toward the camera along -ray_dir, so
+    // cosθ = dot(-sun_dir, -ray_dir) = dot(ray_dir, sun_dir) — +1 looking
+    // sunward, where the g>0 forward lobe must peak. Mixing a propagation
+    // direction with a view direction (ray·-sun) negates this and renders the
+    // glare/silver-lining 180° from the sun.
+    let ray_dot_sun = dot(ray_dir, config.sun_dir.xyz);
     let ms_lobes = multi_scatter_lobes(
         ray_dot_sun,
         config.forward_scattering_g,
