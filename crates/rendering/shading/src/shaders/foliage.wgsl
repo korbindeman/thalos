@@ -57,22 +57,20 @@ fn foliage_exposure(vcolor_g: f32) -> f32 {
     return clamp(baked * 0.92, 0.0, 1.0);
 }
 
-// Subtle per-INSTANCE hue jitter (green ↔ slightly warm/cool). Applied at the
-// instance level by BOTH the mesh trees (`tree.wgsl`) and the impostors
-// (`tree_impostor.wgsl`) — never baked into the atlas — so a stand varies the
-// same way across the LOD handoff and a re-baked impostor inherits no stamped
-// per-tree tint.
-fn foliage_hue_tint(seed: f32) -> vec3<f32> {
-    let hue = (seed - 0.5) * 0.10;
-    return vec3<f32>(1.0 + hue, 1.0, 1.0 - hue);
-}
+// Per-instance hue jitter moved CPU-side (2026-07-30): it is folded into the
+// instance landcover tint at scatter time (`scatter.rs`, `SALT_HUE`), because
+// only the scatter generator knows the body-global Poisson cell — the shaders
+// hashed the TILE-relative root, which gave the same tree two different hues
+// while both clipmap rings drew it during the complementary cross-fade. Still
+// never baked into the atlas, so a re-baked impostor inherits no stamped tint.
 
 // The one foliage albedo function. Returns the intrinsic, view/light-independent
 // base colour of a foliage fragment. `leaf_flag` 1 = translucent foliage (leaf /
 // needle), 0 = opaque shell / bark. `atlas_rgb` is the foliage-atlas albedo
 // sample; `vcolor_g` is the baked AO in vertex-colour green; `seed` drives only
-// the opaque brightness jitter (foliage hue is applied separately, per instance,
-// via `foliage_hue_tint`). Both the near mesh and the impostor bake call THIS,
+// the opaque brightness jitter (foliage hue is applied separately, per
+// instance, folded into the instance tint CPU-side — see the note above).
+// Both the near mesh and the impostor bake call THIS,
 // on the same atlas sample + vertex colour, so their base colour is pixel-equal.
 fn foliage_base_albedo(
     atlas_rgb: vec3<f32>,

@@ -66,6 +66,7 @@ const SALT_SCALE: u64 = 0x06;
 const SALT_TILT: u64 = 0x07;
 const SALT_SPECIES: u64 = 0x08;
 const SALT_THIN: u64 = 0x09;
+const SALT_HUE: u64 = 0x0a;
 
 /// How far beyond a flatten pad's ramp the forest stays cleared (metres). The
 /// tree/shrub density fades from 0 at the pad edge to full over this margin, so
@@ -722,6 +723,15 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 let tint_rb = if sp.layer == VegLayer::Rock {
                     Vec2::ONE
                 } else {
+                    // Per-instance hue jitter (±5 % green↔warm/cool), folded in
+                    // HERE — the one place that knows the body-global Poisson
+                    // cell — rather than shader-side. The shaders used to hash
+                    // the TILE-relative root, which is not ring-invariant: the
+                    // same tree drawn by ring 0 and ring 1 during the
+                    // complementary cross-fade got two different hues
+                    // (reviews/20260730T011353Z §14). CPU mirror of the
+                    // retired `thalos::foliage::foliage_hue_tint`.
+                    let hue = (rng(SALT_HUE) as f32 - 0.5) * 0.10;
                     canopy_landcover_tint(
                         crate::ground::landcover::sample_landcover(
                             root_body,
@@ -730,7 +740,7 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                             dir.y.abs() as f32,
                         )
                         .veg_color,
-                    )
+                    ) * Vec2::new(1.0 + hue, 1.0 - hue)
                 };
                 instances.push(VegInstance {
                     species: chosen as u16,

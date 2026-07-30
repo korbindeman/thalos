@@ -56,7 +56,8 @@ const MIN_SUN_ELEVATION_COS: f32 = 0.06;
 #[derive(Clone, Copy, Debug, Reflect)]
 pub struct CloudShadowFrame {
     /// Centre of the map: a point on the reference sphere directly under the
-    /// view anchor, snapped to the texel lattice.
+    /// view anchor. Deliberately NOT texel-snapped — see [`Self::resolve`]:
+    /// the map rides the camera continuously, unlike a depth cascade.
     pub center: Vec3,
     /// Reference-plane normal (radial up at [`center`](Self::center)).
     pub up: Vec3,
@@ -65,7 +66,12 @@ pub struct CloudShadowFrame {
     pub axis_v: Vec3,
     /// Half the map's edge length, metres.
     pub half_extent_m: f32,
-    /// Cosine of the sun's elevation above the reference plane at the centre.
+    /// `dot(up, sun)` at the centre — geometrically the **sine** of the sun's
+    /// elevation above the reference plane (equivalently the cosine of the
+    /// solar zenith angle; the field name predates that reading). Consumers
+    /// use the raw dot product, which is self-consistent: the 0.06 stand-down
+    /// really is ~3.4° of elevation, and the WGSL slant stretch divides by
+    /// this value as 1/sin(elevation).
     pub sun_elevation_cos: f32,
     /// False when there is nothing to march (no cloud body, clouds disabled,
     /// or the sun is at/below the anchor's horizon). Receivers read fully lit.

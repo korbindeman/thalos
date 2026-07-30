@@ -10,7 +10,8 @@
 //!   Bevy's own directional light + ambient (no `SceneLighting` coupling), so
 //!   tile ground reconverges with the impostor's Hapke look across the swap.
 //!
-//! The shadow maps are fanned in per-frame by `craft::apply_craft_shadow`,
+//! The shadow maps are fanned in per-frame by the game's
+//! `sun_shadow::sync_shadow_receivers` (the SOLE tile shadow writer),
 //! exactly like the hull and `ShadowedStandardMaterial`.
 
 use bevy::math::Vec4;
@@ -128,7 +129,8 @@ pub struct TileShadingExtension {
     /// Cloud sun-transmittance cascade (CLOUD-5 / W2): `r` = the fraction of
     /// the sun beam that survives the deck at this point. Fanned in per frame
     /// by [`apply_cloud_shadow`](crate::tiles::apply_cloud_shadow) alongside
-    /// the block below, exactly as `apply_craft_shadow` fans the cascade maps.
+    /// the block below, exactly as `sync_shadow_receivers` fans the cascade
+    /// maps.
     #[texture(105)]
     #[sampler(106)]
     pub cloud_shadow_map: Handle<Image>,
@@ -158,8 +160,8 @@ impl MaterialExtension for TileShadingExtension {
 }
 
 /// Wrap a base `StandardMaterial` into the tile material with the given
-/// shading style and default (fallback) shadow state — `apply_craft_shadow`
-/// patches the live cascade in each frame.
+/// shading style and default (fallback) shadow state — the game's
+/// `sun_shadow::sync_shadow_receivers` patches the live cascade in each frame.
 pub fn tile_material(base: StandardMaterial, params: TileShadingParams) -> TileTerrainMaterial {
     TileTerrainMaterial {
         base,

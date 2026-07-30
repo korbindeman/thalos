@@ -336,7 +336,7 @@ fn ensure_tile_root(
     // stays neutral. Airless bodies shade through the Hapke regolith branch
     // (tile_terrain.wgsl) so ground reconverges with the impostor's Hapke
     // look; atmosphere-bearing bodies keep stock PBR. Both branches receive
-    // the shared `thalos::shadow` cascade via `apply_craft_shadow`.
+    // the shared `thalos::shadow` cascade via `sync_shadow_receivers`.
     let airless = sim
         .system
         .bodies
@@ -474,7 +474,7 @@ fn ensure_tile_root(
 /// the stable body-fixed frame), the radial up at the view anchor, and the
 /// inputs to the shader's per-fragment ambient day/night gate (body centre in
 /// render space, sun direction, night-floor fraction of the flat ambient). The
-/// tile materials are already dirtied every frame by `apply_craft_shadow`'s
+/// tile materials are already dirtied every frame by `sync_shadow_receivers`'
 /// cascade fan-in, so this adds no new invalidation.
 fn update_tile_material_params(
     anchor: Res<ViewAnchor>,

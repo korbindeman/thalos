@@ -34,7 +34,7 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::foliage::{foliage_base_albedo, foliage_hue_tint}
+#import thalos::foliage::foliage_base_albedo
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor, is_ortho_projection}
 #import thalos::cloud_shadow::{CloudShadowBlock, cloud_sun_transmittance}
 
@@ -275,8 +275,11 @@ fn fragment(
         // impostor bake calls), per-instance hue jitter, and the landcover
         // tint the tile combiner bakes into COLOR r/b (g ≡ 1 for trees — the
         // baked AO rides the atlas-graded exposure instead).
+        // Per-instance hue jitter now rides COLOR r/b (folded into the
+        // landcover tint CPU-side from the ring-invariant Poisson cell —
+        // hashing the tile-relative root here gave the same tree two hues
+        // across the ring cross-fade).
         albedo = foliage_base_albedo(atlas_rgb, in.color.g, leaf, seed)
-            * foliage_hue_tint(seed)
             * vec3<f32>(in.color.r, 1.0, in.color.b);
         // Per-leaf normal from the baked leaf normal map, eased so neighbouring
         // leaves catch light differently without reading as embossed noise.
@@ -333,6 +336,7 @@ fn fragment(
     var pbr_direct = pbr_input;
     pbr_direct.diffuse_occlusion = vec3<f32>(0.0);
     pbr_direct.specular_occlusion = 0.0;
+    pbr_direct.material.emissive = vec4<f32>(0.0);
     let direct = apply_pbr_lighting(pbr_direct);
     out.color = apply_pbr_lighting(pbr_input);
     out.color = vec4<f32>(

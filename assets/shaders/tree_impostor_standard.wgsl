@@ -28,7 +28,6 @@
     view_transformations::position_world_to_clip,
     mesh_view_bindings::view,
 }
-#import thalos::foliage::foliage_hue_tint
 #import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor, is_ortho_projection}
 #import thalos::cloud_shadow::{CloudShadowBlock, cloud_sun_transmittance}
 
@@ -296,11 +295,12 @@ fn fragment(
     let n_world =
         normalize(n_local.x * tangent_w + n_local.y * up_w + n_local.z * bitangent_w);
 
-    // Per-instance hue via the SHARED `foliage_hue_tint` — the same jitter the
-    // mesh trees apply, so a stand varies identically across the handoff. The
-    // baked albedo is already the near-tree colour (the bake calls the same
-    // `foliage_base_albedo`), and `color.rgb` carries the landcover tint.
-    let tint = albedo * in.color.rgb * foliage_hue_tint(seed);
+    // Per-instance hue rides COLOR r/b (folded into the landcover tint
+    // CPU-side from the ring-invariant Poisson cell), so a tree keeps ONE hue
+    // across the ring cross-fade and the mesh↔impostor handoff. The baked
+    // albedo is already the near-tree colour (the bake calls the same
+    // `foliage_base_albedo`).
+    let tint = albedo * in.color.rgb;
 
     pbr_input.material.base_color = vec4<f32>(tint, 1.0);
     pbr_input.material.perceptual_roughness = 0.95;
@@ -339,6 +339,7 @@ fn fragment(
     var pbr_direct = pbr_input;
     pbr_direct.diffuse_occlusion = vec3<f32>(0.0);
     pbr_direct.specular_occlusion = 0.0;
+    pbr_direct.material.emissive = vec4<f32>(0.0);
     let direct = apply_pbr_lighting(pbr_direct);
     out.color = apply_pbr_lighting(pbr_input);
     out.color = vec4<f32>(

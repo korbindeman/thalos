@@ -327,10 +327,11 @@ fn apply_craft_shadow(
     cloud: Option<Res<crate::clouds::CloudShadowMap>>,
     mut materials: ResMut<Assets<ShipPartMaterial>>,
     mut shadowed_materials: ResMut<Assets<ShadowedStandardMaterial>>,
-    // Option: the tile-terrain material is registered by `TileTerrainPlugin`
-    // (BodyRenderPlugin apps); `CraftRenderPlugin`-only apps (the standalone
-    // editor) don't have it.
-    tile_materials: Option<ResMut<Assets<crate::tiles::material::TileTerrainMaterial>>>,
+    // Tile materials are deliberately NOT touched here: the game's
+    // `sun_shadow::sync_shadow_receivers` (also `Last`) is their SOLE shadow
+    // fan-in — it alone carries the contact map. Two unordered `Last` writers
+    // of the same fields were only coincidentally benign
+    // (reviews/20260730T011353Z §12).
 ) {
     let cloud_block = cloud.as_deref().map(|c| (c.block(), c.handle.clone()));
     for (_, mat) in materials.iter_mut() {
@@ -353,15 +354,6 @@ fn apply_craft_shadow(
         if let Some((block, handle)) = &cloud_block {
             ext.cloud_shadow = *block;
             ext.cloud_shadow_map = handle.clone();
-        }
-    }
-    if let Some(mut tile_materials) = tile_materials {
-        for (_, mat) in tile_materials.iter_mut() {
-            let ext = &mut mat.extension;
-            ext.shadow = maps.block;
-            ext.sun_shadow_map_0 = maps.images[0].clone();
-            ext.sun_shadow_map_1 = maps.images[1].clone();
-            ext.sun_shadow_map_2 = maps.images[2].clone();
         }
     }
 }

@@ -1181,6 +1181,10 @@ fn fragment(
         var pbr_direct = pbr_input;
         pbr_direct.diffuse_occlusion = vec3<f32>(0.0);
         pbr_direct.specular_occlusion = 0.0;
+        // Emissive must be removed too or the split over-subtracts it in
+        // shadow (zero today on terrain; the exactness contract is
+        // `shadowed_standard.wgsl`'s).
+        pbr_direct.material.emissive = vec4<f32>(0.0);
         let direct_lit = apply_pbr_lighting(pbr_direct);
         out.color = apply_pbr_lighting(pbr_input);
         out.color = vec4<f32>(

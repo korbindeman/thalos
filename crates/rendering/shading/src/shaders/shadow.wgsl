@@ -80,8 +80,15 @@ const BIAS_MIN_M: f32 = 0.05;
 const BIAS_MAX_M: f32 = 2.5;
 // Constant-bias multiplier for the normal-less path: without the receiver
 // offset, foliage receivers (which DO self-cast — leaf-on-leaf) need a larger
-// margin. Tuned so the near/mid cascades reproduce the pre-W6 hand values
-// (0.6 m / 2.5 m) while the far cascade tightens from 10 m → ~7 m.
+// margin. Originally tuned so the near/mid cascades reproduced the pre-W6
+// hand values (0.6 m / 2.5 m) — but `CASCADE_MIN_HALF_M[1]` has since doubled
+// cascade 1's texel, so the mid value now computes to ~5.5 m (ceiling
+// `BIAS_MAX_M × this` = 6.25 m). Reviewed 2026-07-30: NOT an erasure defect —
+// the depth compare runs along the sun ray, so caster–receiver separation is
+// h/sin(elev) and an 8–13 m tree clears even the ceiling at every elevation;
+// the cost is a ~2× wider contact gap and shrub-shadow loss above ~21° sun in
+// the 0.4–3 km band. Retune against captures if that gap reads wrong; do not
+// cap the product below canopy scale (that reintroduces leaf-on-leaf acne).
 const NO_NORMAL_BIAS_SCALE: f32 = 2.5;
 // Receiver normal-offset, in texels of the sampled cascade's map, and its
 // absolute cap in metres (same erase-the-caster argument as the bias cap).
