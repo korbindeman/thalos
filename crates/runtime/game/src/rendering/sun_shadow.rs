@@ -137,6 +137,18 @@ const SHADOW_RELIEF_MARGIN_M: f32 = 4_000.0;
 /// anyway.
 const SHADOW_MIN_SUN_SIN: f32 = 0.07;
 
+/// Width of the night stand-down band, in sin(sun elevation) below the local
+/// horizon (~3.4°). The rig runs at FULL strength for any sun above the
+/// horizon — golden-hour shadows are the longest and most prominent, so this
+/// must NOT be keyed to `SunDaylight`, whose ramp is fractional up to ~7°
+/// elevation — and fades to zero across this band below it. Without the
+/// stand-down the cascades kept rendering all night from a below-horizon sun,
+/// and because the samplers gate the WHOLE direct term, they carved the
+/// night's moonlight with shadow geometry belonging to a light that was off
+/// (phantom dark patches tracking an invisible sun), while paying for three
+/// depth renders per frame (reviews/20260730T011353Z §11).
+const SHADOW_NIGHT_FADE_SIN: f32 = 0.06;
+
 /// Hard cap (m) on the per-cascade up-sun ground slack, bounding the ortho
 /// depth range at extreme footprint scales (Depth32Float is linear over
 /// `far − near`; keep the range sane).
@@ -570,6 +582,24 @@ fn update_sun_shadow_camera(
         let r = radial.length();
         let radial_dir = if r > 1.0e-3 { radial / r } else { DVec3::Y };
         let up_radial = radial_dir.as_vec3();
+        // ── Night stand-down (surface mode only) ────────────────────────────
+        // See `SHADOW_NIGHT_FADE_SIN`. Craft-local mode is exempt: at orbital
+        // altitude the tangent-plane test is wrong (the true horizon is
+        // depressed), and the single hull cascade is harmless while the hull
+        // is unlit — whether the craft sits in the umbra is the lighting
+        // system's question, not the rig's.
+        let night_fade = if craft_local {
+            1.0
+        } else {
+            let sun_sin_raw = sun_dir.dot(up_radial);
+            ((sun_sin_raw + SHADOW_NIGHT_FADE_SIN) / SHADOW_NIGHT_FADE_SIN).clamp(0.0, 1.0)
+        };
+        if night_fade <= 0.0 {
+            // Fully night: identical to the rig-off path — cameras deactivate
+            // and `gate.x` zeroes, so every sampler early-outs fully lit and
+            // the moon's direct term reaches receivers ungated.
+            break 'resolve;
+        }
         // Project the centre to the TRUE ground below the craft, not the datum
         // sphere: `r − body_radius` is altitude above the REFERENCE radius, so
         // at an elevated site it buried the centre by the full terrain
@@ -775,7 +805,7 @@ fn update_sun_shadow_camera(
         // fully lit and the contact term is moot along with them — the rig-off
         // cases (orbital map terrain, inactive pass) want no shadow at all.
         block.gate = Vec4::new(
-            SHADOW_STRENGTH,
+            SHADOW_STRENGTH * night_fade,
             active_cascades as f32,
             contact.shadow_gate(),
             0.0,
@@ -816,6 +846,8 @@ fn update_sun_shadow_camera(
                 footprint_scale = footprint,
                 cascade0_texel_m = block.params[0].y,
                 active_cascades = active_cascades,
+                sun_sin_elev = sun_dir.dot(up_radial),
+                night_fade = night_fade,
                 "shadow stability gauge"
             );
         }
