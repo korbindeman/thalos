@@ -107,6 +107,17 @@ const CRAFT_PROBE_SIZE_M: f32 = 256.0;
 /// with heliocentric distance + exposure so a far/dim sun reflects dimmer.
 const SUN_DISC_GAIN: f32 = 3.0;
 
+/// Painted starfield radiance at exposure gain 1, in scene-flux units. Stars
+/// are independent of the local sun, so unlike the sun disc and planet terms
+/// this deliberately does NOT scale with heliocentric flux — but it MUST carry
+/// the exposure `gain`: every other painted term rides
+/// `flux = LIGHT_AT_1AU·(AU/d)²·gain`, and a term left constant changes its
+/// *displayed* brightness whenever exposure compensation moves, breaking the
+/// probe's one-unit-system contract (the last unconverted term of
+/// reviews/20260730T011353Z §9; the planet disc got `planet_irradiance` on
+/// 2026-07-29). At the homeworld `gain ≈ 1`, so the tuned look is unchanged.
+const STARFIELD_RADIANCE: f32 = 0.015;
+
 // ── Physical surface sky (graphics-fidelity F3) ───────────────────────────────
 // The reflection cubemap is CPU-painted (the GPU cubemap-render path is blocked —
 // see docs/rendering/atmosphere.md), so the sky it reflects is evaluated on the CPU. The
@@ -908,7 +919,7 @@ fn derive_environment(
         planet_color: Vec3::new(0.25, 0.35, 0.55),
         planet_irradiance: flux.max(0.0) * std::f32::consts::FRAC_1_PI,
         planet_surface,
-        starfield_tint: Vec3::splat(0.015),
+        starfield_tint: Vec3::splat(STARFIELD_RADIANCE * gain),
         up,
         ground_radiance,
         surface_blend,
