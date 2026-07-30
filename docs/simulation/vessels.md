@@ -201,7 +201,12 @@ User-verifiable:
 
 ## 7. Deferred fidelity
 
-Per-part structural breakup, docking/undocking assemblies, debris lifetime
-policy, parachutes, thermal destruction, recovery value, and multiplayer are
-separate features. They build on canonical vessel multiplicity; none should
-introduce a second debris-only simulation path.
+Docking/undocking assemblies, debris lifetime policy, parachutes, thermal
+destruction, recovery value, and multiplayer are separate features. They build on
+canonical vessel multiplicity; none should introduce a second debris-only
+simulation path.
+
+**Per-part structural breakup is no longer deferred** — it is owned by
+[damage.md](damage.md) (ADR-20260730T003005Z), which fires §3's separation
+transaction from a severed joint with a failure impulse in place of a
+decoupler's authored one.

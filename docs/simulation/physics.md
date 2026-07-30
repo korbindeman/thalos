@@ -217,6 +217,16 @@ this allowlist is what gets re-pointed at the owned solver — module by module.
   meshes to node positions so the visible craft deforms. This is a milestone
   of its own, not a tail of the rewrite.
 
+  > **Narrowed 2026-07-30 by ADR-20260730T003005Z.** Phase 3 no longer owns
+  > the damage model, and destruction gameplay does not wait for it. Damage
+  > state is **canonical** (`VesselDamage` on `VesselRecord`, Bevy-free,
+  > persisted) and reaches flight through one rebuild path; the solver only
+  > ever produces *load events*. A structural graph over today's aggregate
+  > rigid body ships first — see [damage.md](damage.md) — and node-beam later
+  > becomes a better *producer* of that same state. What remains uniquely
+  > Phase 3's: real crumple geometry, suspension ruin, and mesh-to-node
+  > skinning.
+
 ### 7.2 Phase 1 detail (deferred plan)
 
 **Crate `thalos_physics`** — pure Rust, depends only on `parry3d-f64` + glam

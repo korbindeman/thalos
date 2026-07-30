@@ -51,6 +51,7 @@ Vehicle dynamics, authority, physics, and near-surface behavior.
 - [Surface gameplay and impacts](simulation/surface.md)
 - [Aerodynamics](simulation/aerodynamics.md)
 - [Fly-by-wire control](simulation/control.md)
+- [Craft damage and destruction](simulation/damage.md)
 - [Owned physics solver](simulation/physics.md)
 
 ### [World](world/)
