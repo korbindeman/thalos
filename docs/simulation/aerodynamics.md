@@ -51,6 +51,18 @@ It is a **whole-body** model. From the air-relative velocity it derives one angl
 of attack `α = atan2(−v·up, v·fwd)` and one sideslip `β = atan2(v·right, v·fwd)`,
 then:
 
+> **Becoming a genuine panel sum (DMG-2, ADR-20260730T003005Z).** The whole-body
+> collapse has no term that can express **asymmetry**, so it cannot represent a
+> damaged or missing panel — which makes it the blocker for survivable craft
+> damage, not the physics substrate. `evaluate_aero` becomes a per-panel sum over
+> the already-per-panel `WingAeroPanel` geometry: local flow `v + ω×r` at each
+> panel's aerodynamic centre, its own α from its own basis, `F` and `r×F`
+> accumulated, with the fuselage keeping a whole-body bluff residual. Roll
+> damping, roll authority, and asymmetric yaw then become **emergent geometry**
+> rather than the tuned coefficients listed below. Gated by a parity test at the
+> Meridian's cruise point; the whole-body model survives only as that test's
+> fixture. Design: [damage.md](damage.md) §4.
+
 - **Forces:** lift `CL = CL0 + CL_α·α` (clamped past stall) perpendicular to the
   flow toward the dorsal side, plus drag `CD = CD0 + CL²/(π·e·AR)` opposing it,
   both scaled by `q̄·S`. A wingless craft sets `CL_α = 0` → pure drag.
