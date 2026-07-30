@@ -110,8 +110,11 @@ pub fn tree_base_material() -> StandardMaterial {
         perceptual_roughness: 0.95,
         metallic: 0.0,
         diffuse_transmission: 1.0,
-        // Thin canopy silhouettes keep their back faces; the standard path
-        // flips the normal for us on back-facing fragments.
+        // Thin canopy silhouettes keep their back faces. `prepare_world_normal`
+        // flips `pbr_input.world_normal` on back-facing fragments — and the
+        // fragment shader must derive its shading normal from THAT field, not
+        // the raw `in.world_normal` varying, or the flip is silently lost
+        // (tree_standard.wgsl, reviews/20260730T011353Z §1).
         double_sided: true,
         cull_mode: None,
         ..Default::default()

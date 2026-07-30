@@ -249,7 +249,14 @@ fn fragment(
     let leaf = in.uv_b.y;
     let is_bark = leaf < 0.5;
 
-    let n_geo = normalize(in.world_normal.xyz);
+    // Base the shading normal on `pbr_input.world_normal`, NOT the raw
+    // `in.world_normal` varying: `prepare_world_normal` has already negated it
+    // on back-facing fragments (double_sided, no tangents/normal map), and the
+    // card's whole two-sided model — dim diffuse + warm transmission on the
+    // anti-sun side — rides on that flip. Rebuilding from the varying discards
+    // it, and every back-facing leaf shades front-lit with a dead transmit
+    // lobe (reviews/20260730T011353Z §1).
+    let n_geo = normalize(pbr_input.world_normal);
     var n = n_geo;
     var albedo: vec3<f32>;
     var roughness = 0.95;
@@ -285,8 +292,8 @@ fn fragment(
     // declares a non-zero value so the pipeline branch is compiled in.
     pbr_input.material.diffuse_transmission = LEAF_DIFFUSE_TRANSMISSION * leaf;
     pbr_input.N = n;
-    // `world_normal` stays geometric: it drives the stable-CSM receiver offset
-    // and the double-sided flip, and a per-leaf N would wobble both.
+    // `pbr_input.world_normal` keeps the (flipped) geometric normal: it drives
+    // the stable-CSM receiver offset, and a per-leaf N would wobble it.
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
