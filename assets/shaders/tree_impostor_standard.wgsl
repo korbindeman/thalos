@@ -29,7 +29,7 @@
     mesh_view_bindings::view,
 }
 #import thalos::foliage::foliage_hue_tint
-#import thalos::shadow::is_ortho_projection
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor, is_ortho_projection}
 #import thalos::cloud_shadow::{CloudShadowBlock, cloud_sun_transmittance}
 
 #ifdef PREPASS_PIPELINE
@@ -77,6 +77,15 @@ var normal_smp: sampler;
 var cloud_shadow_tex: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107)
 var cloud_shadow_samp: sampler;
+// Cascaded sun-shadow receive — see `TreeImpostorExtension::shadow`.
+@group(#{MATERIAL_BIND_GROUP}) @binding(109)
+var<uniform> imp_shadow: ShadowCascadeBlock;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110)
+var imp_shadow_map_0: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(111)
+var imp_shadow_map_1: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112)
+var imp_shadow_map_2: texture_depth_2d;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108)
 var<uniform> cloud_shadow: CloudShadowBlock;
 
@@ -306,22 +315,34 @@ fn fragment(
     let out = deferred_output(in, pbr_input);
 #else
     var out: FragmentOutput;
-    // Cloud sun-transmittance over the direct beam. No cascade sun-shadow here
-    // (the impostor band is beyond the cascade region — unchanged from the
-    // spine version); the deck is the one occluder that matters at this range.
+    // Shared sun-shadow cascade × the cloud deck's sun transmittance — one
+    // gate for the whole direct beam, exactly as the mesh trees compose it.
+    // Impostor rings 0–1 CAST into cascades 1–2 (pinned to 3/6.5 km to cover
+    // exactly this band), so the card must sample them too or it casts a
+    // shadow it cannot receive — bright trees on dark ground, and a
+    // shadowed→lit pop at the 1.2 km mesh↔impostor swap. Past cascade 2 the
+    // sampler fades to lit and the W12 horizon term owns the far field.
+    let hard_shadow = sun_shadow_factor(
+        in.world_position.xyz,
+        imp_shadow,
+        imp_shadow_map_0,
+        imp_shadow_map_1,
+        imp_shadow_map_2,
+    );
     let cloud_t = cloud_sun_transmittance(
         cloud_shadow,
         cloud_shadow_tex,
         cloud_shadow_samp,
         in.world_position.xyz,
     );
+    let shadow_f = hard_shadow * cloud_t;
     var pbr_direct = pbr_input;
     pbr_direct.diffuse_occlusion = vec3<f32>(0.0);
     pbr_direct.specular_occlusion = 0.0;
     let direct = apply_pbr_lighting(pbr_direct);
     out.color = apply_pbr_lighting(pbr_input);
     out.color = vec4<f32>(
-        max(out.color.rgb - (1.0 - cloud_t) * direct.rgb, vec3<f32>(0.0)),
+        max(out.color.rgb - (1.0 - shadow_f) * direct.rgb, vec3<f32>(0.0)),
         out.color.a,
     );
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);

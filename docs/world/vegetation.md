@@ -855,7 +855,10 @@ impostor + wind-weight bundle per species) is unchanged either way.
   species) — trees especially need contact with the ground to feel planted.
   Note the craft-shadow-caster-layer gotcha: casters must share the light's
   render layer.
-- **Impostors** do not cast (or cast a cheap proxy) — past the cutoff.
+- **Impostors** in rings 0–1 (out to `TREE_SHADOW_CASTER_MAX_M`, 6 km) both
+  cast into cascades 1–2 *and* sample them (2026-07-30 — a card that casts a
+  shadow it cannot receive reads as bright trees on dark ground). Rings 2–3
+  neither cast nor receive; the far field belongs to the W12 horizon term.
 - **Grass** stays `NotShadowCaster` (as shipped); receiving soft AO/contact
   shadows near roots is a later polish item.
 

@@ -226,6 +226,22 @@ pub struct TreeImpostorExtension {
     pub cloud_shadow_map: Handle<Image>,
     #[uniform(108)]
     pub cloud_shadow: crate::clouds::CloudShadowBlock,
+    /// Cascaded sun-shadow receive — impostor rings 0–1 CAST into cascades 1–2
+    /// (they sit on `SHADOW_CASTER_LAYER` from 1.2 km out, and the cascades are
+    /// pinned to cover exactly that band), so they must SAMPLE them too or a
+    /// tree casts a shadow it cannot itself receive: bright trees on dark
+    /// ground across a shadowed valley, and a shadowed→lit pop at the 1.2 km
+    /// mesh↔impostor swap (reviews/20260730T011353Z §8). Past cascade 2's
+    /// reach the sampler fades out and the W12 horizon term owns the far
+    /// field, as before.
+    #[uniform(109)]
+    pub shadow: crate::ShadowCascadeBlock,
+    #[texture(110, sample_type = "depth")]
+    pub sun_shadow_map_0: Handle<Image>,
+    #[texture(111, sample_type = "depth")]
+    pub sun_shadow_map_1: Handle<Image>,
+    #[texture(112, sample_type = "depth")]
+    pub sun_shadow_map_2: Handle<Image>,
 }
 
 /// Far-band impostor card on the standard path — `ExtendedMaterial` like the

@@ -291,6 +291,7 @@ fn sync_shadow_receivers(
     mut gpu_grass: Option<ResMut<Assets<GpuGrassMaterial>>>,
     mut rocks: Option<ResMut<Assets<RockMaterial>>>,
     mut trees: Option<ResMut<Assets<TreeMaterial>>>,
+    mut impostors: Option<ResMut<Assets<thalos_body_render::ground::TreeImpostorMaterial>>>,
     mut patches: Option<ResMut<Assets<GroundPatchMaterial>>>,
     mut legacy_ground: Option<ResMut<Assets<BodyTerrainMaterial>>>,
     mut tiles: Option<ResMut<Assets<TileTerrainMaterial>>>,
@@ -313,6 +314,14 @@ fn sync_shadow_receivers(
     sync_plain!(patches);
 
     if let Some(assets) = trees.as_deref_mut() {
+        for (_, material) in assets.iter_mut() {
+            material.extension.shadow = state.block;
+            material.extension.sun_shadow_map_0 = state.images[0].clone();
+            material.extension.sun_shadow_map_1 = state.images[1].clone();
+            material.extension.sun_shadow_map_2 = state.images[2].clone();
+        }
+    }
+    if let Some(assets) = impostors.as_deref_mut() {
         for (_, material) in assets.iter_mut() {
             material.extension.shadow = state.block;
             material.extension.sun_shadow_map_0 = state.images[0].clone();
