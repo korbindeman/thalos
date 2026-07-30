@@ -28,9 +28,9 @@
 // and applied via a TBN reconstructed from the interpolated geometric
 // normal plus an assumed axial direction (local +Y). The bitangent is
 // `+Y` projected onto the tangent plane, which follows the cone slope
-// correctly without additional work. The editor never rotates parts, so
-// using local +Y directly is exact; when parts start rotating in-game
-// we'll need real vertex tangents.
+// correctly without additional work. The mesh instance's normal transform
+// carries that local axis into world space, so the frame follows flight
+// attitude and arbitrary editor rotations without a second CPU uniform.
 //
 // End caps are detected by the geometric normal being near-parallel to
 // the axis — there the detail mask fades out and the base PBR shows
@@ -39,6 +39,7 @@
 #import bevy_pbr::{
     pbr_fragment::pbr_input_from_standard_material,
     pbr_functions::alpha_discard,
+    mesh_functions::mesh_normal_local_to_world,
     mesh_view_bindings::view,
 }
 
@@ -243,11 +244,14 @@ fn fragment(
 
     // Side-vs-cap mask. The cylinder mesh has three regions: +Y cap,
     // side, -Y cap. End caps have a normal that's nearly parallel to
-    // local +Y; sides have a normal perpendicular to it. We detect this
-    // from the geometric (pre-normal-map) world normal. Because parts
-    // aren't rotated in the editor, local Y ≈ world Y; the assumption
-    // is revisited in the file header.
-    let axis_ws = vec3<f32>(0.0, 1.0, 0.0);
+    // local +Y; sides have a normal perpendicular to it. Transform the
+    // part axis through the same instance normal matrix as the geometric
+    // normal, so cap classification and the procedural TBN rotate with the
+    // craft instead of remaining pinned to world +Y.
+    let axis_ws = mesh_normal_local_to_world(
+        vec3<f32>(0.0, 1.0, 0.0),
+        in.instance_index,
+    );
     let axis_dot = abs(dot(normalize(pbr_input.world_normal), axis_ws));
     let side_mask = 1.0 - smoothstep(0.80, 0.95, axis_dot);
 

@@ -65,7 +65,7 @@
     pbr_functions::alpha_discard,
 }
 #import bevy_pbr::mesh_view_bindings::{view, lights}
-#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm}
+#import thalos::shadow::{ShadowCascadeBlock, sun_shadow_factor_nrm, contact_shadow_factor}
 #import thalos::cloud_shadow::{
     CloudShadowBlock, cloud_sun_transmittance, cloud_shadow_debug, cloud_shadow_payload,
 }
@@ -140,6 +140,10 @@ var cloud_shadow_tex: texture_2d<f32>;
 var cloud_shadow_samp: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107)
 var<uniform> cloud_shadow: CloudShadowBlock;
+@group(#{MATERIAL_BIND_GROUP}) @binding(108)
+var contact_shadow_tex: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(109)
+var contact_shadow_samp: sampler;
 
 // Shadows gate ONLY the direct term (split via a second occlusion-zeroed
 // `apply_pbr_lighting` evaluation, exactly like `shadowed_standard.wgsl` /
@@ -1028,6 +1032,17 @@ fn fragment(
         recv_shadow_map_1,
         recv_shadow_map_2,
     );
+    let contact_shadow = contact_shadow_factor(
+        recv_shadow,
+        contact_shadow_tex,
+        contact_shadow_samp,
+        in.position.xy,
+        view.viewport.zw,
+    );
+    if recv_shadow.gate.z > 1.5 {
+        out.color = vec4<f32>(vec3<f32>(contact_shadow), 1.0);
+        return out;
+    }
     // The cloud deck is just the largest occluder of the same beam, so it folds
     // into the same gate as craft/structure shadows. With the direct/indirect
     // split below, the physical `exp(-τ)` transmittance now safely gates the
@@ -1041,7 +1056,7 @@ fn fragment(
         cloud_shadow_samp,
         pbr_input.world_position.xyz,
     );
-    let shadow_f = hard_shadow * cloud_t;
+    let shadow_f = hard_shadow * contact_shadow * cloud_t;
     // Diagnostic paint (`THALOS_CLOUD_SHADOW=show`): the transmittance the
     // cascade actually holds at this fragment, unlit. Separates a wrong march
     // from a wrong projection — the split that matters most for this term,

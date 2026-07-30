@@ -44,6 +44,7 @@ use thalos_shipyard::{
     AirIntake, AmbientIntakeKind, Attachment, Engine, EngineActivation, FuelCrossfeed, G0,
     IntakeCapture, Part, PartResources, Resource, SurfaceMount, live_part_dry_mass_kg,
 };
+use thalos_world::AtmosphereSample;
 
 use crate::SimStage;
 use crate::controls::ControlLocks;
@@ -59,6 +60,10 @@ use crate::sim_clock::SimClock;
 pub struct ActiveEngineFlow {
     pub entity: Entity,
     pub mass_flow_kg_per_s: f64,
+    /// Fraction of the catalog vacuum thrust this engine can deliver at full
+    /// throttle right now: intake starvation × the environment lapse (jet
+    /// density lapse or rocket nozzle back-pressure). Per copy — the
+    /// surface-mount symmetry multiplier is *not* folded in.
     pub thrust_scale: f64,
     pub reactants: Vec<(Resource, f64)>,
 }
@@ -364,28 +369,27 @@ fn ship_in_atmosphere(sim: &SimulationState) -> bool {
     altitude >= 0.0 && altitude <= atmosphere.karman_line_m as f64
 }
 
-/// Ambient air density (kg/m³) at the ship's current altitude over the
-/// dominant body; `0` outside an atmosphere.
-fn ambient_air_density_kg_m3(sim: &SimulationState) -> f64 {
+/// Ambient atmospheric state at the ship's current altitude over the
+/// dominant body; [`AtmosphereSample::VACUUM`] outside an atmosphere.
+/// Density feeds the jet lapse, pressure the rocket nozzle back-pressure.
+fn ambient_atmosphere(sim: &SimulationState) -> AtmosphereSample {
     let body_id = sim.simulation.dominant_body();
     let Some(body) = sim.system.bodies.get(body_id) else {
-        return 0.0;
+        return AtmosphereSample::VACUUM;
     };
     let Some(atmosphere) = body.terrestrial_atmosphere.as_ref() else {
-        return 0.0;
+        return AtmosphereSample::VACUUM;
     };
     let body_pos = sim
         .ephemeris
         .state(body_id, Epoch(sim.simulation.sim_time()))
         .position;
     let altitude = (sim.simulation.ship_state().position - body_pos).length() - body.radius_m;
-    atmosphere
-        .sample_at_altitude_m(
-            altitude,
-            body.surface_pressure_pa(),
-            body.surface_gravity_m_s2(),
-        )
-        .density_kg_m3
+    atmosphere.sample_at_altitude_m(
+        altitude,
+        body.surface_pressure_pa(),
+        body.surface_gravity_m_s2(),
+    )
 }
 
 /// Catalog jet thrust is rated at this density (≈ Thalos / Earth sea level).
@@ -466,12 +470,13 @@ fn refresh_active_propulsion(
         .map(|d| d.enabled && d.jets_in_vacuum)
         .unwrap_or(false);
     let atmosphere_available = ship_in_atmosphere(&sim) || force_atmosphere;
+    let ambient = ambient_atmosphere(&sim);
     // Air-breathing thrust falls off with ambient density (the jet lapse);
     // the debug jets-in-vacuum stopgap pretends rated sea-level air.
     let air_lapse = if force_atmosphere {
         1.0
     } else {
-        air_breathing_thrust_factor(ambient_air_density_kg_m3(&sim))
+        air_breathing_thrust_factor(ambient.density_kg_m3)
     };
     let mut intake_available: HashMap<AmbientIntakeKind, f64> = HashMap::new();
     if atmosphere_available {
@@ -559,16 +564,26 @@ fn refresh_active_propulsion(
         if intake_scale <= 0.0 {
             continue;
         }
-        // Jets lapse with density; rockets carry their own oxidizer. Mass
-        // flow follows the lapsed thrust (fixed Isp), so fuel burn falls off
-        // with altitude too.
-        let lapse = if engine.requires_atmosphere {
+        // Two environment lapses, with opposite mass-flow behaviour:
+        // - Jets lapse with ambient *density* (the core swallows less air);
+        //   fuel burn follows the lapsed thrust (fixed Isp).
+        // - Rockets lapse with ambient *pressure* (nozzle back-pressure,
+        //   `F = F_vac − p·A_e`); the pumps keep the vacuum-rated mass flow,
+        //   so the effective Isp falls with the thrust. A vacuum-optimized
+        //   bell is heavily penalized at sea level; see
+        //   `Engine::pressure_thrust_factor`.
+        let env_factor = if engine.requires_atmosphere {
             air_lapse
         } else {
-            1.0
+            engine.pressure_thrust_factor(ambient.pressure_pa)
         };
-        let thrust_n = engine.thrust as f64 * multiplier * intake_scale * lapse;
-        let mdot = thrust_n / (engine.isp as f64 * G0);
+        let rated_thrust_n = engine.thrust as f64 * multiplier * intake_scale;
+        let thrust_n = rated_thrust_n * env_factor;
+        let mdot = if engine.requires_atmosphere {
+            thrust_n / (engine.isp as f64 * G0)
+        } else {
+            rated_thrust_n / (engine.isp as f64 * G0)
+        };
 
         let reactants: Vec<(Resource, f64)> = engine
             .reactants
@@ -591,7 +606,7 @@ fn refresh_active_propulsion(
         active_engines.push(ActiveEngineFlow {
             entity,
             mass_flow_kg_per_s: mdot,
-            thrust_scale: intake_scale,
+            thrust_scale: intake_scale * env_factor,
             reactants,
         });
     }

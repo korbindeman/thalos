@@ -7,10 +7,10 @@
 //! regime the cascade rig structurally cannot serve, and craft/gear/trunks read
 //! as pasted onto the ground until something else covers it.
 //!
-//! This pass mirrors [`super::ssao`] exactly: a fullscreen pass over
-//! [`SceneDepthImage`] (the only depth that sees the forked-udlod terrain),
-//! running in view space so it is f32-safe under big_space, written after the
-//! opaque pass and sampled by receivers one frame later.
+//! This pass reads the current frame's Bevy depth prepass, runs in view space
+//! so it is f32-safe under big_space, and writes immediately before opaque
+//! shading. The default tile ground therefore receives the contact term in the
+//! same frame as the depth that produced it.
 //!
 //! Two deliberate differences from SSAO:
 //!
@@ -25,10 +25,10 @@
 //! rig's consumers through the binding they already carry.
 
 use crate::camera::ShipCamera;
-use crate::rendering::scene_depth::SceneDepthImage;
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::camera::Camera;
-use bevy::core_pipeline::core_3d::main_transparent_pass_3d;
+use bevy::core_pipeline::core_3d::main_opaque_pass_3d;
+use bevy::core_pipeline::prepass::ViewPrepassTextures;
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::ecs::prelude::*;
 use bevy::image::Image;
@@ -201,12 +201,12 @@ impl Plugin for ContactShadowPlugin {
                 .add_systems(RenderStartup, init_contact_shadow_pipeline)
                 .add_systems(
                     Core3d,
-                    // Same slot as the SSAO pass: after the transparent pass, so
-                    // strictly after `copy_scene_depth` has populated
-                    // `SceneDepthImage`. Receivers sample the result next frame.
+                    // Current-frame contact: prepass depth is complete, and the
+                    // tile receiver has not shaded yet.
                     compute_contact_shadow
                         .in_set(Core3dSystems::MainPass)
-                        .after(main_transparent_pass_3d),
+                        .after(Core3dSystems::Prepass)
+                        .before(main_opaque_pass_3d),
                 );
         }
     }
@@ -282,8 +282,8 @@ fn sync_contact_shadow_sun(
 /// Render-world pipeline for the contact-shadow fullscreen pass.
 #[derive(Resource)]
 struct ContactShadowPipeline {
-    layout: BindGroupLayoutDescriptor,
-    pipeline_id: CachedRenderPipelineId,
+    layouts: [BindGroupLayoutDescriptor; 2],
+    pipeline_ids: [CachedRenderPipelineId; 2],
 }
 
 fn init_contact_shadow_pipeline(
@@ -291,55 +291,83 @@ fn init_contact_shadow_pipeline(
     asset_server: Res<AssetServer>,
     pipeline_cache: Res<PipelineCache>,
 ) {
-    let layout = BindGroupLayoutDescriptor::new(
+    let single_layout = BindGroupLayoutDescriptor::new(
         "contact_shadow_layout",
         &BindGroupLayoutEntries::sequential(
             ShaderStages::FRAGMENT,
             (texture_depth_2d(), uniform_buffer::<ContactUniform>(false)),
         ),
     );
+    let msaa_layout = BindGroupLayoutDescriptor::new(
+        "contact_shadow_msaa_layout",
+        &BindGroupLayoutEntries::sequential(
+            ShaderStages::FRAGMENT,
+            (
+                texture_depth_2d_multisampled(),
+                uniform_buffer::<ContactUniform>(false),
+            ),
+        ),
+    );
     let shader: Handle<Shader> = asset_server.load("shaders/contact_shadow.wgsl");
-    let pipeline_id = pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
-        label: Some("contact_shadow_pipeline".into()),
-        layout: vec![layout.clone()],
-        immediate_size: 0,
-        vertex: VertexState {
-            shader: shader.clone(),
-            shader_defs: vec![],
-            entry_point: Some("vertex".into()),
-            buffers: vec![],
-        },
-        primitive: PrimitiveState::default(),
-        depth_stencil: None,
-        multisample: MultisampleState::default(),
-        fragment: Some(FragmentState {
-            shader,
-            shader_defs: vec![],
-            entry_point: Some("fragment".into()),
-            targets: vec![Some(ColorTargetState {
-                format: CONTACT_FORMAT,
-                blend: None,
-                write_mask: ColorWrites::ALL,
-            })],
-        }),
-        zero_initialize_workgroup_memory: false,
-    });
+    let make_pipeline = |layout: &BindGroupLayoutDescriptor, msaa: bool| {
+        let defs = if msaa {
+            vec!["CONTACT_DEPTH_MSAA".into()]
+        } else {
+            vec![]
+        };
+        pipeline_cache.queue_render_pipeline(RenderPipelineDescriptor {
+            label: Some(
+                if msaa {
+                    "contact_shadow_msaa_pipeline"
+                } else {
+                    "contact_shadow_pipeline"
+                }
+                .into(),
+            ),
+            layout: vec![layout.clone()],
+            immediate_size: 0,
+            vertex: VertexState {
+                shader: shader.clone(),
+                shader_defs: defs.clone(),
+                entry_point: Some("vertex".into()),
+                buffers: vec![],
+            },
+            primitive: PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: MultisampleState::default(),
+            fragment: Some(FragmentState {
+                shader: shader.clone(),
+                shader_defs: defs,
+                entry_point: Some("fragment".into()),
+                targets: vec![Some(ColorTargetState {
+                    format: CONTACT_FORMAT,
+                    blend: None,
+                    write_mask: ColorWrites::ALL,
+                })],
+            }),
+            zero_initialize_workgroup_memory: false,
+        })
+    };
+    let single_pipeline = make_pipeline(&single_layout, false);
+    let msaa_pipeline = make_pipeline(&msaa_layout, true);
 
     commands.insert_resource(ContactShadowPipeline {
-        layout,
-        pipeline_id,
+        layouts: [single_layout, msaa_layout],
+        pipeline_ids: [single_pipeline, msaa_pipeline],
     });
 }
 
-/// March the copied scene depth toward the sun and write the contact-shadow
-/// factor. Runs once for the ship-camera view (`ViewQuery` filters via the
-/// extracted [`ShipCamera`] marker), after the depth copy is populated.
+/// March current prepass depth toward the sun and write the contact-shadow
+/// factor. Runs once for the ship-camera view.
 fn compute_contact_shadow(
-    view: ViewQuery<(&'static ExtractedView, &'static ShipCamera)>,
+    view: ViewQuery<(
+        &'static ExtractedView,
+        &'static ShipCamera,
+        &'static ViewPrepassTextures,
+    )>,
     config: Res<ContactShadowConfig>,
     sun: Res<ContactShadowSun>,
     contact: Option<Res<ContactShadowImage>>,
-    scene_depth: Option<Res<SceneDepthImage>>,
     pipeline: Option<Res<ContactShadowPipeline>>,
     render_assets: Res<RenderAssets<GpuImage>>,
     pipeline_cache: Res<PipelineCache>,
@@ -354,18 +382,17 @@ fn compute_contact_shadow(
     if sun.dir.length_squared() <= 0.0 {
         return;
     }
-    let (extracted, _ship) = view.into_inner();
-    let (Some(contact), Some(scene_depth), Some(pipeline)) = (contact, scene_depth, pipeline)
+    let (extracted, _ship, prepass) = view.into_inner();
+    let (Some(contact), Some(pipeline)) = (contact, pipeline) else {
+        return;
+    };
+    let (Some(dest), Some(depth)) = (render_assets.get(&contact.handle), prepass.depth.as_ref())
     else {
         return;
     };
-    let (Some(dest), Some(depth)) = (
-        render_assets.get(&contact.handle),
-        render_assets.get(&scene_depth.handle),
-    ) else {
-        return;
-    };
-    let Some(render_pipeline) = pipeline_cache.get_render_pipeline(pipeline.pipeline_id) else {
+    let variant = usize::from(depth.texture.texture.sample_count() > 1);
+    let Some(render_pipeline) = pipeline_cache.get_render_pipeline(pipeline.pipeline_ids[variant])
+    else {
         return;
     };
 
@@ -404,8 +431,8 @@ fn compute_contact_shadow(
 
     let bind_group = render_device.create_bind_group(
         Some("contact_shadow_bind_group"),
-        &pipeline_cache.get_bind_group_layout(&pipeline.layout),
-        &BindGroupEntries::sequential((&depth.texture_view, buffer.as_entire_binding())),
+        &pipeline_cache.get_bind_group_layout(&pipeline.layouts[variant]),
+        &BindGroupEntries::sequential((&depth.texture.default_view, buffer.as_entire_binding())),
     );
 
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {

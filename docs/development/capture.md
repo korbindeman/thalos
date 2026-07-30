@@ -128,6 +128,17 @@ history, invalidating the comparison
 
 ### 1.3 Workstation resource contract
 
+The interactive game and headless capture host share one **exclusive
+machine-wide renderer lease** (ADR-20260729T081809Z). It is acquired before
+Bevy/wgpu initialization and released by the OS on owner death. `just game`
+stops an idle persistent host before launch; a capture requested while the game
+is open exits as `renderer busy` without creating a GPU device, retrying, or
+quarantining the adapter. The JSON owner record under the user temp directory
+is explanation only—the Windows named mutex / Unix file lock is the authority.
+Capture-client serialization still exists one level above this boundary: it
+orders capture requests when the capture host, rather than the game, owns the
+renderer.
+
 Automation defaults are intentionally safer than the interactive renderer:
 
 - viewpoint schema v2 stores typed lens/sensor state and no output pixels;

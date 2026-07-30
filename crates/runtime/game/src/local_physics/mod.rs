@@ -80,6 +80,7 @@ impl Plugin for GameLocalPhysicsPlugin {
             .init_resource::<GearState>()
             .init_resource::<ParkingBrake>()
             .init_resource::<WeightOnWheels>()
+            .init_resource::<GearVisualCompression>()
             .init_resource::<SurfaceFriction>()
             .init_resource::<TerrainFloorBackstop>()
             .register_type::<TerrainFloorBackstop>()
@@ -609,6 +610,7 @@ mod tests {
             diameter: 2.0,
             thrust: 0.0,
             isp: 0.0,
+            sea_level_isp: None,
             dry_mass: 0.0,
             reactants: Vec::new(),
             power_draw_kw: 0.0,

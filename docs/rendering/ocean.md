@@ -148,9 +148,14 @@ reference state. Shader constants that describe the fixed packet layout are
 mechanism, not presets. Do not scatter screenshot-specific appearance values;
 the screenshot time override changes phase only.
 
-## 6. Production path
+## 6. Production rendering path
 
-The next program is tracked as `OCEAN-PROG` in `backlog.md`:
+The cross-discipline product program now lives in
+[`roadmap/ocean_systems.md`](../roadmap/ocean_systems.md) (`sea §N`). This
+section owns the rendering mechanism inside that program; `OCEAN-2` through
+`OCEAN-7` in `backlog.md` are its execution slices. The local displacement and
+physics work do not reopen the analytic global surface or the one signed
+coastline.
 
 1. **State and observability (partly landed in OCEAN-1).** Per-body
    `OceanState`, canonical-clock phase reduction, representative packet-speed
@@ -178,10 +183,10 @@ The next program is tracked as `OCEAN-PROG` in `backlog.md`:
    SSR/Hi-Z or local probes by measured visual value. Every optional tier blends
    by confidence and may never leave black reflection holes.
 
-The first production gate is one integrated open-ocean scene with a vessel and
-one shoreline, not isolated wave/foam demos. It must demonstrate geometry,
-filtering, foam history, reflection fallback, local coupling, and GPU budget in
-the same capture and trace.
+The first production gate is `sea §5`'s Thalos proving slice, not isolated
+wave/foam demos. It must demonstrate geometry, filtering, foam history,
+reflection fallback, vessel response, local coast coupling, weather forcing and
+GPU budget across the same deterministic route.
 
 ## 7. Deliberate limits of BL-12 / OCEAN-1
 
@@ -194,7 +199,8 @@ the same capture and trace.
   not evolve every Fourier mode independently or produce height/displacement/
   Jacobian fields. That boundary remains the measured GPU FFT decision.
 
-These are explicit `OCEAN-PROG` scope, not hidden TODOs in the shader.
+These are explicit `OCEAN-2` through `OCEAN-6` scope, not hidden TODOs in the
+shader.
 
 ## References
 

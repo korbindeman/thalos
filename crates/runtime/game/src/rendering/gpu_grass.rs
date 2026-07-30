@@ -49,7 +49,6 @@ use crate::graphics_settings::GraphicsSettings;
 use crate::rendering::grass::grass_scatter_regions;
 use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::CameraExposure;
 use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
@@ -298,7 +297,6 @@ fn finalize_gpu_grass(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
     mut images: ResMut<Assets<Image>>,
-    sun_shadow: Option<Res<SunShadowState>>,
     mut commands: Commands,
 ) {
     let Some((task, ..)) = state.in_flight.as_mut() else {
@@ -368,13 +366,8 @@ fn finalize_gpu_grass(
 
     // First window: create the material + template + entity.
     if state.material.is_none() {
-        let maps: [Handle<Image>; 3] = match sun_shadow.as_deref() {
-            Some(s) => s.images.clone(),
-            None => {
-                let fb = images.add(fallback_shadow_map());
-                [fb.clone(), fb.clone(), fb]
-            }
-        };
+        let fb = images.add(fallback_shadow_map());
+        let maps: [Handle<Image>; 3] = [fb.clone(), fb.clone(), fb];
         state.material = Some(materials.add(GpuGrassMaterial {
             sun_shadow_map_0: maps[0].clone(),
             sun_shadow_map_1: maps[1].clone(),
@@ -465,7 +458,8 @@ fn update_gpu_grass_transform(
 }
 
 /// Per-frame material params: sun / wind / sky / fade mirroring the CPU grass
-/// update, the window/lattice registration upload, and the live shadow rebind.
+/// update and the window/lattice registration upload. The frame-coherent
+/// shadow payload is fanned out once in `sun_shadow`'s `Last` pass.
 /// Read-only on the driver state — anchor re-registration happens in
 /// [`drive_gpu_grass`], first in the chain, so pose and params stay coherent.
 #[allow(clippy::too_many_arguments)]
@@ -476,7 +470,6 @@ fn update_gpu_grass_material(
     time: Res<Time>,
     exposure: Res<CameraExposure>,
     view_anchor: Res<ViewAnchor>,
-    sun_shadow: Option<Res<SunShadowState>>,
     height_sources: Res<HeightSourceRegistry>,
     mut materials: ResMut<Assets<GpuGrassMaterial>>,
 ) {
@@ -601,14 +594,6 @@ fn update_gpu_grass_material(
     // Grass style table (dry/lush/lawn) — authored Rust-side; an all-zero
     // table renders zero-size blades.
     material.params.style = gpu_grass_style_table();
-
-    // Live sun-shadow cascade rebind (trees' shadows fall on the blades).
-    if let Some(sun_shadow) = sun_shadow.as_deref() {
-        material.shadow = sun_shadow.block;
-        material.sun_shadow_map_0 = sun_shadow.images[0].clone();
-        material.sun_shadow_map_1 = sun_shadow.images[1].clone();
-        material.sun_shadow_map_2 = sun_shadow.images[2].clone();
-    }
 
     // Freshness guard: if the height source vanished (body teardown), park.
     if !height_sources.contains(body_id) {

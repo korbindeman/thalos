@@ -1164,7 +1164,7 @@ pub(super) fn update_part_shader_highlight(
     mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
     bodies: Query<
         (Entity, &PartBody, &MeshMaterial3d<ShipPartMaterial>),
-        Without<super::shrouds::ShroudBody>,
+        Without<crate::shrouds::ShroudBody>,
     >,
 ) {
     let hovered: HashSet<Entity> = hover_map

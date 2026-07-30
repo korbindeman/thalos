@@ -26,6 +26,7 @@ Active strategy and sequencing, not implementation detail.
 - [Neural terrain × standard-path renderer](roadmap/neural_terrain_renderer.md) — **keystone / primary sprint**: paired diffusion terrain + Bevy-standard-path renderer, probe milestones, extraction plan.
 - [Architecture cleanup](roadmap/architecture_cleanup.md) — background consolidation sprint (demoted from primary 2026-07-23).
 - [Graphics fidelity](roadmap/graphics_fidelity.md) — one-world rendering strategy; spine-port items frozen by the keystone triage, composites continue.
+- [Ocean systems](roadmap/ocean_systems.md) — future world/gameplay program: a shared weather-driven sea, vessels, beaches, storms, and the Thalos proving slice before Pelagos.
 - [Mira learned terrain](roadmap/mira_learned_terrain.md) — L1–L6 milestones, visual gates, dataset growth, compute ledger, evidence; paused after L2 closure per the keystone.
 
 ### [Gameplay systems](gameplay/)
@@ -37,6 +38,7 @@ Player-facing flows, editors, controls, and interface contracts.
 - [Construction](gameplay/construction.md)
 - [HUD widgets](gameplay/hud_widgets.md)
 - [Input](gameplay/input.md)
+- [Navigation, routes, and guidance](gameplay/navigation.md)
 - [UI flow and `GameContext`](gameplay/ui_flow.md)
 - [UI kit](gameplay/ui.md)
 
@@ -74,6 +76,8 @@ Atmospheric and surface-adjacent rendering systems.
 - [Clouds](rendering/clouds.md)
 - [Ocean](rendering/ocean.md)
 - [Rocket plumes](rendering/plume.md)
+- [Vehicle flow effects](rendering/flow_effects.md) — the shared aerothermal boundary and the effect taxonomy
+- [Reentry shock layer](rendering/reentry.md)
 
 ### [Development](development/)
 
@@ -84,6 +88,18 @@ How to build, inspect, capture, and verify the project.
 - [Capture architecture](development/capture.md)
 - [Tooling](development/tooling.md)
 - [Visual testing and agent capture quickstart](development/visual_testing.md)
+
+### [Reviews](reviews/)
+
+Output of the adversarial expert-review harness
+(`.claude/skills/expert-review/SKILL.md`) — specialist agents audit a slice of the
+codebase, a hostile refuter kills what it can, survivors land in a dated report.
+Claims that survived scrutiny, **not** tracked work: the harness never writes to
+the backlog, and you promote what you agree with.
+
+- [How to read a report, and the report template](reviews/README.md)
+- [Coverage ledger](reviews/coverage.md) — reviewed `(slice, lens)` pairs; drives selection.
+- [Dismissed findings](reviews/dismissed.md) — `by-design` / `wrong` verdicts with citations; the harness's memory.
 
 ### [Reference](reference/)
 
@@ -112,7 +128,9 @@ beside it: `steer` (`.claude/skills/steer/SKILL.md`) routes new work between the
 roadmap and the backlog, and `diag-triage`
 (`.claude/skills/diag-triage/SKILL.md`) runs the diagnostics pass — `just diag`,
 then findings into rows, incidents, or a stated non-action
-(`development/tooling.md` § Reading the lane).
+(`development/tooling.md` § Reading the lane). A third, `expert-review`
+(`.claude/skills/expert-review/SKILL.md`), runs the adversarial audit into
+[reviews/](reviews/).
 
 ## Placement rules
 
@@ -135,6 +153,7 @@ then findings into rows, incidents, or a stated non-action
 | `ntr §N` | [neural terrain × standard-path renderer](roadmap/neural_terrain_renderer.md) |
 | `clean §N` | [architecture cleanup](roadmap/architecture_cleanup.md) |
 | `gfx §N` | [graphics fidelity](roadmap/graphics_fidelity.md) |
+| `sea §N` | [ocean systems](roadmap/ocean_systems.md) |
 | `cloud §N` | [clouds](rendering/clouds.md) |
 | `giant §N` | [navigable gas giants](world/navigable_gas_giants.md) |
 | `ADR-YYYYMMDDTHHMMSSZ-slug` | [architecture decisions](adr/) |

@@ -52,6 +52,35 @@ pub fn tile_synthesis_pool() -> &'static TaskPool {
     })
 }
 
+/// Worker thread count for the scatter-build pool. Bounded for the same reason
+/// as everything in this module — the render thread, Avian, and the tile pools
+/// keep their cores — but *separate* from the tile pool so a cold tree fill
+/// does not queue behind minutes of far-mountain terrain refinement (and vice
+/// versa: scatter can't starve the ground it is waiting on).
+const VEG_SCATTER_THREADS: usize = 4;
+
+static VEG_POOL: OnceLock<TaskPool> = OnceLock::new();
+
+/// Dedicated [`TaskPool`] for vegetation / rock scatter builds
+/// ([`crate::ground::scatter::build_scatter_tile`] + the per-tile mesh
+/// combines).
+///
+/// These used to run on Bevy's shared `AsyncComputeTaskPool`, which is both
+/// narrow (a fraction of cores, capped small) and contended — the exact shape
+/// that hitched the main thread when tile synthesis lived there (see the module
+/// doc). A cold tree carpet is ~2,300 tile builds; on the shared pool it
+/// drained at ~100 tiles/s with the queue permanently full, i.e. the pool
+/// width, not the queue depth, was the throughput ceiling
+/// (`runtime.jsonl` vegetation `drive_gauge`, 2026-07-29).
+pub fn veg_scatter_pool() -> &'static TaskPool {
+    VEG_POOL.get_or_init(|| {
+        TaskPoolBuilder::new()
+            .num_threads(VEG_SCATTER_THREADS)
+            .thread_name("Veg Scatter".to_string())
+            .build()
+    })
+}
+
 static EVAL_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
 
 /// Bounded rayon pool for the *inner* per-tile pixel evaluation

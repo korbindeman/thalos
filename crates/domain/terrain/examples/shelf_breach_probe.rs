@@ -15,11 +15,36 @@
 //! Run: `cargo run -p thalos_terrain --example shelf_breach_probe`
 
 use glam::DVec3;
-use thalos_terrain::ProceduralSurface;
 use thalos_terrain::query::SurfaceQuery;
+use thalos_terrain::{DiffusionSurface, ProceduralSurface};
 
 const RADIUS_M: f64 = 3_186_000.0; // Thalos
-const SEED: u32 = 1;
+// Thalos's body id — the seed the game and `just map` use. A different
+// value here is a different planet, which silently makes any A/B against the
+// diffusion backing (loaded with body id 2) a comparison of two worlds.
+const SEED: u32 = 2;
+
+/// Same toggle the game and `just map` use — see `coastline_lod.rs`.
+fn load_surface() -> Box<dyn SurfaceQuery> {
+    let diffusion = std::env::var("THALOS_TERRAIN")
+        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
+        .unwrap_or(false);
+    if diffusion {
+        let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
+        match DiffusionSurface::load(dir, RADIUS_M as f32, 2) {
+            Ok(surface) => {
+                println!("backing: terrain-diffusion ({})", dir.display());
+                return Box::new(surface);
+            }
+            Err(error) => {
+                println!("backing: procedural (diffusion load failed: {error})");
+            }
+        }
+    } else {
+        println!("backing: procedural");
+    }
+    Box::new(ProceduralSurface::new(RADIUS_M as f32, SEED))
+}
 
 fn lod_m_for(lod: u32) -> f32 {
     let inner_texels = 508.0_f64;
@@ -43,7 +68,8 @@ fn step_dir(dir: DVec3, tangent: DVec3, ang: f64) -> DVec3 {
 }
 
 fn main() {
-    let surface = ProceduralSurface::new(RADIUS_M as f32, SEED);
+    let surface = load_surface();
+    let surface = surface.as_ref();
     let lods: Vec<(String, f32)> = [0u32, 2, 4, 6, 8, 10]
         .iter()
         .map(|&l| (format!("LOD{l:>2} ({:>8.1} m)", lod_m_for(l)), lod_m_for(l)))

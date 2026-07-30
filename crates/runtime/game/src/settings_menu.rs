@@ -33,7 +33,7 @@ use thalos_ui::{
 };
 
 use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
-use crate::units_settings::{UnitSystem, UnitsSettings};
+use crate::units_settings::{AviationUnits, UnitSystem, UnitsSettings};
 use crate::window_settings::{
     MonitorChoice, RESOLUTION_PRESETS, UI_SCALE_MAX, UI_SCALE_MIN, WindowModeSetting,
     WindowSettings, WindowSettingsOverrides,
@@ -141,6 +141,8 @@ struct ResetGraphicsControl;
 // Units tab
 #[derive(Component)]
 struct UnitsControl;
+#[derive(Component)]
+struct AviationUnitsControl;
 
 // HOTAS tab
 #[derive(Component)]
@@ -633,7 +635,34 @@ fn build_units_tab(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, settings: 
         "Imperial shows altitude in feet, speed in knots, vertical speed in ft/min, \
          and mass in pounds. Internal physics stays SI; this only affects the readouts.",
     );
-    note(b, theme, "Saved to user/units.ron.");
+
+    spacer(b);
+    let aviation_index = AviationUnits::ALL
+        .iter()
+        .position(|a| *a == settings.aviation)
+        .unwrap_or(0);
+    let aviation_options = AviationUnits::ALL
+        .iter()
+        .map(|a| a.label().to_string())
+        .collect();
+    spawn_cycle_row(
+        b,
+        theme,
+        "Flight instruments",
+        aviation_options,
+        aviation_index,
+        AviationUnitsControl,
+    );
+    note(
+        b,
+        theme,
+        "Aviation keeps feet, knots, ft/min, and nautical miles on the flight \
+         instruments — the PFD tapes, the atmospheric TAS/q/Mach readout, and the \
+         MFD navigation display — even when Measurement is metric, which is how \
+         real cockpits are marked. Orbital altitude, \u{394}v, staging masses, and \
+         map scales still follow Measurement.",
+    );
+    note(b, theme, "Saved to settings.ron.");
 }
 
 // ── Binding-list tabs ───────────────────────────────────────────────────────────
@@ -1086,12 +1115,20 @@ fn apply_graphics_controls(
 fn apply_units_controls(
     mut settings: ResMut<UnitsSettings>,
     units_q: Query<&UiCycle, (Changed<UiCycle>, With<UnitsControl>)>,
+    aviation_q: Query<&UiCycle, (Changed<UiCycle>, With<AviationUnitsControl>)>,
 ) {
     for cycle in &units_q {
         if let Some(&system) = UnitSystem::ALL.get(cycle.index)
             && settings.system != system
         {
             settings.system = system;
+        }
+    }
+    for cycle in &aviation_q {
+        if let Some(&aviation) = AviationUnits::ALL.get(cycle.index)
+            && settings.aviation != aviation
+        {
+            settings.aviation = aviation;
         }
     }
 }

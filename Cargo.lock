@@ -9226,6 +9226,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "thalos_capture_protocol",
+ "thalos_diagnostics",
  "thalos_runtime",
 ]
 
@@ -9263,10 +9264,13 @@ dependencies = [
 name = "thalos_diagnostics"
 version = "0.1.0"
 dependencies = [
+ "libc",
+ "libloading 0.8.9",
  "serde",
  "serde_json",
  "tracing",
  "tracing-subscriber",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -9285,6 +9289,14 @@ dependencies = [
  "gilrs",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "thalos_navigation"
+version = "0.1.0"
+dependencies = [
+ "approx",
+ "glam 0.32.1",
 ]
 
 [[package]]
@@ -9339,6 +9351,7 @@ dependencies = [
  "thalos_control",
  "thalos_diagnostics",
  "thalos_input",
+ "thalos_navigation",
  "thalos_physics_canonical",
  "thalos_physics_local",
  "thalos_shipyard",

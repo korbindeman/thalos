@@ -17,11 +17,39 @@
 //! Run: `cargo run -p thalos_terrain --example coastline_lod`
 
 use glam::DVec3;
-use thalos_terrain::ProceduralSurface;
 use thalos_terrain::query::SurfaceQuery;
+use thalos_terrain::{DiffusionSurface, ProceduralSurface};
 
 const RADIUS_M: f64 = 3_186_000.0; // Thalos
-const SEED: u32 = 1;
+// Thalos's body id — the seed the game and `just map` use. A different
+// value here is a different planet, which silently makes any A/B against the
+// diffusion backing (loaded with body id 2) a comparison of two worlds.
+const SEED: u32 = 2;
+
+/// Same toggle the game and `just map` use, so this probe measures whichever
+/// backing the session actually renders. The diffusion backing takes its
+/// waterline from the authored signed sea field, so both should report the same
+/// LOD-invariance — that equality is the point of the measurement.
+fn load_surface() -> Box<dyn SurfaceQuery> {
+    let diffusion = std::env::var("THALOS_TERRAIN")
+        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
+        .unwrap_or(false);
+    if diffusion {
+        let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
+        match DiffusionSurface::load(dir, RADIUS_M as f32, 2) {
+            Ok(surface) => {
+                println!("backing: terrain-diffusion ({})", dir.display());
+                return Box::new(surface);
+            }
+            Err(error) => {
+                println!("backing: procedural (diffusion load failed: {error})");
+            }
+        }
+    } else {
+        println!("backing: procedural");
+    }
+    Box::new(ProceduralSurface::new(RADIUS_M as f32, SEED))
+}
 
 // tile_lod_m for LOD 0..15 (mirrors body_render's `tile_lod_m`):
 //   radius * (pi/2 / 2^lod) / inner_texels,  inner_texels = 512 - 2*2 = 508.
@@ -49,7 +77,8 @@ fn step_dir(dir: DVec3, tangent: DVec3, ang: f64) -> DVec3 {
 }
 
 fn main() {
-    let surface = ProceduralSurface::new(RADIUS_M as f32, SEED);
+    let surface = load_surface();
+    let surface = surface.as_ref();
     println!("Thalos radius {RADIUS_M:.0} m, seed {SEED}");
     println!("LOD → lod_m (game tile sampling scale):");
     for lod in [0u32, 3, 6, 9, 12, 15] {

@@ -38,6 +38,20 @@ mod reflection_probe;
 mod regime;
 mod relaunch;
 mod rendering;
+pub mod route;
+
+/// Seam for the headless display previews (`examples/nav_preview.rs`).
+///
+/// Examples are separate crates, so the ND's scene builder, uniform
+/// assembly, and material have to be reachable from outside the crate for
+/// the preview to render *the same code the game runs* rather than a
+/// look-alike. Nothing else should import through here.
+pub mod display_preview {
+    pub use crate::hud::mfd::widgets::nav_display::{
+        NavDisplayMaterial, NavScene, NavSceneInputs, NavStrip, build_nav_scene,
+        nav_display_data,
+    };
+}
 mod runtime_diagnostics;
 mod runway;
 mod scenario_menu;
@@ -46,6 +60,7 @@ mod settings;
 mod settings_menu;
 mod ship_view;
 mod shipyard_editor;
+mod shrouds;
 mod sim_clock;
 mod sky_render;
 pub mod solar_system_state;
@@ -717,6 +732,7 @@ impl AppBuilder {
             .add_plugins(surface_settle::SurfaceSettlePlugin)
             .add_plugins(structures::StructuresPlugin)
             .add_plugins(runway::RunwayPlugin)
+            .add_plugins(route::RoutePlugin)
             .add_plugins(RenderingPlugin)
             .add_plugins(GameLocalPhysicsPlugin)
             .add_plugins(GameAeroPlugin)
@@ -771,6 +787,9 @@ impl AppBuilder {
             .add_plugins(ShipViewPlugin)
             .add_plugins(relaunch::RelaunchPlugin)
             .add_plugins(shipyard_editor::ShipyardEditorPlugin)
+            // Interstage shrouds for both worlds — the VAB build and the flight
+            // craft — so a decoupler under an engine looks the same in either.
+            .add_plugins(shrouds::ShroudPlugin)
             .add_plugins(base_editor::BaseEditorPlugin)
             // Shared god-view camera (base editor + space-center hub) and the KSP-style
             // space-center hub itself.
@@ -814,6 +833,18 @@ impl AppBuilder {
     }
 
     pub fn run(self) {
+        let _renderer_lease = match thalos_diagnostics::renderer_lease::RendererLease::acquire(
+            thalos_diagnostics::renderer_lease::RendererRole::InteractiveGame,
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                eprintln!("GPU renderer lease unavailable: {error}");
+                eprintln!(
+                    "Close the other game, or run `just capture-stop` if a headless capture host owns it, then retry."
+                );
+                std::process::exit(thalos_diagnostics::renderer_lease::EXIT_RENDERER_BUSY);
+            }
+        };
         self.build().run();
     }
 }

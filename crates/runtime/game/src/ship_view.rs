@@ -49,13 +49,13 @@ use crate::view::{HideInMapView, HideInShipView, ViewMode};
 /// editor's value so the two look identical side-by-side.
 const PART_RESOLUTION: u32 = 128;
 
-/// Whole-craft crash tolerance (m/s of surface-relative approach speed).
+/// Whole-craft crash tolerance (m/s of surface-relative **sink rate** — the
+/// into-surface radial component, not total speed, so a fast wheels-first
+/// runway touchdown is judged by its descent, never its ground speed).
 /// A terrain contact above this destroys the vessel. Forgiving first-slice
 /// constant — a future per-part model derives it from the contacting parts.
 /// See `docs/simulation/surface.md`.
-// TEMP (camera-judder repro): survive a hard touchdown so the craft settles in
-// Full on the terrain instead of being destroyed. Restore to 12.0 after.
-const SHIP_IMPACT_TOLERANCE_M_S: f64 = 1.0e9;
+const SHIP_IMPACT_TOLERANCE_M_S: f64 = 12.0;
 /// Aggregate bluff-body drag coefficient for the player ship. Blunt
 /// capsule-topped stacks sit around 1.0; a future per-shape model can derive
 /// this from the nose part. The frontal area is per-vehicle
@@ -107,6 +107,11 @@ impl Plugin for ShipViewPlugin {
                     rebuild_ship_nacelle_visuals,
                     rebuild_ship_gear_visuals,
                     sync_gear_visibility.after(rebuild_ship_gear_visuals),
+                    // After the physics set so it reads this frame's
+                    // compression, not last frame's.
+                    sync_gear_compression
+                        .after(rebuild_ship_gear_visuals)
+                        .after(SimStage::Physics),
                     update_ship_part_transforms.after(rebuild_ship_visuals),
                     update_ship_part_shader_params.after(rebuild_ship_visuals),
                     update_ship_camera_offset.after(update_ship_part_transforms),
@@ -1135,6 +1140,34 @@ fn sync_gear_visibility(
         if *vis != target {
             *vis = target;
         }
+    }
+}
+
+/// Smoothing rate (Hz) for the visual gear-compression offset — fast enough
+/// to track a landing stroke, slow enough to hide the raycast's frame noise.
+const GEAR_COMPRESSION_SMOOTH_HZ: f32 = 12.0;
+
+/// Slide each gearbox mesh **up into the hull** by its wheels' suspension
+/// compression (the strut-swallow cheat). The gear mesh is rigid, authored at
+/// full extension, while the physics suspension compresses up to
+/// `max_travel_fraction·strut` — without this offset every centimetre of real
+/// compression rendered as the wheels sinking through the pavement. Reads the
+/// per-gearbox `(susp_dir, compression)` that [`crate::local_physics`]'s gear
+/// system publishes ([`GearVisualCompression`]'s sole writer); an absent entry
+/// (airborne wheel, gear up, no bubble) relaxes back to full extension.
+fn sync_gear_compression(
+    time: Res<Time>,
+    compression: Res<crate::local_physics::GearVisualCompression>,
+    mut visuals: Query<(&ChildOf, &mut Transform), With<GearVisual>>,
+) {
+    let blend = 1.0 - (-time.delta_secs() * GEAR_COMPRESSION_SMOOTH_HZ).exp();
+    for (parent, mut transform) in &mut visuals {
+        let target = compression
+            .0
+            .get(&parent.0)
+            .map(|(susp_dir, compression_m)| (-*susp_dir * *compression_m).as_vec3())
+            .unwrap_or(Vec3::ZERO);
+        transform.translation = transform.translation.lerp(target, blend);
     }
 }
 

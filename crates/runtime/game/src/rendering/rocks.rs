@@ -26,13 +26,13 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DVec3, Vec3, Vec4};
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy::tasks::{Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
     AU_M, GrassParams, LIGHT_AT_1AU, RockMaterial, RockMeshData, RockMeshParams, TerrainShadingStyle,
     TileKey, TileLattice, VegLayer, VegScatterInput, VegSpeciesPlacement, build_rock_mesh_data,
-    build_scatter_tile, combine_rock_tile_mesh, fallback_shadow_map,
+    build_scatter_tile, combine_rock_tile_mesh, fallback_shadow_map, veg_scatter_pool,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -41,7 +41,6 @@ use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::CameraExposure;
 use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
@@ -444,7 +443,9 @@ fn drive_rock_tiles(
         .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
 
     let ground = mirror.as_ref();
-    let pool = AsyncComputeTaskPool::get();
+    // Shared bounded scatter pool (see `veg_scatter_pool`) — off the contended
+    // AsyncComputeTaskPool, same as the tree driver.
+    let pool = veg_scatter_pool();
     let mut dispatched = 0usize;
     for (_, key) in candidates {
         if dispatched >= slots {
@@ -470,6 +471,9 @@ fn drive_rock_tiles(
             flatten_exclusion,
             spacing_scale: 1.0,
             keep_fraction: 1.0,
+            // Rocks are the only layer this driver draws; skip the (dense)
+            // woody grids entirely.
+            layer_mask: VegLayer::Rock.mask(),
         };
         let meshes = library.meshes.clone();
         let revision = height_source.revision();
@@ -617,7 +621,6 @@ fn update_rock_material(
     time: Res<Time>,
     exposure: Res<CameraExposure>,
     anchor: Res<ViewAnchor>,
-    sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<RockMaterial>>,
 ) {
     let Some(library) = library else {
@@ -673,12 +676,6 @@ fn update_rock_material(
     material.params.sky_up = sky_up;
     material.params.sky_tau = sky_tau;
     material.params.anchor = anchor;
-    if let Some(sun_shadow) = sun_shadow.as_deref() {
-        material.shadow = sun_shadow.block;
-        material.sun_shadow_map_0 = sun_shadow.images[0].clone();
-        material.sun_shadow_map_1 = sun_shadow.images[1].clone();
-        material.sun_shadow_map_2 = sun_shadow.images[2].clone();
-    }
 }
 
 /// Periodically rebuild tiles whose underlying height shifted (a finer atlas

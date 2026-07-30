@@ -38,9 +38,6 @@
 //! collapses to a single craft-centred cascade (craft self-shadow in orbit —
 //! stock Bevy CSM is off, this is the one shadow world).
 
-use std::io::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::camera::{Camera, ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
 // Bevy 0.19: render passes are systems in the `Core3d` schedule (was the
@@ -60,15 +57,18 @@ use bevy::render::{
     texture::GpuImage,
     view::ViewDepthTexture,
 };
+use bevy::transform::TransformSystems;
+use big_space::prelude::{BigSpace, CellCoord, Grid};
 
-use thalos_body_render::{CASCADE_COUNT, CraftShadowMaps, ShadowCascadeBlock};
+use thalos_body_render::tiles::material::TileTerrainMaterial;
+use thalos_body_render::{
+    BodyTerrainMaterial, CASCADE_COUNT, CraftShadowMaps, GpuGrassMaterial, GrassMaterial,
+    GroundPatchMaterial, RockMaterial, ShadowCascadeBlock, TreeMaterial,
+};
 use thalos_world::BodyId;
 
-use crate::SimStage;
 use crate::camera::ShipCamera;
-use crate::rendering::real_space::update_real_space_body_positions;
-use crate::rendering::types::RealSpaceBody;
-use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
+use crate::solar_system_state::{SimulationState, SolarSystemState};
 
 /// Render layer the sun-shadow cameras render. Casters (tree mesh tiles, craft
 /// parts) are made visible to them by adding this layer alongside `SHIP_LAYER`.
@@ -158,13 +158,12 @@ const SHADOW_MAX_ALTITUDE_M: f32 = 50_000.0;
 /// vantage are a few pixels tall anyway; beyond the cap they'd be sub-pixel.
 const SHADOW_MAX_FOOTPRINT_SCALE: f32 = 32.0;
 
-/// Hysteresis for the QUANTIZED footprint scale (power-of-two steps): grow
-/// immediately (coverage is correctness), shrink only once the raw requirement
-/// drops below this fraction of the current step (comfortably inside the next
-/// step down, so a camera hovering at a boundary doesn't strobe texel sizes).
-/// A continuously-varying footprint rescaled every cascade's texel grid every
-/// frame the camera moved — re-rasterizing every shadow edge = global shimmer.
-const SHADOW_FOOTPRINT_SHRINK_FRACTION: f32 = 0.42;
+/// Wall-clock smoothing time for cascade footprint changes. The old power-of-two
+/// quantizer held a stable grid, then changed every texel by 2× in one frame.
+/// Texel snapping already stabilizes translation; smoothing keeps zoom/altitude
+/// changes continuous without bringing that scale pop back.
+const SHADOW_FOOTPRINT_SMOOTH_TAU_S: f32 = 0.30;
+const SHADOW_FOOTPRINT_HEADROOM: f32 = 1.12;
 
 /// Cap on the footprint's look-reach term, in multiples of camera AGL. The
 /// cascade covers the ground point the camera looks at out to this many × AGL
@@ -179,22 +178,6 @@ const SHADOW_LOOK_REACH_MAX_AGL: f32 = 4.0;
 /// drifts this far from it, re-anchor (a one-frame sub-texel phase jump).
 /// Keeps the f32 relative coordinates small and precise.
 const SNAP_ANCHOR_REACH_M: f64 = 8_000.0;
-
-/// Quantized sun stepping (stable CSM, part 2 — the rotational cousin of the
-/// body-fixed texel snap). The snap stabilizes the cascade's *translation*
-/// relative to the co-rotating ground, but the sun's direction over the site
-/// still changed every simulated frame (planet rotation × warp) — the light
-/// basis rotated relative to the casters, so every shadow edge re-rasterized
-/// with a fresh sub-texel phase each frame anyway. The rig therefore HOLDS its
-/// sun direction fixed IN THE BODY FRAME and only steps it once the true sun
-/// has drifted past this angle: between steps the light co-rotates rigidly
-/// with the ground, the light↔caster geometry is frame-to-frame constant, and
-/// the rendered depth maps are stable. At 0.1° a 100 m shadow moves ~17 cm per
-/// step (sub-texel for cascade 0); under high warp shadows advance in visible
-/// discrete steps, which reads as intended time-lapse rather than shimmer.
-/// Scene lighting (`update_sun_light`) keeps the continuous sun — only the
-/// shadow rig quantizes; a ≤0.1° mismatch is imperceptible.
-const SUN_LOCK_STEP_RAD: f64 = 0.1 * core::f64::consts::PI / 180.0;
 
 /// Default shadow darkening strength (0 = off, 1 = black). Higher values give
 /// hard cliff/ridge contrast; ambient fill keeps shadowed ground from going pure black.
@@ -226,10 +209,6 @@ pub struct SunShadowCascade {
     pub index: u32,
 }
 
-/// Frame counter for the copy node's rate-limited diagnostics. Render-world, so
-/// it can't use a `Local`; an atomic keeps it lock-free across the pass.
-static COPY_DIAG_FRAME: AtomicU64 = AtomicU64::new(0);
-
 /// Copy each shadow cascade's rendered depth into its own depth map. Ported
 /// from the former `CopySunShadowDepthNode` (`ViewNode`) to a Bevy 0.19
 /// render-pass **system**. The `ViewQuery` filters to cascade views via
@@ -242,41 +221,22 @@ fn copy_sun_shadow_depth(
 ) {
     let (depth, cascade) = view.into_inner();
 
-    // ~once/sec at 60 fps, cascade 0 only — diagnostics, never per-frame.
-    let n = COPY_DIAG_FRAME.fetch_add(1, Ordering::Relaxed);
-    let diag = |s: &str| {
-        if cascade.index == 0 && n % (60 * CASCADE_COUNT as u64) == 0 {
-            log_shadow_state(s);
-        }
-    };
-
     let Some(shadow) = shadow else {
-        diag("{\"copy\":\"no_resource\"}");
         return;
     };
     let Some(handle) = shadow.handles.get(cascade.index as usize) else {
         return;
     };
     let Some(dest) = render_assets.get(handle) else {
-        diag("{\"copy\":\"no_dest_gpuimage\"}");
         return;
     };
 
     let src_size = depth.texture.size();
     let dst_size = dest.texture.size();
     if src_size.width != dst_size.width || src_size.height != dst_size.height {
-        diag(&format!(
-            "{{\"copy\":\"size_mismatch\",\"src\":[{},{}],\"dst\":[{},{}]}}",
-            src_size.width, src_size.height, dst_size.width, dst_size.height,
-        ));
         return;
     }
     if depth.texture.sample_count() != dest.texture.sample_count() {
-        diag(&format!(
-            "{{\"copy\":\"sample_mismatch\",\"src\":{},\"dst\":{}}}",
-            depth.texture.sample_count(),
-            dest.texture.sample_count(),
-        ));
         return;
     }
 
@@ -287,16 +247,12 @@ fn copy_sun_shadow_depth(
         dest.texture.as_image_copy(),
         src_size,
     );
-    diag(&format!(
-        "{{\"copy\":\"ok\",\"size\":[{},{}],\"cascades\":{}}}",
-        src_size.width, src_size.height, CASCADE_COUNT,
-    ));
 }
 
 /// Mirror the live sun-shadow cascade (`SunShadowState`, owned by the rig) into
 /// the render crate's `CraftShadowMaps`, so the craft hull / gear — Bevy-PBR
 /// `ShipPartMaterial` — RECEIVE the same cascade the terrain / trees cast into
-/// (graphics-fidelity F6b). `apply_craft_shadow` (render crate, PostUpdate) fans
+/// (graphics-fidelity F6b). `apply_craft_shadow` (render crate, Last) fans
 /// it onto the materials. No-op until the rig's state exists and the craft
 /// material is registered.
 fn sync_craft_shadow(state: Option<Res<SunShadowState>>, maps: Option<ResMut<CraftShadowMaps>>) {
@@ -307,6 +263,72 @@ fn sync_craft_shadow(state: Option<Res<SunShadowState>>, maps: Option<ResMut<Cra
     maps.block = state.block;
 }
 
+/// Final shadow-only fan-out for receivers owned by the runtime render drivers.
+///
+/// Their ordinary material updates run in `Update` and intentionally own wind,
+/// exposure, fades, and body parameters. Shadow placement now runs after the
+/// camera in `PostUpdate`, so copying shadow fields there would be a frame late.
+/// This single `Last` pass overwrites only the shared shadow payload immediately
+/// before material extraction, making the maps, matrices, and every receiver a
+/// single frame-coherent transaction.
+#[allow(clippy::too_many_arguments)]
+fn sync_shadow_receivers(
+    state: Res<SunShadowState>,
+    contact: Option<Res<super::contact_shadow::ContactShadowImage>>,
+    mut grass: Option<ResMut<Assets<GrassMaterial>>>,
+    mut gpu_grass: Option<ResMut<Assets<GpuGrassMaterial>>>,
+    mut rocks: Option<ResMut<Assets<RockMaterial>>>,
+    mut trees: Option<ResMut<Assets<TreeMaterial>>>,
+    mut patches: Option<ResMut<Assets<GroundPatchMaterial>>>,
+    mut legacy_ground: Option<ResMut<Assets<BodyTerrainMaterial>>>,
+    mut tiles: Option<ResMut<Assets<TileTerrainMaterial>>>,
+) {
+    macro_rules! sync_plain {
+        ($assets:expr) => {
+            if let Some(assets) = $assets.as_deref_mut() {
+                for (_, material) in assets.iter_mut() {
+                    material.shadow = state.block;
+                    material.sun_shadow_map_0 = state.images[0].clone();
+                    material.sun_shadow_map_1 = state.images[1].clone();
+                    material.sun_shadow_map_2 = state.images[2].clone();
+                }
+            }
+        };
+    }
+    sync_plain!(grass);
+    sync_plain!(gpu_grass);
+    sync_plain!(rocks);
+    sync_plain!(patches);
+
+    if let Some(assets) = trees.as_deref_mut() {
+        for (_, material) in assets.iter_mut() {
+            material.extension.shadow = state.block;
+            material.extension.sun_shadow_map_0 = state.images[0].clone();
+            material.extension.sun_shadow_map_1 = state.images[1].clone();
+            material.extension.sun_shadow_map_2 = state.images[2].clone();
+        }
+    }
+    if let Some(assets) = legacy_ground.as_deref_mut() {
+        for (_, material) in assets.iter_mut() {
+            material.extras.shadow = state.block;
+            material.sun_shadow_map_0 = state.images[0].clone();
+            material.sun_shadow_map_1 = state.images[1].clone();
+            material.sun_shadow_map_2 = state.images[2].clone();
+        }
+    }
+    if let Some(assets) = tiles.as_deref_mut() {
+        for (_, material) in assets.iter_mut() {
+            material.extension.shadow = state.block;
+            material.extension.sun_shadow_map_0 = state.images[0].clone();
+            material.extension.sun_shadow_map_1 = state.images[1].clone();
+            material.extension.sun_shadow_map_2 = state.images[2].clone();
+            if let Some(contact) = contact.as_deref() {
+                material.extension.contact_shadow_map = contact.handle.clone();
+            }
+        }
+    }
+}
+
 pub struct SunShadowPlugin;
 
 impl Plugin for SunShadowPlugin {
@@ -315,19 +337,16 @@ impl Plugin for SunShadowPlugin {
             .add_plugins(ExtractComponentPlugin::<SunShadowCascade>::default())
             .add_systems(Startup, setup_sun_shadow)
             .add_systems(
-                Update,
+                PostUpdate,
                 (
-                    update_sun_shadow_camera
-                        .after(update_real_space_body_positions)
-                        .after(sync_solar_system_state)
-                        .after(crate::rendering::real_space::update_real_space_origin),
-                    // Mirror the live cascade onto the craft hull/gear so they
-                    // RECEIVE it (the render crate's `apply_craft_shadow` fans
-                    // `CraftShadowMaps` onto the materials in PostUpdate).
-                    sync_craft_shadow.after(update_sun_shadow_camera),
+                    crate::rendering::real_space::update_real_space_origin,
+                    update_sun_shadow_camera,
+                    sync_craft_shadow,
                 )
-                    .in_set(SimStage::Sync),
-            );
+                    .chain()
+                    .before(TransformSystems::Propagate),
+            )
+            .add_systems(Last, sync_shadow_receivers);
 
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
             render_app.add_systems(
@@ -440,18 +459,6 @@ fn cascade_clip_from_view(half_extent: f32, far: f32) -> Mat4 {
     )
 }
 
-/// Append one JSONL line of shadow-pass diagnostics, but only when
-/// `THALOS_SHADOW_LOG` names a file. Mirrors the house JSONL style used by
-/// `THALOS_PERF_LOG`. A single env read when unset, so it's safe to leave wired.
-fn log_shadow_state(line: &str) {
-    let Some(path) = thalos_diagnostics::paths::jsonl_path_from_env("THALOS_SHADOW_LOG") else {
-        return;
-    };
-    if let Ok(mut f) = thalos_diagnostics::paths::open_jsonl_append(&path) {
-        let _ = writeln!(f, "{line}");
-    }
-}
-
 /// Aim every cascade camera down the sun over the craft and publish their
 /// transforms. Near the surface: three ground-projected cascades. In orbit /
 /// high flight: one craft-centred cascade (self-shadow only). Fully disabled
@@ -460,10 +467,11 @@ fn log_shadow_state(line: &str) {
 fn update_sun_shadow_camera(
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
-    bodies: Query<(&RealSpaceBody, &GlobalTransform)>,
-    ship_cam: Query<&GlobalTransform, With<ShipCamera>>,
+    grid: Query<&Grid, With<BigSpace>>,
+    ship_cam: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     origin: Res<crate::rendering::real_space::RealSpaceOrigin>,
     view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
+    real_time: Res<Time<Real>>,
     height_sources: Res<thalos_physics_local::HeightSourceRegistry>,
     // Contact tier (W18a): its gate is published in `block.gate.z` so it reaches
     // every consumer through the binding they already carry.
@@ -478,90 +486,59 @@ fn update_sun_shadow_camera(
         Without<ShipCamera>,
     >,
     mut state: ResMut<SunShadowState>,
-    mut frame: Local<u64>,
+    mut diagnostic_elapsed_s: Local<f32>,
     // Body-fixed texel-snap anchor (see the snap note below) + the current
     // quantized footprint step (power-of-two, with shrink hysteresis) + the
-    // held body-fixed sun direction (see `SUN_LOCK_STEP_RAD`).
+    // continuously-smoothed footprint and transported light basis.
     mut snap_anchor: Local<Option<(BodyId, DVec3)>>,
-    mut footprint_step: Local<f32>,
-    mut sun_lock: Local<Option<(BodyId, DVec3)>>,
+    mut footprint_scale: Local<f32>,
+    mut previous_light_right: Local<Option<Vec3>>,
 ) {
-    *frame = frame.wrapping_add(1);
-    let log_now = *frame % 15 == 0;
-
-    let mut reason = "ok";
-    let mut altitude_m = -1.0_f32;
-    let mut body_dbg = String::from("none");
-    let mut n_terrain_bodies = 0u32;
+    *diagnostic_elapsed_s += real_time.delta_secs();
 
     'resolve: {
         let Some(states) = cache.states.as_deref() else {
-            reason = "no_states";
             break 'resolve;
         };
-        let Ok(cam_xform) = ship_cam.single() else {
-            reason = "no_ship_cam";
+        let (Ok(root_grid), Ok((cam_cell, cam_xform))) = (grid.single(), ship_cam.single()) else {
             break 'resolve;
         };
-        let cam_pos = cam_xform.translation();
+        let camera_world = root_grid.grid_position_double(cam_cell, cam_xform);
+        let cam_pos = origin.to_render(camera_world);
 
         let mut best: Option<(BodyId, f32, f32)> = None;
-        for (b, xform) in &bodies {
-            let Some(def) = sim.system.bodies.get(b.body_id) else {
+        for body_state in states {
+            let Some(def) = sim.system.bodies.get(body_state.id) else {
                 continue;
             };
             if !def.terrain.is_some() {
                 continue;
             }
-            n_terrain_bodies += 1;
             let radius = def.radius_m as f32;
-            let altitude = (cam_pos - xform.translation()).length() - radius;
+            let altitude = (camera_world - body_state.position).length() as f32 - radius;
             if best.is_none_or(|(_, a, _)| altitude < a) {
-                best = Some((b.body_id, altitude, radius));
+                best = Some((body_state.id, altitude, radius));
             }
         }
         let Some((active_id, altitude, body_radius_m)) = best else {
-            reason = "no_terrain_body";
             break 'resolve;
         };
-        altitude_m = altitude;
-        body_dbg = format!("{active_id:?}");
         // Off-surface, don't disable — switch to craft-local self-shadow mode
         // (see `SHADOW_MAX_ALTITUDE_M`). The gate is the CAMERA's altitude, so
         // any near-surface view (flight, god view, freecam) keeps ground
         // shadows regardless of where the craft is.
         let craft_local = altitude > SHADOW_MAX_ALTITUDE_M;
-        if craft_local {
-            reason = "craft_local";
-        }
         let (Some(star), Some(body_state)) = (states.first(), states.get(active_id)) else {
-            reason = "no_state";
             break 'resolve;
         };
 
         let offset = star.position - body_state.position;
         let sun_dir = if offset.length_squared() <= 0.0 {
             Vec3::Y
-        } else if craft_local {
-            // Orbit / high flight: the caster is the freely-rotating craft, so
-            // there is no body frame to hold the light in — use the true sun.
-            *sun_lock = None;
-            offset.normalize().as_vec3()
         } else {
-            // Quantized sun stepping: hold the shadow sun fixed in the BODY
-            // frame until the true sun drifts `SUN_LOCK_STEP_RAD` away (see the
-            // constant's note). Between steps the light basis, the body-fixed
-            // snap grid, and every caster co-rotate rigidly — the rendered
-            // cascade content is frame-to-frame identical while the sim runs.
-            let cur_bf = body_state.orientation.inverse() * offset.normalize();
-            let locked_bf = match *sun_lock {
-                Some((b, l)) if b == active_id && l.dot(cur_bf) > SUN_LOCK_STEP_RAD.cos() => l,
-                _ => {
-                    *sun_lock = Some((active_id, cur_bf));
-                    cur_bf
-                }
-            };
-            (body_state.orientation * locked_bf).normalize().as_vec3()
+            // Keep lighting and shadow geometry on the same continuous sun.
+            // The old 0.1° hold moved every shadow edge in visible time steps.
+            offset.normalize().as_vec3()
         };
 
         // Centre the cascades on the ground point BELOW THE VIEW, so the crisp
@@ -584,9 +561,11 @@ fn update_sun_shadow_camera(
         let anchor_here = view_anchor
             .resolved
             .filter(|a| !craft_local && a.body == active_id);
-        let player_inertial = anchor_here
-            .map(|a| a.cam_world(states))
-            .unwrap_or_else(|| sim.simulation.ship_state().position);
+        let player_inertial = if craft_local {
+            sim.simulation.ship_state().position
+        } else {
+            camera_world
+        };
         let radial = player_inertial - body_state.position;
         let r = radial.length();
         let radial_dir = if r > 1.0e-3 { radial / r } else { DVec3::Y };
@@ -636,11 +615,6 @@ fn update_sun_shadow_camera(
                 player_inertial - radial_dir * player_alt as f64,
             )
         };
-        let up = if sun_dir.dot(Vec3::Y).abs() > 0.99 {
-            Vec3::Z
-        } else {
-            Vec3::Y
-        };
         // View footprint scale: the cascade set is centred on the ground below
         // the camera, but it must COVER whatever ground the camera is *looking
         // at* from ANY vantage. Three view terms size it: any camera↔anchor
@@ -659,10 +633,7 @@ fn update_sun_shadow_camera(
         } else {
             let cam_dist = (cam_pos - player_render).length();
             let cam_agl = (altitude - terrain_h as f32).max(0.0);
-            let fwd = cam_xform
-                .affine()
-                .transform_vector3(Vec3::NEG_Z)
-                .normalize_or_zero();
+            let fwd = cam_xform.rotation * Vec3::NEG_Z;
             let down = (-fwd).dot(up_radial).max(0.0);
             let horiz = (1.0 - down * down).max(0.0).sqrt();
             let look_reach = if down > 1.0e-3 {
@@ -673,23 +644,14 @@ fn update_sun_shadow_camera(
             let required_half_m = cam_dist + look_reach + cam_agl * 2.0;
             let raw = (required_half_m / CASCADE_HALF_EXTENTS_M[CASCADE_COUNT - 1])
                 .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
-            // QUANTIZE to power-of-two steps with shrink hysteresis: a
-            // continuously-varying footprint rescaled every cascade's texel
-            // grid every frame the camera moved, re-rasterizing every shadow
-            // edge (global shimmer). Grow immediately — coverage is
-            // correctness; shrink only once raw demand is comfortably inside
-            // the lower step.
-            let quantized = raw
-                .log2()
-                .ceil()
-                .exp2()
-                .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
-            if quantized > *footprint_step
-                || raw < *footprint_step * SHADOW_FOOTPRINT_SHRINK_FRACTION
-            {
-                *footprint_step = quantized;
+            let target = (raw * SHADOW_FOOTPRINT_HEADROOM).clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
+            if *footprint_scale <= 0.0 || target / footprint_scale.max(1.0e-3) > 2.0 {
+                *footprint_scale = target;
+            } else {
+                let alpha = 1.0 - (-real_time.delta_secs() / SHADOW_FOOTPRINT_SMOOTH_TAU_S).exp();
+                *footprint_scale += (target - *footprint_scale) * alpha;
             }
-            *footprint_step
+            *footprint_scale
         };
         // ── Up-sun depth slack ────────────────────────────────────────────────
         // The cascade box is square in the LIGHT plane, but its intersection
@@ -713,12 +675,21 @@ fn update_sun_shadow_camera(
         };
         // Rotation is shared by every cascade (only translation differs); any
         // eye distance yields the same rotation.
-        let base_look = Transform::from_translation(center + sun_dir * SHADOW_BACK_DISTANCE_M)
-            .looking_at(center, up);
-        let light_right = base_look.rotation * Vec3::X;
-        let light_up = base_look.rotation * Vec3::Y;
-        let eye_dbg = center + sun_dir * SHADOW_BACK_DISTANCE_M;
-        let sun_dbg = sun_dir;
+        let transported = previous_light_right
+            .map(|right| right - sun_dir * right.dot(sun_dir))
+            .unwrap_or(Vec3::ZERO);
+        let light_right = if transported.length_squared() > 1.0e-6 {
+            transported.normalize()
+        } else {
+            sun_dir
+                .cross(up_radial)
+                .try_normalize()
+                .unwrap_or_else(|| sun_dir.cross(Vec3::X).normalize_or_zero())
+        };
+        let light_up = sun_dir.cross(light_right).normalize_or_zero();
+        *previous_light_right = Some(light_right);
+        let light_rotation =
+            Quat::from_mat3(&Mat3::from_cols(light_right, light_up, sun_dir)).normalize();
 
         // ── Texel-snap reference (stable CSM on a ROTATING planet) ──────────
         // Snapping the centre to a grid in RENDER space assumed a static
@@ -789,7 +760,7 @@ fn update_sun_shadow_camera(
                 + ((cu / texel).round() * texel - cu) * light_up;
             let center_i = center + snap;
             let eye_i = center_i + sun_dir * back;
-            let look_i = Transform::from_translation(eye_i).looking_at(center_i, up);
+            let look_i = Transform::from_translation(eye_i).with_rotation(light_rotation);
             block.view_proj[i] = cascade_clip_from_view(half, far) * look_i.to_matrix().inverse();
             // x = clip units per metre of light-space depth (orthographic z is
             // linear), y = texel size in world metres — the shared sampler
@@ -834,34 +805,19 @@ fn update_sun_shadow_camera(
             cam.is_active = on;
         }
 
-        if log_now {
-            // `centre_off_m` is the decisive coverage signal: the cascade set is
-            // centred on the ground under the camera, so in the correct render
-            // frame it can only differ from the camera by the nadir drop
-            // (≈ `alt_m`). Anything larger means the boxes are sitting somewhere
-            // the view isn't — the failure mode `RealSpaceOrigin` exists to kill.
-            let centre_off_m = (center - cam_pos).length();
-            log_shadow_state(&format!(
-                "{{\"frame\":{},\"reason\":\"{}\",\"active\":true,\"alt_m\":{:.1},\
-                 \"body\":\"{}\",\"n_terrain\":{},\"strength\":{:.3},\"cascades\":{},\
-                 \"footprint\":{:.1},\"centre_off_m\":{:.1},\
-                 \"eye\":[{:.1},{:.1},{:.1}],\"sun\":[{:.3},{:.3},{:.3}]}}",
-                *frame,
-                reason,
-                altitude_m,
-                body_dbg,
-                n_terrain_bodies,
-                SHADOW_STRENGTH,
-                CASCADE_COUNT,
-                footprint,
-                centre_off_m,
-                eye_dbg.x,
-                eye_dbg.y,
-                eye_dbg.z,
-                sun_dbg.x,
-                sun_dbg.y,
-                sun_dbg.z,
-            ));
+        if *diagnostic_elapsed_s >= 1.0 {
+            *diagnostic_elapsed_s = 0.0;
+            let expected_origin = root_grid.grid_position_double(cam_cell, &Transform::IDENTITY);
+            info!(
+                target: "thalos::diagnostic::shadow",
+                event = "stability_gauge",
+                body_id = active_id,
+                origin_frame_error_m = origin.position.distance(expected_origin),
+                footprint_scale = footprint,
+                cascade0_texel_m = block.params[0].y,
+                active_cascades = active_cascades,
+                "shadow stability gauge"
+            );
         }
         return;
     }
@@ -870,11 +826,4 @@ fn update_sun_shadow_camera(
         cam.is_active = false;
     }
     state.block.gate.x = 0.0;
-    if log_now {
-        log_shadow_state(&format!(
-            "{{\"frame\":{},\"reason\":\"{}\",\"active\":false,\"alt_m\":{:.1},\
-             \"body\":\"{}\",\"n_terrain\":{},\"strength\":0.0}}",
-            *frame, reason, altitude_m, body_dbg, n_terrain_bodies,
-        ));
-    }
 }

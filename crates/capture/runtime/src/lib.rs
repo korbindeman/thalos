@@ -36,6 +36,16 @@ impl CaptureAppBuilder {
     /// exists" worthless as evidence. A capture that logged an error is not
     /// partially valid; callers should discard it rather than compare it.
     pub fn run(self) {
+        let _renderer_lease = match thalos_diagnostics::renderer_lease::RendererLease::acquire(
+            thalos_diagnostics::renderer_lease::RendererRole::CaptureHost,
+        ) {
+            Ok(lease) => lease,
+            Err(error) => {
+                eprintln!("GPU renderer lease unavailable: {error}");
+                eprintln!("Close the interactive game before requesting headless visual evidence.");
+                std::process::exit(thalos_diagnostics::renderer_lease::EXIT_RENDERER_BUSY);
+            }
+        };
         self.build().run();
 
         let errors = thalos_runtime::capture_health::error_count();

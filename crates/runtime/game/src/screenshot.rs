@@ -294,6 +294,14 @@ pub enum ScreenshotPreset {
     /// Same framing as [`Self::Ocean`], but replaces the water BRDF with a
     /// false-colour resolved-slope / filtered-roughness diagnostic.
     OceanSlopes,
+    /// Low oblique across a real shoreline: camera out over the water looking
+    /// inland, so the waterline crosses the frame with the foreshore drop in
+    /// front of it and the beach berm rising behind. This is the framing that
+    /// shows whether the coastal profile is a crisp crossing or a kilometre of
+    /// ankle-deep mush (INC-0003), and the regression probe for the authored
+    /// signed sea field the diffusion backing now shares
+    /// (`DiffusionSurface::height` layer A).
+    Coastline,
     /// Mira's cratered horizon from low orbit. Boots the canonical orbit
     /// scenario around Mira, then frames the daylight surface with enough boom
     /// distance for curvature and large impact structure to read.
@@ -379,6 +387,40 @@ pub enum ScreenshotPreset {
     /// not reproduce it. Any future capture meant to exercise composite order
     /// must keep this upward pitch.
     PlumeSkyline,
+    /// The reentry shock layer at peak heating, framed three-quarter on the
+    /// vehicle so both the stagnation cap and the swept flank are in one image.
+    ///
+    /// Boots a plain orbit and drives [`FlowDebugOverride`] to a peak-heating
+    /// freestream (`THALOS_REENTRY_DENSITY` kg/m³, `THALOS_REENTRY_SPEED` m/s),
+    /// because the alternative — actually flying an entry — is neither
+    /// deterministic nor reachable headlessly. The wind is put on the craft's
+    /// **belly** (`-Z` local, the same dorsal convention the gear uses), which is
+    /// the attitude a lifting body actually enters in, so the shell is exercised
+    /// off-axis rather than in the degenerate nose-on case.
+    Reentry,
+    /// The two-stage Saturn on its pad, framed side-on across the **interstage**
+    /// between its stages.
+    ///
+    /// The regression probe for [`crate::shrouds`]: a decoupler under an engine
+    /// grows a shroud from the attach graph, and that derivation used to run
+    /// only over `EditorPart`s — the VAB showed the interstage and the flight
+    /// craft flew with a bare engine bell hanging in the gap. Nothing else in
+    /// the preset set boots a craft that *has* a decoupler (`ShipOrbit` flies
+    /// Apollo, a single stage), so this is the only framing where the flight
+    /// shroud exists at all. Booting `Launch` also puts the stack on the pad
+    /// under daylight, which is where the shroud's seam shading and its joint
+    /// with the tank above read.
+    Interstage,
+    /// Stainless hull in low orbit with the planet filling the sky behind it —
+    /// the framing that judges what a mirror-finish craft *reflects* in space.
+    ///
+    /// This exists because the orbital reflection has no other witness: every
+    /// other orbital preset frames the planet, not the ship, so a hull
+    /// reflecting a flat blue-grey disc instead of continents is invisible in
+    /// all of them. Close on the hull (a 3.6 m body at 14 m) with the planet
+    /// below and the sun off-axis, so the reflected planet occupies a large,
+    /// curved patch of the panels rather than a highlight.
+    OrbitHull,
     /// **Showcase framing 1 of 3 (NTR-X4)** — aerial oblique establishing shot
     /// of the diffusion window's NE massif (5.8 km peaks ~54 km NNE of the
     /// spaceport), styled after the Alpine photogrammetry reference: the whole
@@ -564,6 +606,7 @@ impl ScreenshotPreset {
         Self::EarthReference,
         Self::Ocean,
         Self::OceanSlopes,
+        Self::Coastline,
         Self::MiraOrbit,
         Self::MiraSurface,
         Self::MiraEva,
@@ -580,6 +623,9 @@ impl ScreenshotPreset {
         Self::CloudGodray,
         Self::Plume,
         Self::PlumeSkyline,
+        Self::Reentry,
+        Self::Interstage,
+        Self::OrbitHull,
         Self::MassifAerial,
         Self::MassifRidge,
         Self::MassifValley,
@@ -597,6 +643,7 @@ impl ScreenshotPreset {
             Self::EarthReference => "earth-reference",
             Self::Ocean => "ocean",
             Self::OceanSlopes => "ocean-slopes",
+            Self::Coastline => "coastline",
             Self::MiraOrbit => "mira-orbit",
             Self::MiraSurface => "mira-surface",
             Self::MiraEva => "mira-eva",
@@ -613,6 +660,9 @@ impl ScreenshotPreset {
             Self::CloudGodray => "cloud-godray",
             Self::Plume => "plume",
             Self::PlumeSkyline => "plume-skyline",
+            Self::Reentry => "reentry",
+            Self::Interstage => "interstage",
+            Self::OrbitHull => "orbit-hull",
             Self::MassifAerial => "massif-aerial",
             Self::MassifRidge => "massif-ridge",
             Self::MassifValley => "massif-valley",
@@ -639,6 +689,7 @@ impl ScreenshotPreset {
             }
             "ocean" | "open-ocean" | "open_ocean" | "sea" | "water" => Self::Ocean,
             "ocean-slopes" | "ocean_slopes" | "sea-slopes" | "slope-field" => Self::OceanSlopes,
+            "coastline" | "coast" | "shore" | "shoreline" | "beach" => Self::Coastline,
             "mira" | "mira-orbit" | "mira_orbit" => Self::MiraOrbit,
             "mira-surface" | "mira_surface" | "regolith" => Self::MiraSurface,
             "mira-eva" | "mira_eva" | "regolith-eva" => Self::MiraEva,
@@ -659,6 +710,9 @@ impl ScreenshotPreset {
             | "cloud-shafts" | "light-shafts" | "crepuscular" => Self::CloudGodray,
             "plume" | "engine" | "exhaust" | "rocket" => Self::Plume,
             "plume-skyline" | "plume_skyline" | "plume-sky" | "plume-ascent" => Self::PlumeSkyline,
+            "reentry" | "re-entry" | "entry" | "shock" | "plasma" => Self::Reentry,
+            "interstage" | "shroud" | "decoupler" | "staging" => Self::Interstage,
+            "orbit-hull" | "orbit_hull" | "stainless" | "hull-reflection" => Self::OrbitHull,
             "massif-aerial" | "massif_aerial" | "massif" | "mountains" => Self::MassifAerial,
             "massif-ridge" | "massif_ridge" | "ridge" => Self::MassifRidge,
             "massif-valley" | "massif_valley" | "valley" => Self::MassifValley,
@@ -688,9 +742,11 @@ impl ScreenshotPreset {
             // Dry-belt frames wild terrain far from any base, so a plain orbit
             // scenario is enough; the driver poses the camera over the searched
             // desert site (the craft stays in orbit, irrelevant to the framing).
-            Self::DryBelt | Self::ForestStand | Self::Ocean | Self::OceanSlopes => {
-                SpawnSituation::ShipOrbit
-            }
+            Self::DryBelt
+            | Self::ForestStand
+            | Self::Ocean
+            | Self::OceanSlopes
+            | Self::Coastline => SpawnSituation::ShipOrbit,
             Self::EarthReference => SpawnSituation::Runway,
             Self::MiraOrbit
             | Self::MiraSurface
@@ -711,6 +767,14 @@ impl ScreenshotPreset {
             // plume, a lit sky, and ground still in frame — all three needed
             // for the composite-order probe.
             Self::PlumeSkyline => SpawnSituation::FinalApproach,
+            // Plain orbit; the freestream is supplied by `FlowDebugOverride`
+            // rather than by the craft's real altitude, so the probe does not
+            // depend on flying a trajectory to a particular moment.
+            Self::Reentry => SpawnSituation::ShipOrbit,
+            // The only scenario that flies a multi-stage rocket — and therefore
+            // the only one whose craft has a decoupler to shroud.
+            Self::Interstage => SpawnSituation::Launch,
+            Self::OrbitHull => SpawnSituation::ShipOrbit,
         }
     }
 
@@ -1128,6 +1192,30 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            // Craft-centred GodView like `Plume`, framed a little wider: the
+            // shock layer wraps the *whole* windward side, so a framing tight on
+            // one face cannot show whether the standoff sweeps back correctly.
+            // Black sky for the same reason as `Plume` — the shell is an additive
+            // emitter and a sunlit backdrop washes out the colour ramp that
+            // carries the temperature information.
+            Self::Reentry => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/reentry.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 235.0,
+                elevation_deg: 18.0,
+                distance_m: 60.0,
+                warmup_frames: 90,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("reentry.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
             // Same craft-centred GodView focus as `Plume` (up = the nose axis),
             // but posed *under* the waist so the camera looks up the stack.
             //
@@ -1157,6 +1245,64 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 report: thalos_diagnostics::paths::default_jsonl_path("plume_skyline.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            // Craft-centred GodView like `Plume`, but the focus is offset far
+            // enough down the stack to sit on the interstage rather than the
+            // first-stage bell (see `INTERSTAGE_FOCUS_OFFSET_M`).
+            Self::Interstage => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/interstage.png"),
+                width: 1920,
+                height: 1080,
+                // Side-on and a touch above the joint: the shroud is a body of
+                // revolution, so a level view reads its silhouette against the
+                // tank above and the decoupler below, and a small downward
+                // pitch shows the ring where the two meet.
+                azimuth_deg: 235.0,
+                elevation_deg: 8.0,
+                // Frames both stage joints plus the engine bay: close enough
+                // that a 3.6 m shroud is a large fraction of the frame.
+                distance_m: 26.0,
+                // Spaceport scenario with deferred pad placement and a terrain
+                // settle, same class as `spaceport-aerial`.
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("interstage.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::OrbitHull => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/orbit_hull.png"),
+                width: 1920,
+                height: 1080,
+                // GodView around a craft-centered focus (see `craft_context`),
+                // so `up` is the ship's nose axis: elevation is height above the
+                // stack's waist and azimuth swings around it. A three-quarter
+                // view slightly below the waist puts the largest run of curved
+                // panel between the camera and the planet, which is where a
+                // reflected coastline actually lands.
+                azimuth_deg: 215.0,
+                elevation_deg: -18.0,
+                // Close: the reflection is a low-frequency image on a curved
+                // mirror, so the hull has to be large in frame to read it.
+                distance_m: 14.0,
+                // Orbital scenario — no terrain streaming to settle, so the
+                // warmup only has to cover the probe's first paint (a 2 s
+                // refresh interval at 60 fps) plus the IBL prefilter.
+                warmup_frames: 240,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("orbit_hull.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1275,6 +1421,31 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 report: thalos_diagnostics::paths::default_jsonl_path("ocean.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            Self::Coastline => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/coastline.png"),
+                width: 1920,
+                height: 1080,
+                // The site search puts open water to local east and land to
+                // local west, and azimuth 0 places the camera due east — i.e.
+                // over the water, looking inland across the waterline.
+                azimuth_deg: 0.0,
+                // Low enough that the foreshore reads as a profile rather than
+                // a plan view, high enough to see over the berm onto the land
+                // behind it.
+                elevation_deg: 7.0,
+                distance_m: 900.0,
+                // Coastal tiles plus the analytic ocean's own settling.
+                warmup_frames: 600,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("coastline.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -2020,6 +2191,8 @@ struct ScreenshotDriver {
     forest_site_dir: Option<DVec3>,
     /// Cached deep-water direction for the low-sun open-ocean preset.
     ocean_site_dir: Option<DVec3>,
+    /// Cached shoreline direction for the coastline preset, same latching.
+    coast_site_dir: Option<DVec3>,
     /// Cached Mira survey site for the airless presets: body-fixed direction
     /// plus the landmark crater radius when the search locked onto one.
     airless_site: Option<(DVec3, Option<f64>)>,
@@ -2090,6 +2263,7 @@ impl Plugin for HeadlessScreenshotPlugin {
                     hide_overlays,
                     apply_live_capture_diagnostics,
                     configure_plume_capture,
+                    configure_reentry_capture,
                 ),
             )
             // The pose + capture driver runs *after* the flight camera so it wins
@@ -2464,6 +2638,7 @@ fn poll_capture_requests(
     driver.dry_site_dir = None;
     driver.forest_site_dir = None;
     driver.ocean_site_dir = None;
+    driver.coast_site_dir = None;
     driver.airless_site = None;
     // Re-arm the massif streaming hold: a new request may frame a different
     // (cold) site. When the ground is already streamed the gate re-passes in
@@ -2736,6 +2911,62 @@ fn configure_plume_capture(
     );
 }
 
+/// Drive [`FlowDebugOverride`] for [`ScreenshotPreset::Reentry`] so the shock
+/// layer is reproducible without flying an entry.
+///
+/// Overrides go on the *inputs* — density, airspeed, static temperature — and
+/// the flow boundary derives Mach, dynamic pressure, stagnation temperature and
+/// heat flux from them. Forcing a derived quantity instead would render a state
+/// no atmosphere can produce, and the probe would stop being evidence about the
+/// real flight envelope.
+///
+/// `THALOS_REENTRY_DENSITY` (kg/m³) and `THALOS_REENTRY_SPEED` (m/s) scrub the
+/// entry point: the defaults are peak-heating conditions for a capsule entry.
+fn configure_reentry_capture(
+    cfg: Res<ScreenshotConfig>,
+    runtime: Res<CaptureRuntimeOverrides>,
+    mut over: ResMut<crate::rendering::flow::FlowDebugOverride>,
+) {
+    if !cfg.is_changed() && !runtime.is_changed() {
+        return;
+    }
+    if cfg.preset != ScreenshotPreset::Reentry {
+        *over = crate::rendering::flow::FlowDebugOverride::default();
+        return;
+    }
+    let read = |key: &str, fallback: f32| {
+        runtime
+            .get(key)
+            .and_then(|raw| raw.trim().parse::<f32>().ok())
+            .or_else(|| env_parse::<f32>(key))
+            .unwrap_or(fallback)
+            .max(0.0)
+    };
+    let density = read("THALOS_REENTRY_DENSITY", 3.0e-4);
+    let speed = read("THALOS_REENTRY_SPEED", 7_400.0);
+    // Upper-atmosphere static temperature and the matching speed of sound, so
+    // Mach is a real number rather than a free parameter.
+    let static_temp = 250.0f32;
+    let speed_of_sound = 317.0f32;
+
+    over.density_kg_m3 = Some(density);
+    over.airspeed_m_s = Some(speed);
+    over.static_temp_k = Some(static_temp);
+    over.speed_of_sound_m_s = Some(speed_of_sound);
+    // Wind on the belly: craft `+Z` is dorsal, so the freestream arrives from
+    // `-Z`. This is the entry attitude of a lifting body, and it is the framing
+    // that would expose a shell wrongly keyed to the craft's nose axis.
+    over.flow_from_local = Some(Vec3::NEG_Z);
+    info!(
+        target: "thalos::diagnostic::capture",
+        event = "reentry_probe_configuration",
+        density_kg_m3 = density,
+        airspeed_m_s = speed,
+        mach = speed / speed_of_sound,
+        "reentry probe configuration"
+    );
+}
+
 /// Diagnostic: for each probe offset across the basin (metres from the pad
 /// centre along `center_dir × heading`), log the resident tile texel size and
 /// the height-mirror sample relative to the basin elevation `E`, plus the tile
@@ -2954,6 +3185,14 @@ fn drive_headless_screenshot(
             &mut driver.ocean_site_dir,
         )
         .map(CaptureFocus::from),
+        ScreenshotPreset::Coastline => coast_site_context(
+            &sim,
+            &solar,
+            &height_sources,
+            homeworld.0,
+            &mut driver.coast_site_dir,
+        )
+        .map(CaptureFocus::from),
         ScreenshotPreset::MiraOrbit
         | ScreenshotPreset::MiraSurface
         | ScreenshotPreset::MiraDisc
@@ -2990,9 +3229,14 @@ fn drive_headless_screenshot(
             eva_surface_context(&sim, &solar, &height_sources, homeworld.0).map(CaptureFocus::from)
         }
         // Frame the craft itself, not a surface site.
-        ScreenshotPreset::Plume => craft_context(&sim).map(CaptureFocus::from),
+        ScreenshotPreset::Plume | ScreenshotPreset::Reentry | ScreenshotPreset::OrbitHull => {
+            craft_context(&sim).map(CaptureFocus::from)
+        }
         ScreenshotPreset::PlumeSkyline => {
             plume_skyline_context(&sim, &solar).map(CaptureFocus::from)
+        }
+        ScreenshotPreset::Interstage => {
+            craft_context_at(&sim, INTERSTAGE_FOCUS_OFFSET_M).map(CaptureFocus::from)
         }
         ScreenshotPreset::MassifAerial
         | ScreenshotPreset::MassifRidge
@@ -3011,8 +3255,14 @@ fn drive_headless_screenshot(
                 } => elevation,
                 _ => 25.0,
             };
-            cloud_godray_site_context(&sim, &solar, &height_sources, homeworld.0, sun_elevation_deg)
-                .map(CaptureFocus::from)
+            cloud_godray_site_context(
+                &sim,
+                &solar,
+                &height_sources,
+                homeworld.0,
+                sun_elevation_deg,
+            )
+            .map(CaptureFocus::from)
         }
         _ => match cfg.framing {
             // The sun-relative and disc framings are only reachable from the
@@ -3330,8 +3580,13 @@ pub(crate) fn pose_scripted_viewpoint(
         ScreenshotPreset::MiraEva => {
             eva_surface_context(sim, solar, height_sources, body_id).map(CaptureFocus::from)
         }
-        ScreenshotPreset::Plume => craft_context(sim).map(CaptureFocus::from),
+        ScreenshotPreset::Plume | ScreenshotPreset::Reentry | ScreenshotPreset::OrbitHull => {
+            craft_context(sim).map(CaptureFocus::from)
+        }
         ScreenshotPreset::PlumeSkyline => plume_skyline_context(sim, solar).map(CaptureFocus::from),
+        ScreenshotPreset::Interstage => {
+            craft_context_at(sim, INTERSTAGE_FOCUS_OFFSET_M).map(CaptureFocus::from)
+        }
         ScreenshotPreset::MassifAerial
         | ScreenshotPreset::MassifRidge
         | ScreenshotPreset::MassifValley => {
@@ -3458,6 +3713,213 @@ fn ocean_site_context(
 }
 
 const OCEAN_SITE_LOD_M: f32 = 256.0;
+
+const COAST_SITE_LOD_M: f32 = 32.0;
+/// How far either side of the site the search probes for "is this really a
+/// shore?". A few km: wide enough that a puddle or a flat plain near 0 m fails
+/// the test, narrow enough to stay on one coastal stretch.
+const COAST_PROBE_M: f64 = 3_000.0;
+
+/// Frame the coastline preset: stand on the strand with open water to local
+/// east and land to local west, so the fixed azimuth-0 camera sits over the
+/// water looking inland across the waterline.
+fn coast_site_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    height_sources: &HeightSourceRegistry,
+    body_id: BodyId,
+    cached_dir: &mut Option<DVec3>,
+) -> Option<HubContext> {
+    let states = solar.states.as_deref()?;
+    let body_state = states.get(body_id)?;
+    let radius_m = sim.system.bodies.get(body_id)?.radius_m;
+    let hs = height_sources.get(body_id)?;
+    // Site searches run in the SURFACE body-fixed frame (see the ocean note).
+    let surface_q = crate::rendering::transforms::surface_orientation_authored(
+        &sim.system.bodies,
+        body_id,
+        states,
+    )
+    .unwrap_or_else(|| body_state.orientation.normalize());
+    let sun_world = (-body_state.position).normalize_or_zero();
+    let sun_world = if sun_world == DVec3::ZERO {
+        DVec3::Y
+    } else {
+        sun_world
+    };
+
+    let dir_body = match *cached_dir {
+        Some(dir) => dir,
+        None => {
+            let dir = find_coast_site(hs.as_ref(), surface_q, sun_world, radius_m);
+            let up_world = (surface_q * dir).normalize();
+            let seed = if up_world.dot(DVec3::Y).abs() < 0.99 {
+                DVec3::Y
+            } else {
+                DVec3::X
+            };
+            let east = seed.cross(up_world).normalize();
+            let east_body = (surface_q.inverse() * east).normalize();
+            let step = COAST_PROBE_M / radius_m;
+            let sample = |d: DVec3| {
+                hs.sample_height_m(d.normalize().as_vec3(), COAST_SITE_LOD_M)
+                    .unwrap_or(0.0)
+            };
+            // The three numbers that say whether this really is a shore, beside
+            // the image that claims it is (BL-20: a plausible PNG is not proof).
+            info!(
+                target: "thalos::diagnostic::capture",
+                event = "coast_site",
+                site_height_m = sample(dir),
+                seaward_height_m = sample(dir + east_body * step),
+                landward_height_m = sample(dir - east_body * step),
+                sun_elevation_deg =
+                    up_world.dot(sun_world).clamp(-1.0, 1.0).asin().to_degrees(),
+                "coastline capture site"
+            );
+            *cached_dir = Some(dir);
+            dir
+        }
+    };
+
+    let up_world = (surface_q * dir_body).normalize();
+    Some(HubContext {
+        body_id,
+        center_world: body_state.position + up_world * radius_m,
+        up_world,
+        pad_r: radius_m,
+    })
+}
+
+/// Search the globe for a genuine shoreline: real land one probe to local west,
+/// real open water one probe to local east, then **bisect to the waterline** and
+/// stand just inshore of it.
+///
+/// The east/west asymmetry is what makes the fixed framing deterministic — the
+/// same trick `find_ocean_site` uses to pin the glitter road.
+///
+/// **Do not re-add a "candidate must already be on the strand" precondition.**
+/// The first version of this function required `0 ≤ h ≤ 12 m` at the candidate
+/// itself and found *nothing on the whole planet*: a golden-spiral set of 16k
+/// candidates is ~88 km apart, while the 0–12 m strand band is 0.4–0.9 km wide
+/// at Thalos's 13–29 m/km coastal slopes, so the hit probability is ~0.5 % even
+/// for a candidate already sitting on a coast. It silently returned the `DVec3::Y`
+/// fallback — the north pole, abyssal ocean — and the preset rendered a
+/// perfectly plausible **open-ocean sunset** that looked like a successful
+/// capture. Only the `coast_site` diagnostic exposed it
+/// (`site_height_m −3204`, `sun_elevation_deg 0.0`). Straddle-and-bisect turns a
+/// 0.4 km target into a ~6 km one and then solves for the crossing exactly.
+///
+/// The sun is **scored, not filtered**, for the same reason: a hard sun window
+/// stacked on top of a hard geometry window is how a search ends up with an
+/// empty accept set and no signal that it did.
+fn find_coast_site(
+    source: &dyn HeightSource,
+    body_to_world: DQuat,
+    sun_world: DVec3,
+    radius_m: f64,
+) -> DVec3 {
+    const CANDIDATES: usize = 16_384;
+    const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
+    /// Bisection steps: 3 km / 2^14 ≈ 0.2 m, far finer than the berm.
+    const BISECT_STEPS: usize = 14;
+    /// Stand this far inshore of the crossing, so the focus is on the strand
+    /// rather than exactly on the waterline.
+    const INSHORE_M: f64 = 120.0;
+
+    let step = COAST_PROBE_M / radius_m;
+    let mut best = DVec3::Y;
+    let mut best_score = f64::NEG_INFINITY;
+    // Per-filter survivor counts. A site search that returns its fallback
+    // renders a plausible image of the wrong place (BL-20), so the search has to
+    // say *where* it died, not just that it did.
+    let (mut n_sampled, mut n_straddle, mut n_strand, mut n_sun) = (0u32, 0u32, 0u32, 0u32);
+    let mut n_none = 0u32;
+    for i in 0..CANDIDATES {
+        let y = 1.0 - 2.0 * (i as f64 + 0.5) / CANDIDATES as f64;
+        let ring_r = (1.0 - y * y).sqrt();
+        let theta = GOLDEN_ANGLE * i as f64;
+        let dir_body = DVec3::new(ring_r * theta.cos(), y, ring_r * theta.sin());
+        let none_here = std::cell::Cell::new(false);
+        let sample =
+            |d: DVec3| match source.sample_height_m(d.normalize().as_vec3(), COAST_SITE_LOD_M) {
+                Some(h) => h as f64,
+                None => {
+                    none_here.set(true);
+                    0.0
+                }
+            };
+        n_sampled += 1;
+
+        let up_world = (body_to_world * dir_body).normalize();
+        let seed = if up_world.dot(DVec3::Y).abs() < 0.99 {
+            DVec3::Y
+        } else {
+            DVec3::X
+        };
+        let east_body = (body_to_world.inverse() * seed.cross(up_world).normalize()).normalize();
+
+        // Straddle test: real land to the west, real open water to the east.
+        // This is the only hard requirement — it is what makes the site a coast.
+        let landward = sample(dir_body - east_body * step);
+        let seaward = sample(dir_body + east_body * step);
+        if none_here.get() {
+            n_none += 1;
+        }
+        if landward < 40.0 || seaward > -20.0 {
+            continue;
+        }
+        n_straddle += 1;
+
+        // Bisect along east for the waterline, then step inshore.
+        let (mut lo, mut hi) = (-step, step); // lo = land side, hi = sea side
+        for _ in 0..BISECT_STEPS {
+            let mid = 0.5 * (lo + hi);
+            if sample(dir_body + east_body * mid) > 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let site = (dir_body + east_body * (lo - INSHORE_M / radius_m)).normalize();
+        let h = sample(site);
+        // The bisection can land on a cliff or an inland lake edge; require the
+        // strand to actually be a strand.
+        if !(0.0..=40.0).contains(&h) {
+            continue;
+        }
+        n_strand += 1;
+
+        let site_up = (body_to_world * site).normalize();
+        let sun_sine = site_up.dot(sun_world);
+        // Scored, not filtered: mid-morning preferred, but a lit coast at any
+        // angle beats the fallback. Below the horizon is still rejected.
+        if sun_sine <= 0.05 {
+            continue;
+        }
+        n_sun += 1;
+
+        // Prefer a pronounced crossing (deep water, high land) and a sun that
+        // gives the berm a profile.
+        let score = -seaward + landward - (sun_sine - 0.45).abs() * 4_000.0;
+        if score > best_score {
+            best_score = score;
+            best = site;
+        }
+    }
+    info!(
+        target: "thalos::diagnostic::capture",
+        event = "coast_site_search",
+        candidates = n_sampled,
+        none_returned = n_none,
+        passed_straddle = n_straddle,
+        passed_strand = n_strand,
+        passed_sun = n_sun,
+        found = n_sun > 0,
+        "coastline site search survivor counts"
+    );
+    best
+}
 
 /// Search the globe for deep water at 10–32° sun elevation, preferring a
 /// site where the sun's tangent direction is opposite local east. That makes
@@ -3652,12 +4114,28 @@ fn craft_context(sim: &SimulationState) -> Option<HubContext> {
     /// Shift the focus this far along the nose axis (negative = toward the
     /// engine) so the bell + plume land in frame rather than the pod.
     const FOCUS_OFFSET_M: f64 = -4.0;
+    craft_context_at(sim, FOCUS_OFFSET_M)
+}
+
+/// Distance down the Saturn stack's nose axis to its interstage, for
+/// [`ScreenshotPreset::Interstage`]. The craft state sits at the ship root — the
+/// top of the command pod — and the joint is below the pod, the upper tank, and
+/// the second-stage engine bay: ~4 m + 4 m + 3.6 m of `ships/saturn.ron`.
+/// Approximate on purpose; the framing only has to land the joint near frame
+/// centre, and hard-reading the blueprint here would couple the capture harness
+/// to one ship's part list.
+const INTERSTAGE_FOCUS_OFFSET_M: f64 = -11.5;
+
+/// Craft-centred focus poled on the ship's nose, with the focus point shifted
+/// `offset_m` along that axis (negative = toward the engine). Shared by every
+/// craft-hero framing so they differ only in where along the stack they look.
+fn craft_context_at(sim: &SimulationState, offset_m: f64) -> Option<HubContext> {
     let orientation = sim.simulation.attitude().orientation;
     let nose = (orientation * DVec3::Y).try_normalize().unwrap_or(DVec3::Y);
     let craft = sim.simulation.ship_state().position;
     Some(HubContext {
         body_id: sim.simulation.dominant_body(),
-        center_world: craft + nose * FOCUS_OFFSET_M,
+        center_world: craft + nose * offset_m,
         up_world: nose,
         pad_r: 0.0,
     })

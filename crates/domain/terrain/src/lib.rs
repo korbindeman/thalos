@@ -20,6 +20,7 @@ pub mod generic_terrestrial_field;
 pub mod height;
 pub mod height_generator;
 pub mod icosphere;
+pub mod macro_conditioning;
 pub mod noise;
 pub mod package;
 pub mod pipeline;
@@ -66,8 +67,10 @@ pub use package::{
     SCHEMA_VERSION as PACKAGE_SCHEMA_VERSION, TerrainPackageManifest, load_static_package,
     write_static_package,
 };
+pub use macro_conditioning::{ConditioningChart, LandformProvince};
 pub use procedural::{
-    GENERATOR_VERSION, MacroBiome, ProceduralSurface, climate_cold_lift_m, climate_warmth,
+    COAST_BAND_M, GENERATOR_VERSION, MacroBiome, MacroSignals, ProceduralSurface,
+    climate_cold_lift_m, climate_warmth, combine_macro_and_relief,
 };
 pub use query::{
     BakedSurface, FlattenHandle, FlattenRegion, FlattenedSurface, MaterialBands, Region,

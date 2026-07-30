@@ -251,7 +251,7 @@ const OFFSHORE_SHALLOW_KEEP: f64 = 0.15;
 /// `examples/coastline_lod.rs`). Wider → a broader smooth foreshore but a more
 /// rock-steady waterline; on a flat coast the smoothed apron is ~`COAST_BAND_M /
 /// slope` wide, which is where the pinning is needed most.
-const COAST_BAND_M: f64 = 60.0;
+pub const COAST_BAND_M: f64 = 60.0;
 
 /// Rolling hills layer: mid wavelength, land-masked, LOD-aware octaves.
 const HILLS_WL_M: f64 = 6_000.0;
@@ -652,7 +652,10 @@ const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0)
 //     cell scale 2400 -> 700 m, depth set by EROSION_DEPTH_GAIN.
 // 24: the diffusion erosion band rounds the filter's C0 ridge folds at its own
 //     resolution (`EROSION_FOLD_ROUND`) — the "shark fin" blades.
-pub const GENERATOR_VERSION: u64 = 25;
+// 26: the diffusion backing takes its waterline, shelf, foreshore and berm from
+//     the authored signed sea field (`macro_signed_height_m`) instead of a
+//     46 km-blurred landmask blend — every coastal height on that body moves.
+pub const GENERATOR_VERSION: u64 = 26;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ProceduralSurface {
@@ -660,11 +663,63 @@ pub struct ProceduralSurface {
     seed: u32,
 }
 
+/// Canonical macro signals at one direction, read by
+/// [`crate::macro_conditioning`] to derive generator conditioning.
+///
+/// Ordering invariant (ADR-20260725T004758Z part 4): climate and geomorphic
+/// *macro* signals feed generation; nothing downstream of generation feeds
+/// back into these.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct MacroSignals {
+    /// Geometric height above the reference radius, metres. Sea level is 0 m.
+    pub height_m: f64,
+    /// Montane orogeny weight — the mountain-building amplitude at this point.
+    pub orogeny: f64,
+    /// Continentalness (the plate-tectonics seam); plate interiors sit high.
+    pub continentalness: f64,
+    /// Macro moisture in `[-1, 1]`.
+    pub moisture: f64,
+    /// `|sin(latitude)|`.
+    pub sin_lat: f64,
+}
+
 impl ProceduralSurface {
     pub fn new(radius_m: f32, seed: u32) -> Self {
         Self {
             radius_m: radius_m.max(1.0) as f64,
             seed,
+        }
+    }
+
+    /// Body radius in metres.
+    pub fn radius_m(&self) -> f64 {
+        self.radius_m
+    }
+
+    /// The canonical macro signals a coarse **conditioning chart** is derived
+    /// from ([`crate::macro_conditioning`]).
+    ///
+    /// This is the one seam through which the diffusion producer reads Thalos's
+    /// authored world: height stays the canonical height (one height
+    /// authority — the chart never invents its own continents), while orogeny,
+    /// continentalness and moisture are the province/climate signals the
+    /// generation conditioning is built out of. Exposed as a named struct
+    /// rather than making `height_and_orogeny`'s opaque tuple public.
+    pub fn macro_signals(&self, dir: DVec3, lod_m: f32) -> MacroSignals {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO {
+            return MacroSignals::default();
+        }
+        let (height_m, orogeny, continentalness) = self.height_and_orogeny(dir, lod_m);
+        let sin_lat = dir.y.abs();
+        let moisture =
+            self.macro_moisture(dir * self.radius_m, lod_m, continentalness, sin_lat);
+        MacroSignals {
+            height_m,
+            orogeny,
+            continentalness,
+            moisture,
+            sin_lat,
         }
     }
 
@@ -820,6 +875,27 @@ impl ProceduralSurface {
         // edges silently return 0 — invert explicitly instead.)
         let w = 1.0 - smoothstep(0.55, 1.0, t);
         c_base + (c_warped + isle - c_base) * w
+    }
+
+    /// The authored **signed sea field**: metres about sea level (0 m) from the
+    /// macro continent field alone — continents, shelf shoulder, continental
+    /// slope, abyssal plain, plus the foreshore drop and the beach berm. No
+    /// relief cascade, so it is fixed-octave and **LOD-invariant**: its zero
+    /// crossing is the shoreline at every sampling resolution, which is the
+    /// property ADR-20260720T185958Z-water-projects-one-signed-sea-field and
+    /// INC-0003 both rest on.
+    ///
+    /// Public so a body whose *relief* comes from a different producer — the
+    /// terrain-diffusion backing — can take its waterline from here instead of
+    /// growing a second, blurrier coast model. There is one coastline authority
+    /// per body regardless of which producer supplies the terrain on top of it.
+    pub fn macro_signed_height_m(&self, dir: DVec3) -> f64 {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO {
+            return 0.0;
+        }
+        let p = dir * self.radius_m;
+        hypsometric_height(self.continentalness(p) + self.runway_land_bias(dir))
     }
 
     /// The unrefined continentalness: plates + continent-scale warp + organic
@@ -1562,7 +1638,7 @@ fn hypsometric_height(c: f64) -> f64 {
 ///    level. The 0-crossing is *exclusively* the macro field's — LOD-aware
 ///    relief defining any waterline (mainland or islet) makes that waterline
 ///    move with camera distance (INC-0003).
-fn combine_macro_and_relief(macro_h: f64, relief: f64) -> f64 {
+pub fn combine_macro_and_relief(macro_h: f64, relief: f64) -> f64 {
     let coast_fade = smoothstep(0.0, COAST_BAND_M, macro_h.abs());
     let h = macro_h + relief * coast_fade;
     if macro_h >= 0.0 {

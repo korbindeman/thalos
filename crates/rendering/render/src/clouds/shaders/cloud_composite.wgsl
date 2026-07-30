@@ -170,8 +170,26 @@ fn sample_near_cloud(pixel: vec2<f32>) -> vec4<f32> {
     return (cs00 * w00 + cs10 * w10 + cs01 * w01 + cs11 * w11) / weight;
 }
 
+/// Fraction of the near marcher's result that survives occlusion by opaque
+/// geometry at `scene_t`.
+///
+/// The marcher integrates its whole in-shell chord without knowing where the
+/// ground is, so cloud BEHIND a mountain is in the result and has to be taken
+/// back out here. What the march hands over is the chord's total transmittance
+/// plus its extinction slab (`slab_near`..`slab_far`, matched to the real
+/// profile's first moment in `slab_far_distance`).
+///
+/// The partition is therefore taken in OPTICAL DEPTH, not in opacity: the depth
+/// in front of the scene is `tau * frac`, and the opacity that survives is
+/// `1 - exp(-tau * frac)`, renormalized against the full-chord opacity the
+/// caller is scaling. Ramping opacity linearly instead — as the predecessor did,
+/// against a CONSTANT 5.4 km denominator — is what drew solid cumulus as
+/// see-through smoke wherever terrain sat behind them, and left them solid only
+/// against open sky (INC-20260729T051500Z).
 fn near_visibility(
     cloud_near: f32,
+    slab_far: f32,
+    transmittance: f32,
     scene_t: f32,
     oc_len_sq: f32,
     b: f32,
@@ -202,16 +220,24 @@ fn near_visibility(
         band_far = max(-b + sqrt_top, 0.0);
     }
     let near = min(cloud_near, band_far);
-    // Partition denominator: how far past its first hit the marched cloud
-    // plausibly extends. The band chord itself is a wild over-estimate on
-    // grazing rays (hundreds of km for a cloud a few km deep), and dividing by
-    // it faded every distant cloud seen against terrain toward transparency —
-    // the "washed out" horizon band. Bound it by the coarsest cell period
-    // (thalos::atmosphere cell field, 5.4 km): a single marched cloud is at
-    // most about one cell deep, and a scene hit beyond that is behind the
-    // cloud, not inside it.
-    let extent = min(band_far - near, 5400.0);
-    return clamp((scene_t - near) / max(extent, 1.0), 0.0, 1.0);
+    // The marched slab, clipped to the shell chord. No constant lives here any
+    // more: the extent is the one the march measured on THIS ray, so a scene hit
+    // beyond the cloud's own back face partitions to exactly 1.
+    let extent = max(min(slab_far, band_far) - near, 0.0);
+    let frac = select(
+        clamp((scene_t - near) / extent, 0.0, 1.0),
+        select(0.0, 1.0, scene_t >= near),
+        extent <= 1.0,
+    );
+    // Renormalized against the full-chord opacity, so `frac == 1` returns
+    // exactly 1 for any transmittance and the caller's scaling is a no-op when
+    // nothing occludes the cloud.
+    let tau = -log(clamp(transmittance, 1.0e-4, 1.0));
+    let opacity_full = 1.0 - exp(-tau);
+    if opacity_full <= 1.0e-5 {
+        return frac;
+    }
+    return clamp((1.0 - exp(-tau * frac)) / opacity_full, 0.0, 1.0);
 }
 
 // Share of this ray owned by the far/orbital projection. The near marcher now
@@ -786,8 +812,15 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         vec2<i32>(0),
         vec2<i32>(dims) - vec2<i32>(1),
     );
-    let cloud_near = textureLoad(cloud_distance_texture, ref_coord, 0).r;
-    let near_vis = near_visibility(cloud_near, scene_t, oc_len_sq, b);
+    let cloud_span = textureLoad(cloud_distance_texture, ref_coord, 0).rg;
+    let near_vis = near_visibility(
+        cloud_span.x,
+        cloud_span.y,
+        near_sample.a,
+        scene_t,
+        oc_len_sq,
+        b,
+    );
     let tier_diagnostic = cloud_params.cloud_march.y;
     let near_enabled = select(1.0, 0.0, tier_diagnostic > 0.5);
     let far_enabled = select(1.0, 0.0, tier_diagnostic < -0.5);

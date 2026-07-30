@@ -28,10 +28,22 @@ UI-framework-agnostic `core` submodule (`ShipEditorCorePlugin`) — the
 `EditorState` command/state hub the front-end reads/writes, attach-node +
 surface-mount placement with the KSP linked-symmetry stamping, live mesh
 rebuilds and the build-frame transform solve, selection/hover highlight, the
-tank-resize handle, the placement-preview ghost, interstage shrouds, and
-blueprint save/load against `ships/*.ron`. It reads the `thalos_shipyard`
-construction model (parts, blueprints, geometry, sizing/stats/staging) — which
-carries no editor or UI. The front-end:
+tank-resize handle, the placement-preview ghost, and blueprint save/load against
+`ships/*.ron`. It reads the `thalos_shipyard` construction model (parts,
+blueprints, geometry, sizing/stats/staging) — which carries no editor or UI.
+
+**Interstage shrouds are not editor-owned.** A `ShroudProvider` (decoupler)
+whose `top` mates with a `Shroudable`'s `bottom` grows a shroud sized to cover
+that part's silhouette — and that is true of the flight craft as much as the
+build, so the derivation lives in `thalos_runtime::shrouds` as one reconcile
+pass over both worlds. The editor adds only interaction on top: the shroud is
+pickable (clicking it selects the decoupler) and goes partly transparent on
+hover so the engine inside reads through. Flight shrouds are opaque hull
+geometry. Shrouds are never persisted in a blueprint — both sides derive them.
+Through staging the shroud rides down with its decoupler; see
+`docs/simulation/vessels.md` §3.
+
+The front-end:
 
 - **In-game editor** — `thalos_runtime::shipyard_editor`, native Bevy UI in
   the game's `HudTheme` style. A **separate scene** (not an `AppState`): a

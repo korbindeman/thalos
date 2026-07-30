@@ -1214,7 +1214,12 @@ fn start_server_once_inner(
                 record_resource_fault(kind, &log);
                 return Err(resource_fault_message(kind, &log));
             }
-            return Err(format!("capture launcher exited\n{log}"));
+            let exit = classify_launcher_exit(&log);
+            runlog::field("launcher_exit_kind", exit.kind);
+            if let Some(detail) = &exit.detail {
+                runlog::field("launcher_exit_detail", detail.clone());
+            }
+            return Err(launcher_exit_message(&exit, &log));
         }
         if let Some(state) = read_json::<CaptureServerState>(&diagnostic_path(STATE_FILE)) {
             if let Some(message) = capture_rss_failure(state.pid, overrides) {
@@ -1298,6 +1303,32 @@ fn stop_server(quiet: bool) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline && process_alive(state.pid) {
             thread::sleep(Duration::from_millis(100));
+        }
+        // A host mid-stream polls the request file from its own busy main
+        // loop and can miss the graceful window entirely. Returning anyway
+        // used to delete the state files and leave an *untracked, live*
+        // renderer holding the GPU — the replacement then booted into an
+        // oversubscribed card, WDDM evicted video memory into system RAM,
+        // and the ballooned working set tripped the RSS watchdog (the
+        // 2026-07-29 massif-aerial "memory runaway" kills). Escalate to a
+        // forced kill and do not proceed until the process is confirmed
+        // gone: one renderer at a time is the invariant, and a failed stop
+        // must fail the shot rather than double-render.
+        if process_alive(state.pid) {
+            runlog::count("host_stop_forced");
+            terminate_process_tree(state.pid);
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline && process_alive(state.pid) {
+                thread::sleep(Duration::from_millis(100));
+            }
+            if process_alive(state.pid) {
+                return Err(format!(
+                    "capture host pid {} survived shutdown request and forced kill; \
+                     refusing to start a second renderer beside it — kill it manually, \
+                     then retry",
+                    state.pid
+                ));
+            }
         }
     }
     if let Some(launcher) = read_json::<LauncherState>(&diagnostic_path(LAUNCHER_FILE))
@@ -1405,6 +1436,7 @@ fn canonical_preset(raw: &str) -> Result<String, String> {
         "earth-ref" | "atmosphere" | "atmo" => "earth-reference",
         "open-ocean" | "sea" | "water" => "ocean",
         "sea-slopes" | "slope-field" => "ocean-slopes",
+        "coast" | "shore" | "shoreline" | "beach" => "coastline",
         "mira" => "mira-orbit",
         "regolith" => "mira-surface",
         "regolith-eva" => "mira-eva",
@@ -1419,6 +1451,7 @@ fn canonical_preset(raw: &str) -> Result<String, String> {
         "cloud-globe" | "cloud-disc" | "full-planet" | "planet-disc" => "cloud-planet",
         "clouds-sunset" => "cloud-sunset",
         "engine" | "exhaust" | "rocket" => "plume",
+        "re-entry" | "entry" | "shock" | "plasma" => "reentry",
         "massif" | "mountains" => "massif-aerial",
         "ridge" => "massif-ridge",
         "valley" => "massif-valley",
@@ -1758,6 +1791,138 @@ fn resource_fault_kind(log: &str) -> Option<&'static str> {
     None
 }
 
+/// Why the launcher process ended before the host was ready.
+///
+/// `capture launcher exited` on its own is a bucket, not a diagnosis. The log
+/// that explains it is written to the console the agent reading `tools.jsonl`
+/// no longer has, so a triage window could see that 13 of 58 shots died and
+/// nothing about *why* (BL-20260729T070928Z). Classify it the way
+/// [`resource_fault_kind`] already classifies GPU faults: the kind becomes the
+/// failure reason's first line — which is what [`thalos_diagnostics::ToolRun`]
+/// records and what `just diag` groups by — and the payload rides alongside as
+/// a typed field.
+///
+/// The kinds are the ones the real log actually distinguishes: `cargo` reports
+/// a build failure as `could not compile <crate>` with an `error[E….]` code, a
+/// dying host as `process didn't exit successfully … (exit code: N)`, and a
+/// Rust panic prints `panicked at`. A launcher that logged nothing at all is
+/// NTR-X9's signature and is worth its own kind rather than being pooled with
+/// "we don't know".
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct LauncherExit {
+    /// Stable grouping key. Kept short and free of run-specific text so a
+    /// triage window counts causes, not variants of one cause.
+    pub(crate) kind: &'static str,
+    /// The line of the log that identifies this failure, if there is one.
+    pub(crate) detail: Option<String>,
+}
+
+pub(crate) fn classify_launcher_exit(log: &str) -> LauncherExit {
+    // The process-wide renderer lease refuses before Bevy/wgpu starts. This is
+    // an intentional concurrency boundary, not a host crash and never a reason
+    // to retry or quarantine the GPU.
+    if let Some(line) = first_line_containing(log, &["GPU renderer lease unavailable"]) {
+        return LauncherExit {
+            kind: "renderer busy",
+            detail: Some(line),
+        };
+    }
+    // Stale-artifact link corruption first: it is not a code error, it has its
+    // own automatic recovery, and its symptom (`undefined symbol: anon.*`)
+    // otherwise reads as an ordinary build failure (INC-20260724T182642Z).
+    if toolchain_corruption(log) {
+        return LauncherExit {
+            kind: "toolchain corruption",
+            detail: first_line_containing(log, &["undefined symbol", "invalid metadata"]),
+        };
+    }
+    if let Some(line) = first_line_containing(log, &["could not compile", "error: linking with"]) {
+        // The `error[E….]` code above the summary is the actionable half; the
+        // summary line only names the crate.
+        let code = first_line_containing(log, &["error["]);
+        return LauncherExit {
+            kind: "workspace build failure",
+            detail: Some(match code {
+                Some(code) => format!("{line} · {code}"),
+                None => line,
+            }),
+        };
+    }
+    if let Some(line) = first_line_containing(log, &["panicked at"]) {
+        // The payload is on the line *after* `panicked at <location>`, which is
+        // the half that says what actually went wrong.
+        let payload = log
+            .lines()
+            .skip_while(|candidate| !candidate.contains("panicked at"))
+            .nth(1)
+            .map(str::trim)
+            .filter(|payload| !payload.is_empty());
+        return LauncherExit {
+            kind: "capture host panic",
+            detail: Some(match payload {
+                Some(payload) => format!("{} · {payload}", line.trim()),
+                None => line,
+            }),
+        };
+    }
+    if let Some(line) = first_line_containing(log, &["process didn't exit successfully"]) {
+        return LauncherExit {
+            kind: "capture host aborted",
+            detail: Some(line),
+        };
+    }
+    // Nothing recognisable. Separate "said nothing" from "said something we do
+    // not understand": the first is a host that died before it could log (the
+    // `mira-disc` signature), the second is a classifier gap to close here.
+    let logged = log.trim();
+    if logged.is_empty() {
+        LauncherExit {
+            kind: "silent exit",
+            detail: None,
+        }
+    } else {
+        LauncherExit {
+            kind: "unclassified launcher exit",
+            detail: log
+                .lines()
+                .rev()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_owned),
+        }
+    }
+}
+
+/// The first line containing any marker, trimmed and length-capped so one
+/// pathological line cannot dominate a lane record.
+fn first_line_containing(log: &str, markers: &[&str]) -> Option<String> {
+    let lower = |text: &str| text.to_ascii_lowercase();
+    log.lines()
+        .find(|line| {
+            let line = lower(line);
+            markers.iter().any(|marker| line.contains(&lower(marker)))
+        })
+        .map(|line| {
+            let line = line.trim();
+            match line.char_indices().nth(300) {
+                Some((cut, _)) => format!("{}…", &line[..cut]),
+                None => line.to_owned(),
+            }
+        })
+}
+
+/// Failure text for a launcher exit: the kind on the first line (the stable
+/// reason recorded in the lane), the identifying line next, then the tail for
+/// the human at the console.
+fn launcher_exit_message(exit: &LauncherExit, log: &str) -> String {
+    let mut message = format!("capture launcher exited: {}", exit.kind);
+    if let Some(detail) = &exit.detail {
+        message.push_str(&format!("\n{detail}"));
+    }
+    message.push_str(&format!("\n{log}"));
+    message
+}
+
 fn resource_fault_message(kind: &str, log: &str) -> String {
     let tail = log
         .lines()
@@ -1938,9 +2103,23 @@ fn capture_source_snapshot_inner() -> Result<CaptureSourceSnapshot, String> {
         root.join("tools/capture_host"),
     ] {
         build_files.extend(recursive_files(&source_root).into_iter().filter(|path| {
-            path.extension()
-                .and_then(|extension| extension.to_str())
-                .is_some_and(|extension| matches!(extension, "rs" | "toml"))
+            let linked = !path.components().any(|component| {
+                matches!(
+                    component.as_os_str().to_str(),
+                    Some("examples" | "tests" | "benches")
+                )
+            });
+            // examples/tests/benches never link into the host binary, so an
+            // edit there cannot change what a capture renders — but it used to
+            // restart the host anyway (~2 min per shot, multiplied across
+            // every agent; `restart_stale_source` dominated the 73 % boot
+            // rate). Inline `#[cfg(test)]` modules still fingerprint, which is
+            // conservative in the right direction.
+            linked
+                && path
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| matches!(extension, "rs" | "toml"))
         }));
     }
     build_files.sort();
@@ -2662,6 +2841,102 @@ mod tests {
             Some("GPU device loss")
         );
         assert_eq!(resource_fault_kind("ordinary compile error"), None);
+    }
+
+    /// Every case below is a verbatim excerpt of
+    /// `artifacts/diagnostics/visual_capture_server.log`, which is where the
+    /// 13 unattributable failures of the 2026-07-29 triage window came from.
+    #[test]
+    fn launcher_exits_are_classified_by_cause() {
+        let busy = classify_launcher_exit(
+            "GPU renderer lease unavailable: cannot start capture host: pid 42 already owns the GPU renderer as interactive game\n\
+             error: process didn't exit successfully: `target\\debug\\thalos_capture_host.exe` (exit code: 4)",
+        );
+        assert_eq!(busy.kind, "renderer busy");
+        assert!(
+            busy.detail
+                .as_deref()
+                .is_some_and(|detail| detail.contains("pid 42"))
+        );
+
+        let build = classify_launcher_exit(
+            "   Compiling thalos_body_render v0.1.0\n\
+             error[E0609]: no field `sun_radiance` on type `BodySkyMaterial`\n\
+             error: could not compile `thalos_body_render` (lib) due to 1 previous error\n",
+        );
+        assert_eq!(build.kind, "workspace build failure");
+        let detail = build.detail.expect("build failure names the crate");
+        assert!(detail.contains("thalos_body_render"), "{detail}");
+        assert!(
+            detail.contains("E0609"),
+            "the error code is the actionable half: {detail}"
+        );
+
+        let panic = classify_launcher_exit(
+            "thread 'Compute Task Pool (4)' (29372) panicked at wgpu-29.0.3\\src\\backend\\wgpu_core.rs:2253:18:\n\
+             Error in Buffer::get_mapped_range: Validation Error\n\
+             error: process didn't exit successfully: `target\\debug\\thalos_capture_host.exe` (exit code: 3)\n",
+        );
+        assert_eq!(
+            panic.kind, "capture host panic",
+            "a panic outranks the cargo exit-code line that always follows it"
+        );
+        assert!(
+            panic
+                .detail
+                .expect("panic detail")
+                .contains("get_mapped_range"),
+            "the payload line, not just the panic location, is what identifies the panic"
+        );
+
+        let aborted = classify_launcher_exit(
+            "2026-07-29T05:26:11Z INFO capture host booting\n\
+             error: process didn't exit successfully: `target\\debug\\thalos_capture_host.exe` (exit code: 101)\n",
+        );
+        assert_eq!(aborted.kind, "capture host aborted");
+
+        // NTR-X9: the host exits with nothing flushed at all. That is a
+        // distinct, filable fact — not the same as "we could not parse it".
+        assert_eq!(classify_launcher_exit("").kind, "silent exit");
+        assert_eq!(classify_launcher_exit("   \n\n").kind, "silent exit");
+
+        let unknown = classify_launcher_exit("boot: installing tiles\nsomething unfamiliar\n");
+        assert_eq!(
+            unknown.kind, "unclassified launcher exit",
+            "a log we cannot read is a gap in this classifier, and must say so"
+        );
+        assert_eq!(unknown.detail.as_deref(), Some("something unfamiliar"));
+
+        // Stale-artifact corruption reads as a build failure but is neither a
+        // code error nor terminal — it has its own recovery.
+        assert_eq!(
+            classify_launcher_exit(
+                "error: could not compile `thalos_runtime` (lib) due to 1 previous error\n\
+                 = note: rust-lld: error: undefined symbol: anon.9f2c.7.llvm.1234\n",
+            )
+            .kind,
+            "toolchain corruption"
+        );
+    }
+
+    #[test]
+    fn launcher_exit_message_leads_with_the_kind() {
+        // `ToolRun::fail` records the first line, so the first line must be the
+        // classification and must not carry run-specific text that would split
+        // one cause into many rows in a triage window.
+        let log = "error[E0425]: cannot find value `x`\n\
+                   error: could not compile `thalos_terrain` (lib) due to 1 previous error\n";
+        let message = launcher_exit_message(&classify_launcher_exit(log), log);
+        let first = message.lines().next().expect("a first line");
+        assert_eq!(first, "capture launcher exited: workspace build failure");
+        assert!(
+            message.contains("thalos_terrain"),
+            "detail survives below the reason"
+        );
+        assert!(
+            message.contains("E0425"),
+            "the full log still reaches the console"
+        );
     }
 
     #[test]

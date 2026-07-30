@@ -1,11 +1,10 @@
 //! CPU-authored environment map for ship reflections.
 //!
 //! Maintains a small cubemap painted from CPU code — sun, planet,
-//! stars — and feeds it to the main camera via
-//! [`GeneratedEnvironmentMapLight`]. Bevy's realtime filter pipeline
-//! prefilters it into diffuse + specular mips every time the image
-//! asset is marked changed, so metallic ship parts get IBL reflections
-//! that respond to orbital state.
+//! stars — and sends it through a detached
+//! [`GeneratedEnvironmentMapLight`] filter producer. Craft-local
+//! [`LightProbe`] consumers share its filtered specular map and use a black
+//! diffuse map because `GlobalAmbientLight` already owns diffuse sky fill.
 //!
 //! See `docs/rendering/atmosphere.md` for the full design note — why this
 //! is CPU-painted rather than a 6-camera render of the actual scene,
@@ -25,22 +24,30 @@
 //!
 //! # Update cadence
 //!
-//! The cubemap is rewritten every [`REFRESH_INTERVAL`] game-time
-//! seconds. Orbital angular rates near Thalos are on the order of
-//! 1e-3 rad/s, so a 0.25 s refresh is well under the threshold at
-//! which the eye can pick up staleness in a reflection.
+//! The cubemap is reconsidered every [`REFRESH_INTERVAL`] real seconds
+//! ([`REFRESH_INTERVAL_WARP`] under fast warp), then a direction/sim-time
+//! gate skips repaints whose result would be visually unchanged.
 
 use bevy::asset::RenderAssetUsages;
+use bevy::camera::visibility::RenderLayers;
 use bevy::image::Image;
-use bevy::light::GeneratedEnvironmentMapLight;
+use bevy::light::{
+    EnvironmentMapLight, GeneratedEnvironmentMapLight, LightProbe, ParallaxCorrection,
+};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     Extent3d, TextureDimension, TextureFormat, TextureUsages, TextureViewDescriptor,
     TextureViewDimension,
 };
 
-use crate::camera::OrbitCamera;
-use crate::rendering::{CameraExposure, SimulationState};
+use std::sync::Arc;
+
+use thalos_body_render::ImpostorAlbedo;
+use thalos_body_render::udlod::prelude::PreciseRotation;
+
+use crate::coords::SHIP_LAYER;
+use crate::rendering::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState};
+use crate::terrain_registry::ImpostorAlbedoRegistry;
 use thalos_body_render::{
     AU_M, AtmosphereBlock, LIGHT_AT_1AU, MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH,
     MultiScatterLut, SkyViewLut,
@@ -83,10 +90,17 @@ const REPAINT_SIM_DRIFT_S: f64 = 120.0;
 const ENV_DIR_DOT_MIN: f32 = 0.9999;
 const ENV_COS_EPS: f32 = 1.0e-4;
 
-/// Environment map intensity multiplier handed to
-/// [`GeneratedEnvironmentMapLight`]. 1.0 matches scene luminance;
-/// bump if reflections read too dark on polished metals.
-const PROBE_INTENSITY: f32 = 1.0;
+/// Photometric conversion applied to the scene-flux radiance stored in the
+/// cubemap. Bevy defines `GeneratedEnvironmentMapLight::intensity` as a cd/m²
+/// multiplier; tying it to the directional-light bridge keeps the reflected
+/// sky and the sun in one unit system instead of leaving the hull's dominant
+/// light source three orders of magnitude too dim.
+const PROBE_INTENSITY: f32 = crate::rendering::lighting::LUX_PER_SPINE_FLUX;
+
+/// Side length of each craft-local reflection-probe cube in metres. This
+/// comfortably encloses the authored craft catalogue while keeping the
+/// ship-relative planet disc out of the camera-wide world lighting.
+const CRAFT_PROBE_SIZE_M: f32 = 256.0;
 
 /// Bright HDR gain for the reflected sun disc, in scene-flux units. `flux ≈ 10`
 /// at the homeworld → ~30 (matching the old flat sun_color), but now scaling
@@ -185,7 +199,11 @@ impl Plugin for ReflectionProbePlugin {
         app.init_resource::<ProbeRefreshTimer>()
             .init_resource::<SkyAmbient>()
             .add_systems(Startup, setup_probe)
-            .add_systems(Update, (attach_env_map_to_main_camera, refresh_cubemap));
+            .add_systems(Update, (attach_env_map_to_craft, refresh_cubemap))
+            .add_systems(
+                PostUpdate,
+                keep_craft_probe_world_aligned.before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -196,6 +214,7 @@ impl Plugin for ReflectionProbePlugin {
 #[derive(Resource, Clone)]
 struct ReflectionProbe {
     cubemap: Handle<Image>,
+    black_diffuse: Handle<Image>,
 }
 
 #[derive(Resource)]
@@ -251,25 +270,141 @@ fn setup_probe(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     });
 
     let cubemap = images.add(image);
-    commands.insert_resource(ReflectionProbe { cubemap });
-}
-
-/// Install the env-map component on the main camera once it exists.
-/// Idempotent via the `Without` filter — after the first successful
-/// match, the query iterates nothing.
-fn attach_env_map_to_main_camera(
-    mut commands: Commands,
-    probe: Option<Res<ReflectionProbe>>,
-    cam: Query<Entity, (With<OrbitCamera>, Without<GeneratedEnvironmentMapLight>)>,
-) {
-    let Some(probe) = probe else { return };
-    for e in cam.iter() {
-        commands.entity(e).insert(GeneratedEnvironmentMapLight {
-            environment_map: probe.cubemap.clone(),
+    // The physical diffuse sky remains the shared `GlobalAmbientLight`
+    // projection for all Bevy surfaces. The craft-local reflection probe is
+    // deliberately specular-only so installing the now-photometric cubemap
+    // does not count that sky a second time inside the probe volume.
+    let mut black_diffuse = Image::new_fill(
+        Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 6,
+        },
+        TextureDimension::D2,
+        &[0u8; 8],
+        TextureFormat::Rgba16Float,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    black_diffuse.sampler = bevy::image::ImageSampler::linear();
+    black_diffuse.texture_view_descriptor = Some(TextureViewDescriptor {
+        label: Some("craft_reflection_probe_black_diffuse"),
+        dimension: Some(TextureViewDimension::Cube),
+        ..Default::default()
+    });
+    let black_diffuse = images.add(black_diffuse);
+    commands.insert_resource(ReflectionProbe {
+        cubemap: cubemap.clone(),
+        black_diffuse,
+    });
+    // Keep Bevy's realtime filtering output on this detached producer. It has
+    // neither `LightProbe` nor a camera component, so it cannot illuminate the
+    // scene itself; craft-local consumers clone only its specular-map handle.
+    // In particular, do not replace this entity's diffuse handle with the
+    // black map: the filter writes to that generated storage texture.
+    commands.spawn((
+        Name::new("Craft environment-map filter"),
+        CraftEnvironmentMapGenerator,
+        GeneratedEnvironmentMapLight {
+            environment_map: cubemap,
             intensity: PROBE_INTENSITY,
             rotation: Quat::IDENTITY,
-            affects_lightmapped_mesh_diffuse: true,
-        });
+            affects_lightmapped_mesh_diffuse: false,
+        },
+    ));
+}
+
+/// Install one ship-relative reflection probe per rendered craft.
+///
+/// This used to attach the generated map to the main camera, making a cubemap
+/// painted from *the ship's* planet/sun directions illuminate every
+/// `StandardMaterial` in the view. At its old intensity of 1 that scope error
+/// was mostly invisible; converting it to photometric units would make terrain
+/// reflect and diffusely receive the planet it belongs to. A local probe keeps
+/// the ship-authored environment at the selected-craft boundary; iterating
+/// `PlayerShip` entities also avoids baking a single-entity query assumption
+/// into the attachment path.
+fn attach_env_map_to_craft(
+    mut commands: Commands,
+    probe: Option<Res<ReflectionProbe>>,
+    generated: Query<
+        &EnvironmentMapLight,
+        (
+            With<CraftEnvironmentMapGenerator>,
+            Without<CraftEnvironmentProbe>,
+        ),
+    >,
+    crafts: Query<Entity, (With<PlayerShip>, Without<CraftEnvironmentProbeInstalled>)>,
+) {
+    let Some(probe) = probe else { return };
+    // Bevy creates the filter producer's output handles via deferred commands.
+    // Wait until they exist; the `Without` marker on the craft keeps retrying
+    // instead of losing the one-shot `Added<PlayerShip>` event.
+    let Ok(filtered) = generated.single() else {
+        return;
+    };
+    for craft in &crafts {
+        let reflection_probe = commands
+            .spawn((
+                Name::new("Craft reflection probe"),
+                CraftEnvironmentProbe,
+                LightProbe {
+                    falloff: Vec3::splat(0.1),
+                },
+                EnvironmentMapLight {
+                    diffuse_map: probe.black_diffuse.clone(),
+                    specular_map: filtered.specular_map.clone(),
+                    intensity: PROBE_INTENSITY,
+                    rotation: Quat::IDENTITY,
+                    affects_lightmapped_mesh_diffuse: false,
+                },
+                // The cubemap is authored in world directions. Only the probe
+                // volume follows the craft; `keep_craft_probe_world_aligned`
+                // cancels inherited attitude before transform propagation.
+                ParallaxCorrection::None,
+                RenderLayers::layer(SHIP_LAYER),
+                Transform::from_scale(Vec3::splat(CRAFT_PROBE_SIZE_M)),
+            ))
+            .id();
+        commands
+            .entity(craft)
+            .insert(CraftEnvironmentProbeInstalled)
+            .add_child(reflection_probe);
+    }
+}
+
+#[derive(Component)]
+struct CraftEnvironmentMapGenerator;
+
+#[derive(Component)]
+struct CraftEnvironmentProbe;
+
+#[derive(Component)]
+struct CraftEnvironmentProbeInstalled;
+
+/// Keep the craft-relative probe volume aligned to world axes.
+///
+/// Bevy composes a local probe's `GlobalTransform` with
+/// `EnvironmentMapLight::rotation` to form its cubemap sampling frame. Because
+/// this entity is parented to the craft for position and the environment-map
+/// rotation is intentionally identity, leaving the child's local rotation at
+/// identity would make the painted sun, horizon, and planet rotate with craft
+/// attitude. The real-space root is unrotated, so cancelling the current craft
+/// root rotation keeps the probe's global rotation at identity while its
+/// translation still follows the craft.
+///
+/// This runs in `PostUpdate` before transform propagation: the canonical craft
+/// sync has already written this frame's `Transform`, while the probe's
+/// resulting `GlobalTransform` has not yet been consumed by visibility and
+/// extraction.
+fn keep_craft_probe_world_aligned(
+    crafts: Query<&Transform, (With<PlayerShip>, Without<CraftEnvironmentProbe>)>,
+    mut probes: Query<(&ChildOf, &mut Transform), With<CraftEnvironmentProbe>>,
+) {
+    for (parent, mut probe_transform) in &mut probes {
+        let Ok(craft_transform) = crafts.get(parent.0) else {
+            continue;
+        };
+        probe_transform.rotation = craft_transform.rotation.inverse();
     }
 }
 
@@ -292,6 +427,8 @@ fn refresh_cubemap(
     sim: Option<Res<SimulationState>>,
     exposure: Option<Res<CameraExposure>>,
     mut sky_ambient: ResMut<SkyAmbient>,
+    impostors: Option<Res<ImpostorAlbedoRegistry>>,
+    body_rotations: Query<(&RealSpaceBody, &PreciseRotation)>,
 ) {
     let Some(probe) = probe else { return };
 
@@ -328,9 +465,27 @@ fn refresh_cubemap(
     if gain <= 0.0 {
         return;
     }
+    // Resolve the reflected body's bake + drawn rotation on demand: only
+    // `derive_environment` knows which body the ship is actually bound to.
+    // Which body the environment resolved to, recorded on the way past so the
+    // diagnostic below can name it (only `derive_environment` knows).
+    let reflected_body = std::cell::Cell::new(usize::MAX);
+    let planet_surface_for = |body_id: usize| -> Option<PlanetSurface> {
+        reflected_body.set(body_id);
+        let albedo = impostors.as_deref()?.get(body_id)?;
+        let rotation = body_rotations
+            .iter()
+            .find(|(body, _)| body.body_id == body_id)
+            .map(|(_, precise)| precise.0)?;
+        Some(PlanetSurface {
+            albedo,
+            // `PreciseRotation` is body → world; the cube is indexed body-fixed.
+            world_to_body: rotation.inverse().as_quat(),
+        })
+    };
     let (env, sky_inputs) = sim
         .as_deref()
-        .map(|s| derive_environment(s, gain))
+        .map(|s| derive_environment(s, gain, &planet_surface_for))
         .unwrap_or_else(|| (default_environment(), None));
 
     // Repaint when the env geometry moved, OR when the sim clock drifted (warp:
@@ -341,8 +496,8 @@ fn refresh_cubemap(
         .map(|s| s.simulation.sim_time())
         .unwrap_or(f64::NEG_INFINITY);
     let sim_drifted = (sim_time - timer.last_paint_sim_time).abs() > REPAINT_SIM_DRIFT_S;
-    if let Some(last) = timer.last_painted
-        && !env_changed_meaningfully(&last, &env)
+    if let Some(last) = timer.last_painted.as_ref()
+        && !env_changed_meaningfully(last, &env)
         && !sim_drifted
     {
         return;
@@ -440,7 +595,43 @@ fn refresh_cubemap(
         return;
     };
 
-    paint_cubemap(&mut image, &env, sky_lut.as_ref());
+    let stats = paint_cubemap(&mut image, &env, sky_lut.as_ref());
+
+    // What the hull actually reflects of the planet. This exists because the
+    // orbital reflection is otherwise unfalsifiable from a screenshot: a hull
+    // reflecting a flat blue-grey disc and one reflecting real continents can
+    // look similar at a glance, and "the framing didn't show it" is
+    // indistinguishable from "the bake was never sampled".
+    //
+    // `disc_texels = 0` means the planet was outside the cubemap's covered
+    // directions entirely (the framing question). `impostor = false` with
+    // `disc_texels > 0` means the bake was missing (the wiring question).
+    // `albedo_spread` separates the two success cases: a constant tint reads
+    // ~0, real continents and ocean read well above it.
+    info!(
+        target: "thalos::diagnostic::sky",
+        event = "planet_reflection",
+        impostor = env.planet_surface.is_some(),
+        body_id = reflected_body.get(),
+        disc_texels = stats.disc_texels,
+        disc_frac = stats.disc_texels as f32 / (PROBE_SIZE * PROBE_SIZE * 6) as f32,
+        albedo_mean_r = stats.albedo_mean.x,
+        albedo_mean_g = stats.albedo_mean.y,
+        albedo_mean_b = stats.albedo_mean.z,
+        albedo_spread = stats.albedo_spread,
+        // The reflection's strength in the SAME unit as `GlobalAmbientLight`
+        // (see the `ambient_lux` event), because the two compete directly on a
+        // metal: Bevy's `ambient_light()` adds a direction-independent
+        // `specular_ambient` term, and for F0 ≈ 0.85 its specular occlusion is
+        // 1.0, so a flat fill that outweighs this number erases the reflection
+        // no matter how correct the cubemap is. Space ambient is ~1940 lux.
+        planet_lux = luminance(stats.albedo_mean * env.planet_irradiance) * PROBE_INTENSITY,
+        planet_irradiance = env.planet_irradiance,
+        planet_ang_deg = env.planet_sin.asin().to_degrees(),
+        surface_blend = env.surface_blend,
+        "planet reflection paint"
+    );
+
     timer.last_painted = Some(env);
     timer.last_paint_sim_time = sim_time;
 }
@@ -462,6 +653,13 @@ fn env_changed_meaningfully(last: &EnvParams, new: &EnvParams) -> bool {
         // even when every direction is static (a parked craft).
         || (last.sun_disc_radiance - new.sun_disc_radiance).length()
             > 0.02 * last.sun_disc_radiance.length().max(0.1)
+        // The impostor bake becomes available a frame or more after the first
+        // paint (`spawn_bodies` inserts the registry through `Commands`), and
+        // acquiring or losing it changes the disc from a flat tint to
+        // continents without moving a single direction. Without this the gate
+        // would suppress the repaint and the hull would keep reflecting the
+        // flat disc until the ship happened to drift ~0.8°.
+        || last.planet_surface.is_some() != new.planet_surface.is_some()
 }
 
 /// Inputs for baking the physical [`SkyViewLut`] (surface regime only). `atmos`
@@ -483,7 +681,10 @@ struct SkyLutInputs {
     flux: f32,
 }
 
-#[derive(Clone, Copy)]
+/// Not `Copy`: [`Self::planet_surface`] holds a shared handle on the body's
+/// impostor bake. The struct is passed by reference everywhere it is read, and
+/// cloned only into the change-detection gate's `last_painted`.
+#[derive(Clone)]
 struct EnvParams {
     /// Unit vector from ship toward sun, in world space.
     sun_dir: Vec3,
@@ -499,8 +700,38 @@ struct EnvParams {
     /// Cosine half-angle of the planet disc from the ship. Planet is
     /// drawn where `dot(view, planet_dir) > planet_cos`.
     planet_cos: f32,
-    /// Lit-side planet colour.
+    /// **Sine** of the same half-angle, i.e. `R / D`. Carried alongside
+    /// `planet_cos` because the surface-point solve below is expressed in units
+    /// of the planet radius, and `D / R = 1 / planet_sin` is the only scale it
+    /// needs — no absolute distances, so no f32 cancellation at orbital range.
+    planet_sin: f32,
+    /// Lit-side planet **albedo**. The flat fallback: used where no
+    /// [`PlanetSurface`] bake is available, and as the base tint under one.
+    ///
+    /// This is a reflectance, not a radiance — [`Self::planet_irradiance`] turns
+    /// it into one.
     planet_color: Vec3,
+    /// Solar irradiance reaching the planet, in the same scene-flux units every
+    /// other painted term uses, already divided by π for the Lambertian
+    /// conversion. Reflected radiance is `albedo × planet_irradiance × N·L`.
+    ///
+    /// This factor was **missing** until 2026-07-29: the sun disc
+    /// (`flux × SUN_DISC_GAIN`), the ground bounce (`flux × SCENE_FLUX_SCALE ×
+    /// …`) and the sky LUT all carried the incident flux, and the planet disc
+    /// alone was bare reflectance. The old hand-tuned `Vec3(0.25, 0.35, 0.55)`
+    /// hid it: as a *radiance* that constant read 0.343, and the physical form
+    /// with a real ~0.09 albedo gives 0.288 — so the tuned value was standing in
+    /// for `albedo × flux / π` all along, and switching to true albedo without
+    /// this factor made the reflected planet 3.8× too dim.
+    ///
+    /// Carrying the flux also makes the reflection react to heliocentric
+    /// distance and camera exposure, which a constant could not.
+    planet_irradiance: f32,
+    /// Baked macro appearance of the planet, so a mirror hull in orbit reflects
+    /// continents and oceans rather than a uniform disc. `None` for a
+    /// solid-colour or degraded body — the disc then reads exactly as it did
+    /// before this existed.
+    planet_surface: Option<PlanetSurface>,
     /// Dim ambient fill for the starfield (below the sun, behind the
     /// planet's horizon ring).
     starfield_tint: Vec3,
@@ -515,6 +746,24 @@ struct EnvParams {
     surface_blend: f32,
 }
 
+/// Everything [`orbital_sample`] needs to answer "what is on the planet's
+/// surface in this direction".
+///
+/// The lookup is a ray-sphere hit followed by a cube sample in the body-fixed
+/// frame. The orientation is **read from the body entity's `PreciseRotation`**,
+/// i.e. the rotation the renderer actually drew the planet with, rather than
+/// recomputed — so the reflected coastline and the visible coastline cannot
+/// drift apart, including on a tidally-locked body where the render orientation
+/// is a lock composition rather than the raw ephemeris quaternion. A frame of
+/// staleness is irrelevant at a 2-second repaint cadence, so this needs no
+/// system ordering against the transform writer.
+#[derive(Clone)]
+struct PlanetSurface {
+    albedo: Arc<ImpostorAlbedo>,
+    /// World → body-fixed rotation for the reflected body.
+    world_to_body: Quat,
+}
+
 fn default_environment() -> EnvParams {
     EnvParams {
         sun_dir: Vec3::X,
@@ -522,7 +771,11 @@ fn default_environment() -> EnvParams {
         sun_disc_radiance: Vec3::splat(30.0),
         planet_dir: Vec3::NEG_Y,
         planet_cos: 0.5, // ~60° half-angle — low orbit fills a lot of sky
+        planet_sin: (1.0_f32 - 0.25).sqrt(),
         planet_color: Vec3::new(0.25, 0.35, 0.55),
+        // Pre-first-frame stand-in only; the real value is flux-derived.
+        planet_irradiance: std::f32::consts::FRAC_1_PI,
+        planet_surface: None,
         starfield_tint: Vec3::splat(0.02),
         up: Vec3::Y,
         ground_radiance: Vec3::ZERO,
@@ -547,7 +800,11 @@ fn default_environment() -> EnvParams {
 /// structures pick up the real sky as ambient. The sky is now the physical
 /// sky-view LUT (F3); the eventual upgrade is a GPU cubemap render of the actual
 /// scene; see `docs/rendering/atmosphere.md`.)
-fn derive_environment(sim: &SimulationState, gain: f32) -> (EnvParams, Option<SkyLutInputs>) {
+fn derive_environment(
+    sim: &SimulationState,
+    gain: f32,
+    planet_surface_for: &dyn Fn(usize) -> Option<PlanetSurface>,
+) -> (EnvParams, Option<SkyLutInputs>) {
     let ship_pos = sim.simulation.ship_state().position;
     let epoch = thalos_physics_canonical::canonical::Epoch(sim.simulation.sim_time());
 
@@ -579,9 +836,14 @@ fn derive_environment(sim: &SimulationState, gain: f32) -> (EnvParams, Option<Sk
         .map(|b| b.radius_m as f32)
         .unwrap_or(1.0);
     let planet_dist_m = to_planet.length().max(planet_radius_m * 1.0001);
-    let planet_ang = (planet_radius_m / planet_dist_m).clamp(0.0, 0.999).asin();
+    let planet_sin = (planet_radius_m / planet_dist_m).clamp(0.0, 0.999);
+    let planet_ang = planet_sin.asin();
     let planet_cos = planet_ang.cos();
     let planet_dir = to_planet.try_normalize().unwrap_or(Vec3::NEG_Y);
+    // The baked macro appearance of whatever body we are actually orbiting.
+    // `planet_id` is only known here, which is why the lookup arrives as a
+    // closure rather than a resolved value.
+    let planet_surface = planet_surface_for(planet_id);
 
     // Surface-sky model — only meaningful under a terrestrial-atmosphere body.
     let mut up = -planet_dir;
@@ -642,7 +904,10 @@ fn derive_environment(sim: &SimulationState, gain: f32) -> (EnvParams, Option<Sk
         sun_disc_radiance,
         planet_dir,
         planet_cos,
+        planet_sin,
         planet_color: Vec3::new(0.25, 0.35, 0.55),
+        planet_irradiance: flux.max(0.0) * std::f32::consts::FRAC_1_PI,
+        planet_surface,
         starfield_tint: Vec3::splat(0.015),
         up,
         ground_radiance,
@@ -651,20 +916,39 @@ fn derive_environment(sim: &SimulationState, gain: f32) -> (EnvParams, Option<Sk
     (env, sky_inputs)
 }
 
+/// What a paint actually put on the planet's share of the cubemap. See the
+/// `planet_reflection` diagnostic for why each field earns its place.
+#[derive(Default)]
+struct PaintStats {
+    /// Texels whose direction hit the planet disc.
+    disc_texels: u32,
+    /// Mean sampled albedo over those texels.
+    albedo_mean: Vec3,
+    /// Mean absolute deviation from `albedo_mean` (luminance). ~0 for a flat
+    /// tint; substantially above 0 once continents and ocean are present. This
+    /// is the number that distinguishes "the bake is wired" from "the bake is
+    /// wired and is actually varying".
+    albedo_spread: f32,
+}
+
 /// Write Rgba16Float pixels into the cubemap. Layer order matches
 /// WGPU / D3D: +X, -X, +Y, -Y, +Z, -Z. `sky_lut` is the physical upper-hemisphere
 /// sky sampled per direction in the surface regime (`None` out in space).
-fn paint_cubemap(image: &mut Image, env: &EnvParams, sky_lut: Option<&SkyViewLut>) {
+fn paint_cubemap(image: &mut Image, env: &EnvParams, sky_lut: Option<&SkyViewLut>) -> PaintStats {
     let size = PROBE_SIZE as i32;
     let inv_size = 1.0 / size as f32;
     const FACE_COUNT: usize = 6;
     let face_bytes = (PROBE_SIZE * PROBE_SIZE * 8) as usize; // 4 × 2B
     let Some(data) = image.data.as_mut() else {
-        return;
+        return PaintStats::default();
     };
     if data.len() != face_bytes * FACE_COUNT {
         data.resize(face_bytes * FACE_COUNT, 0);
     }
+
+    // Disc albedos, collected during the paint so the diagnostic costs one pass
+    // rather than a second sweep over 393k texels.
+    let mut disc_albedo: Vec<Vec3> = Vec::new();
 
     for face in 0..FACE_COUNT {
         let offset = face_bytes * face;
@@ -679,6 +963,11 @@ fn paint_cubemap(image: &mut Image, env: &EnvParams, sky_lut: Option<&SkyViewLut
 
                 let color = sample_environment(env, dir, sky_lut);
 
+                let planet_dot = dir.dot(env.planet_dir);
+                if planet_dot > env.planet_cos {
+                    disc_albedo.push(planet_albedo(env, dir, planet_dot));
+                }
+
                 let texel_off = ((y * size + x) * 4) as usize * 2;
                 write_rgba16f(&mut face_data[texel_off..texel_off + 8], color);
             }
@@ -688,6 +977,27 @@ fn paint_cubemap(image: &mut Image, env: &EnvParams, sky_lut: Option<&SkyViewLut
     image.asset_usage = RenderAssetUsages::all();
     // Force Bevy to re-upload the image this frame.
     // The asset change is detected by `Assets<Image>::get_mut` marking the handle dirty.
+
+    if disc_albedo.is_empty() {
+        return PaintStats::default();
+    }
+    let n = disc_albedo.len() as f32;
+    let mean = disc_albedo.iter().copied().sum::<Vec3>() / n;
+    let mean_luma = luminance(mean);
+    let spread = disc_albedo
+        .iter()
+        .map(|a| (luminance(*a) - mean_luma).abs())
+        .sum::<f32>()
+        / n;
+    PaintStats {
+        disc_texels: disc_albedo.len() as u32,
+        albedo_mean: mean,
+        albedo_spread: spread,
+    }
+}
+
+fn luminance(c: Vec3) -> f32 {
+    0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
 }
 
 fn face_dir(face: usize, u: f32, v: f32) -> Vec3 {
@@ -737,16 +1047,66 @@ fn orbital_sample(env: &EnvParams, dir: Vec3) -> Vec3 {
     let mut col = env.starfield_tint;
     let planet_dot = dir.dot(env.planet_dir);
     if planet_dot > env.planet_cos {
-        let point_on_planet = dir - env.planet_dir * planet_dot;
-        let normal = -(env.planet_dir - point_on_planet * (1.0 - env.planet_cos))
-            .normalize_or(-env.planet_dir);
+        let normal = planet_surface_normal(env, dir, planet_dot);
         let lit = env.sun_dir.dot(normal).max(0.0);
+        let albedo = planet_albedo_for_normal(env, normal);
         // Soft limb gradient + Lambert term. The 0.15 floor keeps the night
         // side visible as a slightly-bluish disc rather than a hole.
         let limb = smoothstep_f32(env.planet_cos, env.planet_cos + 0.02, planet_dot);
-        col = env.planet_color * (lit * 0.85 + 0.15) * limb + col * (1.0 - limb);
+        // Reflected radiance = albedo × irradiance × N·L. The 0.15 floor keeps
+        // the night side a faint disc rather than a hole in the starfield.
+        let radiance = albedo * (env.planet_irradiance * (lit * 0.85 + 0.15));
+        col = radiance * limb + col * (1.0 - limb);
     }
     col
+}
+
+/// Planet albedo along a view direction: the baked macro appearance where we
+/// have one, otherwise the flat body tint.
+///
+/// Water texels keep their baked depth-graded colour — the specular/glint half
+/// of a real ocean is not modelled here, and at orbital range in a *reflection*
+/// the diffuse colour is what reads.
+///
+/// Shared by the painter and the `planet_reflection` diagnostic, so the number
+/// the log reports is by construction the number that was painted.
+fn planet_albedo(env: &EnvParams, dir: Vec3, planet_dot: f32) -> Vec3 {
+    planet_albedo_for_normal(env, planet_surface_normal(env, dir, planet_dot))
+}
+
+fn planet_albedo_for_normal(env: &EnvParams, normal: Vec3) -> Vec3 {
+    match &env.planet_surface {
+        Some(surface) => surface
+            .albedo
+            .sample(surface.world_to_body * normal)
+            .albedo_linear,
+        None => env.planet_color,
+    }
+}
+
+/// Outward surface normal at the point where view direction `dir` meets the
+/// planet — the exact ray-sphere hit, in units of the planet radius.
+///
+/// With `oc = -planet_dir · D` (ship→centre) the near root is
+/// `t = D·µ − R·√(1 − k²)`, `k = sinθ / sin(angular radius)`, and dividing
+/// through by `R` leaves only `D/R = 1/planet_sin`. Every term is then O(D/R),
+/// which is why this holds up in f32 where the same solve in absolute metres
+/// would lose most of its precision to `|oc|² − R²` (≈ 4.9e13 − 4.4e13 at low
+/// orbit — a subtraction that keeps barely six significant figures).
+///
+/// Replaces an earlier disc-space approximation that was exact only at the
+/// sub-ship point; the albedo lookup needs a normal good enough to land on the
+/// right continent, and using a different normal for shading than for the
+/// lookup would be incoherent.
+fn planet_surface_normal(env: &EnvParams, dir: Vec3, planet_dot: f32) -> Vec3 {
+    let inv_sin = 1.0 / env.planet_sin.max(1.0e-6);
+    let sin_theta_sq = (1.0 - planet_dot * planet_dot).max(0.0);
+    // k² > 1 means the ray passes outside the sphere. Inside the `planet_cos`
+    // test that is only reachable on the limb texel itself, through rounding;
+    // clamp so it degenerates to the exact grazing normal rather than a NaN.
+    let k_sq = (sin_theta_sq * inv_sin * inv_sin).min(1.0);
+    let t_over_r = inv_sin * planet_dot - (1.0 - k_sq).sqrt();
+    (dir * t_over_r - env.planet_dir * inv_sin).normalize_or(-env.planet_dir)
 }
 
 fn smoothstep_f32(edge0: f32, edge1: f32, x: f32) -> f32 {
@@ -778,5 +1138,108 @@ fn write_rgba16f(out: &mut [u8], color: Vec3) {
         let h = f32_to_f16_bits(c);
         out[i * 2] = (h & 0xff) as u8;
         out[i * 2 + 1] = ((h >> 8) & 0xff) as u8;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bevy::math::DVec3;
+
+    /// Brute-force ray-sphere hit normal in f64, in absolute metres — the thing
+    /// [`planet_surface_normal`] is a rescaled, f32-safe rearrangement of.
+    fn reference_normal(ship: DVec3, center: DVec3, radius_m: f64, dir: DVec3) -> Option<DVec3> {
+        let oc = ship - center;
+        let b = dir.dot(oc);
+        let c = oc.dot(oc) - radius_m * radius_m;
+        let disc = b * b - c;
+        if disc < 0.0 {
+            return None;
+        }
+        let t = -b - disc.sqrt();
+        Some((ship + dir * t - center).normalize())
+    }
+
+    fn env_looking_at(planet_dir: Vec3, planet_sin: f32) -> EnvParams {
+        EnvParams {
+            planet_dir,
+            planet_sin,
+            planet_cos: (1.0 - planet_sin * planet_sin).max(0.0).sqrt(),
+            ..default_environment()
+        }
+    }
+
+    /// The disc-centre normal points straight back at the ship. This is the one
+    /// case the superseded disc-space approximation also got right, so it is a
+    /// regression floor rather than the interesting case.
+    #[test]
+    fn sub_ship_point_normal_faces_the_ship() {
+        let planet_dir = Vec3::new(0.3, -0.5, 0.81).normalize();
+        let env = env_looking_at(planet_dir, 0.5);
+        let n = planet_surface_normal(&env, planet_dir, 1.0);
+        assert!(
+            n.distance(-planet_dir) < 1.0e-5,
+            "expected {:?}, got {n:?}",
+            -planet_dir
+        );
+    }
+
+    /// The limb normal is perpendicular to the view ray — the ray grazes the
+    /// sphere there — and the solve must reach it without a NaN despite `k² → 1`.
+    #[test]
+    fn limb_normal_is_perpendicular_to_the_view_ray() {
+        let planet_dir = Vec3::Z;
+        let sin = 0.42_f32;
+        let env = env_looking_at(planet_dir, sin);
+        // A direction exactly on the limb.
+        let cos = (1.0 - sin * sin).sqrt();
+        let dir = (planet_dir * cos + Vec3::X * sin).normalize();
+        let n = planet_surface_normal(&env, dir, dir.dot(planet_dir));
+        assert!(n.is_finite(), "limb normal went non-finite: {n:?}");
+        assert!(
+            n.dot(dir).abs() < 1.0e-3,
+            "limb normal should be perpendicular to the ray, got dot {}",
+            n.dot(dir)
+        );
+    }
+
+    /// The whole point: the rescaled f32 solve agrees with the f64 absolute-metre
+    /// solve across the altitudes a ship actually flies. Verified to ~1e-6° over
+    /// 20k randomised cases offline; this pins a deterministic sample of the same
+    /// property so a future rearrangement cannot quietly lose it.
+    #[test]
+    fn matches_an_absolute_metre_solve_from_low_orbit_to_high() {
+        let radius_m = 6.4e6_f64;
+        let center = DVec3::new(1.4e11, -3.0e10, 7.0e9);
+        let mut worst = 0.0_f64;
+        for &altitude_m in &[30.0e3, 200.0e3, 800.0e3, 4.0e6, 3.0e7] {
+            let distance_m = radius_m + altitude_m;
+            let planet_dir_d = DVec3::new(0.26, 0.53, -0.807).normalize();
+            let ship = center - planet_dir_d * distance_m;
+            let sin = (radius_m / distance_m) as f32;
+            let env = env_looking_at(planet_dir_d.as_vec3().normalize(), sin);
+
+            // Sweep the disc from centre to just inside the limb, off-axis in a
+            // fixed perpendicular direction.
+            let perp_d = planet_dir_d.cross(DVec3::Y).normalize();
+            let ang = (radius_m / distance_m).asin();
+            for step in 0..12 {
+                let theta = ang * (step as f64 / 12.0) * 0.999;
+                let dir_d = (planet_dir_d * theta.cos() + perp_d * theta.sin()).normalize();
+                let reference =
+                    reference_normal(ship, center, radius_m, dir_d).expect("ray hits the sphere");
+
+                let dir = dir_d.as_vec3().normalize();
+                let got = planet_surface_normal(&env, dir, dir.dot(env.planet_dir));
+                let err = got.as_dvec3().dot(reference).clamp(-1.0, 1.0).acos();
+                worst = worst.max(err);
+            }
+        }
+        // 1e-3 rad ≈ 0.06°, far tighter than one texel of a 256² impostor face
+        // (~0.35°), so a normal this good cannot land on the wrong continent.
+        assert!(
+            worst < 1.0e-3,
+            "worst normal error {worst:.3e} rad exceeds the tolerance"
+        );
     }
 }

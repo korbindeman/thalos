@@ -1,7 +1,25 @@
 //! Auto-generated interstage shrouds: cones wrapping a [`thalos_shipyard::Shroudable`]
-//! engine above a [`thalos_shipyard::ShroudProvider`] (decoupler). Editor-only visuals —
-//! they are not part of the persisted blueprint.
+//! engine above a [`thalos_shipyard::ShroudProvider`] (decoupler).
+//!
+//! **One canonical path for both worlds.** A shroud is a property of the
+//! decoupler's attachment, not of the editor, so [`sync_shrouds`] reconciles
+//! *every* provider — the VAB's [`EditorPart`] stack and the flight craft
+//! alike. The editor adds interaction on top (hover transparency, click-selects
+//! the provider); flight shrouds are plain opaque hull geometry. Before this
+//! module was hoisted out of `shipyard_editor::core`, the query filtered
+//! `With<EditorPart>` and the shroud existed only in the VAB — the craft flew
+//! with a bare engine hanging under the interstage.
+//!
+//! Shrouds are **not** part of the persisted blueprint: they are derived from
+//! the attach graph on both sides, so a saved ship never carries one.
+//!
+//! Ownership through staging: the shroud is a child of the provider, so firing
+//! the decoupler carries it down with the jettisoned stage (the KSP interstage
+//! convention). Separation strips the decoupler's `Attachment`, which would
+//! make it stop qualifying here, so `staging` stamps [`ShroudFired`] on the
+//! shroud at the cut and this module then leaves it alone forever.
 
+use bevy::camera::visibility::NoFrustumCulling;
 use bevy::picking::Pickable;
 use bevy::picking::events::{Click, Pointer};
 use bevy::picking::hover::HoverMap;
@@ -11,10 +29,28 @@ use std::collections::{HashMap, HashSet};
 use thalos_body_render::{
     ShipPartExtension, ShipPartMaterial, ShipPartParams, stainless_steel_base,
 };
+use thalos_shipyard::sizing::propagate_node_sizes;
 use thalos_shipyard::{AttachNodes, Attachment, Engine, ShroudProvider, Shroudable};
 
-use super::state::{EditorPart, EditorState, EditorUiGate, PART_RESOLUTION};
-use super::visuals::engine_visual_profile;
+use crate::shipyard_editor::core::state::{EditorPart, EditorState, EditorUiGate, PART_RESOLUTION};
+use crate::shipyard_editor::core::visuals::engine_visual_profile;
+
+/// Owns shroud reconciliation for the whole app — the VAB build and the flight
+/// craft are two sets of parts under one system, not two implementations.
+pub struct ShroudPlugin;
+
+impl Plugin for ShroudPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(
+            Update,
+            (
+                // Geometry reads `AttachNodes` diameters, which sizing writes.
+                sync_shrouds.after(propagate_node_sizes),
+                update_shroud_transparency.after(sync_shrouds),
+            ),
+        );
+    }
+}
 
 /// Attached to a shroud entity — a mesh child of the provider
 /// (e.g. a decoupler) that wraps the shrouded part above. Spawned and
@@ -24,19 +60,32 @@ use super::visuals::engine_visual_profile;
 pub struct Shroud {
     pub provider: Entity,
     pub shrouded: Entity,
+    /// Axial length of the shroud, metres — also the distance the shrouded part
+    /// must travel to clear it, which `staging` reads to size the separation
+    /// impulse.
+    pub height: f32,
     // Cached spec, compared each frame so we only rebuild the mesh /
     // material when geometry actually changed.
     bottom_radius: f32,
     top_radius: f32,
-    height: f32,
 }
 
 /// Marker on the shroud entity's body. Kept distinct from
-/// [`super::state::PartBody`] so part-level highlight systems (tint, material
-/// swap) don't fire on hovered shrouds — the shroud manages its own hover
-/// feedback (transparency) in [`update_shroud_transparency`].
+/// [`crate::shipyard_editor::core::state::PartBody`] so part-level highlight
+/// systems (tint, material swap) don't fire on hovered shrouds — the shroud
+/// manages its own hover feedback (transparency) in
+/// [`update_shroud_transparency`]. Editor shrouds only; flight shrouds are not
+/// interactive.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct ShroudBody;
+
+/// Stamped on a shroud when its provider fires, in the same transaction that
+/// cuts the attach graph. A fired decoupler has no `Attachment` left, so it can
+/// never re-qualify in [`sync_shrouds`]; without this marker the reconcile pass
+/// would read that as "provider no longer qualifies" and despawn the interstage
+/// off the jettisoned stage one frame after separation.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct ShroudFired;
 
 /// Expected geometry for a shroud covering a given attachment. `None`
 /// when no shroud should exist for this pair (misconfigured attachment,
@@ -95,13 +144,18 @@ fn spec_matches(s: &Shroud, spec: &ShroudSpec) -> bool {
 /// Reconcile shroud entities against current attachment state: spawn
 /// missing shrouds, update ones whose geometry changed, and despawn
 /// orphans. Idempotent per frame; cheap when attachment is stable.
-pub(super) fn sync_shrouds(
+///
+/// Runs over editor *and* flight providers. The only difference between the two
+/// is presentation: an editor shroud is pickable and alpha-blended so hover can
+/// reveal the engine inside; a flight shroud is opaque hull geometry with
+/// frustum culling off, like every other flight part visual.
+pub fn sync_shrouds(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
-    providers: Query<(Entity, &Attachment, &AttachNodes), (With<ShroudProvider>, With<EditorPart>)>,
+    providers: Query<(Entity, &Attachment, &AttachNodes, Has<EditorPart>), With<ShroudProvider>>,
     shroudables: Query<(&Engine, Has<Shroudable>)>,
-    existing: Query<(Entity, &Shroud)>,
+    existing: Query<(Entity, &Shroud), Without<ShroudFired>>,
 ) {
     // Map provider -> (shroud_entity, current Shroud component).
     let mut current_by_provider: HashMap<Entity, (Entity, Shroud)> = HashMap::new();
@@ -111,7 +165,7 @@ pub(super) fn sync_shrouds(
 
     let mut kept: HashSet<Entity> = HashSet::new();
 
-    for (provider, attachment, provider_nodes) in providers.iter() {
+    for (provider, attachment, provider_nodes, is_editor) in providers.iter() {
         let Some(spec) = compute_shroud_spec(attachment, provider_nodes, &shroudables) else {
             continue;
         };
@@ -141,13 +195,20 @@ pub(super) fn sync_shrouds(
         // Matches the vertical height only when the two radii agree.
         let dr = spec.bottom_radius - spec.top_radius;
         let slant_length = (spec.height * spec.height + dr * dr).sqrt();
-        // Blend mode is set once here; we only vary base-color alpha
-        // from the hover system so the pipeline stays hot.
-        let material = ship_materials.add(ShipPartMaterial {
-            base: StandardMaterial {
+        // The editor's blend mode is set once here; we only vary base-color
+        // alpha from the hover system so the pipeline stays hot. Flight shrouds
+        // stay opaque — nothing hovers them, and a blended hull surface would
+        // sort against the craft it belongs to.
+        let base = if is_editor {
+            StandardMaterial {
                 alpha_mode: AlphaMode::Blend,
                 ..stainless_steel_base()
-            },
+            }
+        } else {
+            stainless_steel_base()
+        };
+        let material = ship_materials.add(ShipPartMaterial {
+            base,
             extension: ShipPartExtension {
                 params: ShipPartParams {
                     length: slant_length,
@@ -165,29 +226,35 @@ pub(super) fn sync_shrouds(
         // Shroud mesh center sits at +height/2 in the provider's local
         // frame, since the provider's "top" node (y = 0) meets the
         // shrouded's base and the shroud extends upward from there.
-        let shroud_entity = commands
-            .spawn((
-                Mesh3d(mesh_handle),
-                MeshMaterial3d(material),
-                Transform::from_xyz(0.0, spec.height * 0.5, 0.0),
-                Visibility::default(),
-                Shroud {
-                    provider,
-                    shrouded: spec.shrouded,
-                    bottom_radius: spec.bottom_radius,
-                    top_radius: spec.top_radius,
-                    height: spec.height,
-                },
-                ShroudBody,
-                Pickable::default(),
-            ))
-            .observe(on_shroud_click)
-            .id();
+        let mut shroud_entity = commands.spawn((
+            Mesh3d(mesh_handle),
+            MeshMaterial3d(material),
+            Transform::from_xyz(0.0, spec.height * 0.5, 0.0),
+            Visibility::default(),
+            Shroud {
+                provider,
+                shrouded: spec.shrouded,
+                bottom_radius: spec.bottom_radius,
+                top_radius: spec.top_radius,
+                height: spec.height,
+            },
+        ));
+        if is_editor {
+            shroud_entity.insert((ShroudBody, Pickable::default()));
+            shroud_entity.observe(on_shroud_click);
+        } else {
+            // Flight part visuals opt out of frustum culling: the craft sits
+            // deep in a BigSpace grid and the culling AABBs are unreliable
+            // there. Match `ship_view::rebuild_ship_visuals`.
+            shroud_entity.insert(NoFrustumCulling);
+        }
+        let shroud_entity = shroud_entity.id();
         commands.entity(provider).add_child(shroud_entity);
     }
 
     // Despawn shrouds whose provider no longer qualifies (detachment,
     // geometry change below threshold, shrouded part removed, etc.).
+    // Fired shrouds are excluded from `existing` and never reach here.
     for (provider, (entity, _)) in &current_by_provider {
         if !kept.contains(provider) {
             commands.entity(*entity).despawn();
@@ -197,8 +264,9 @@ pub(super) fn sync_shrouds(
 
 /// Drive the shroud's base-color alpha from hover: opaque by default
 /// (engine hidden inside), partial transparency while hovered so the
-/// shrouded silhouette reads through.
-pub(super) fn update_shroud_transparency(
+/// shrouded silhouette reads through. Editor-only — [`ShroudBody`] is not
+/// present on flight shrouds.
+pub fn update_shroud_transparency(
     hover_map: Res<HoverMap>,
     mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
     shrouds: Query<(Entity, &MeshMaterial3d<ShipPartMaterial>), With<ShroudBody>>,

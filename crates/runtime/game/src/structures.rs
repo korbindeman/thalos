@@ -196,6 +196,27 @@ impl StructureRegistry {
         self.sites.values().flatten().find(|s| s.id == id)
     }
 
+    /// Surface elevation (m above the body reference radius) a structure
+    /// actually sits at.
+    ///
+    /// A [`StructurePlacement::FlattenTo`] site carries its own level; a
+    /// **`Drape` site does not, and its own placement says nothing** — it drapes
+    /// on its parent's flattened pad, so the parent's elevation is the answer.
+    /// Every runway on the spaceport is exactly that case (a `Drape` strip on a
+    /// basin levelled to ~700 m), which is why reading `Drape` as "elevation 0"
+    /// is wrong: harmless for a top-down plot, but a 700 m error in threshold
+    /// elevation puts an approach glideslope completely off.
+    pub fn site_elevation_m(&self, site: &StructureSite) -> f64 {
+        match site.placement {
+            StructurePlacement::FlattenTo { elevation_m, .. } => elevation_m,
+            StructurePlacement::Drape => site
+                .parent_site
+                .and_then(|parent| self.get(parent))
+                .map(|parent| self.site_elevation_m(parent))
+                .unwrap_or(0.0),
+        }
+    }
+
     /// Mutate a registered structure in place (e.g. an inspector edit to a
     /// building's footprint). No-op if the id is unknown.
     pub fn update(&mut self, id: StructureId, f: impl FnOnce(&mut StructureSite)) {

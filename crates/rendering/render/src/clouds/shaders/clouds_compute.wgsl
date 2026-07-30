@@ -181,11 +181,15 @@ struct Config {
 
 @group(1) @binding(0) var clouds_render_texture: texture_storage_2d<rgba32float, read_write>;
 @group(1) @binding(1) var clouds_worley_texture: texture_storage_3d<rgba32float, read_write>;
-// Per-pixel nearest cloud-hit distance (metres from the camera; MAX_DISTANCE
-// where the ray hit no cloud). The game's body_sky composite reads it for
-// true depth occlusion against terrain / the ship hull; the raymarch's own
-// history reads use `history_distance_texture` below.
-@group(1) @binding(2) var cloud_distance_texture: texture_storage_2d<r32float, write>;
+// Per-pixel cloud-hit span (metres from the camera; MAX_DISTANCE where the ray
+// hit no cloud). `r` = nearest hit, `g` = the far end of the ray's
+// optical-depth-weighted slab (`slab_far`, below). The game's body_sky
+// composite reads BOTH for true depth occlusion against terrain / the ship
+// hull — the near hit alone cannot say how much of the integrated cloud lies in
+// front of a depth sample, which is what made distant cloud go see-through
+// wherever terrain sat behind it. The raymarch's own history reads use
+// `history_distance_texture` below and key on `r` only.
+@group(1) @binding(2) var cloud_distance_texture: texture_storage_2d<rg32float, write>;
 // Planet-fixed cubemap weather field: coverage, cloud type, normalized base,
 // normalized top. CLOUD-3 consumes all channels for type-specific vertical
 // structure.
@@ -215,6 +219,9 @@ struct Ray {
 
 struct RaymarchResult {
     dist: f32,
+    // Far end of the equivalent uniform slab this ray's extinction occupies.
+    // See `slab_far_distance`.
+    slab_far: f32,
     color: vec4f,
 }
 
@@ -512,15 +519,26 @@ fn get_cloud_map_density(
     // in `march_column` (fill_lut.rs) and `cloud_surface_density_cpu` — keep
     // the three in lockstep. (`column_tall` is declared above the cell field.)
     let dome = h * h;
-    let vertical_narrow = h * 0.04 * stratus_w
-        + dome * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
+    // Dome coefficients are scaled against the spread of `shape` — see the
+    // derivation on `cloud_surface_density_traced` (solar_system_state.rs).
+    // The former 0.42 was ~4.7σ and cut every column's top half off, which
+    // rendered the deck as flat pancakes. Do not retune one mirror alone.
+    let vertical_narrow = h * 0.012 * stratus_w
+        + dome * (0.130 * cumulus_w + 0.093 * storm_w) * (1.0 - 0.45 * column_tall);
     var mass = shape - threshold - vertical_narrow;
 
     // Cumulonimbus anvils broaden again near the tropopause, but only where
     // the storm weather channel permits them.
+    // Blend by the gate; never `max` against a gate-scaled value. That form
+    // collapses to `max(mass, 0.0)` wherever the gate is zero — a mass floor,
+    // not an anvil. Harmless here (this tier realizes with
+    // `smoothstep(0.0, edge_softness, mass)`, so a zero floor is zero density)
+    // but the CPU producer's realization is centred on zero, where the same
+    // line emitted a planet-wide 0.5 cloud floor. Fixed in all three mirrors
+    // together — see `cloud_surface_density_traced` (solar_system_state.rs).
     let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
     let anvil_shape = anvil_base - (threshold - 0.06);
-    mass = max(mass, anvil_shape * anvil_profile * storm_w);
+    mass = mix(mass, max(mass, anvil_shape), anvil_profile * storm_w);
 
     // Fine 3-D Worley erosion is strongest only near the boundary, preserving
     // solid cores for deep self-shadow while cutting cauliflower detail into
@@ -837,6 +855,32 @@ fn get_ray(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ray
     return Ray(step, dir_length, seg_start, seg_end);
 }
 
+/// Far end of the equivalent uniform slab for a ray whose extinction has total
+/// optical depth `tau_total` with distance-moment `tau_moment`, entering at
+/// `near`.
+///
+/// The composite has to answer "how much of this ray's cloud is in front of the
+/// depth buffer?" from what the march can afford to store. One distance cannot
+/// answer it, and the predecessor's stand-in — a CONSTANT 5.4 km denominator —
+/// is what made every cloud with terrain behind it render see-through: a 900 m
+/// deep cumulus with the ground a kilometre behind it was drawn at ~1/5 of its
+/// opacity even though ALL of it is in front of that ground
+/// (INC-20260729T051500Z).
+///
+/// Matching the first moment of the real extinction profile is the cheapest
+/// summary that gets the limits right: terrain beyond the cloud partitions to
+/// full opacity, terrain in front to none. Weighting by optical depth rather
+/// than taking the last hit also keeps a single wispy tail sample — or a second
+/// cloud 20 km further down the same ray — from stretching the slab across
+/// empty air.
+fn slab_far_distance(near: f32, tau_total: f32, tau_moment: f32) -> f32 {
+    if (tau_total <= 1.0e-6) {
+        return near;
+    }
+    let centroid = tau_moment / tau_total;
+    return near + 2.0 * max(centroid - near, 0.0);
+}
+
 fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> RaymarchResult {
     let ray = get_ray(ray_origin, ray_dir, max_dist, jitter);
     let pixel_angle = cloud_pixel_angle();
@@ -849,7 +893,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     let entry_footprint = ray.start * pixel_angle;
     let far_own = cloud_far_ownership(entry_footprint);
     if (far_own >= 1.0 || ray.start > max_dist) {
-        return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
+        return RaymarchResult(max_dist, max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
 
     // Per-ray weather context varies over tens-of-km scales, so one evaluation
@@ -879,7 +923,7 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     );
     let region_coverage = max(max(weather.r, weather_region.r), far_region.r);
     if (region_coverage * config.clouds_coverage <= 1.0e-3) {
-        return RaymarchResult(max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
+        return RaymarchResult(max_dist, max_dist, vec4f(0.0, 0.0, 0.0, 1.0));
     }
     // The anti-tiling modulation has a ~21.6 km period. Sampling it once per
     // view segment preserves a smoothly varying per-pixel system bias without
@@ -914,6 +958,10 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     var dist = max_dist;
     var scattered_light = vec3f(0.0, 0.0, 0.0);
     var transmittance = 1.0;
+    // Zeroth and first distance moments of this ray's extinction, for the
+    // composite's depth partition (`slab_far_distance`).
+    var tau_total = 0.0;
+    var tau_moment = 0.0;
     var refining = false;
     var consecutive_empty = 0u;
     // Never backtrack outside the physical shell. Later coarse hits may rewind
@@ -1112,6 +1160,10 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
 
             scattered_light += transmittance * integrated_scattering;
             transmittance *= delta_transmittance;
+
+            let d_tau = clouds_density_sampled * fine_step;
+            tau_total += d_tau;
+            tau_moment += d_tau * dir_length;
         }
 
         if transmittance <= config.clouds_min_transmittance { break; }
@@ -1143,7 +1195,11 @@ fn raymarch(ray_origin: vec3f, ray_dir: vec3f, max_dist: f32, jitter: f32) -> Ra
     let peak_limit = 10.0;
     scattered_light = scattered_light / (vec3f(1.0) + scattered_light / peak_limit);
 
-    return RaymarchResult(dist, vec4f(scattered_light, transmittance));
+    return RaymarchResult(
+        dist,
+        slab_far_distance(dist, tau_total, tau_moment),
+        vec4f(scattered_light, transmittance),
+    );
 }
 
 fn render_clouds_volume(coord: vec3f) -> vec4f {
@@ -1168,6 +1224,7 @@ fn render_clouds_volume(coord: vec3f) -> vec4f {
 struct CloudsOutput {
     color: vec4f,
     dist: f32,
+    slab_far: f32,
 }
 
 // Select one coherent colour/depth history sample from the reprojected 2×2
@@ -1189,16 +1246,16 @@ fn sample_history_matching(rr: vec2f, expected_dist: f32) -> CloudsOutput {
         vec2i(c00.x, c11.y),
         c11,
     );
-    var best = CloudsOutput(vec4f(0.0, 0.0, 0.0, 1.0), MAX_DISTANCE);
+    var best = CloudsOutput(vec4f(0.0, 0.0, 0.0, 1.0), MAX_DISTANCE, MAX_DISTANCE);
     var best_error = MAX_DISTANCE;
     for (var i = 0u; i < 4u; i += 1u) {
         let coord = vec2u(coords[i]);
-        let dist = textureLoad(history_distance_texture, coord, 0).r;
-        if dist < 1.0e8 {
-            let error = abs(dist - expected_dist);
+        let span = textureLoad(history_distance_texture, coord, 0).rg;
+        if span.x < 1.0e8 {
+            let error = abs(span.x - expected_dist);
             if error < best_error {
                 best_error = error;
-                best = CloudsOutput(textureLoad(history_texture, coord, 0), dist);
+                best = CloudsOutput(textureLoad(history_texture, coord, 0), span.x, span.y);
             }
         }
     }
@@ -1294,12 +1351,12 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
                 config.render_resolution.xy,
                 config.inverse_camera_projection[0][0],
                 config.inverse_camera_projection[1][1],
-            ), MAX_DISTANCE);
+            ), MAX_DISTANCE, MAX_DISTANCE);
         }
         if frag_coord.x < 6.0 && frag_coord.x >= 5.0 {
-            return CloudsOutput(vec4f(f32(config.history_epoch), config.time, 0.0, 0.0), MAX_DISTANCE);
+            return CloudsOutput(vec4f(f32(config.history_epoch), config.time, 0.0, 0.0), MAX_DISTANCE, MAX_DISTANCE);
         }
-        return CloudsOutput(common::save_camera(camera, frag_coord, ray_origin), MAX_DISTANCE);
+        return CloudsOutput(common::save_camera(camera, frag_coord, ray_origin), MAX_DISTANCE, MAX_DISTANCE);
     }
 
     // Camera-change metric: a steady view (in the body-fixed frame:
@@ -1346,8 +1403,8 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
         || !cam_static
         || sparse_slot == (config.frame_index % 9u);
     if (!trace_pixel) {
-        let old_dist = textureLoad(history_distance_texture, current_texel, 0).r;
-        return CloudsOutput(textureLoad(history_texture, current_texel, 0), old_dist);
+        let old_span = textureLoad(history_distance_texture, current_texel, 0).rg;
+        return CloudsOutput(textureLoad(history_texture, current_texel, 0), old_span.x, old_span.y);
     }
 
     // Interleaved-gradient phase for the view march; temporal history removes
@@ -1382,7 +1439,7 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
             min(config.reprojection_strength, 0.82),
             config.sparse_march != 0u,
         );
-        return CloudsOutput(mix(col, history, steady_weight), result.dist);
+        return CloudsOutput(mix(col, history, steady_weight), result.dist, result.slab_far);
     }
 
     // Moving view: reproject this ray's nearest cloud point through the
@@ -1415,11 +1472,11 @@ fn get_clouds_color(frag_coord: vec2f, camera: mat4x4f, old_cam: mat4x4f, ray_di
                     * clamp(config.reprojection_strength, 0.0, 1.0);
                 if (w > 0.01) {
                     let hist = clamp_history(history.color, col, projected.xy);
-                    return CloudsOutput(mix(col, hist, w), result.dist);
+                    return CloudsOutput(mix(col, hist, w), result.dist, result.slab_far);
                 }
         }
     }
-    return CloudsOutput(col, result.dist);
+    return CloudsOutput(col, result.dist, result.slab_far);
 }
 
 fn get_ray_direction(frag_coord: vec2f) -> vec3f {
@@ -1632,5 +1689,9 @@ fn update(@builtin(global_invocation_id) invocation_id: vec3<u32>, @builtin(num_
     storageBarrier();
 
     textureStore(clouds_render_texture, invocation_id.xy, out.color);
-    textureStore(cloud_distance_texture, invocation_id.xy, vec4f(out.dist, 0.0, 0.0, 0.0));
+    textureStore(
+        cloud_distance_texture,
+        invocation_id.xy,
+        vec4f(out.dist, out.slab_far, 0.0, 0.0),
+    );
 }

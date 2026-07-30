@@ -828,7 +828,6 @@ fn update_grass_material(
     time: Res<Time>,
     exposure: Res<CameraExposure>,
     anchor: Res<ViewAnchor>,
-    sun_shadow: Option<Res<SunShadowState>>,
     mut materials: ResMut<Assets<GrassMaterial>>,
 ) {
     let (Some(body_id), Some(states)) = (grass.body, solar.states.as_deref()) else {
@@ -908,16 +907,6 @@ fn update_grass_material(
         material.params.sky_up = sky_up;
         material.params.sky_tau = sky_tau;
         material.params.anchor = anchor;
-        // Bind the live sun-shadow cascade so blades take the trees' (and the
-        // ground's) shadows. `gate.x` is 0 off-surface, so the shader skips the
-        // per-vertex sample there. Grass lives within the near cascade's reach,
-        // so only cascade 0 is sampled in practice.
-        if let Some(sun_shadow) = sun_shadow.as_deref() {
-            material.shadow = sun_shadow.block;
-            material.sun_shadow_map_0 = sun_shadow.images[0].clone();
-            material.sun_shadow_map_1 = sun_shadow.images[1].clone();
-            material.sun_shadow_map_2 = sun_shadow.images[2].clone();
-        }
     }
 }
 

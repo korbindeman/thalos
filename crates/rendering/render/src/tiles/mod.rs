@@ -143,8 +143,12 @@ const TILE_SKIRT_VERTS: usize = 4 * TILE_RES - 4;
 const TILE_VERTS: usize = TILE_RES * TILE_RES + TILE_SKIRT_VERTS;
 /// Bytes per vertex across the attribute set [`build_tile_mesh`] writes:
 /// POSITION 12 + NORMAL 12 + COLOR 16 + UV_0 8 + UV_1 8. Kept adjacent to the
-/// mesher so adding an attribute (NTR-RT1 wants TANGENT) updates the budget's
-/// denominator in the same edit instead of silently under-counting VRAM.
+/// mesher so adding an attribute updates the budget's denominator in the same
+/// edit instead of silently under-counting VRAM.
+///
+/// COLOR and UV_1 carry the NTR-X4 spare-channel contract `tile_terrain.wgsl`
+/// reads. They are also why this mesh can never enter the raytracing scene —
+/// see [`RT_TILE_MESH_BYTES`] and [`crate::rt`].
 const TILE_VERTEX_BYTES: usize = 12 + 12 + 16 + 8 + 8;
 /// Indices in one tile mesh: two triangles per core quad plus two per skirt
 /// quad.
@@ -155,6 +159,21 @@ const TILE_INDICES: usize = ((TILE_RES - 1) * (TILE_RES - 1) * 2 + TILE_SKIRT_VE
 /// has to be: a *count* cap looks harmless and silently means gigabytes (the
 /// same lesson `rendering::tile_cache`'s payload budget already records).
 pub const TILE_MESH_BYTES: usize = TILE_VERTS * TILE_VERTEX_BYTES + TILE_INDICES * 4;
+
+/// Extra GPU bytes a tile costs **on top of** [`TILE_MESH_BYTES`] when it also
+/// carries an RT twin — **312 KiB**, i.e. an RT-covered tile costs **1.90×** a
+/// plain one.
+///
+/// Solari's attribute gate is an equality, so the RT mesh is a second copy of
+/// the geometry rather than a re-use of the visible one ([`crate::rt`] explains
+/// why in full). That makes RT terrain coverage a VRAM decision before it is a
+/// tracing-cost decision: covering the whole 4 GiB resident set would want
+/// **another ~3.6 GiB**, on a budget that is already machine-wide and shared
+/// between concurrent instances (INC-20260725T012104Z). That is the number
+/// behind NTR-RT3 scoping RT proxies to a radius around `ViewAnchor` rather
+/// than to residency — near-only coverage is a necessity here, not a tuning
+/// choice.
+pub const RT_TILE_MESH_BYTES: usize = TILE_VERTS * crate::rt::RT_VERTEX_BYTES + TILE_INDICES * 4;
 
 /// Soft VRAM target for tile meshes **across every Thalos renderer on this
 /// machine**, overridable with `THALOS_TILE_BUDGET_MB` (0 disables the budget
@@ -1899,6 +1918,62 @@ mod budget_tests {
             TILE_MESH_BYTES,
             "TILE_MESH_BYTES ({TILE_MESH_BYTES}) disagrees with the mesh \
              ({vertex_bytes} vertex + {index_bytes} index) — an attribute changed"
+        );
+    }
+
+    /// A real tile mesh — not a toy grid — converts into something the
+    /// raytracing scene will actually accept, and costs what the budget says.
+    ///
+    /// This is the test that would have caught the whole premise being wrong:
+    /// the visible tile mesh carries COLOR and UV_1, so it can never pass
+    /// Solari's gate itself, and a proxy "sharing the mesh handle" would have
+    /// been silently skipped with no ground in any reflection.
+    #[test]
+    fn a_real_tile_converts_into_an_rt_twin() {
+        let built = build_tile_mesh(
+            &flat_tile(TileKey {
+                face: 0,
+                level: 6,
+                x: 3,
+                y: 5,
+            }),
+            R,
+        );
+        assert!(
+            !crate::rt::is_raytracing_eligible(&built.mesh),
+            "the visible mesh must NOT be RT-eligible — if it becomes so, the \
+             separate RT twin is dead weight and this design should change"
+        );
+
+        let twin = crate::rt::rt_twin_of_tile(&built.mesh).expect("tile mesh converts");
+        assert!(
+            crate::rt::is_raytracing_eligible(&twin),
+            "attributes {:?}",
+            crate::rt::attribute_names(&twin)
+        );
+
+        let vertex_bytes = twin.get_vertex_buffer_size();
+        let index_bytes = twin
+            .get_index_buffer_bytes()
+            .expect("RT twins are indexed")
+            .len();
+        assert_eq!(
+            vertex_bytes + index_bytes,
+            RT_TILE_MESH_BYTES,
+            "RT_TILE_MESH_BYTES ({RT_TILE_MESH_BYTES}) disagrees with the built \
+             twin ({vertex_bytes} vertex + {index_bytes} index)"
+        );
+        // The twin is geometry-identical to the raster mesh: a reflection can
+        // never disagree with the ground under it about where the ground is.
+        assert_eq!(twin.count_vertices(), built.mesh.count_vertices());
+
+        // Pin the figures the RT_TILE_MESH_BYTES docs quote and NTR-RT1's
+        // budget reasons from, so prose and code cannot drift apart.
+        assert_eq!(RT_TILE_MESH_BYTES / 1024, 312, "documented as 312 KiB");
+        let ratio = (TILE_MESH_BYTES + RT_TILE_MESH_BYTES) as f64 / TILE_MESH_BYTES as f64;
+        assert!(
+            (ratio - 1.90).abs() < 0.005,
+            "documented as 1.90x, computed {ratio:.3}"
         );
     }
 

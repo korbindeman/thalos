@@ -1053,6 +1053,13 @@ constructor.
 
 #### 3.4 Detection: pre-contact surface-relative speed
 
+> **Update 2026-07-29:** the recorded quantity is the **sink rate** — the
+> into-surface (radial) component of the surface-relative velocity — not the
+> full speed. Full speed counted a normal ~60 m/s wheels-first runway
+> touchdown as a destroying "impact" the moment the tolerance was finite
+> (INC-20260729T073116Z); the airframe absorbs the radial component only.
+> The peak-window and rising-edge mechanics below are unchanged.
+
 The game layer is the only place that sees contacts, so detection
 lives there (`detect_terrain_impact` in `local_physics.rs`). Method:
 
@@ -1303,10 +1310,14 @@ A craft *without* landing gear — a lander or rocket resting on its belly —
 gets its tangential ground friction from `apply_surface_friction`
 ([`../../crates/runtime/game/src/local_physics/mod.rs`](../../crates/runtime/game/src/local_physics/mod.rs)),
 which runs right **after** `terrain_floor_backstop` and just **before**
-`readback_local_craft` in the local-physics chain. The backstop only ever
-removes the *into-surface* (radial) velocity component; before this system
-existed a landed gearless craft kept its full tangential velocity and slid
-indefinitely, because nothing opposed surface-parallel motion.
+`readback_local_craft` in the local-physics chain. The backstop resolves
+*deep* penetration only — a contact impulse (normal + Coulomb friction, with
+the angular response) at the deepest hull point, past its `skin_m` allowance
+(INC-20260729T073116Z: the earlier translation-only clamp had zero torque, so
+a craft that arrived wingtip-first froze in that attitude and "stood on the
+wing"); before this system existed a landed gearless craft kept its full
+tangential velocity and slid indefinitely, because nothing opposed
+surface-parallel motion in shallow resting contact.
 
 - **Coulomb stick/slip, velocity-level.** Like the backstop, it edits
   `LinearVelocity` directly rather than pushing a force into the
@@ -1359,11 +1370,17 @@ acceleration accumulators.
   about the nose-pod origin, ahead of every wheel, and the upward wheel
   forces have no balancing torque — the craft tips onto its nose. Wheel
   torque arms are taken relative to this CoM.
-- **Per wheel, per frame.** A ray is cast from the strut top down the
-  suspension axis (`Rotation·r̂`, belly-ward) against every collider
-  *except the craft* — which transparently finds the runway slab or the
-  terrain patch, whichever is closest, and reports nothing when the wheel
-  is airborne. From the hit: a one-way **spring + damper** along the strut
+- **Per wheel, per frame.** A ray is cast down the suspension axis
+  (`Rotation·r̂`, belly-ward) against every collider *except the craft* —
+  which transparently finds the runway slab or the terrain patch, whichever
+  is closest, and reports nothing when the wheel is airborne. The ray starts
+  `ray_start_lift_m` **above** the strut top: the floor backstop tolerates
+  hull penetration up to its skin, and a ray cast from a buried strut top
+  points down from *underneath* the heightfield and silently unloads the
+  wheel (no normal force ⇒ no brakes — INC-20260729T073116Z); if the lifted
+  ray still misses, the analytic `HeightSource` (the same surface the
+  backstop reads) supplies the distance. From the contact: a one-way
+  **spring + damper** along the strut
   (using the contact-*point* velocity; the ground is static in the
   body-fixed frame so slip is just that velocity — **no `ω×r` term**),
   **lateral grip** resisting sideways slip, and a **longitudinal** force
@@ -1375,17 +1392,42 @@ acceleration accumulators.
   brings a coasting craft to a true stop in finite time and then holds it,
   instead of the old `∝ v` law that decayed asymptotically and let the
   craft creep forever.
-- **Ride height (no clip).** The damper is sized from the craft's real
-  per-wheel mass for a near-critical settle, and `k_spring` is stiff enough
-  that the natural static sag `m·g/(n·k)` is ~cm-scale, so the rigid wheel
-  meshes don't visibly clip the ground. (A uniform spring *preload* to
-  cancel the sag was tried and reverted — it unbalances the per-wheel
-  torque and tips the craft; the suspension must find its own
-  load-balanced equilibrium.)
+- **Ride height (no clip).** Damper coefficients are sized from the craft's
+  real per-wheel mass, and `k_spring` is stiff enough that the natural
+  static sag `m·g/(n·k)` is ~cm-scale, so the rigid wheel meshes don't
+  visibly clip the ground. (A uniform spring *preload* to cancel the sag was
+  tried and reverted — it unbalances the per-wheel torque and tips the
+  craft; the suspension must find its own load-balanced equilibrium.)
+- **Asymmetric oleo damping.** The damper is soft on the **compression**
+  stroke (`damping_ratio_compress` ≈ 0.4, ramped in over the first
+  `damper_engage_frac` of travel so the contact-onset force is continuous)
+  and firm on **rebound** (`damping_ratio_rebound` ≈ 1.2) — the real-oleo
+  schedule. A single near-critical damper delivered its whole force as a
+  step the instant the wheels touched (compression ≈ 0 but compression
+  *rate* = the full sink speed), which made every landing a multi-g slam
+  regardless of flare (INC-20260729T073116Z); soft-in lets the stroke absorb
+  the sink, firm-out dissipates the stored spring energy instead of
+  bouncing.
 - **Steering.** Nosewheel steering reuses the yaw axis (A/D, KSP-style —
   no separate binding); it rotates the single-leg gear's roll/axle
   directions about the strut, and the resulting off-CoM lateral grip yaws
   the craft (emergent, friction-limited).
+- **Ground control regime (reaction wheels).** With weight on the wheels,
+  `ShipParameters::max_torque` is masked per axis
+  (`wheel_torque_ground_mask`): **roll and yaw wheel torque are zeroed**
+  — yaw belongs to the rudder + nosewheel, and realizing pod reaction
+  wheels on the ground let a stick or SAS roll command torque the airframe
+  over its own gear at taxi speed ("tips over on the runway") — while
+  **pitch keeps** wheel assist so takeoff rotation stays available. The
+  mask is applied identically in the fly-by-wire controller's authority
+  normalization (`control_bus::realize_control`) and the force realization
+  (`apply_local_forces`), so commanded torque equals realized torque.
+- **Visual compression (strut swallow).** The rendered gear mesh is rigid,
+  so `ship_view::sync_gear_compression` slides each gearbox mesh up into
+  the hull by its wheels' live compression (published per gear part in
+  `GearVisualCompression` by the gear system), keeping the rendered wheels
+  on the pavement through the static sag and the landing stroke instead of
+  sinking them through it.
 - **Parking brake.** A latched toggle (`B`, `flight.parking_brake`),
   **engaged at startup** (`ParkingBrake::default` → `engaged: true`) so a
   spawned aircraft holds on the runway instead of creeping. When engaged,
@@ -1421,10 +1463,11 @@ acceleration accumulators.
   colliders are kept as the `SweptCcd`/impact backstop; with the craft
   spawned at gear-bottom clearance the belly rides above the surface and
   only engages on a gear-collapse/abnormal landing.
-- **Tuning.** `GearTuning` (spring stiffness, damping ratio, friction
-  `mu`, lateral stiffness, rolling `rolling_mu` + `rolling_hold_stiffness`,
-  parking-brake stiffness, max steer, travel, ray margin) is a
-  Reflect-registered resource (tune by editing the default and rebuilding).
+- **Tuning.** `GearTuning` (spring stiffness, compress/rebound damping
+  ratios + damper engagement fraction, friction `mu`, lateral stiffness,
+  rolling `rolling_mu` + `rolling_hold_stiffness`, parking-brake stiffness,
+  max steer, travel, ray margin + ray start lift) is a Reflect-registered
+  resource (tune by editing the default and rebuilding).
 
 **Driving requires thrust, which requires staged + fuelled engines.** The
 demo aircraft's engines only produce thrust once *activated* (staging —

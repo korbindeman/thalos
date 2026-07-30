@@ -276,6 +276,7 @@ fn finish_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
+    crate::part_mesh::add_raytracing_tangents(&mut mesh);
     mesh
 }
 
@@ -772,4 +773,15 @@ mod tests {
         assert!(left.thick_dir.z > 0.0, "left wing top faces up");
         assert!(right.tip_center.x > 0.0 && left.tip_center.x < 0.0);
     }
+    /// See `engine_mesh`'s copy: a mesh that misses the attribute set is
+    /// skipped by the BLAS builder silently.
+    #[test]
+    fn wing_mesh_is_raytracing_ready() {
+        assert!(crate::part_mesh::is_raytracing_ready(&build_wing_mesh(
+            &test_wing(),
+            0.0,
+            1.5
+        )));
+    }
+
 }

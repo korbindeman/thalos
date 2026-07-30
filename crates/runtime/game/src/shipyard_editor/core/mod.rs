@@ -4,8 +4,12 @@
 //! camera*: the [`EditorState`] command/state hub, part placement (attach
 //! nodes + surface mounts + KSP linked symmetry), live mesh rebuilds, the
 //! build-frame transform solve, selection/hover highlighting, the
-//! tank-resize handle, placement-preview ghost, interstage shrouds, and
-//! blueprint save/load against `ships/*.ron`.
+//! tank-resize handle, placement-preview ghost, and blueprint save/load
+//! against `ships/*.ron`.
+//!
+//! Interstage shrouds are **not** here: they are derived from the attach graph
+//! for the flight craft too, so they live in [`crate::shrouds`] as one shared
+//! reconcile pass over both worlds.
 //!
 //! This is the editor logic proper; its 2D UI + camera front-end is the
 //! sibling [`crate::shipyard_editor`] module (native Bevy UI). It reads the
@@ -35,7 +39,6 @@ pub mod debug_log;
 pub mod files;
 pub mod format;
 pub mod placement;
-pub mod shrouds;
 pub mod state;
 pub mod visuals;
 
@@ -179,8 +182,6 @@ impl Plugin for ShipEditorCorePlugin {
                     placement::deselect_on_empty_click,
                     debug_log::log_selection_changes.after(placement::deselect_on_empty_click),
                     visuals::propagate_coupled_material.after(visuals::rebuild_visuals),
-                    shrouds::sync_shrouds.after(visuals::update_part_transforms),
-                    shrouds::update_shroud_transparency.after(shrouds::sync_shrouds),
                 ),
             );
     }

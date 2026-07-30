@@ -133,6 +133,14 @@ pub struct EngineSpec {
     pub diameter: f32,
     pub thrust: f32,
     pub isp: f32,
+    /// Specific impulse at 1 atm, s. Authors the nozzle back-pressure loss:
+    /// thrust and effective Isp fall linearly with ambient pressure from the
+    /// vacuum rating down to this value (mass flow fixed) — see
+    /// [`crate::part::Engine::pressure_thrust_factor`]. Omit for
+    /// pressure-insensitive engines (air-breathers lapse with density
+    /// instead).
+    #[serde(default)]
+    pub sea_level_isp: Option<f32>,
     pub dry_mass: f32,
     pub reactants: Vec<ReactantRatio>,
     pub power_draw_kw: f32,

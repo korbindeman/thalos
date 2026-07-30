@@ -117,10 +117,10 @@ fn cascade_bias_m(texel_m: f32, slope: f32) -> f32 {
 // search there buys noise, not realism) and the per-vertex grass path keeps
 // its cheap point kernel.
 
-// tan of the sun's FULL angular diameter (~0.53°): metres of penumbra per
-// metre of caster→receiver light-space distance. Physical value — raise for a
-// softer, hazier-sun look.
-const SUN_TAN_ANGULAR_WIDTH: f32 = 0.0093;
+// tan of the sun's angular RADIUS (~0.266°): metres of penumbra radius per
+// metre of caster→receiver light-space distance. The old value used the full
+// diameter as a radius and made every separated edge about 2× too soft.
+const SUN_TAN_ANGULAR_RADIUS: f32 = 0.00465;
 // Blocker-search radius, in texels of the sampled cascade. Bounds the largest
 // occluder distance whose penumbra the search can notice; beyond it the
 // filter simply stays at its widest.
@@ -129,14 +129,6 @@ const PCSS_SEARCH_TEXELS: f32 = 6.0;
 // dense enough that 16 samples do not band.
 const PCSS_MAX_FILTER_TEXELS: f32 = 6.0;
 const PCSS_TAPS: i32 = 16;
-const PCSS_TAU: f32 = 6.28318530717958647;
-
-// Interleaved-gradient noise over shadow-MAP texel coordinates — a stable
-// per-fragment rotation for the Vogel disk. Keyed to the map space (not world
-// position) so a big_space origin rebase cannot re-roll it.
-fn pcss_rotation(map_pos: vec2<f32>) -> f32 {
-    return fract(52.9829189 * fract(dot(map_pos, vec2<f32>(0.06711056, 0.00583715)))) * PCSS_TAU;
-}
 
 // PCSS variant of [`cascade_factor`]. `clip_per_m` converts stored-depth
 // deltas back to light-space metres (`params.x`); `texel_m` is the cascade's
@@ -198,38 +190,38 @@ fn cascade_factor_pcss(
     // (2) Penumbra radius from the average occluder distance, in texels.
     let avg_occluder_m = occ_sum_m / occ_n;
     let radius_tx = clamp(
-        SUN_TAN_ANGULAR_WIDTH * avg_occluder_m / max(texel_m, 1.0e-6),
+        SUN_TAN_ANGULAR_RADIUS * avg_occluder_m / max(texel_m, 1.0e-6),
         0.0,
         PCSS_MAX_FILTER_TEXELS,
     );
 
     var lit = 0.0;
     if (radius_tx <= 1.2) {
-        // Contact range: the fixed tent is denser than a 16-tap disk at this
-        // radius and noise-free — identical to the pre-PCSS look, which was
-        // already right at contact.
+        // Contact range: a bilinear 2×2 comparison footprint. The previous
+        // 4×4 tent spread a nominally sharp contact edge across ~3 texels.
         let base = vec2<i32>(floor(map_pos));
         let f = map_pos - floor(map_pos);
-        var wx = vec4<f32>(1.0 - f.x, 1.0, 1.0, f.x) / 3.0;
-        var wy = vec4<f32>(1.0 - f.y, 1.0, 1.0, f.y) / 3.0;
-        for (var j = 0; j < 4; j = j + 1) {
-            for (var i = 0; i < 4; i = i + 1) {
-                let texel = clamp(base + vec2<i32>(i - 1, j - 1), vec2<i32>(0), dims_i - 1);
+        var weights = vec4<f32>(
+            (1.0 - f.x) * (1.0 - f.y),
+            f.x * (1.0 - f.y),
+            (1.0 - f.x) * f.y,
+            f.x * f.y,
+        );
+        for (var j = 0; j < 2; j = j + 1) {
+            for (var i = 0; i < 2; i = i + 1) {
+                let texel = clamp(base + vec2<i32>(i, j), vec2<i32>(0), dims_i - 1);
                 let stored = textureLoad(tex, texel, 0);
-                lit = lit + wx[i] * wy[j] * select(1.0, 0.0, stored > ndc.z + bias);
+                lit = lit + weights[j * 2 + i] * select(1.0, 0.0, stored > ndc.z + bias);
             }
         }
     } else {
-        // (3) Vogel-disk PCF at the penumbra radius, rotated per fragment so
-        // the sparse taps dither instead of banding.
-        let rot = pcss_rotation(map_pos);
-        let cr = cos(rot);
-        let sr = sin(rot);
+        // (3) Fixed-orientation Vogel disk. A per-fragment hash made the
+        // sparse pattern crawl as a moving edge crossed shadow-map texels; in
+        // this non-TAA renderer a deterministic kernel is the stable choice.
         for (var t = 0; t < PCSS_TAPS; t = t + 1) {
             let r = radius_tx * sqrt((f32(t) + 0.5) / f32(PCSS_TAPS));
             let a = f32(t) * 2.39996322972865332;
-            let d = vec2<f32>(cos(a), sin(a)) * r;
-            let off = vec2<f32>(d.x * cr - d.y * sr, d.x * sr + d.y * cr);
+            let off = vec2<f32>(cos(a), sin(a)) * r;
             let texel = clamp(vec2<i32>(map_pos + off + vec2<f32>(0.5)), vec2<i32>(0), dims_i - 1);
             let stored = textureLoad(tex, texel, 0);
             lit = lit + select(1.0, 0.0, stored > ndc.z + bias);
@@ -243,6 +235,40 @@ fn cascade_factor_pcss(
         edge_fade = 1.0 - smoothstep(0.85, 1.0, edge);
     }
     return 1.0 - strength * (1.0 - lit) * edge_fade;
+}
+
+// Normalized distance to the square cascade edge, or a negative sentinel when
+// the point is outside. Inner cascades remain valid all the way to 1.0 so the
+// receiver can cross-fade to the next map instead of switching maps in one
+// fragment.
+fn cascade_edge(world_pos: vec3<f32>, vp: mat4x4<f32>) -> f32 {
+    let clip = vp * vec4<f32>(world_pos, 1.0);
+    if clip.w <= 0.0 {
+        return -1.0;
+    }
+    let ndc = clip.xyz / clip.w;
+    if ndc.z < 0.0 || ndc.z > 1.0 {
+        return -1.0;
+    }
+    let edge = max(abs(ndc.x), abs(ndc.y));
+    return select(edge, -1.0, edge > 1.0);
+}
+
+const CASCADE_BLEND_START: f32 = 0.90;
+const CASCADE_BLEND_END: f32 = 0.99;
+
+fn cascade_blend(inner: f32, inner_edge: f32, outer: f32) -> f32 {
+    if inner < 0.0 {
+        return outer;
+    }
+    if outer < 0.0 {
+        return inner;
+    }
+    return mix(
+        inner,
+        outer,
+        smoothstep(CASCADE_BLEND_START, CASCADE_BLEND_END, inner_edge),
+    );
 }
 
 // ── Contact tier (W18a) ───────────────────────────────────────────────────────
@@ -415,26 +441,34 @@ fn sun_shadow_factor(
         return 1.0;
     }
     // No normal ⇒ assume a mid slope (1.0) and scale up for the missing offset.
-    var f = cascade_factor(
+    let f0 = cascade_factor(
         world_pos, block.view_proj[0],
         cascade_bias_m(block.params[0].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[0].x,
-        s, tex0, 0.98, false,
+        s, tex0, 1.0, false,
     );
-    if (f < 0.0) {
-        f = cascade_factor(
+    let e0 = cascade_edge(world_pos, block.view_proj[0]);
+    if f0 >= 0.0 && e0 < CASCADE_BLEND_START {
+        return f0;
+    }
+    let f1 = cascade_factor(
             world_pos, block.view_proj[1],
             cascade_bias_m(block.params[1].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[1].x,
-            s, tex1, 0.98, false,
-        );
+            s, tex1, 1.0, false,
+    );
+    if f0 >= 0.0 {
+        return cascade_blend(f0, e0, f1);
     }
-    if (f < 0.0) {
-        f = cascade_factor(
+    let e1 = cascade_edge(world_pos, block.view_proj[1]);
+    if f1 >= 0.0 && e1 < CASCADE_BLEND_START {
+        return f1;
+    }
+    let f2 = cascade_factor(
             world_pos, block.view_proj[2],
             cascade_bias_m(block.params[2].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[2].x,
             s, tex2, 1.0, true,
-        );
-    }
-    if (f < 0.0) {
+    );
+    let f = cascade_blend(f1, e1, f2);
+    if f < 0.0 {
         return 1.0;
     }
     return f;
@@ -454,25 +488,33 @@ fn sun_shadow_factor_vert(
     if (s <= 0.0) {
         return 1.0;
     }
-    var f = cascade_factor_point(
+    let f0 = cascade_factor_point(
         world_pos, block.view_proj[0],
         cascade_bias_m(block.params[0].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[0].x,
-        s, tex0, 0.98, false,
+        s, tex0, 1.0, false,
     );
-    if (f < 0.0) {
-        f = cascade_factor_point(
+    let e0 = cascade_edge(world_pos, block.view_proj[0]);
+    if f0 >= 0.0 && e0 < CASCADE_BLEND_START {
+        return f0;
+    }
+    let f1 = cascade_factor_point(
             world_pos, block.view_proj[1],
             cascade_bias_m(block.params[1].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[1].x,
-            s, tex1, 0.98, false,
-        );
+            s, tex1, 1.0, false,
+    );
+    if f0 >= 0.0 {
+        return cascade_blend(f0, e0, f1);
     }
-    if (f < 0.0) {
-        f = cascade_factor_point(
+    let e1 = cascade_edge(world_pos, block.view_proj[1]);
+    if f1 >= 0.0 && e1 < CASCADE_BLEND_START {
+        return f1;
+    }
+    let f2 = cascade_factor_point(
             world_pos, block.view_proj[2],
             cascade_bias_m(block.params[2].y, 1.0) * NO_NORMAL_BIAS_SCALE * block.params[2].x,
             s, tex2, 1.0, true,
-        );
-    }
+    );
+    let f = cascade_blend(f1, e1, f2);
     if (f < 0.0) {
         return 1.0;
     }
@@ -510,31 +552,42 @@ fn sun_shadow_factor_nrm(
     let offset1 = min(block.params[1].y * NORMAL_OFFSET_TEXELS * (1.0 + slope), NORMAL_OFFSET_MAX_M);
     let offset2 = min(block.params[2].y * NORMAL_OFFSET_TEXELS * (1.0 + slope), NORMAL_OFFSET_MAX_M);
 
-    var f = cascade_factor_pcss(
-        world_pos + normal * offset0,
+    let pos0 = world_pos + normal * offset0;
+    let f0 = cascade_factor_pcss(
+        pos0,
         block.view_proj[0],
         cascade_bias_m(block.params[0].y, slope) * block.params[0].x,
-        s, tex0, 0.98, false,
+        s, tex0, 1.0, false,
         block.params[0].x, block.params[0].y,
     );
-    if (f < 0.0) {
-        f = cascade_factor_pcss(
-            world_pos + normal * offset1,
+    let e0 = cascade_edge(pos0, block.view_proj[0]);
+    if f0 >= 0.0 && e0 < CASCADE_BLEND_START {
+        return f0;
+    }
+    let pos1 = world_pos + normal * offset1;
+    let f1 = cascade_factor_pcss(
+            pos1,
             block.view_proj[1],
             cascade_bias_m(block.params[1].y, slope) * block.params[1].x,
-            s, tex1, 0.98, false,
+            s, tex1, 1.0, false,
             block.params[1].x, block.params[1].y,
-        );
+    );
+    if f0 >= 0.0 {
+        return cascade_blend(f0, e0, f1);
     }
-    if (f < 0.0) {
-        f = cascade_factor_pcss(
-            world_pos + normal * offset2,
+    let e1 = cascade_edge(pos1, block.view_proj[1]);
+    if f1 >= 0.0 && e1 < CASCADE_BLEND_START {
+        return f1;
+    }
+    let pos2 = world_pos + normal * offset2;
+    let f2 = cascade_factor_pcss(
+            pos2,
             block.view_proj[2],
             cascade_bias_m(block.params[2].y, slope) * block.params[2].x,
             s, tex2, 1.0, true,
             block.params[2].x, block.params[2].y,
-        );
-    }
+    );
+    let f = cascade_blend(f1, e1, f2);
     if (f < 0.0) {
         return 1.0;
     }

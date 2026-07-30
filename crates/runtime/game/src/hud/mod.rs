@@ -28,7 +28,7 @@ pub(crate) mod format;
 mod fps_overlay;
 mod geo;
 pub mod input_gate;
-mod mfd;
+pub mod mfd;
 mod nav_attitude;
 mod nav_panel;
 mod orbital_panel;
@@ -152,6 +152,7 @@ impl Plugin for HudPlugin {
                         pfd_panel::update_attitude_display,
                         pfd_panel::update_tapes.after(orbital_panel::update),
                         pfd_panel::update_annunciators,
+                        pfd_panel::update_approach_guidance,
                     )
                         .chain(),
                 )

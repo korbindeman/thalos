@@ -342,22 +342,12 @@ const AMBIENT_DAY_TINT: Color = Color::srgb(0.62, 0.72, 0.95);
 /// universes' shadow fill actually meets (matched by capture on
 /// `massif-valley`: shadowed-ground p05 luminance 0.125 both sides).
 ///
-/// It was 0.2 on the theory that the env cubemap
-/// (`GeneratedEnvironmentMapLight`, painted from the same sky-view LUT) already
-/// delivered most of the sky's diffuse irradiance, so a full-strength flat
-/// ambient would count the sky twice. That reasoning does not survive the
-/// NTR-X5 calibration: **the cubemap is painted in scene-flux units** (radiance
-/// ~0.1–1.3) while Bevy consumes it in the same photometric space as the
-/// directional light's lux, so at `PROBE_INTENSITY = 1.0` its diffuse
-/// contribution is three orders of magnitude short of the sky it depicts —
-/// effectively zero. The 0.2 residual was therefore the *entire* sky fill, and
-/// tuned against an uncalibrated exposure at that: with the exposure fixed it
-/// left shadowed ground at a fifth of the spine's, crushing gullies to black
-/// and reading asphalt as a hole in the ground.
-///
-/// **If the env map is ever put on physical units** (W7/F7), this must come
-/// back down by whatever share the env then carries, or the sky *will* be
-/// double-counted — the failure the 0.2 was guarding against.
+/// The craft reflection cubemap is now converted through the same
+/// [`LUX_PER_SPINE_FLUX`] bridge, but the craft-local consumer binds a separate
+/// black diffuse map: the probe owns specular reflection only, while this flat
+/// projection remains the one diffuse-sky authority for every Bevy surface. Do
+/// not bind the producer's diffuse irradiance to the probe without reducing
+/// this term or the sky will be counted twice inside the probe volume.
 ///
 /// **0.7 → 0.38 (2026-07-29).** The 0.7 calibration predates the shadow
 /// direct/ambient split (BL-20260726T222119Z): it was matched against a shadow

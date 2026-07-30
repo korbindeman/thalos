@@ -1320,6 +1320,42 @@ the whole-disc producer smears; and the cloud *underside* still reads flat grey
 from below — that is the lighting budget (round 8's territory), not density,
 and needs the user's eye to judge.
 
+### Round 12 — the depth partition is a slab, not a constant (2026-07-29)
+
+User verdict on the `thin-clouds` viewpoint: clouds "look ghostly, pretty see
+through… we can see the terrain behind it", at some angles only.
+
+The near marcher runs before any per-view pass, so it never sees scene depth and
+integrates its whole in-shell chord — cloud behind a mountain included. The
+composite has to take that back out, and it only had **one distance** to do it
+with (the nearest hit), so `near_visibility` ramped opacity linearly over a
+**constant 5.4 km**. That constant is the defect, and it is the whole reason the
+symptom tracked the *backdrop* rather than the cloud: a cumulus entirely in front
+of ground a kilometre behind it was drawn at ~1/5 opacity, while the same cloud
+against open sky stayed solid.
+
+The march now reports the **span** its extinction occupies, not just where it
+starts: `cloud_distance_texture` is RG32F, `r` = nearest hit (unchanged, so
+temporal reprojection keys on the same value), `g` = `slab_far_distance` — the
+far end of the uniform slab whose first distance-moment matches the ray's real
+extinction profile. The partition is then taken in **optical depth** over that
+measured span, so both limits are exact by construction: terrain beyond the
+cloud's back face returns visibility 1 for any transmittance, terrain in front
+returns 0. Weighting the moment by optical depth (rather than taking the last
+hit) keeps a wispy tail sample — or a second cloud further down the same ray —
+from stretching the slab across empty air.
+
+Cost: +7 MiB of cloud targets at 1280×720 (105.2 → 112.2 MiB); no measurable GPU
+cost. Full post-mortem: INC-20260729T051739Z.
+
+**Open, and the dominant residual at that framing:** the *mid-distance* cloud in
+the same shot did not move — forcing the partition fully off changed its region
+mean by 0.12/255, so the partition was never active there. Its transparency is
+the near tier's own integrated optical depth, which is a separate defect
+(BL-20260729T051739Z-cloud-body-optical-depth). Step 1 there is an instrument:
+there is currently no way to read the volume's opacity out of a capture, which is
+why this had to be argued from region means rather than measured directly.
+
 ### Program acceptance matrix
 
 | Scenario | Pass condition |

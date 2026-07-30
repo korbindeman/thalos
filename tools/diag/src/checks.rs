@@ -51,11 +51,184 @@ pub fn run(stream: &Stream) -> Vec<Finding> {
     findings.extend(errors_and_warnings(stream));
     findings.extend(capture_health(stream));
     findings.extend(frame_health(stream));
+    findings.extend(shadow_health(stream));
+    findings.extend(planet_reflection_health(stream));
+    findings.extend(gear_ground_health(stream));
+    findings.extend(gpu_health(stream));
     findings.extend(memory_health(stream));
     findings.extend(silent_sessions(stream));
+    findings.extend(flow_effect_health(stream));
     findings.extend(lane_noise(stream));
     findings.sort_by_key(|finding| finding.severity);
     findings
+}
+
+// ── shadow coherence ────────────────────────────────────────────────────────
+
+fn shadow_health(stream: &Stream) -> Vec<Finding> {
+    let samples: Vec<_> = stream
+        .events("stability_gauge")
+        .filter(|record| record.target.ends_with("::shadow"))
+        .collect();
+    if samples.is_empty() {
+        return Vec::new();
+    }
+    let mut bad = 0usize;
+    let mut worst = 0.0_f64;
+    let mut session = "";
+    for record in &samples {
+        let error = record.f64("origin_frame_error_m").unwrap_or_default();
+        if error > SHADOW_ORIGIN_ERROR_M_ATTENTION {
+            bad += 1;
+            if error > worst {
+                worst = error;
+                session = &record.session;
+            }
+        }
+    }
+    if bad == 0 {
+        return Vec::new();
+    }
+    vec![
+        Finding::new(
+            Severity::Attention,
+            "shadow_frame_desync",
+            format!(
+                "{bad} of {} shadow gauges used the wrong render origin (worst {worst:.2} m)",
+                samples.len()
+            ),
+            format!("runtime.jsonl session={session} event=stability_gauge"),
+        )
+        .with_detail(
+            "a cell crossing must not move cascade cameras and receivers in different frames",
+        ),
+    ]
+}
+
+// ── orbital reflection of the planet ────────────────────────────────────────
+
+/// A polished hull in orbit reflects the planet through the impostor bake. Two
+/// ways that goes wrong produce a plausible image and no error:
+///
+/// - the bake is **absent** while the planet fills much of the reflected sky,
+///   so the hull mirrors a flat body tint (the wiring failure);
+/// - the bake is **bound but not varying**, which is how a wrong body-fixed
+///   rotation or a blank cube presents (the silent-content failure).
+///
+/// Both are invisible in a screenshot — a hull reflecting a flat disc and one
+/// reflecting continents differ subtly at a glance — which is exactly why the
+/// `planet_reflection` event exists and why it needs a reader.
+fn planet_reflection_health(stream: &Stream) -> Vec<Finding> {
+    let samples: Vec<_> = stream.events("planet_reflection").collect();
+    if samples.is_empty() {
+        return Vec::new();
+    }
+
+    let mut missing = 0usize;
+    let mut flat = 0usize;
+    let mut session = "";
+    let mut worst_spread = f64::INFINITY;
+    for record in &samples {
+        let disc_frac = record.f64("disc_frac").unwrap_or_default();
+        // The planet has to actually be in the reflected sky for its albedo to
+        // matter; a framing that points away from it is not a defect.
+        if disc_frac < REFLECTION_DISC_FRAC_MIN {
+            continue;
+        }
+        if record.bool("impostor") != Some(true) {
+            missing += 1;
+            session = &record.session;
+            continue;
+        }
+        let spread = record.f64("albedo_spread").unwrap_or_default();
+        if spread < REFLECTION_ALBEDO_SPREAD_FLAT {
+            flat += 1;
+            if spread < worst_spread {
+                worst_spread = spread;
+                session = &record.session;
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    if missing > 0 {
+        findings.push(
+            Finding::new(
+                Severity::Watch,
+                "reflection_bake_missing",
+                format!(
+                    "{missing} of {} reflection paints had the planet filling the sky with no impostor bake bound",
+                    samples.len()
+                ),
+                format!("runtime.jsonl session={session} event=planet_reflection impostor=false"),
+            )
+            .with_detail(
+                "hulls mirror a flat body tint instead of continents; check ImpostorAlbedoRegistry has an entry for this body",
+            ),
+        );
+    }
+    if flat > 0 {
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "reflection_bake_flat",
+                format!(
+                    "{flat} reflection paints sampled a bound bake that does not vary (spread {worst_spread:.4})"
+                ),
+                format!("runtime.jsonl session={session} event=planet_reflection albedo_spread"),
+            )
+            .with_detail(
+                "a bound-but-constant bake is a blank cube or a wrong body-fixed rotation, not a bland planet",
+            ),
+        );
+    }
+    findings
+}
+
+// ── landing gear vs floor backstop ──────────────────────────────────────────
+
+/// A wheeled craft (gear down) being carried by the terrain floor backstop
+/// means every suspension ray failed to find ground while the hull sat at the
+/// surface — the buried-ray / belly-slide defect (INC-20260729T073116Z). One
+/// event can be a touchdown transient; sustained carrying is the defect.
+fn gear_ground_health(stream: &Stream) -> Vec<Finding> {
+    let carried: Vec<_> = stream
+        .events("backstop_intervention")
+        .filter(|record| {
+            record.u64("gear_down") == Some(1)
+                && record.u64("weight_on_wheels") == Some(0)
+                && record.u64("destroyed") == Some(0)
+        })
+        .collect();
+    if carried.len() < GEAR_BACKSTOP_CARRY_EVENTS_ATTENTION {
+        return Vec::new();
+    }
+    let mut worst = 0.0_f64;
+    let mut session = "";
+    for record in &carried {
+        let penetration = record.f64("penetration_m").unwrap_or_default();
+        if penetration >= worst {
+            worst = penetration;
+            session = &record.session;
+        }
+    }
+    vec![
+        Finding::new(
+            Severity::Attention,
+            "gear_carried_by_backstop",
+            format!(
+                "a wheeled craft rode the floor backstop instead of its gear for ~{} s (worst hull penetration {worst:.2} m)",
+                carried.len()
+            ),
+            format!(
+                "runtime.jsonl session={session} event=backstop_intervention · compare event=gear_contact"
+            ),
+        )
+        .with_detail(
+            "gear down + zero weight-on-wheels while the backstop carries the hull = the \
+             suspension rays found no ground; expect a belly slide with no brakes",
+        ),
+    ]
 }
 
 // ── errors and warnings ─────────────────────────────────────────────────────
@@ -67,7 +240,7 @@ fn errors_and_warnings(stream: &Stream) -> Vec<Finding> {
     for record in &stream.records {
         // Capture failures arrive as WARN on the tool target and have their own
         // checks below; counting them twice would inflate every report.
-        if record.target.ends_with("::tool") {
+        if record.target.ends_with("::tool") || record.target.ends_with("::gpu_health") {
             continue;
         }
         let key = format!("{}·{}", record.subsystem(), record.event());
@@ -122,6 +295,204 @@ fn errors_and_warnings(stream: &Stream) -> Vec<Finding> {
     findings
 }
 
+// ── whole-card GPU health ──────────────────────────────────────────────────
+
+fn gpu_health(stream: &Stream) -> Vec<Finding> {
+    let samples: Vec<_> = stream
+        .events("sample")
+        .filter(|record| record.target.ends_with("::gpu_health"))
+        .collect();
+    let failures: Vec<_> = stream
+        .events("sample_error")
+        .filter(|record| record.target.ends_with("::gpu_health"))
+        .collect();
+    if samples.is_empty() && failures.is_empty() {
+        return Vec::new();
+    }
+
+    let mut findings = Vec::new();
+    if let Some(failure) = failures.last() {
+        let prior = samples
+            .iter()
+            .rev()
+            .find(|sample| sample.session == failure.session);
+        let mut finding = Finding::new(
+            Severity::Attention,
+            "gpu_adapter_lost",
+            format!(
+                "NVIDIA whole-card telemetry failed in {} runtime session{}",
+                failures
+                    .iter()
+                    .map(|record| record.session.as_str())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                plural(
+                    failures
+                        .iter()
+                        .map(|record| record.session.as_str())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len()
+                )
+            ),
+            format!(
+                "runtime.jsonl session={} event=sample_error",
+                failure.session
+            ),
+        )
+        .with_detail(
+            failure
+                .str("error")
+                .unwrap_or("NVML stopped seeing the adapter"),
+        );
+        if let Some(sample) = prior {
+            finding = finding.with_detail(gpu_sample_summary(sample));
+        }
+        findings.push(finding);
+    }
+
+    if let Some(worst) = samples.iter().max_by(|a, b| {
+        a.f64("memory_used_frac")
+            .unwrap_or_default()
+            .total_cmp(&b.f64("memory_used_frac").unwrap_or_default())
+    }) {
+        let used_frac = worst.f64("memory_used_frac").unwrap_or_default();
+        if used_frac >= GPU_MEMORY_USED_FRAC_ATTENTION {
+            findings.push(
+                Finding::new(
+                    Severity::Attention,
+                    "gpu_memory_pressure",
+                    format!(
+                        "whole-card VRAM reached {:.1}% ({:.0} of {:.0} MiB)",
+                        used_frac * 100.0,
+                        worst.f64("memory_used_mib").unwrap_or_default(),
+                        worst.f64("memory_total_mib").unwrap_or_default()
+                    ),
+                    format!(
+                        "runtime.jsonl session={} event=sample · reduce resident GPU resources",
+                        worst.session
+                    ),
+                )
+                .with_detail(gpu_sample_summary(worst)),
+            );
+        }
+    }
+
+    if let Some(hottest) = samples.iter().max_by(|a, b| {
+        a.f64("temperature_c")
+            .unwrap_or_default()
+            .total_cmp(&b.f64("temperature_c").unwrap_or_default())
+    }) {
+        let temperature_c = hottest.f64("temperature_c").unwrap_or_default();
+        if temperature_c >= GPU_TEMPERATURE_C_ATTENTION {
+            findings.push(
+                Finding::new(
+                    Severity::Attention,
+                    "gpu_thermal_pressure",
+                    format!(
+                        "GPU temperature reached {temperature_c:.0} °C across {} whole-card sample{}",
+                        samples.len(),
+                        plural(samples.len())
+                    ),
+                    format!(
+                        "runtime.jsonl session={} event=sample · inspect cooling and clocks",
+                        hottest.session
+                    ),
+                )
+                .with_detail(gpu_sample_summary(hottest)),
+            );
+        }
+    }
+
+    let mut thermal_by_session: BTreeMap<&str, Vec<_>> = BTreeMap::new();
+    for sample in &samples {
+        if sample.u64("clock_throttle_reasons").unwrap_or_default()
+            & (GPU_SW_THERMAL_SLOWDOWN_MASK | GPU_HW_THERMAL_SLOWDOWN_MASK)
+            != 0
+        {
+            thermal_by_session
+                .entry(sample.session.as_str())
+                .or_default()
+                .push(*sample);
+        }
+    }
+    if let Some((session, throttled)) = thermal_by_session
+        .into_iter()
+        .filter(|(_, records)| records.len() >= GPU_THERMAL_THROTTLE_SAMPLES_ATTENTION)
+        .max_by_key(|(_, records)| records.len())
+    {
+        let session_samples = samples
+            .iter()
+            .filter(|sample| sample.session == session)
+            .count();
+        let sw_thermal = throttled
+            .iter()
+            .filter(|sample| {
+                sample.u64("clock_throttle_reasons").unwrap_or_default()
+                    & GPU_SW_THERMAL_SLOWDOWN_MASK
+                    != 0
+            })
+            .count();
+        let hw_thermal = throttled
+            .iter()
+            .filter(|sample| {
+                sample.u64("clock_throttle_reasons").unwrap_or_default()
+                    & GPU_HW_THERMAL_SLOWDOWN_MASK
+                    != 0
+            })
+            .count();
+        let hw_slowdown = throttled
+            .iter()
+            .filter(|sample| {
+                sample.u64("clock_throttle_reasons").unwrap_or_default() & GPU_HW_SLOWDOWN_MASK != 0
+            })
+            .count();
+        let hottest = throttled
+            .iter()
+            .max_by(|a, b| {
+                a.f64("temperature_c")
+                    .unwrap_or_default()
+                    .total_cmp(&b.f64("temperature_c").unwrap_or_default())
+            })
+            .copied()
+            .expect("threshold guarantees a thermal sample");
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "gpu_thermal_throttle",
+                format!(
+                    "NVIDIA asserted thermal slowdown in {}/{} whole-card samples ({:.1}%)",
+                    throttled.len(),
+                    session_samples,
+                    throttled.len() as f64 / session_samples as f64 * 100.0
+                ),
+                format!(
+                    "runtime.jsonl session={session} event=sample · inspect GPU/memory cooling and driver"
+                ),
+            )
+            .with_detail(format!(
+                "NVML reason counts: software thermal {sw_thermal}, hardware thermal {hw_thermal}, hardware slowdown {hw_slowdown}"
+            ))
+            .with_detail(gpu_sample_summary(hottest)),
+        );
+    }
+
+    findings
+}
+
+fn gpu_sample_summary(record: &thalos_diagnostics::Record) -> String {
+    format!(
+        "card sample: {:.0}/{:.0} MiB, {:.0} °C, {:.0}/{:.0} W, {:.0}% GPU, {} MHz, throttle mask 0x{:x}",
+        record.f64("memory_used_mib").unwrap_or_default(),
+        record.f64("memory_total_mib").unwrap_or_default(),
+        record.f64("temperature_c").unwrap_or_default(),
+        record.f64("power_w").unwrap_or_default(),
+        record.f64("power_limit_w").unwrap_or_default(),
+        record.f64("gpu_util_frac").unwrap_or_default() * 100.0,
+        record.u64("graphics_clock_mhz").unwrap_or_default(),
+        record.u64("clock_throttle_reasons").unwrap_or_default(),
+    )
+}
+
 // ── capture lane ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Default)]
@@ -133,6 +504,10 @@ struct CaptureStats {
     booted: usize,
     ok_durations_ms: Vec<f64>,
     errors: BTreeMap<String, usize>,
+    /// One representative payload per failure reason. The reason groups the
+    /// cause; this says which crate failed to compile or what the host panicked
+    /// on, so a triage pass can act without opening the log.
+    error_examples: BTreeMap<String, BTreeMap<String, usize>>,
     boot_reasons: BTreeMap<String, usize>,
     lock_wait_ms: f64,
     lock_queued: usize,
@@ -145,6 +520,13 @@ fn capture_stats(stream: &Stream) -> CaptureStats {
             continue;
         }
         stats.total += 1;
+        // A game-owned renderer lease is an intentional workstation boundary,
+        // not a broken capture lane. The host exits before Bevy/wgpu starts;
+        // counting that refusal as a failure would make normal user play an
+        // ATTENTION finding and teach agents to work around the safety gate.
+        if record.str("launcher_exit_kind") == Some("renderer busy") {
+            continue;
+        }
         match record.str("outcome").unwrap_or_default() {
             "ok" => {
                 if let Some(total_ms) = record.f64("total_ms") {
@@ -154,10 +536,16 @@ fn capture_stats(stream: &Stream) -> CaptureStats {
             "abandoned" => stats.abandoned += 1,
             _ => {
                 stats.failed += 1;
-                *stats
-                    .errors
-                    .entry(record.str("error").unwrap_or("unknown").to_owned())
-                    .or_default() += 1;
+                let error = record.str("error").unwrap_or("unknown").to_owned();
+                *stats.errors.entry(error.clone()).or_default() += 1;
+                if let Some(detail) = record.str("launcher_exit_detail") {
+                    *stats
+                        .error_examples
+                        .entry(error)
+                        .or_default()
+                        .entry(detail.to_owned())
+                        .or_default() += 1;
+                }
             }
         }
         if record.u64("retry_count").unwrap_or(0) > 0 {
@@ -200,6 +588,14 @@ fn capture_health(stream: &Stream) -> Vec<Finding> {
         );
         for (message, count) in top_counts(&stats.errors) {
             finding = finding.with_detail(format!("{message:?} ×{count}"));
+            // The reason names the cause; this names the thing that caused it.
+            if let Some((example, _)) = stats
+                .error_examples
+                .get(message)
+                .and_then(|examples| top_counts(examples).into_iter().next())
+            {
+                finding = finding.with_detail(format!("    e.g. {example}"));
+            }
         }
         findings.push(finding);
     }
@@ -353,10 +749,7 @@ fn frame_health(stream: &Stream) -> Vec<Finding> {
                 Severity::Watch
             },
             "slow_frames",
-            format!(
-                "{count} × 2 s windows below 30 fps in one session (worst p95 {worst:.0} ms)",
-
-            ),
+            format!("{count} × 2 s windows below 30 fps in one session (worst p95 {worst:.0} ms)",),
             format!("just perf-report {session}"),
         ));
     }
@@ -399,43 +792,69 @@ fn memory_health(stream: &Stream) -> Vec<Finding> {
     }
 
     // Growth across a session, the open question behind the tile OOM: tiles can
-    // sit inside their budget while the process still climbs.
-    let mut worst: Option<(&str, f64, f64)> = None;
+    // sit inside their budget while the process still climbs. Prefer whole-
+    // process RSS where the session carries it (frame_gauge `rss_mib`, added
+    // 2026-07-29 after a host died at 8.1 GiB with every GPU gauge at ~2 GiB);
+    // older sessions fall back to the GPU-side tile + slab sum.
+    let mut worst: Option<(&str, f64, f64, bool)> = None;
     for (session, records) in stream.by_session() {
-        let series: Vec<f64> = records
+        let gauges: Vec<_> = records
             .iter()
             .filter(|record| record.event() == "frame_gauge")
-            .filter_map(|record| Some(record.f64("tile_mib")? + record.f64("slab_mib")?))
             .collect();
+        let rss: Vec<f64> = gauges
+            .iter()
+            .filter_map(|record| record.f64("rss_mib").filter(|v| *v > 0.0))
+            .collect();
+        let (series, is_rss) = if rss.is_empty() {
+            let gpu: Vec<f64> = gauges
+                .iter()
+                .filter_map(|record| Some(record.f64("tile_mib")? + record.f64("slab_mib")?))
+                .collect();
+            (gpu, false)
+        } else {
+            (rss, true)
+        };
         let (Some(first), Some(peak)) = (
             series.first().copied(),
-            series.iter().copied().fold(None, |acc: Option<f64>, value| {
-                Some(acc.map_or(value, |current: f64| current.max(value)))
-            }),
+            series
+                .iter()
+                .copied()
+                .fold(None, |acc: Option<f64>, value| {
+                    Some(acc.map_or(value, |current: f64| current.max(value)))
+                }),
         ) else {
             continue;
         };
         let growth = peak - first;
         if growth >= MEMORY_GROWTH_MIB_ATTENTION
-            && worst.is_none_or(|(_, previous, _)| growth > previous)
+            && worst.is_none_or(|(_, previous, _, _)| growth > previous)
         {
-            worst = Some((session, growth, peak));
+            worst = Some((session, growth, peak, is_rss));
         }
     }
-    if let Some((session, growth, peak)) = worst {
+    if let Some((session, growth, peak, is_rss)) = worst {
+        let (what, detail) = if is_rss {
+            (
+                "process RSS",
+                "read rss_mib against mesh_cpu_mib / image_cpu_mib / tile_mib / slab_mib in the \
+                 same gauges — the unattributed remainder is the lead",
+            )
+        } else {
+            (
+                "tile + mesh-slab memory",
+                "the open accumulation question behind the tile OOM — check whether tile_mib \
+                 plateaus while slab_mib climbs",
+            )
+        };
         findings.push(
             Finding::new(
                 Severity::Attention,
                 "memory_growth",
-                format!(
-                    "tile + mesh-slab memory grew {growth:.0} MiB within one session (peak {peak:.0} MiB)"
-                ),
+                format!("{what} grew {growth:.0} MiB within one session (peak {peak:.0} MiB)"),
                 format!("just perf-report {session} · runtime.jsonl event=frame_gauge"),
             )
-            .with_detail(
-                "the open accumulation question behind the tile OOM — check whether tile_mib \
-                 plateaus while slab_mib climbs",
-            ),
+            .with_detail(detail),
         );
     }
     findings
@@ -591,7 +1010,13 @@ mod tests {
     use serde_json::json;
     use thalos_diagnostics::Record;
 
-    fn record(session: &str, ts: u128, level: &str, target: &str, fields: serde_json::Value) -> Record {
+    fn record(
+        session: &str,
+        ts: u128,
+        level: &str,
+        target: &str,
+        fields: serde_json::Value,
+    ) -> Record {
         Record {
             session: session.to_owned(),
             ts_unix_ms: ts,
@@ -645,6 +1070,65 @@ mod tests {
         )
     }
 
+    fn reflection(session: &str, impostor: bool, disc_frac: f64, spread: f64) -> Record {
+        record(
+            session,
+            1_000,
+            "INFO",
+            "thalos::diagnostic::sky",
+            json!({
+                "event": "planet_reflection",
+                "impostor": impostor,
+                "body_id": 2,
+                "disc_texels": (disc_frac * 393_216.0) as u64,
+                "disc_frac": disc_frac,
+                "albedo_mean_r": 0.05,
+                "albedo_mean_g": 0.105,
+                "albedo_mean_b": 0.067,
+                "albedo_spread": spread,
+                "planet_ang_deg": 70.2,
+                "surface_blend": 0.5,
+            }),
+        )
+    }
+
+    /// The measured healthy case: Thalos from a 200 km orbit, impostor bound,
+    /// spread 0.046. Must stay silent, or the check is noise on every session
+    /// that works.
+    #[test]
+    fn a_working_orbital_reflection_is_silent() {
+        let findings = planet_reflection_health(&stream(vec![reflection("s", true, 0.36, 0.046)]));
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// The wiring failure: planet fills the reflected sky, no bake bound.
+    #[test]
+    fn a_missing_bake_is_reported() {
+        let findings = planet_reflection_health(&stream(vec![reflection("s", false, 0.36, 0.0)]));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "reflection_bake_missing");
+    }
+
+    /// The silent-content failure: bake bound but constant — a blank cube or a
+    /// wrong body-fixed rotation. This is the one a screenshot cannot show.
+    #[test]
+    fn a_bound_but_flat_bake_is_reported() {
+        let findings = planet_reflection_health(&stream(vec![reflection("s", true, 0.36, 0.0004)]));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "reflection_bake_flat");
+    }
+
+    /// A framing pointed away from the planet is not a defect, whatever the
+    /// bake state — otherwise every surface capture would fire this.
+    #[test]
+    fn a_planet_outside_the_reflected_sky_is_not_a_defect() {
+        let findings = planet_reflection_health(&stream(vec![
+            reflection("s", false, 0.001, 0.0),
+            reflection("s", true, 0.0, 0.0),
+        ]));
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
     /// A healthy day must print nothing. This is the check that keeps the tool
     /// worth reading: if a clean window produces findings, every real finding
     /// is buried.
@@ -660,10 +1144,87 @@ mod tests {
                 "thalos::diagnostic::perf",
                 json!({"event": "frame_gauge", "cpu_ms_p95": 8.0, "tile_mib": 300.0, "slab_mib": 200.0}),
             ));
+            records.push(record(
+                "s1",
+                1_000 + index,
+                "INFO",
+                "thalos::diagnostic::shadow",
+                json!({"event": "stability_gauge", "origin_frame_error_m": 0.0}),
+            ));
         }
         assert!(
             run(&stream(records)).is_empty(),
             "a clean window must stay silent"
+        );
+    }
+
+    /// A launcher exit is only useful if the window says *why*. The 2026-07-29
+    /// triage saw 13 identical `capture launcher exited` strings and could not
+    /// tell a build failure from a dead host (BL-20260729T070928Z).
+    #[test]
+    fn capture_failures_report_the_cause_and_its_payload() {
+        let details = |records: Vec<Record>| -> Vec<String> {
+            run(&stream(records))
+                .into_iter()
+                .filter(|finding| finding.id == "capture_failures")
+                .flat_map(|finding| finding.detail)
+                .collect()
+        };
+
+        let reported = details(vec![
+            shot(
+                "s",
+                1,
+                "error",
+                json!({
+                    "error": "capture launcher exited: workspace build failure",
+                    "launcher_exit_kind": "workspace build failure",
+                    "launcher_exit_detail":
+                        "error: could not compile `thalos_body_render` (lib) · error[E0609]",
+                }),
+            ),
+            shot(
+                "s",
+                2,
+                "error",
+                json!({
+                    "error": "capture launcher exited: capture host panic",
+                    "launcher_exit_kind": "capture host panic",
+                    "launcher_exit_detail":
+                        "panicked at wgpu_core.rs:2253:18 · Error in Buffer::get_mapped_range",
+                }),
+            ),
+        ]);
+
+        let joined = reported.join("\n");
+        assert!(
+            joined.contains("workspace build failure") && joined.contains("capture host panic"),
+            "the two causes must not collapse into one bucket: {joined}"
+        );
+        assert!(
+            joined.contains("thalos_body_render") && joined.contains("get_mapped_range"),
+            "each cause must carry the payload that makes it actionable: {joined}"
+        );
+    }
+
+    #[test]
+    fn renderer_busy_is_an_expected_refusal_not_a_capture_failure() {
+        let findings = run(&stream(vec![shot(
+            "s",
+            1,
+            "error",
+            json!({
+                "error": "capture launcher exited: renderer busy",
+                "launcher_exit_kind": "renderer busy",
+                "launcher_exit_detail":
+                    "GPU renderer lease unavailable: pid 42 owns the interactive game",
+            }),
+        )]));
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.id != "capture_failures"),
+            "playing the game must not make diagnostics report a broken capture lane"
         );
     }
 
@@ -721,6 +1282,86 @@ mod tests {
         )];
         assert!(ids(brake).contains(&"tile_budget_brake"));
 
+        let shadow_desync = vec![record(
+            "s",
+            1,
+            "INFO",
+            "thalos::diagnostic::shadow",
+            json!({"event": "stability_gauge", "origin_frame_error_m": 1000.0}),
+        )];
+        assert!(ids(shadow_desync).contains(&"shadow_frame_desync"));
+
+        let gpu_loss = vec![
+            record(
+                "s",
+                1,
+                "INFO",
+                "thalos::diagnostic::gpu_health",
+                json!({
+                    "event": "sample",
+                    "memory_used_mib": 4096.0,
+                    "memory_total_mib": 12288.0,
+                    "memory_used_frac": 0.333,
+                    "temperature_c": 70.0,
+                    "power_w": 180.0,
+                    "power_limit_w": 285.0,
+                    "gpu_util_frac": 0.8,
+                }),
+            ),
+            record(
+                "s",
+                2,
+                "ERROR",
+                "thalos::diagnostic::gpu_health",
+                json!({"event": "sample_error", "error": "NVML error 15: GPU is lost"}),
+            ),
+        ];
+        assert!(ids(gpu_loss).contains(&"gpu_adapter_lost"));
+
+        let gpu_pressure = vec![record(
+            "s",
+            1,
+            "INFO",
+            "thalos::diagnostic::gpu_health",
+            json!({
+                "event": "sample",
+                "memory_used_mib": 11800.0,
+                "memory_total_mib": 12288.0,
+                "memory_used_frac": 0.9603,
+                "temperature_c": 90.0,
+                "power_w": 270.0,
+                "power_limit_w": 285.0,
+                "gpu_util_frac": 1.0,
+            }),
+        )];
+        let pressure_ids = ids(gpu_pressure);
+        assert!(pressure_ids.contains(&"gpu_memory_pressure"));
+        assert!(pressure_ids.contains(&"gpu_thermal_pressure"));
+
+        let gpu_thermal_throttle = (1..=3)
+            .map(|timestamp| {
+                record(
+                    "s",
+                    timestamp,
+                    "INFO",
+                    "thalos::diagnostic::gpu_health",
+                    json!({
+                        "event": "sample",
+                        "memory_used_mib": 5800.0,
+                        "memory_total_mib": 12288.0,
+                        "memory_used_frac": 0.472,
+                        "temperature_c": 79.0,
+                        "power_w": 200.0,
+                        "power_limit_w": 285.0,
+                        "gpu_util_frac": 0.99,
+                        "graphics_clock_mhz": 2505,
+                        "clock_throttle_reasons": 32,
+                    }),
+                )
+            })
+            .collect();
+        assert!(ids(gpu_thermal_throttle).contains(&"gpu_thermal_throttle"));
+
         let growth = vec![
             record(
                 "s",
@@ -738,6 +1379,54 @@ mod tests {
             ),
         ];
         assert!(ids(growth).contains(&"memory_growth"));
+
+        // A session carrying `rss_mib` is judged on whole-process RSS — the
+        // massif-aerial OOM shape: GPU gauges flat, RSS runaway.
+        let rss_growth = vec![
+            record(
+                "s",
+                1,
+                "INFO",
+                "thalos::diagnostic::perf",
+                json!({"event": "frame_gauge", "cpu_ms_p95": 8.0, "tile_mib": 100.0, "slab_mib": 100.0, "rss_mib": 2000.0}),
+            ),
+            record(
+                "s",
+                2,
+                "INFO",
+                "thalos::diagnostic::perf",
+                json!({"event": "frame_gauge", "cpu_ms_p95": 8.0, "tile_mib": 100.0, "slab_mib": 100.0, "rss_mib": 8000.0}),
+            ),
+        ];
+        let rss_findings = run(&stream(rss_growth));
+        let rss_finding = rss_findings
+            .iter()
+            .find(|finding| finding.id == "memory_growth")
+            .expect("rss growth fires memory_growth");
+        assert!(
+            rss_finding.headline.contains("process RSS"),
+            "rss_mib series should be preferred over tile+slab: {}",
+            rss_finding.headline
+        );
+        // And flat RSS stays silent even while the GPU-side sum would have
+        // fired — RSS is the truth once it exists.
+        let rss_flat = vec![
+            record(
+                "s",
+                1,
+                "INFO",
+                "thalos::diagnostic::perf",
+                json!({"event": "frame_gauge", "cpu_ms_p95": 8.0, "tile_mib": 100.0, "slab_mib": 100.0, "rss_mib": 3000.0}),
+            ),
+            record(
+                "s",
+                2,
+                "INFO",
+                "thalos::diagnostic::perf",
+                json!({"event": "frame_gauge", "cpu_ms_p95": 8.0, "tile_mib": 900.0, "slab_mib": 900.0, "rss_mib": 3100.0}),
+            ),
+        ];
+        assert!(!ids(rss_flat).contains(&"memory_growth"));
 
         let errors = vec![record(
             "s",
@@ -784,4 +1473,119 @@ mod tests {
         // 2026-07-29T04:00:00Z
         assert_eq!(stamp(1_785_297_600_000), "2026-07-29 04:00Z");
     }
+
+    fn backstop_event(ts: u128, gear_down: u64, weight_on_wheels: u64) -> Record {
+        record(
+            "s",
+            ts,
+            "INFO",
+            "thalos::diagnostic::local_physics",
+            json!({
+                "event": "backstop_intervention",
+                "penetration_m": 0.62,
+                "excess_m": 0.12,
+                "gear_down": gear_down,
+                "weight_on_wheels": weight_on_wheels,
+                "destroyed": 0,
+            }),
+        )
+    }
+
+    /// The buried-ray defect signature: a gear-down craft carried by the
+    /// backstop with no weight on wheels, sustained past one throttle tick
+    /// (INC-20260729T073116Z — the belly-slide with no brakes).
+    #[test]
+    fn gear_carried_by_backstop_fires_on_sustained_carry() {
+        let findings = run(&stream(vec![
+            backstop_event(1_000, 1, 0),
+            backstop_event(2_000, 1, 0),
+        ]));
+        let ids: Vec<_> = findings.iter().map(|finding| finding.id).collect();
+        assert!(ids.contains(&"gear_carried_by_backstop"));
+    }
+
+    /// Silent when the wheels are carrying (backstop merely deep-caught a
+    /// transient), when the craft is gearless/gear-up (hull rest is the
+    /// intended contact), or when the carry lasted a single tick.
+    #[test]
+    fn gear_backstop_check_stays_silent_off_signature() {
+        // Wheels carrying alongside the backstop.
+        let wheels_loaded = stream(vec![backstop_event(1_000, 1, 1), backstop_event(2_000, 1, 1)]);
+        assert!(!run(&wheels_loaded)
+            .iter()
+            .any(|finding| finding.id == "gear_carried_by_backstop"));
+        // Gear up: hull-on-backstop is the crash/belly path, not this defect.
+        let gear_up = stream(vec![backstop_event(1_000, 0, 0), backstop_event(2_000, 0, 0)]);
+        assert!(!run(&gear_up)
+            .iter()
+            .any(|finding| finding.id == "gear_carried_by_backstop"));
+        // One tick = a touchdown transient.
+        let transient = stream(vec![backstop_event(1_000, 1, 0)]);
+        assert!(!run(&transient)
+            .iter()
+            .any(|finding| finding.id == "gear_carried_by_backstop"));
+    }
+}
+
+/// Vehicle flow effects fitted to the wrong body.
+///
+/// `reentry_shell_lit` publishes the craft bounds the shell actually resolved.
+/// This is the one thing a screenshot cannot tell you apart from a physics bug:
+/// both look like "the glow is in the wrong place". Every wrong-looking shell so
+/// far has been a bounds-resolution failure — first a bounding sphere standing in
+/// for an elongated hull, then a sweep that measured the effects' own proxy meshes
+/// and resolved a small cube on a long vehicle.
+fn flow_effect_health(stream: &Stream) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let Some(record) = stream
+        .records
+        .iter()
+        .rev()
+        .find(|r| r.event() == "reentry_shell_lit")
+    else {
+        return findings;
+    };
+
+    let meshes = record.u64("measured_mesh_count").unwrap_or(0);
+    if meshes < FLOW_BOUNDS_MESH_MIN {
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "flow_bounds_unmeasured",
+                format!(
+                    "the craft-bounds sweep measured {meshes} mesh(es) — every attached flow effect is sized from a default body"
+                ),
+                "runtime.jsonl · event=reentry_shell_lit, read measured_mesh_count and body_half_*_m;                  check the sweep in rendering::flow walks the PlayerShip descendants and that FlowProxyMesh is not over-applied",
+            )
+            .with_detail(format!(
+                "    resolved half-extents {:.2} x {:.2} x {:.2} m",
+                record.f64("body_half_x_m").unwrap_or(0.0),
+                record.f64("body_half_y_m").unwrap_or(0.0),
+                record.f64("body_half_z_m").unwrap_or(0.0),
+            )),
+        );
+        return findings;
+    }
+
+    let axes = [
+        record.f64("body_half_x_m").unwrap_or(0.0),
+        record.f64("body_half_y_m").unwrap_or(0.0),
+        record.f64("body_half_z_m").unwrap_or(0.0),
+    ];
+    let longest = axes.iter().cloned().fold(0.0f64, f64::max);
+    let shortest = axes.iter().cloned().fold(f64::INFINITY, f64::min);
+    if shortest > 0.0 && longest / shortest < FLOW_BOUNDS_CUBIC_RATIO {
+        findings.push(
+            Finding::new(
+                Severity::Watch,
+                "flow_bounds_cubic",
+                format!(
+                    "the measured craft box is near-cubic ({longest:.2} m vs {shortest:.2} m) — real vehicles are elongated, so the sweep likely missed the hull"
+                ),
+                "runtime.jsonl · event=reentry_shell_lit, compare body_half_*_m against the craft you can see in a capture",
+            )
+            .with_detail(format!("    measured from {meshes} descendant mesh(es)")),
+        );
+    }
+    findings
 }

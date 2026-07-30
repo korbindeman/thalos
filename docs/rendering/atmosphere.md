@@ -19,7 +19,7 @@ atmosphere renderer.
 | Rocky-body sky | **The shared `BodySkyMaterial` raymarch is canonical** (ADR-20260721T185221Z-custom-rocky-atmosphere). It reads the authored `AtmosphereBlock`, renders for every resident terrain view, and clips against shared opaque scene depth. `earth-reference` and `runway-atmosphere` are the orbital and surface regression probes. | Tune the orbital limb inside the shared optical model; complete terrain/atmosphere radiometric exposure unification without restoring a second renderer. |
 | Cloud rendering | **Dedicated cloud path:** the body-fixed compute march exports premultiplied radiance/transmittance plus hit depth; `CloudCompositeMaterial` is the sole near/orbital screen compositor and samples the same per-body weather field as `SolidPlanetMaterial`. Cloud lighting currently uses its analytic projection of the shared atmospheric coefficients. Gas-giant decks remain distinct. | Bind the shared Thalos sky/transmittance LUT explicitly while completing foreground/background atmosphere ordering, then shared cloud shadows and environment response. |
 | Oceans | One dedicated analytic-sphere `BodyOceanMaterial` path (ADR-20260720T185954Z / ADR-20260720T185958Z / ADR-20260721T050036Z): signed-field coverage, depth optics, shore response, four body-fixed mipmapped slope-texture cascades, anisotropic horizon filtering, filtered GGX energy, sparse slope-coupled foam, and atmosphere-derived sun/sky reflection. It is a sibling of the custom atmosphere and shares its optical contract. See [ocean.md](ocean.md). | Authored sea state, dynamic spectral displacement/Jacobian cascades, persistent foam, and bounded local shore/wake solvers behind the same analytic planet surface. |
-| Reflection probe | CPU painter: 256³ cubemap rewritten every 0.25 s with sun disc + Lambert planet hemisphere + dim starfield. Feeds Bevy's `GeneratedEnvironmentMapLight`. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
+| Reflection probe | CPU painter: 256²×6 cubemap, change-gated at 2 s real / 0.5 s under fast warp, with sun disc + Lambert planet hemisphere + dim starfield. A detached `GeneratedEnvironmentMapLight` producer filters it; a craft-local, specular-only `LightProbe` consumes the specular output at the canonical photometric scale and cancels inherited craft attitude so the world-authored cubemap stays world-aligned. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
 > **Rendering vs physics.** This doc covers atmosphere *rendering* (how the sky
 > and aerial perspective look). The *physical* atmosphere — air density vs
@@ -736,26 +736,56 @@ foundation (the single terrain height authority):
 
 ### Today
 
-Environment-map source for metallic ship-part reflections. Feeds
-Bevy's `GeneratedEnvironmentMapLight` on the main camera so
-`ShipPartMaterial` panels read the sky from the ship's orbital
-vantage.
+Environment-map source for metallic ship-part reflections. A detached
+`GeneratedEnvironmentMapLight` producer filters the painted cubemap; a
+craft-local Bevy `LightProbe` carries a plain `EnvironmentMapLight`
+that shares only the generated specular handle. `ShipPartMaterial`
+panels therefore read the sky from the selected ship's orbital vantage
+without projecting its planet disc onto every `StandardMaterial` in
+the camera view. The cubemap stores scene-flux radiance; probe intensity
+derives from the same `LUX_PER_SPINE_FLUX` bridge as direct sunlight,
+putting hull reflection and world lighting in one photometric scale.
 
-CPU-authored cubemap, rewritten every `REFRESH_INTERVAL` seconds
-(0.25 s) from the ship's current state:
+CPU-authored cubemap, reconsidered every 2 real seconds (0.5 s under
+fast warp, with direction and sim-time change gates) from the ship's
+current state:
 
-- Cubemap `Image` asset, 256³, 6 layers, `Rgba16Float`, cube view
+- Cubemap `Image` asset, 256² × 6 layers, `Rgba16Float`, cube view
   descriptor. `TEXTURE_BINDING | COPY_DST` usage — no
   render-attachment, since we're not rendering into it.
 - Painter reads ship-to-sun and ship-to-planet directions from
   `SimulationState`, plus the planet's angular radius from its
   physical radius and range. Each frame that hits the refresh tick,
-  all 6 faces get rewritten: sun disc (HDR hot spot), lit-side
-  planet hemisphere with a Lambert terminator, dim starfield tint
-  everywhere else.
-- Re-assigns the handle via `Assets<Image>::get_mut` which marks it
-  changed; Bevy's runtime filter pipeline re-prefilters diffuse +
+  all 6 faces get rewritten: sun disc (HDR hot spot), lit planet
+  disc with a Lambert terminator, dim starfield tint everywhere else.
+- **The orbital planet disc is the impostor bake, not a flat tint**
+  (2026-07-29). Each texel inside the disc solves the exact ray-sphere
+  hit, rotates the resulting normal into the body-fixed frame using the
+  rotation the renderer *drew the body with* (`PreciseRotation`, so a
+  tidally-locked body needs no special case), and samples the body's
+  `ImpostorAlbedo` — the same bake `SolidPlanetMaterial` shows the
+  player, held in `ImpostorAlbedoRegistry` so the two cannot disagree.
+  A mirror hull in orbit therefore reflects continents, coastlines and
+  ocean rather than one blue-grey constant. The flat `planet_color`
+  survives as the fallback for solid-colour and degraded bodies.
+  Clouds are **not** in the bake, so the reflected planet is a
+  cloudless one — the next increment, and the reason this is not yet
+  the whole orbital story.
+
+  The hit-normal solve is expressed in units of the planet radius
+  (`D/R = 1/planet_sin`) rather than absolute metres, because
+  `|oc|² − R²` at low orbit is ≈ 4.9e13 − 4.4e13 and keeps barely six
+  significant figures in f32. Verified against an f64 absolute-metre
+  solve from 30 km to 30,000 km altitude.
+- Mutates the image via `Assets<Image>::get_mut`, marking it changed;
+  Bevy's detached runtime filter producer re-prefilters diffuse +
   specular mips downstream.
+- The local consumer uses a separate black diffuse cubemap while sharing
+  the producer's generated specular handle. The producer keeps its real
+  diffuse storage target, and the `SkyAmbient` → `GlobalAmbientLight`
+  projection remains the one diffuse-sky authority. This prevents the
+  same sky irradiance being added twice inside the local probe volume
+  without corrupting the compute filter's output binding.
 
 Under a terrestrial atmosphere the painter blends by altitude (across
 the Kármán line) from that orbital model into a **surface sky**: the
@@ -774,9 +804,10 @@ baseline) is the one calibration dial. The multi-scatter LUT the bake
 needs is static per body, so it is cached (keyed by body id) and only
 the view-dependent sky-view LUT rebakes on a sun/altitude shift.
 
-F4 will project this same LUT to SH ambient for the terrain and
-`StandardMaterial` paths (the probe already consumes it for the hull),
-retiring the hand-tuned `GlobalAmbientLight`.
+`SkyAmbient` already projects this same LUT into the flat
+`GlobalAmbientLight` bridge for terrain and `StandardMaterial`
+diffuse fill. Full directional SH remains future work; the current
+craft probe deliberately does not compete with that diffuse authority.
 
 Lives in `crates/runtime/game/src/reflection_probe.rs`; the sky-view LUT
 mechanism in `crates/rendering/render/src/shading/sky_view.rs`.
@@ -805,9 +836,9 @@ Switch to real-scene capture when:
 - The painted-planet divergence from the impostor reads wrong at
   screenshot distance (a consistent visual bug, not a one-off).
 
-`GeneratedEnvironmentMapLight` is the stable contract on the main
-camera. Everything behind it can be swapped without touching ship
-materials or camera setup.
+Craft-local `LightProbe` + specular `EnvironmentMapLight` is the stable
+contract. Everything behind that consumer, including the detached
+realtime filter producer, can be swapped without touching ship materials.
 
 ### Status
 

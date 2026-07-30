@@ -38,9 +38,13 @@ use std::{io, sync::Arc};
 
 pub mod layer;
 pub mod paths;
+pub mod process;
 pub mod reader;
+pub mod renderer_lease;
 pub mod run;
 pub mod sink;
+#[cfg(windows)]
+mod windows_gpu_health;
 
 pub use layer::{JsonlDiagnosticLayer, is_diagnostic_target};
 pub use reader::{Record, Stream};
@@ -64,6 +68,12 @@ pub const TOOL_LOG_FILENAME: &str = "tools.jsonl";
 pub const RUNTIME_LOG_ENV: &str = "THALOS_RUNTIME_DIAGNOSTICS";
 /// Environment override for the developer-tool sink path.
 pub const TOOL_LOG_ENV: &str = "THALOS_TOOL_DIAGNOSTICS";
+/// Opt-in for one-second NVIDIA whole-card sampling on Windows.
+///
+/// The sampler is deliberately off during ordinary play and capture. Enable it
+/// only for GPU-loss/thermal investigations, where the final pre-loss sample is
+/// worth the extra always-on driver queries and diagnostic volume.
+pub const GPU_HEALTH_ENV: &str = "THALOS_GPU_HEALTH";
 
 /// Session role for a game-shaped process.
 pub const ROLE_RUNTIME: &str = "runtime";
@@ -75,7 +85,21 @@ pub const ROLE_RUNTIME: &str = "runtime";
 pub fn runtime_layer() -> io::Result<JsonlDiagnosticLayer> {
     let path = paths::jsonl_path_from_env_or(RUNTIME_LOG_ENV, RUNTIME_LOG_FILENAME);
     let sink = DiagnosticSink::install(DiagnosticSink::open(&path, ROLE_RUNTIME)?);
+    #[cfg(windows)]
+    if env_truthy(GPU_HEALTH_ENV) {
+        windows_gpu_health::start(Arc::clone(sink));
+    }
     Ok(JsonlDiagnosticLayer::new(Arc::clone(sink)))
+}
+
+#[cfg(windows)]
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 /// Install the developer-tool lane as this process's global tracing subscriber.

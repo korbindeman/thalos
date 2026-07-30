@@ -1,7 +1,7 @@
 # Rocket engine plumes
 
 Liquid-engine exhaust is rendered as a **data-driven, pressure-responsive
-billboard effect** evaluated from engine state and local atmosphere. This is the
+volumetric effect** evaluated from engine state and local atmosphere. This is the
 consumer-side visual layer over the shipyard's `Engine` parts; it owns *how a
 firing engine looks*, not *what the engine is* (that stays in `thalos_shipyard`).
 
@@ -10,6 +10,14 @@ path for solids) is captured in the uploaded concept note; this doc tracks what
 is **built** and the seams the later phases extend.
 
 ## Status
+
+**Phase 4 (built, 2026-07-29) — the plume became a volume.** The billboard is
+gone: the fragment stage now integrates the same emission model along the
+**actual view ray** through an axisymmetric envelope, rasterized by a proxy
+prism that is never seen. This fixed a failure that was structural, not a tuning
+miss — see *The view-ray integral* below. Screenshot-verified across an
+elevation sweep (side-on → straight down the exhaust). Motion and the
+orbiting-camera cue remain unverifiable from stills.
 
 **Phase 3 (built, 2026-07-25) — turbulent motion + a single length authority.**
 The column now convects like a turbulent jet rather than sliding as one rigid
@@ -71,7 +79,7 @@ Engine sim (EngineThrust + ThrottleState)   local atmosphere (ambient pressure)
                                                        │
                             update_plume_visuals ──► PlumeParams (flat uniform)
                                                        │
-                                              plume.wgsl (billboard + volumetric)
+                                        plume.wgsl (proxy prism + ray integral)
 ```
 
 - **`PlumeSignals`** (component on the engine entity) is the single typed
@@ -132,7 +140,7 @@ hack that had a visible failure mode:
 **The visible length falls out of the model, and nothing else may touch it.**
 `visible_length_m` bisects the CPU twin of the fragment's own chain — both layers,
 gain included — for the station where the rendered radiance drops below
-`VISIBLE_RADIANCE`, and the billboard is cut exactly there. Every input that
+`VISIBLE_RADIANCE`, and the march is cut exactly there. Every input that
 should shorten a plume feeds that chain instead of trimming its result:
 
 | input | acts through |
@@ -168,26 +176,73 @@ positionally (`anim.w`, `shock.z`, …). Repurposing a lane is a rename, not an
 edit: audit every reader on both sides first. Getting this wrong erased the
 vacuum plume entirely — see INC-0020.
 
-## The billboard + volumetric fragment
+## The view-ray integral
 
-`plume.wgsl` renders a unit quad (built once, shared) as a **cylindrical
-billboard**: the vertex stage locks it to the engine's exhaust axis (part-local
-`-Y`, opposite thrust) but rotates it about that axis to face the camera, so a
-flat strip reads as a round plume from any side view.
+**The plume is integrated along the real view ray, not across an assumed
+perpendicular chord.** This is the same principle that earlier replaced a
+coverage mask with `1 − exp(−τ)`, taken one step further, and it is what makes
+the column hold up from every direction.
 
-The fragment stage integrates a radially-symmetric density through that round
-cross-section (analytic chord through a cylinder of radius `R(t)`), so the plume
-is bright and thick on-axis and feathers to nothing at the silhouette — no hard
-mesh edge. On that envelope it layers the emission temperature field: a hot
-near-nozzle core, shock-diamond (Mach-disk) compression nodes that fade
-downstream, a cooler mixing-layer sheath, and animated turbulent breakup. Colour
-comes from a three-stop propellant palette (edge → mid → core) indexed by
-temperature.
+The mesh is a closed **proxy prism** around the exhaust axis, sized by
+`bound_radius(s)` — a strictly conservative, noise-free over-estimate of the
+envelope. It is a rasterization bound and nothing else: its silhouette is never
+seen, because the visible edge comes from the density integral reaching zero.
+Front faces are kept (back faces culled) so each ray shades exactly once and the
+plume keeps depth-testing at the surface where the column starts.
 
-The mesh uses **normalized axial coordinates** (`v` = axial 0→1, `x` = lateral
-−1→1); the vertex shader scales and orients it from `PlumeParams`, so shape and
-pressure response change with no runtime mesh regeneration (design note decision
-#1: procedural radial profile in the shader, not authored blend targets).
+The fragment reconstructs the world-space ray, clips it to a bounding cylinder,
+and marches, accumulating the *same* chain per sample: the compact-support
+radial profiles are now **local densities** rather than pre-integrated chords,
+so a side-on ray still accumulates exactly the optical depth the look was tuned
+against (`∫(1−(r/R)²)^½` along a perpendicular chord *is* `(π/2)·R·(1−(p/R)²)`,
+the closed form it replaced). Core and sheath keep independent transmittances,
+preserving the previous "neither layer absorbs the other" balance.
+
+### Why the billboard had to go
+
+It was a **cylindrical billboard**: a flat strip locked to the exhaust axis and
+rotated about it to face the camera. That construction degenerates as the view
+swings onto the axis — and the degenerate case is not a rare grazing angle, it is
+looking up the exhaust, where a real plume is at its **brightest**, because the
+line of sight runs the entire length of the column. Measured on the `plume`
+preset at fixed azimuth: correct at 1°, a flat triangular flap with hard straight
+edges by 80°, and at 90° **the plume vanished completely**. No "stable
+perpendicular" fallback can help; a quad seen edge-on covers no pixels whatever
+its orientation. The old code's comment that this degenerates "to a sliver, which
+is correct end-on" was the bug, stated out loud.
+
+Two lesser angle defects went with it: at oblique angles the perpendicular-chord
+assumption **under-estimated** the path length by roughly `1/sin(view-to-axis)`,
+so the column thinned exactly as it should have thickened; and the turbulence
+azimuth was recovered from the billboard's own lateral coordinate (`asin(x)`), so
+the entire eddy field counter-rotated with the camera — the cue that reads as
+"sticker" rather than "object".
+
+### Consequences to respect
+
+- **`bound_radius` must stay an over-estimate.** It is not a second shape
+  authority. If it ever cut inside the envelope it would clip a still-emitting
+  column — the class of defect in
+  INC-20260724T235437Z-plume-ended-on-a-lit-rim.
+- **Azimuth is engine-fixed, and its noise wraps.** `turbulence` takes the true
+  azimuth in turns and samples `value_noise_wrapped`, whose period *must* be a
+  whole number or a stationary seam appears down one meridian. The per-layer
+  periods (44/94/22) reproduce the pre-raymarch angular frequencies.
+- **Per-sample weighting dilutes what per-chord weighting did not.** The
+  Mach-disk concentration `pow(fc, 3)` was authored against an `fc` evaluated
+  once per chord; averaged inside the integral its on-axis peak lands at 0.547
+  of that, which showed up as a visibly softer shock train. `SHOCK_NODE_MARCH_GAIN`
+  restores the authored peak analytically rather than by eye. Any future term
+  that concentrates toward the axis inherits this correction.
+
+Shape and pressure response still change with no runtime mesh regeneration
+(design note decision #1: procedural radial profile in the shader, not authored
+blend targets).
+
+**Known gap:** a camera *inside* the bounding prism (inside the exhaust) loses
+the part of the volume behind the near plane. Fixing it properly means clamping
+the march against scene depth, which would also make the plume intersect hull and
+terrain volumetrically instead of at a flat depth-test.
 
 ## Motion
 
@@ -214,14 +269,16 @@ What this shader does, and why each piece is there:
   slow layer's weight ramps up toward the tail, where the jet has broken down.
 - **The silhouette boils.** `radius_wobble` perturbs the envelope radius as eddies
   pass. It is a function of `s` alone so the vertex and fragment stages agree
-  exactly and the mesh edge stays *on* the analytic envelope.
+  exactly. (Pre-Phase-4 this also kept the mesh edge *on* the envelope; the
+  proxy prism now merely bounds it, but the two stages must still agree or the
+  bound can clip the column.)
 - **Laminar where it should be.** Turbulence amplitude is gated by `breakup(s)`,
   which is zero inside the potential core (the un-mixed cone that survives until
   the shear layer reaches the axis) and one where the jet has fully broken down.
   Past the core, sheath growth accelerates and the tail disperses.
 - **Flicker.** Low-frequency combustion roughness on gain and exit temperature,
   worse at low throttle, damped in vacuum. It only ever *dims and shortens*, so
-  the visible column always stays inside the mesh the CPU sized for the
+  the visible column always stays inside the span the CPU sized for the
   unflickered state.
 - **Shock cells lengthen downstream.** A constant wavenumber produces an evenly
   spaced ladder of identical rungs; the phase is now `k·ln(1+g·s)/g`. Compression

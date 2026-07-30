@@ -10,6 +10,7 @@ use crate::navball::ui::{
 };
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::target::TargetBody;
+use crate::units_settings::UnitDomain;
 use crate::velocity_frame::{VelocityFrameState, next_frame};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
@@ -178,7 +179,7 @@ pub fn update(
 
     if let Ok(mut t) = vel_q.single_mut() {
         let s = match basis {
-            Some(b) => format::speed(b.speed, units.system),
+            Some(b) => format::speed(b.speed, units.system_for(UnitDomain::General)),
             None => "—".to_string(),
         };
         if t.0 != s {

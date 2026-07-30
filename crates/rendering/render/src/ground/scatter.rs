@@ -194,13 +194,23 @@ pub struct PlacementSample {
 ///
 /// This is the exact slope/curvature/mask/normal block grass placement uses,
 /// factored out so grass, shrubs, and trees share one definition.
+///
+/// `min_height_m` is the caller's height floor (sea level + beach clearance;
+/// `f32::MIN` disables it): a candidate at or below it returns `None` after the
+/// **first** probe instead of paying the 4-probe stencil — on an ocean or
+/// coastal tile that is every candidate, and the stencil is 4/5 of the gate's
+/// sampling cost.
 pub fn placement_gate(
     source: &dyn HeightSource,
     basis: &TerrainPatchBasis,
     dir: DVec3,
     radius_m: f64,
+    min_height_m: f32,
 ) -> Option<PlacementSample> {
     let height_m = source.sample_height_m(dir.as_vec3(), PLACEMENT_LOD_M)?;
+    if height_m <= min_height_m {
+        return None;
+    }
 
     let p = dir * radius_m;
     let probe =
@@ -256,6 +266,16 @@ pub enum VegLayer {
     /// only up close (no impostor band).
     Rock,
 }
+
+impl VegLayer {
+    /// This layer's bit in [`VegScatterInput::layer_mask`].
+    pub const fn mask(self) -> u32 {
+        1 << self as u32
+    }
+}
+
+/// [`VegScatterInput::layer_mask`] value placing every layer.
+pub const VEG_ALL_LAYERS: u32 = (1 << 4) - 1;
 
 /// Placement parameters for one species. Asset-handle-free, so it can be
 /// snapshotted into the async scatter build; the game-side `SpeciesLibrary`
@@ -350,15 +370,25 @@ pub struct VegScatterInput {
     /// `keep_fraction`) keep this at `1.0` and thin instead.
     pub spacing_scale: f32,
     /// Nested-subset thinning fraction in `[0, 1]` (`1.0` = keep every survivor).
-    /// Applied *after* Poisson elimination as a deterministic per-cell hash gate,
-    /// so a ring with a smaller fraction renders a strict **subset** of a finer
-    /// ring's trees **at the identical positions** — provided both share the grid
-    /// (`spacing_scale = 1`). That is what makes the near↔far handoff keep each
-    /// tree *in place* (only the density-delta infill fades in on approach)
-    /// instead of dissolving one independent grid into another. Evaluated before
-    /// the height gate, so a decimated ring doesn't pay the gate for thinned-out
-    /// candidates.
+    /// A deterministic per-cell hash gate, so a ring with a smaller fraction
+    /// renders a strict **subset** of a finer ring's trees **at the identical
+    /// positions** — provided both share the grid (`spacing_scale = 1`). That is
+    /// what makes the near↔far handoff keep each tree *in place* (only the
+    /// density-delta infill fades in on approach) instead of dissolving one
+    /// independent grid into another. Evaluated before Poisson elimination and
+    /// the height gate (thinning a candidate never affects its neighbours'
+    /// elimination — that reads the raw cell candidates — so the survivors are
+    /// identical either way, and a decimated ring skips both costs for
+    /// thinned-out candidates).
     pub keep_fraction: f32,
+    /// Which [`VegLayer`]s to place, as [`VegLayer::mask`] bits
+    /// ([`VEG_ALL_LAYERS`] = everything). The driver knows which layers the
+    /// finished tile can actually draw — an impostor or mid-LOD tile renders
+    /// trees only — and placement cost is dominated by the densest grid (the
+    /// 2.3 m shrub grid iterates ~6× the cells of the 5.5 m tree grid), so
+    /// skipping undrawable layers is the difference between paying for a
+    /// forest and paying for a forest plus an invisible understory.
+    pub layer_mask: u32,
 }
 
 /// One Poisson candidate: the body-global cell `(face, ci, cj)` hashes to a
@@ -473,6 +503,9 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
 
     let mut instances = Vec::new();
     for layer in [VegLayer::Shrub, VegLayer::Tree, VegLayer::Rock] {
+        if input.layer_mask & layer.mask() == 0 {
+            continue;
+        }
         // Members of this layer + the combined grid spacing (the widest member,
         // so even the largest canopy never interpenetrates a neighbour) + the
         // total mix weight for the per-point species draw.
@@ -527,6 +560,23 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 if !(cand.u >= u_lo && cand.u < u_hi && cand.v >= v_lo && cand.v < v_hi) {
                     continue;
                 }
+
+                let key = TileKey { face, x: ci, y: cj };
+
+                // Nested-subset thinning, BEFORE the elimination scan and the
+                // height gate (see `keep_fraction` — thinning a candidate never
+                // changes its neighbours' elimination, which reads the raw cell
+                // candidates, so this is a pure cost reorder). A pure hash of
+                // the *global* cell → a coarse ring (small `keep_fraction`) drops
+                // the same cells every finer ring keeps, so its trees are a strict
+                // subset at identical positions. The finer ring only *adds* the
+                // dropped ("infill") trees on approach; the shared ones never move.
+                if input.keep_fraction < 1.0
+                    && veg_hash(input.seed, key, grid_id, 1, SALT_THIN)
+                        >= input.keep_fraction as f64
+                {
+                    continue;
+                }
                 if !survives_elimination(
                     input.seed,
                     face,
@@ -543,19 +593,6 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                 }
 
                 let dir = cand.dir;
-                let key = TileKey { face, x: ci, y: cj };
-
-                // Nested-subset thinning (before the height gate). A pure hash of
-                // the *global* cell → a coarse ring (small `keep_fraction`) drops
-                // the same cells every finer ring keeps, so its trees are a strict
-                // subset at identical positions. The finer ring only *adds* the
-                // dropped ("infill") trees on approach; the shared ones never move.
-                if input.keep_fraction < 1.0
-                    && veg_hash(input.seed, key, grid_id, 1, SALT_THIN)
-                        >= input.keep_fraction as f64
-                {
-                    continue;
-                }
 
                 let rng = |salt: u64| veg_hash(input.seed, key, grid_id, 0, salt);
 
@@ -578,12 +615,17 @@ pub fn build_scatter_tile(input: &VegScatterInput) -> Option<VegScatterTile> {
                     continue;
                 }
 
-                let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
+                // The gate carries the sea/beach floor so underwater candidates
+                // cost one probe, not five.
+                let Some(sample) = placement_gate(
+                    source,
+                    &basis,
+                    dir,
+                    input.radius_m,
+                    input.sea_level_m + VEG_BEACH_CLEAR_M,
+                ) else {
                     continue;
                 };
-                if sample.height_m <= input.sea_level_m + VEG_BEACH_CLEAR_M {
-                    continue;
-                }
                 if sample.slope > sp.slope_limit || sample.grass_w < sp.min_grass_w {
                     continue;
                 }
@@ -1221,6 +1263,7 @@ mod tests {
             flatten_exclusion: None,
             spacing_scale: 1.0,
             keep_fraction: 1.0,
+            layer_mask: VEG_ALL_LAYERS,
         };
         let a = build_scatter_tile(&input).expect("flat land scatters trees");
         let b = build_scatter_tile(&input).expect("flat land scatters trees");
@@ -1250,6 +1293,7 @@ mod tests {
             flatten_exclusion: None,
             spacing_scale: 1.0,
             keep_fraction: 1.0,
+            layer_mask: VEG_ALL_LAYERS,
         };
         assert!(build_scatter_tile(&input).is_none());
     }
@@ -1266,6 +1310,7 @@ mod tests {
             flatten_exclusion: None,
             spacing_scale: 1.0,
             keep_fraction: 1.0,
+            layer_mask: VEG_ALL_LAYERS,
         }
     }
 

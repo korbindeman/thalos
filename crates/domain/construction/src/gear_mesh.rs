@@ -182,6 +182,7 @@ pub fn build_gear_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Mesh {
     // ring verts so it shades round. `compute_smooth_normals` (unlike
     // `compute_flat_normals`) works on indexed geometry, which this is.
     mesh.compute_smooth_normals();
+    crate::part_mesh::add_raytracing_tangents(&mut mesh);
     mesh
 }
 
@@ -236,6 +237,7 @@ pub fn build_gear_bay_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Mesh 
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
+    crate::part_mesh::add_raytracing_tangents(&mut mesh);
     mesh
 }
 
@@ -544,4 +546,20 @@ mod tests {
         // Width is small (wheel half-thickness), nowhere near a 0.6·radius track.
         assert!(max.x < 0.3, "no lateral track for the nose leg");
     }
+    /// See `engine_mesh`'s copy: a mesh that misses the attribute set is
+    /// skipped by the BLAS builder silently.
+    #[test]
+    fn gear_meshes_are_raytracing_ready() {
+        assert!(crate::part_mesh::is_raytracing_ready(&build_gear_mesh(
+            &main_gear(),
+            0.0,
+            1.5
+        )));
+        assert!(crate::part_mesh::is_raytracing_ready(&build_gear_bay_mesh(
+            &nose_gear(),
+            0.0,
+            1.5
+        )));
+    }
+
 }

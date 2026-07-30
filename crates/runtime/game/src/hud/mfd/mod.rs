@@ -43,7 +43,7 @@ use thalos_physics_local::LocalCraftBody;
 use crate::aero::AeroReadout;
 use crate::fuel::ThrottleState;
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::structures::{StructureKind, StructurePlacement, StructureRegistry, StructureSite};
+use crate::structures::{StructureKind, StructureRegistry, StructureSite};
 use crate::view::ViewMode;
 
 use super::HudPanel;
@@ -158,15 +158,13 @@ enum MfdTab {
 /// the body's spin frame). Shared by the context's nearest-runway scan and
 /// the ND widget's projection.
 pub(super) fn runway_surface_inertial(
+    registry: &StructureRegistry,
     site: &StructureSite,
     body_radius_m: f64,
     body_pos: DVec3,
     body_orientation: DQuat,
 ) -> DVec3 {
-    let elevation_m = match site.placement {
-        StructurePlacement::FlattenTo { elevation_m, .. } => elevation_m,
-        StructurePlacement::Drape => 0.0,
-    };
+    let elevation_m = registry.site_elevation_m(site);
     body_pos + body_orientation * (site.anchor_dir * (body_radius_m + elevation_m))
 }
 
@@ -193,6 +191,8 @@ impl Plugin for MfdPlugin {
                     select_active_widget,
                     widgets::trajectory::update,
                     widgets::nav_display::update,
+                    widgets::nav_display::handle_canvas_click,
+                    widgets::nav_display::handle_select_buttons,
                     handle_tab_clicks,
                     update_tab_visuals,
                 )
@@ -364,7 +364,8 @@ fn update_flight_context(
             if !matches!(site.kind, StructureKind::Runway { .. }) {
                 continue;
             }
-            let surf = runway_surface_inertial(site, body_radius_m, bs.position, bs.orientation);
+            let surf =
+                runway_surface_inertial(&structures, site, body_radius_m, bs.position, bs.orientation);
             best = best.min((surf - ship.position).length());
         }
         if best.is_finite() {

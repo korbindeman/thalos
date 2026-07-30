@@ -48,6 +48,23 @@ pub struct Finding {
     pub next: String,
 }
 
+/// A vehicle flow effect (plume, reentry shock layer) sizes itself from the
+/// craft's measured visual bounds. Below this many measured descendant meshes the
+/// sweep has plainly not found the vehicle, and every attached effect is running
+/// on a default size — which renders as an effect fitted to the wrong body rather
+/// than as anything missing, so nothing else reports it.
+///
+/// Two is the floor rather than one because the smallest authored craft still
+/// carries a hull plus at least one appendage; a single measured mesh has always
+/// meant the sweep stopped early.
+pub const FLOW_BOUNDS_MESH_MIN: u64 = 2;
+
+/// Aspect ratio above which a measured craft box is suspiciously cubic for a
+/// vehicle. Real craft are elongated; a box whose longest and shortest axes agree
+/// this closely usually means the sweep measured one placeholder mesh instead of
+/// the hull.
+pub const FLOW_BOUNDS_CUBIC_RATIO: f64 = 1.05;
+
 impl Finding {
     pub fn new(
         severity: Severity,
@@ -133,6 +150,44 @@ pub const SLOW_GAUGES_ATTENTION: usize = 10;
 /// (INC-20260725T012104Z), so it is checked explicitly rather than left to a
 /// crash to reveal.
 pub const MEMORY_GROWTH_MIB_ATTENTION: f64 = 1024.0;
+/// The cascade cameras live outside big_space and must use exactly the cell
+/// origin the current frame renders against. Anything above one centimetre is
+/// not floating-point noise; it is a scheduling/frame mismatch and can move
+/// every shadow edge at once.
+pub const SHADOW_ORIGIN_ERROR_M_ATTENTION: f64 = 0.01;
+/// Below this, the planet painted into the reflection cubemap is effectively a
+/// flat tint — the impostor bake is bound but is not varying, which is how a
+/// broken body-fixed rotation or a blank bake presents. Set well under the
+/// 0.046 measured on Thalos from a 200 km orbit (≈ 51 % of mean luminance) and
+/// far above the 0.0 a genuine constant produces, so it separates the two
+/// without firing on a legitimately bland body.
+pub const REFLECTION_ALBEDO_SPREAD_FLAT: f64 = 0.005;
+/// Share of the reflection cubemap the planet must cover before a missing bake
+/// is worth reporting. Below this the planet is a minor feature of the
+/// reflected sky; at and above it, reflecting a flat disc is a visible defect
+/// on a polished hull.
+pub const REFLECTION_DISC_FRAC_MIN: f64 = 0.05;
+/// Whole-card dedicated-memory occupancy. Above 90% the driver has little
+/// headroom for transient allocations, compaction, or the desktop compositor.
+pub const GPU_MEMORY_USED_FRAC_ATTENTION: f64 = 0.90;
+/// Ada normally controls around its low-80s target. A sustained sample at or
+/// above 88 °C is outside the expected envelope and separates thermal pressure
+/// from an allocation/backend failure.
+pub const GPU_TEMPERATURE_C_ATTENTION: f64 = 88.0;
+/// NVML's software-thermal-slowdown reason. NVIDIA defines this bit as the GPU
+/// or memory exceeding its maximum operating temperature. The memory sensor is
+/// not exposed on every GeForce card, so this is stronger evidence than the
+/// visible core temperature alone.
+pub const GPU_SW_THERMAL_SLOWDOWN_MASK: u64 = 0x20;
+/// NVML's hardware-thermal-slowdown reason. Unlike ordinary boost management,
+/// this means the hardware protection path reduced core clocks sharply.
+pub const GPU_HW_THERMAL_SLOWDOWN_MASK: u64 = 0x40;
+/// NVML's broader hardware-slowdown bit. It accompanied hardware thermal
+/// slowdown in the incident that motivated this check and is kept as evidence.
+pub const GPU_HW_SLOWDOWN_MASK: u64 = 0x08;
+/// Ignore a one-sample clock-transition blip, but report thermal limiting that
+/// appears for roughly three seconds within one runtime session.
+pub const GPU_THERMAL_THROTTLE_SAMPLES_ATTENTION: usize = 3;
 // ── lane hygiene ────────────────────────────────────────────────────────────
 
 /// Below this volume, a dominant event is not yet a cost worth acting on.
@@ -143,6 +198,14 @@ pub const NOISE_SHARE_WATCH: f64 = 0.40;
 /// The tile budget brake coarsens terrain to stay inside VRAM. Any engagement
 /// means a capture-verified framing may have rendered coarser than authored.
 pub const TILE_BRAKE_SCALE: f64 = 0.999;
+
+/// A wheeled craft carried by the terrain floor backstop instead of its gear
+/// (`backstop_intervention` with `gear_down = 1, weight_on_wheels = 0`) is the
+/// buried-suspension-ray signature (INC-20260729T073116Z): the craft slides
+/// belly-down with no braking authority. The events are 1 Hz-throttled, so
+/// each one is ~one second spent in the state; 2+ means sustained carrying
+/// rather than a single touchdown transient.
+pub const GEAR_BACKSTOP_CARRY_EVENTS_ATTENTION: usize = 2;
 
 #[cfg(test)]
 mod tests {

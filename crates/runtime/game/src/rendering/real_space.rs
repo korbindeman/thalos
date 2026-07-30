@@ -45,14 +45,10 @@ impl RealSpaceOrigin {
 
 /// Publish the floating origin's cell origin as [`RealSpaceOrigin`].
 ///
-/// Reads the camera's `CellCoord` as it stands at `SimStage::Sync` — the value
-/// last frame's `TransformSystems::Propagate` rendered against. The camera
-/// drivers rewrite it later this frame (`SimStage::Camera`), so on a frame where
-/// the camera crosses a cell boundary this trails the render frame by one cell
-/// (≤ `REAL_SPACE_CELL_SIZE_M`) for that frame; every other frame it is exact.
-/// That residual is the ordinary one-frame camera lag every `SimStage::Sync`
-/// consumer carries (see `rendering::view_anchor`), not the unbounded
-/// craft-relative error it replaces.
+/// Runs in `PostUpdate`, after every `SimStage::Camera` driver has written the
+/// current `CellCoord` and immediately before transform propagation. Consumers
+/// placed outside big_space therefore use the exact cell origin the current
+/// frame will render against, including on a cell crossing.
 pub(super) fn update_real_space_origin(
     grid: Query<&Grid, With<BigSpace>>,
     floating_origin: Query<&CellCoord, With<FloatingOrigin>>,

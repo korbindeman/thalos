@@ -1,9 +1,14 @@
 //! Formatters shared by HUD panels.
 //!
 //! Every value the player sees is stored internally in SI; these formatters are
-//! the single point where it is converted for display. Each takes the active
-//! [`UnitSystem`] (from the persisted [`crate::units_settings::UnitsSettings`])
-//! and renders either the metric or the aviation-flavoured imperial unit.
+//! the single point where it is converted for display. Each takes a
+//! [`UnitSystem`] and renders either the metric or the aviation-flavoured
+//! imperial unit.
+//!
+//! Callers do **not** pass `UnitsSettings::system`. They pass
+//! `units.system_for(UnitDomain::…)`, so an aviation instrument can read feet
+//! and knots while the global preference stays metric — see
+//! [`crate::units_settings`].
 
 use crate::units_settings::UnitSystem;
 
@@ -13,6 +18,7 @@ const M_TO_NMI: f64 = 1.0 / 1852.0;
 const MPS_TO_KN: f64 = 1.943_844_492;
 const MPS_TO_FPM: f64 = 196.850_393_7;
 const KG_TO_LB: f64 = 2.204_622_622;
+const PA_TO_PSF: f64 = 0.020_885_434;
 
 /// Compact altitude string.
 ///
@@ -84,6 +90,67 @@ pub fn speed(meters_per_second: f64, system: UnitSystem) -> String {
         format!("{:.2} km/s", meters_per_second / 1_000.0)
     } else {
         format!("{:.0} m/s", meters_per_second)
+    }
+}
+
+/// Horizontal ground distance, to one decimal — distance-to-go, cross-track,
+/// runway range. Imperial: nautical miles, the aviation distance unit.
+/// Metric: metres below 1 km, else kilometres.
+pub fn ground_distance(meters: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        format!("{:.1} nmi", meters * M_TO_NMI)
+    } else if meters.abs() < 1_000.0 {
+        format!("{:.0} m", meters)
+    } else {
+        format!("{:.1} km", meters / 1_000.0)
+    }
+}
+
+/// Coarse horizontal distance for a range-ring or scale label, where a decimal
+/// place is noise. Same units as [`ground_distance`].
+pub fn ground_range(meters: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        let nmi = meters * M_TO_NMI;
+        // Sub-mile rings would read "0 nmi" without a decimal.
+        if nmi.abs() < 9.95 {
+            format!("{:.1} nmi", nmi)
+        } else {
+            format!("{:.0} nmi", nmi)
+        }
+    } else if meters.abs() < 1_000.0 {
+        format!("{:.0} m", meters)
+    } else {
+        format!("{:.0} km", meters / 1_000.0)
+    }
+}
+
+/// Signed altitude deviation, as a pilot reads it (`+` = high). Imperial: feet.
+/// Metric: metres. Clamped so a nonsense guidance value can't stretch the line.
+pub fn altitude_delta(meters: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        format!("{:+.0} ft", (meters * M_TO_FT).clamp(-99_999.0, 99_999.0))
+    } else {
+        format!("{:+.0} m", meters.clamp(-9_999.0, 9_999.0))
+    }
+}
+
+/// Dynamic pressure. Metric: kilopascals. Imperial: pounds per square foot,
+/// the unit `q` is quoted in on US flight-test cards.
+pub fn dynamic_pressure(pascals: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        format!("{:.0} psf", pascals * PA_TO_PSF)
+    } else {
+        format!("{:.1} kPa", pascals / 1_000.0)
+    }
+}
+
+/// Unit suffix for the vertical-speed readout, so a bare signed number on the
+/// PFD's V/S tape can be labelled with what it actually means.
+pub fn vertical_speed_unit(system: UnitSystem) -> &'static str {
+    if system.is_imperial() {
+        "ft/min"
+    } else {
+        "m/s"
     }
 }
 
@@ -194,5 +261,80 @@ pub fn resource_ratio(current_kg: f64, max_kg: f64, system: UnitSystem) -> Strin
         } else {
             format!("{:.0} / {:.0} kg", current_kg, max_kg)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::units_settings::UnitSystem::{Imperial, Metric};
+
+    /// The conversion factors, pinned against textbook figures. A silently
+    /// wrong factor produces a plausible-looking instrument, which is the worst
+    /// possible failure for a readout a player trusts to land with.
+    #[test]
+    fn conversion_factors_match_the_definitions() {
+        // 1 nautical mile is exactly 1852 m; FL350 is 35 000 ft.
+        assert_eq!(altitude(1852.0, Imperial), "6076 ft");
+        assert_eq!(altitude(10_668.0, Imperial), "35000 ft");
+        // 100 kn is 51.444 m/s.
+        assert_eq!(speed(51.444, Imperial), "100 kn");
+        // 1 m/s is 196.85 ft/min; a 500 ft/min descent is 2.54 m/s.
+        assert!((vertical_speed_value(-2.54, Imperial) + 500.0).abs() < 0.5);
+        // 1 kg is 2.2046 lb.
+        assert_eq!(mass(453.592, Imperial), "1000 lb");
+    }
+
+    /// Metric and imperial must describe the *same* physical quantity — a
+    /// mis-signed or mis-scaled branch would only show up in one of them.
+    #[test]
+    fn the_two_systems_agree_on_magnitude() {
+        for m in [-8_000.0, -12.5, 0.0, 137.0, 9_500.0] {
+            let ft = altitude_tape_value(m, Imperial);
+            assert!(
+                (ft / M_TO_FT - m).abs() < 1e-6,
+                "altitude tape disagrees at {m} m"
+            );
+            let vs = vertical_speed_value(m, Imperial);
+            assert_eq!(vs.signum(), m.signum(), "V/S sign flipped at {m} m/s");
+        }
+    }
+
+    #[test]
+    fn metric_altitude_climbs_through_its_units() {
+        assert_eq!(altitude(500.0, Metric), "500 m");
+        assert_eq!(altitude(120_000.0, Metric), "120.0 km");
+        assert_eq!(altitude(4.0e8, Metric), "400.0 Mm");
+        assert_eq!(altitude(1.5e11, Metric), "150.00 Gm");
+    }
+
+    #[test]
+    fn ground_distance_uses_nautical_miles_when_imperial() {
+        assert_eq!(ground_distance(18_520.0, Imperial), "10.0 nmi");
+        assert_eq!(ground_distance(18_520.0, Metric), "18.5 km");
+        assert_eq!(ground_distance(400.0, Metric), "400 m");
+        // A range ring inside a mile must not collapse to "0 nmi".
+        assert_eq!(ground_range(1852.0, Imperial), "1.0 nmi");
+        assert_eq!(ground_range(92_600.0, Imperial), "50 nmi");
+    }
+
+    #[test]
+    fn altitude_delta_keeps_its_sign_and_clamps() {
+        assert_eq!(altitude_delta(30.48, Imperial), "+100 ft");
+        assert_eq!(altitude_delta(-30.48, Imperial), "-100 ft");
+        assert_eq!(altitude_delta(76.0, Metric), "+76 m");
+        assert_eq!(altitude_delta(1.0e9, Metric), "+9999 m");
+    }
+
+    #[test]
+    fn dynamic_pressure_switches_unit() {
+        assert_eq!(dynamic_pressure(10_000.0, Metric), "10.0 kPa");
+        assert_eq!(dynamic_pressure(10_000.0, Imperial), "209 psf");
+    }
+
+    #[test]
+    fn vertical_speed_unit_labels_the_bare_number() {
+        assert_eq!(vertical_speed_unit(Metric), "m/s");
+        assert_eq!(vertical_speed_unit(Imperial), "ft/min");
     }
 }

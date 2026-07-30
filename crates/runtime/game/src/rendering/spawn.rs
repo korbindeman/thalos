@@ -30,7 +30,7 @@ use thalos_body_render::{
     AtmosphereBlock, CloudCompositeMaterial, GasGiantLayers, GasGiantMaterial, GasGiantParams,
     MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RenderedGroundHeightSource, RingLayers,
     RingMaterial, RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial,
-    SolidPlanetParams, bake_coast_bathymetry_cube, bake_impostor_albedo_cube,
+    SolidPlanetParams, bake_coast_bathymetry_cube, bake_impostor_albedo,
     bake_multi_scatter_lut, bake_ocean_slope_texture, blank_coast_cube, blank_impostor_cube,
     build_ring_mesh, cloud_weather_image, coast_bathymetry_cube_from_bytes,
     ocean_packet_phase_speeds,
@@ -54,6 +54,7 @@ use super::types::{
 use crate::coords::{MAP_LAYER, MAP_SCALE, SHIP_LAYER, SHIP_SCALE};
 use crate::loading::LoadingTracker;
 use crate::solar_system_state::{CloudWeatherField, SolarSystemState};
+use crate::terrain_registry::ImpostorAlbedoRegistry;
 use crate::view::HideInShipView;
 use std::sync::Arc;
 
@@ -141,13 +142,15 @@ pub(super) struct BlankCloudTextures {
     pub distance: Handle<Image>,
 }
 
-/// 1×1 far-sentinel cloud-distance fallback (R32F `1e9` = "no cloud on this
-/// ray") for [`CloudCompositeMaterial::cloud_distance`]; same swap policy as
+/// 1×1 far-sentinel cloud-distance fallback (RG32F `1e9` in both channels = "no
+/// cloud on this ray", matching the live target's near-hit/slab-far pair) for
+/// [`CloudCompositeMaterial::cloud_distance`]; same swap policy as
 /// [`blank_cloud_layer`].
 fn blank_cloud_distance(images: &mut Assets<Image>) -> Handle<Image> {
     use bevy::asset::RenderAssetUsages;
     use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, TextureUsages};
-    let data = 1.0e9_f32.to_le_bytes().to_vec();
+    let mut data = 1.0e9_f32.to_le_bytes().to_vec();
+    data.extend_from_slice(&1.0e9_f32.to_le_bytes());
     let mut image = Image::new(
         Extent3d {
             width: 1,
@@ -156,7 +159,7 @@ fn blank_cloud_distance(images: &mut Assets<Image>) -> Handle<Image> {
         },
         TextureDimension::D2,
         data,
-        TextureFormat::R32Float,
+        TextureFormat::Rg32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
     image.texture_descriptor.usage = TextureUsages::TEXTURE_BINDING | TextureUsages::COPY_DST;
@@ -210,6 +213,7 @@ pub(super) fn spawn_bodies(
 ) {
     let bodies = &sim.system.bodies;
     let initial_states = sim.ephemeris.states(Epoch::ZERO);
+    let mut impostor_albedo = ImpostorAlbedoRegistry::default();
 
     // Shared meshes.
     let icon_mesh = meshes.add(Circle::new(1.0));
@@ -596,16 +600,22 @@ pub(super) fn spawn_bodies(
             // surface) binds a blank cube with `w = 0` so the shader takes the
             // flat-colour path — one body's unusable terrain package must not
             // panic the spawn of every other body.
+            // The bake is kept as CPU data in `ImpostorAlbedoRegistry` as well
+            // as uploaded, because the orbital reflection probe samples the
+            // same answer — see that resource's docs for why they must not be
+            // two bakes.
             let body_surface = procedural_install.surfaces.surface(body.id);
             let (impostor_cube, cube_selected) = match &body_surface {
-                Some(surface) => (
-                    images.add(bake_impostor_albedo_cube(
+                Some(surface) => {
+                    let bake = bake_impostor_albedo(
                         surface.as_ref(),
                         256,
                         body.terrain.ocean_sea_level_m(),
-                    )),
-                    1.0,
-                ),
+                    );
+                    let image = images.add(bake.to_image());
+                    impostor_albedo.insert(body.id, Arc::new(bake));
+                    (image, 1.0)
+                }
                 None => (blank_impostor.clone(), 0.0),
             };
             let albedo = Vec4::new(
@@ -1119,6 +1129,10 @@ pub(super) fn spawn_bodies(
         brightness: 50.0,
         ..default()
     });
+
+    // The macro-appearance bakes, for every consumer that needs to agree with
+    // the distant disc (today: the orbital reflection probe).
+    commands.insert_resource(impostor_albedo);
 
     // No async bake installs anymore — procedural bodies generate terrain at
     // runtime. Seed the bake-install step's total to 0 so it completes

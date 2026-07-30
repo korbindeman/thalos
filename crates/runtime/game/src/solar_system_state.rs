@@ -86,8 +86,36 @@ pub struct CloudWeatherField {
     pub version: u32,
 }
 
+/// One sampled texel's inputs plus the trace of its lowest stratum, for the
+/// `cloud_weather_probe` diagnostic. Carries the authored coverage alongside
+/// the derivation's internals so the probe can condition on it — the question
+/// that matters is what the derivation emits *where coverage says clear*.
+#[derive(Clone, Copy, Debug)]
+pub struct WeatherTraceSample {
+    pub coverage: f32,
+    pub cloud_type: f32,
+    pub base: f32,
+    pub top: f32,
+    pub trace: SurfaceDensityTrace,
+}
+
 impl CloudWeatherField {
     pub fn from_climate(climate: &CloudClimate) -> Self {
+        Self::from_climate_traced(climate, 0).0
+    }
+
+    /// [`Self::from_climate`] with optional instrumentation. A non-zero
+    /// `trace_stride` records one [`WeatherTraceSample`] every `trace_stride`
+    /// texels (lowest stratum), which is how `cloud_weather_probe` attributes a
+    /// too-cloudy planet to a specific term of the derivation instead of
+    /// guessing from the emitted cube. Stride keeps the sample set to a few MB;
+    /// the production path passes 0 and allocates nothing.
+    pub fn from_climate_traced(
+        climate: &CloudClimate,
+        trace_stride: usize,
+    ) -> (Self, Vec<WeatherTraceSample>) {
+        let mut trace_samples: Vec<WeatherTraceSample> = Vec::new();
+        let mut texel_index: usize = 0;
         let face_size = CLOUD_WEATHER_FACE_SIZE;
         let mut texels = Vec::with_capacity((face_size * face_size * 6) as usize);
         let mut surface_density_texels = Vec::with_capacity((face_size * face_size * 6) as usize);
@@ -532,6 +560,23 @@ impl CloudWeatherField {
                                 top_c,
                             )
                     });
+                    if trace_stride > 0 && texel_index % trace_stride == 0 {
+                        trace_samples.push(WeatherTraceSample {
+                            coverage,
+                            cloud_type,
+                            base,
+                            top: top_c,
+                            trace: cloud_surface_density_traced(
+                                surface_shape,
+                                base + 0.125 * (top_c - base),
+                                coverage,
+                                cloud_type,
+                                base,
+                                top_c,
+                            ),
+                        });
+                    }
+                    texel_index += 1;
                     let encode = |value: f32| (value.clamp(0.0, 1.0) * 255.0).round() as u8;
                     texels.push([
                         encode(coverage),
@@ -544,18 +589,21 @@ impl CloudWeatherField {
             }
         }
 
-        Self {
-            seed: climate.seed,
-            face_size,
-            texels,
-            surface_density_texels,
-            coverage_mean: climate.coverage.clamp(0.0, 1.0),
-            base_altitude_m: climate.base_altitude_m.max(0.0),
-            top_altitude_m: (climate.base_altitude_m + climate.thickness_m).max(0.0),
-            albedo: climate.albedo,
-            wind_m_s: climate.wind_m_s,
-            version: 0,
-        }
+        (
+            Self {
+                seed: climate.seed,
+                face_size,
+                texels,
+                surface_density_texels,
+                coverage_mean: climate.coverage.clamp(0.0, 1.0),
+                base_altitude_m: climate.base_altitude_m.max(0.0),
+                top_altitude_m: (climate.base_altitude_m + climate.thickness_m).max(0.0),
+                albedo: climate.albedo,
+                wind_m_s: climate.wind_m_s,
+                version: 0,
+            },
+            trace_samples,
+        )
     }
 
     /// Number of mip levels the weather cube carries (1024 → 8 px faces).
@@ -638,6 +686,35 @@ fn smoothstep(edge0: f32, edge1: f32, value: f32) -> f32 {
 // reintroducing the defect the near tier just had removed. If it comes back, it
 // must use the same fix the shader uses — blend between constant transforms.
 
+/// Intermediates of [`cloud_surface_density_cpu`], for the `cloud_weather_probe`
+/// diagnostic. The emitted strata cube is what every far/orbital projection
+/// renders, so when the planet reads cloudier than its authored coverage the
+/// question is always *which* term lifted it — the formation threshold, the
+/// shape field it is compared against, or the areal realization. Reading that
+/// off the final density alone is impossible; this makes each term observable
+/// without a second copy of the math to keep in lockstep.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SurfaceDensityTrace {
+    /// Normalized height within the local `[base, top]` deck.
+    pub h: f32,
+    /// Coverage after `COVERAGE_SCALE`, i.e. the authored areal fraction.
+    pub cov: f32,
+    /// Reconstructed vertical shape-noise value at this height.
+    pub shape: f32,
+    /// Formation threshold `shape` must clear for cloud to exist here.
+    pub threshold: f32,
+    /// Height-rising dome-sculpting term subtracted from `mass`.
+    pub vertical_narrow: f32,
+    /// `shape - threshold - vertical_narrow` (after the anvil branch).
+    pub mass: f32,
+    /// Sub-texel areal fraction: the share of the texel that is cloudy.
+    pub areal_fraction: f32,
+    /// Type-blended vertical profile applied on top of the areal fraction.
+    pub vertical_profile: f32,
+    /// The emitted value — `areal_fraction * vertical_profile`.
+    pub density: f32,
+}
+
 /// CPU producer for the canonical four-stratum density payload. Nonlinear
 /// formation/profile response happens before the mip chain is built, so far
 /// footprints average occupied area instead of thresholding an averaged raw
@@ -650,10 +727,35 @@ fn cloud_surface_density_cpu(
     local_base: f32,
     local_top: f32,
 ) -> f32 {
+    cloud_surface_density_traced(
+        surface_shape,
+        normalized_height,
+        coverage,
+        cloud_type,
+        local_base,
+        local_top,
+    )
+    .density
+}
+
+/// [`cloud_surface_density_cpu`] with its intermediates exposed. The production
+/// path routes through this, so there is exactly one copy of the derivation.
+pub fn cloud_surface_density_traced(
+    surface_shape: [f32; 4],
+    normalized_height: f32,
+    coverage: f32,
+    cloud_type: f32,
+    local_base: f32,
+    local_top: f32,
+) -> SurfaceDensityTrace {
     let h = (normalized_height - local_base) / (local_top - local_base).max(0.02);
     let cov = (coverage * crate::rendering::clouds::COVERAGE_SCALE).clamp(0.0, 1.0);
     if h <= 0.0 || h >= 1.0 || cov <= 1.0e-3 {
-        return 0.0;
+        return SurfaceDensityTrace {
+            h,
+            cov,
+            ..Default::default()
+        };
     }
 
     let stratus_w = 1.0 - smoothstep(0.18, 0.38, cloud_type);
@@ -661,21 +763,51 @@ fn cloud_surface_density_cpu(
     let cumulus_w = (1.0 - stratus_w - storm_w).max(0.0);
     // Formation threshold, calibrated so the emitted column occupancy TRACKS
     // the coverage channel (`cloud_weather_probe` reports the ratio). This
-    // matters because the far tier renders the strata cube, not coverage: the
-    // old 0.58→0.30 line was fitted against the biased-low isosurface below,
-    // and once that became an unbiased areal fraction the same line emitted
-    // ~1.3× the authored coverage — the planet read as an overcast sheet with
-    // holes in it no matter how far the coverage channel was trimmed.
-    let threshold = 1.03 + (0.33 - 1.03) * cov;
+    // matters because the far tier renders the strata cube, not coverage.
+    //
+    // **DERIVED, not hand-fitted** — `cloud_weather_probe`'s THRESHOLD FIT
+    // table prints it. For occupancy to equal coverage `c`, the threshold must
+    // be the (1-c) quantile of the `shape - vertical_narrow` comparand, and
+    // the probe measures exactly that per coverage decile and least-squares
+    // fits this line. Re-derive it there after ANY change to `surface_shape`
+    // or the vertical terms; do not nudge these constants by eye (hand-fitting
+    // has failed here twice — see BL-20260723T214730Z).
+    //
+    // The 1.03 → 0.33 line this replaces was co-tuned with the anvil mass
+    // floor below, and only made sense in its presence: `shape` has a NARROW
+    // distribution (σ ≈ 0.09 about 0.562), so a threshold sweeping 1.03 → 0.33
+    // sits almost entirely outside the field's support. Nothing formed on its
+    // own merits and the 0.5 floor supplied the planet's cloud instead. With
+    // the floor removed that line emitted 0.34× the authored coverage.
+    let threshold = 0.675 + (0.458 - 0.675) * cov;
     // Round-7 dome sculpting: convective tops are carved by a quadratically
     // height-rising threshold (a per-lobe noise isosurface — strong lobes
     // tower, weak lobes stay squat) instead of the former linear thinning;
     // tall congestus/storm columns keep more mass with height so towers stay
     // coherent. Mirrored in `get_cloud_map_density` (clouds_compute.wgsl) and
     // `march_column` (fill_lut.rs) — keep the three in lockstep.
+    // **Scale these against `shape`'s spread, not in the abstract.** This term
+    // is a height-rising addition to the effective threshold, so what decides
+    // how hard it carves is its size in units of σ(`shape`) ≈ 0.09 — that is
+    // what converts a threshold shift into an occupancy change.
+    //
+    // The former 0.04/0.42/0.30 were scaled against a threshold line spanning
+    // 1.03 → 0.33. At h→1 the cumulus term reached 0.42 ≈ **4.7σ**, which
+    // drives top-stratum occupancy to ~0: every column lost its upper half and
+    // the deck rendered as flat pancakes with no vertical development. That was
+    // survivable only while the anvil mass floor (INC-20260729T061228Z) was
+    // pinning every stratum at 0.5 regardless.
+    //
+    // Rescaled by 0.31 for the derived threshold line's 0.675 → 0.458 span.
+    // Two independent routes agree on that factor: the threshold-range ratio
+    // (0.217 / 0.70) and the σ argument (want ~1.4σ at the top, so 0.42 →
+    // 0.13). Occupancy now tapers ~32% → ~6% from base to top stratum, which
+    // is a dome rather than a cut. Keep the RATIOS between the three
+    // coefficients — they are the authored per-type shape; only the common
+    // scale is derived.
     let column_tall = smoothstep(0.30, 0.65, local_top - local_base);
-    let vertical_narrow = h * 0.04 * stratus_w
-        + (h * h) * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
+    let vertical_narrow = h * 0.012 * stratus_w
+        + (h * h) * (0.130 * cumulus_w + 0.093 * storm_w) * (1.0 - 0.45 * column_tall);
 
     // C1 reconstruction of the four vertical shape samples, matching
     // `cloud_surface_shape` (thalos::atmosphere) and `surface_shape`
@@ -717,8 +849,31 @@ fn cloud_surface_density_cpu(
     }
     .clamp(0.0, 1.0);
     let mut mass = shape - threshold - vertical_narrow;
+    // Cumulonimbus anvils broaden again near the tropopause, but only where the
+    // storm channel permits them.
+    //
+    // **Never fold the gate into the value and then use it as a floor.** The
+    // shipped form was `mass.max(anvil_shape * anvil_profile * storm_w)`, and
+    // outside an anvil that product is exactly 0.0 — so the line degraded to
+    // `mass.max(0.0)` and `mass` could not go negative anywhere on the planet.
+    // `anvil_profile` is zero for the lower strata, so it fired at essentially
+    // every height outside storm columns. The realization below is a smoothstep
+    // CENTRED on zero, so a floor of exactly 0.0 lands on its midpoint and
+    // emitted `areal_fraction = 0.5` for clear sky, planet-wide: an orbital
+    // cloud floor no climate trim or downstream response curve could remove
+    // (INC-20260729T*-orbital-cloud-floor). The near marcher and `fill_lut`
+    // carried the same `max` but realize with `smoothstep(0.0, …)`, where a
+    // zero floor maps to zero density — which is why the defect was invisible
+    // from the surface and catastrophic from orbit.
+    //
+    // Blending by the gate cannot clamp at any gate value: 0 leaves `mass`
+    // untouched, 1 applies the full anvil floor. Mirrored in
+    // `get_cloud_map_density` (clouds_compute.wgsl) and `march_column`
+    // (fill_lut.rs) — keep the three in lockstep.
     let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
-    mass = mass.max((shape - (threshold - 0.06)) * anvil_profile * storm_w);
+    let anvil_gate = anvil_profile * storm_w;
+    let anvil_mass = shape - (threshold - 0.06);
+    mass += (mass.max(anvil_mass) - mass) * anvil_gate;
 
     // NOTE (2026-07-25): surface-space boundary erosion was tried here — fine
     // noise added to `mass`, gated on proximity to the threshold, to rough up
@@ -784,7 +939,17 @@ fn cloud_surface_density_cpu(
     // wide enough to keep the mip chain something to filter and no wider.
     const SUB_TEXEL_RMS: f32 = 0.035;
     let areal_fraction = smoothstep(-SUB_TEXEL_RMS, SUB_TEXEL_RMS, mass);
-    areal_fraction * vertical_profile
+    SurfaceDensityTrace {
+        h,
+        cov,
+        shape,
+        threshold,
+        vertical_narrow,
+        mass,
+        areal_fraction,
+        vertical_profile,
+        density: areal_fraction * vertical_profile,
+    }
 }
 
 /// Divergence-free domain warp on the unit sphere.

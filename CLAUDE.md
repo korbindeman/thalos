@@ -70,6 +70,13 @@ the exception; when you're unsure whether something earns a record, it doesn't.
   arbitrary from the code. Ordinary judgment calls belong in the commit message.
   Before reopening a settled area, `rg '<topic>' docs/adr` — don't read the
   directory. Immutable once accepted; supersede, don't rewrite.
+- **`docs/reviews/`** — output of the `expert-review` skill: specialist agents
+  audit a code slice in character, a hostile refuter kills what it can, survivors
+  land in a dated report. Runs weekly in the cloud and on demand ("expert review
+  of the propagator"). **Claims that survived scrutiny, not tracked work** — the
+  harness never writes to the backlog; you promote what you agree with. Before
+  filing a defect an earlier run may have settled, check
+  `docs/reviews/dismissed.md`.
 - **`docs/incidents/`** — bugs whose diagnosis was **non-obvious**: the symptom,
   the mechanism, and the tell that identifies a recurrence. Short is correct.
   Written in the same change as the fix.
@@ -120,7 +127,8 @@ post-mortem in the same change; a typo-grade fix needs none.
 ## Commands
 
 ```bash
-just game [mode]        # USER-RUN ONLY (see below). modes: menu (default) orbit
+just game [mode]        # USER-RUN ONLY; stops the capture host, then owns the
+                        # one machine-wide renderer lease. modes: menu (default) orbit
                         #   polar eva landing final cruise runway runway-approach
                         #   shipyard hub mira mira-eva
 just check [package]    # fast type-check (default thalos_game)
@@ -140,6 +148,8 @@ just build-reset        # the ONE supported full artifact reset
 
 just map                # whole-planet biome map + per-biome stats → target/
 just preview            # headless procedural-object gallery → artifacts/visual/latest/
+just nd-preview           # headless navigation-display preview (8 approach
+                        #   situations, real plans + real shader)
 just ui-preview         # headless UI kitchen sink → artifacts/visual/latest/
 just bake Mira          # rebuild assets/terrain_packages/Mira.bin offline
 just validate-bake Mira # validate package schema/index/checksums/payload
@@ -249,6 +259,49 @@ Enter overrides it) or **F8** to manage saved viewpoints in
 `assets/viewpoints.json`; replay one headlessly with `just screenshot <slug>`
 (`latest` = newest entry). ADR-20260724T211627Z.
 
+## Presenting your work
+
+**When the result is something to look at, hand back a presentation, not a wall
+of prose.** The user judges terrain, lighting, scatter, UI, and layout by eye; a
+paragraph describing a screenshot is strictly worse than the screenshot. The
+same holds when the change's shape is spatial or structural — a reordered
+pipeline, a moved ownership boundary, a before/after of a data flow — where one
+diagram replaces three paragraphs nobody reads carefully.
+
+**Not every change earns one, and a padded presentation is worse than none.** A
+one-line fix, a doc edit, a refactor with no visible surface, an answer to a
+question: those get the normal short summary. Present when the images *are* the
+evidence (you ran `just screenshot` / `capture` / `compare` / `preview` /
+`map`), when the user will accept or reject the change on looks, when the change
+spans enough subsystems that a diagram beats a list, or when asked. Judge it
+yourself — this is not a step to perform on every run.
+
+**Build it with the Artifact tool**, a self-contained HTML page the user can
+open and share:
+
+- **Captures must be embedded.** The page is served under a CSP that blocks
+  every external host and cannot read the developer's disk, so a `file://` or
+  `artifacts/…` `src` renders as a broken image. Write the page with
+  `{{img:artifacts/visual/latest/<name>.png}}` tokens (optionally
+  `{{img:<path>|caption text}}`), then run
+  `python3 scripts/present_embed.py <page>.html` — it downscales, inlines, and
+  writes `<page>.embedded.html`. Publish *that* file; keep the token source so
+  the page can be regenerated after a recapture.
+- **Before/after beats after.** Show the matched pair from the comparison run,
+  same preset and framing, labelled — never two differently-framed stills.
+- **Diagrams are mermaid**, rendered natively (```mermaid fence or
+  `<pre class="mermaid">`); no external library will load.
+- **Plain language, same as a visual report**: what you see, what changed, what
+  you deliberately left alone, and what is still unverified. Name the presets
+  and files so the user can rerun them.
+- With no artifact surface available, fall back to a short markdown summary with
+  the PNG paths — do not describe pixels you could have shown.
+
+The presentation is for the user, not for the repo: it replaces neither the
+backlog row, the ADR, nor the `.capture.json` evidence beside each PNG, and
+nothing in `docs/` should link to it. Detail and worked examples:
+`docs/development/visual_testing.md`.
+
 ## Observability
 
 **An agent diagnoses exactly as well as the data already in the tree.** You
@@ -341,10 +394,28 @@ fires daily and is dismissed daily is a wrong threshold or a dead check — tune
 the constant or remove it. **Delete instruments whose subsystem is gone**, the
 same way you delete dead code on contact.
 
+**Improving the tooling is your job too — no permission needed.** When you hit
+friction that an instrument, a receipt field, a `just` recipe, a diag check, or a
+faster capture path would remove, build it in the same session instead of
+routing around it. Building the tool is usually a fraction of the debugging
+session it saves, and unlike the fix itself it pays out again for every agent
+after you — so bias toward building it. The bar is **measurably better
+debugging**: name the hypothesis the new data separates, the guess it removes, or
+the phase it shortens. Speculative dashboards and events nobody reads fail that
+bar (*Every diagnostic owes the reader a check*, above). Then **make it
+discoverable, or it does not exist**: a new agent-facing entry point goes in the
+*Commands* list above, its contract and lane in `docs/development/tooling.md`,
+anything expensive to rediscover in an ADR or incident, and multi-session tooling
+work in `docs/backlog.md`. Say in your report what you added and why.
+
 **Read the artifacts before asking.** `just diag` first (it names the session
 worth opening), then `artifacts/diagnostics/runtime.jsonl` and `tools.jsonl`, the
 `.capture.json` receipt beside every PNG, `just perf-report [session|latest]`
 (HTML + `summary.json`), and F3 in-game.
+On Windows NVIDIA systems, `THALOS_GPU_HEALTH=1` adds one-second whole-card
+`gpu_health` samples (VRAM, temperature, power, utilization, clocks); a failed
+NVML query is the timestamped adapter-loss tell read by `just diag`. It is
+investigation-only and off during ordinary play/capture.
 Asking the user to reproduce is justified only after you've read the existing
 evidence and can name what it does *not* show. Deep profiling stays a user-run
 escalation: `cargo run --release -p thalos_game --features profile-chrome`, then

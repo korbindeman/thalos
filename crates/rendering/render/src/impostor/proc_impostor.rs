@@ -20,7 +20,7 @@ use bevy::render::render_resource::{
 use rayon::prelude::*;
 
 use thalos_terrain::SurfaceQuery;
-use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
+use thalos_terrain::cubemap::{Cubemap, CubemapFace, face_uv_to_dir};
 
 /// Deep-water linear-RGB tint (open ocean).
 const OCEAN_DEEP: Vec3 = Vec3::new(0.008, 0.028, 0.065);
@@ -39,29 +39,90 @@ fn linear_to_srgb_u8(c: f32) -> u8 {
     (s * 255.0 + 0.5).clamp(0.0, 255.0) as u8
 }
 
-/// Bake an `Rgba8UnormSrgb` cube: continents (surface albedo) + oceans (water
-/// colour where `height < sea_level_m`). `resolution` is the per-face edge in
-/// texels. `sea_level_m` is the body's authored hydrosphere datum
+/// The impostor albedo bake, in **linear** space and still on the CPU: what a
+/// body looks like from far enough away that its relief stops mattering.
+///
+/// Kept as data rather than only as an uploaded texture because two consumers
+/// need the same answer, and they must not be allowed to disagree: the distant
+/// body the player *looks at* (`SolidPlanetMaterial`, via [`Self::to_image`])
+/// and the planet a stainless hull *reflects* in orbit
+/// (`reflection_probe`, via [`Self::sample`]). One bake, one authority.
+#[derive(Clone, Debug)]
+pub struct ImpostorAlbedo {
+    /// `rgb` = linear radiance-scale albedo (surface albedo on land, a
+    /// depth-graded water colour at sea), `a` = water flag (0 land, 1 ocean).
+    cube: Cubemap<[f32; 4]>,
+}
+
+/// One texel of an [`ImpostorAlbedo`] lookup.
+#[derive(Clone, Copy, Debug)]
+pub struct ImpostorTexel {
+    /// Linear albedo. Multiply by incident radiance to get reflected radiance.
+    pub albedo_linear: Vec3,
+    /// Bilinear water fraction — `0` inland, `1` open sea, fractional across a
+    /// coastline texel.
+    pub water_frac: f32,
+}
+
+impl ImpostorAlbedo {
+    /// Sample by **body-fixed** direction (the frame the bake is indexed in —
+    /// callers holding an inertial direction must rotate it by the body's
+    /// inverse orientation first, or the continents will not turn with the
+    /// planet).
+    pub fn sample(&self, body_fixed_dir: Vec3) -> ImpostorTexel {
+        let t = self.cube.sample_bilinear(body_fixed_dir);
+        ImpostorTexel {
+            albedo_linear: Vec3::new(t[0], t[1], t[2]),
+            water_frac: t[3].clamp(0.0, 1.0),
+        }
+    }
+
+    /// Encode as the `Rgba8UnormSrgb` cube the impostor material samples.
+    ///
+    /// Alpha stays the water mask and is *linear* in `Rgba8UnormSrgb` (only RGB
+    /// takes the sRGB curve), so the shader reads back a clean 0/1 flag and
+    /// shades ocean texels through the water BRDF (Fresnel + sun glint) rather
+    /// than the land Hapke BRDF.
+    pub fn to_image(&self) -> Image {
+        let res = self.cube.resolution();
+        let mut data: Vec<u8> = Vec::with_capacity((res * res * 6 * 4) as usize);
+        for face in CubemapFace::ALL {
+            for texel in self.cube.face_data(face) {
+                data.push(linear_to_srgb_u8(texel[0]));
+                data.push(linear_to_srgb_u8(texel[1]));
+                data.push(linear_to_srgb_u8(texel[2]));
+                data.push(if texel[3] >= 0.5 { 255 } else { 0 });
+            }
+        }
+        cube_image(res, data, TextureFormat::Rgba8UnormSrgb)
+    }
+}
+
+/// Bake the impostor albedo: continents (surface albedo) + oceans (water colour
+/// where `height < sea_level_m`). `resolution` is the per-face edge in texels.
+/// `sea_level_m` is the body's authored hydrosphere datum
 /// (`TerrainConfig::ocean_sea_level_m`); pass `None` for airless bodies so no
 /// texel is ever classified as water — signed heights around the reference
 /// radius must not paint a dry world half ocean.
-pub fn bake_impostor_albedo_cube(
+pub fn bake_impostor_albedo(
     surface: &dyn SurfaceQuery,
     resolution: u32,
     sea_level_m: Option<f32>,
-) -> Image {
-    let res = resolution.max(4) as usize;
+) -> ImpostorAlbedo {
+    let res = resolution.max(4);
     let radius = surface.radius_m().max(1.0);
     // One texel spans ~ this arc on the sphere; feed it as the LOD so the bake
     // takes the matching (coarse) octave count and doesn't alias.
     let lod_m = (std::f32::consts::TAU * radius / (4.0 * res as f32)).max(1.0);
 
+    let mut cube: Cubemap<[f32; 4]> = Cubemap::new(res);
     // Faces in `CubemapFace::ALL` order (the order Bevy's cube view expects),
-    // baked in parallel then concatenated.
-    let faces: Vec<Vec<u8>> = CubemapFace::ALL
-        .par_iter()
-        .map(|&face| {
-            let mut bytes = vec![0u8; res * res * 4];
+    // baked in parallel.
+    cube.faces_mut()
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(face_idx, texels)| {
+            let face = CubemapFace::ALL[face_idx];
             let mut i = 0usize;
             for y in 0..res {
                 let v = (y as f32 + 0.5) / res as f32;
@@ -77,24 +138,23 @@ pub fn bake_impostor_albedo_cube(
                     } else {
                         s.albedo_linear
                     };
-                    bytes[i] = linear_to_srgb_u8(col.x);
-                    bytes[i + 1] = linear_to_srgb_u8(col.y);
-                    bytes[i + 2] = linear_to_srgb_u8(col.z);
-                    // Alpha = water mask (255 = ocean, 0 = land). The impostor
-                    // shader shades ocean texels through the shared water BRDF
-                    // (Fresnel + sun glint) instead of the land Hapke BRDF. Alpha
-                    // is linear in `Rgba8UnormSrgb` (only RGB gets the sRGB curve),
-                    // so this reads back as a clean 0/1 flag.
-                    bytes[i + 3] = if is_water { 255 } else { 0 };
-                    i += 4;
+                    texels[i] = [col.x, col.y, col.z, if is_water { 1.0 } else { 0.0 }];
+                    i += 1;
                 }
             }
-            bytes
-        })
-        .collect();
+        });
 
-    let data: Vec<u8> = faces.into_iter().flatten().collect();
-    cube_image(res as u32, data, TextureFormat::Rgba8UnormSrgb)
+    ImpostorAlbedo { cube }
+}
+
+/// [`bake_impostor_albedo`] straight to the GPU cube, for callers that need
+/// only the texture.
+pub fn bake_impostor_albedo_cube(
+    surface: &dyn SurfaceQuery,
+    resolution: u32,
+    sea_level_m: Option<f32>,
+) -> Image {
+    bake_impostor_albedo(surface, resolution, sea_level_m).to_image()
 }
 
 /// A 1×1×6 opaque-black cube for bodies with no baked impostor (solid-colour

@@ -1,0 +1,11 @@
+[package]
+name = "thalos_navigation"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+glam = { version = "0.32", features = ["serde"] }
+
+[dev-dependencies]
+approx = "0.5"

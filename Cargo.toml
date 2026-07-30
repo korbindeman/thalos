@@ -19,6 +19,7 @@ members = [
     "crates/rendering/udlod",
     "crates/runtime/game",
     "crates/simulation/control",
+    "crates/simulation/navigation",
     "crates/simulation/physics_canonical",
     "crates/simulation/physics_local",
     "crates/vendor/big_space",

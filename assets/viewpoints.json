@@ -2,6 +2,76 @@
   "schema": "thalos.viewpoints.v2",
   "viewpoints": [
     {
+      "id": "blobby-clouds",
+      "name": "blobby clouds",
+      "description": "",
+      "saved_unix_ms": 1785300435603,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3272061.9439217695,
+        316268.25106022076,
+        -134296.07844842586
+      ],
+      "camera_rotation_body_xyzw": [
+        -0.6009986834315509,
+        0.7255994455839113,
+        -0.06095399479164992,
+        -0.3295309357265299
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "cloudy-ripples",
+      "name": "cloudy ripples",
+      "description": "",
+      "saved_unix_ms": 1785300479474,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3172218.497301376,
+        300127.7978902047,
+        205082.36375940888
+      ],
+      "camera_rotation_body_xyzw": [
+        0.6735076355298201,
+        -0.6946901226318191,
+        0.2082559203521745,
+        0.14290755766959357
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
       "id": "dark-thalos",
       "name": "dark thalos",
       "description": "",
@@ -9,7 +79,7 @@
       "body": "Thalos",
       "spawn": "runway",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -1369054.0661562858,
         2896639.517815519,
@@ -24,10 +94,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -44,7 +114,7 @@
       "body": "Thalos",
       "spawn": "runway",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3194543.2107708445,
         511525.8512686994,
@@ -59,10 +129,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -79,7 +149,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -12201996.172423258,
         2927788.258804262,
@@ -94,10 +164,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -129,10 +199,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -149,7 +219,7 @@
       "body": "Thalos",
       "spawn": "runway",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3157154.9173677005,
         421960.84286761633,
@@ -164,10 +234,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -184,7 +254,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3156994.058472502,
         420270.8997825164,
@@ -199,10 +269,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -219,7 +289,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3157175.6758905724,
         419477.6581321743,
@@ -234,10 +304,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -254,7 +324,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3158333.297381494,
         412166.5571917023,
@@ -269,10 +339,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.447268088287682
+          "focal_length_mm": 24.447268
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -289,7 +359,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3163459.952707384,
         497963.31705217983,
@@ -304,10 +374,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -324,14 +394,14 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3128338.4934464535,
         637459.674209958,
         165996.98248592706
       ],
       "camera_rotation_body_xyzw": [
-        0.37272890690754923,
+        0.3727289069075492,
         -0.7194691347654493,
         0.0707770140904034,
         0.5817455976213365
@@ -339,10 +409,45 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "thin-clouds",
+      "name": "thin clouds",
+      "description": "",
+      "saved_unix_ms": 1785300394858,
+      "body": "Thalos",
+      "spawn": "launch",
+      "boots_hub": false,
+      "sim_time_s": 59100.0,
+      "camera_position_body_m": [
+        -3159433.066654717,
+        419803.81708385656,
+        106329.27427988744
+      ],
+      "camera_rotation_body_xyzw": [
+        0.48374363330758785,
+        -0.5567280397646642,
+        0.4236557263323173,
+        0.5258914455664832
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -359,7 +464,7 @@
       "body": "Thalos",
       "spawn": "launch",
       "boots_hub": false,
-      "sim_time_s": 59100,
+      "sim_time_s": 59100.0,
       "camera_position_body_m": [
         -3160836.632054684,
         415937.8424921744,
@@ -374,10 +479,10 @@
       "optics": {
         "lens": {
           "model": "full-frame-horizontal",
-          "focal_length_mm": 24.443911053717244
+          "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36,
+          "gate_width_mm": 36.0,
           "aspect": [
             16,
             9
@@ -393,6 +498,12 @@
       "name": "Cloud cruise",
       "description": "Aviation-altitude view across cloud tops and developing towers.",
       "driver": "cloud-cruise"
+    },
+    {
+      "id": "cloud-godray",
+      "name": "Cloud godray",
+      "description": "Searched cloudy-land site, near-ground camera looking sunward for crepuscular shafts.",
+      "driver": "cloud-godray"
     },
     {
       "id": "cloud-interior",
@@ -429,12 +540,6 @@
       "name": "Cloud sunset",
       "description": "Near-surface cloud view toward a sun just above the local horizon.",
       "driver": "cloud-sunset"
-    },
-    {
-      "id": "cloud-godray",
-      "name": "Cloud godray",
-      "description": "Searched cloudy-land site, near-ground camera looking sunward for crepuscular shafts.",
-      "driver": "cloud-godray"
     },
     {
       "id": "dry-belt",
@@ -527,6 +632,12 @@
       "driver": "ocean-slopes"
     },
     {
+      "id": "coastline",
+      "name": "Coastline",
+      "description": "Search-driven low oblique from over the water onto a real shoreline: foreshore drop, waterline, beach berm.",
+      "driver": "coastline"
+    },
+    {
       "id": "paved-ground",
       "name": "Paved ground",
       "description": "Eye-level along the base's taxiway/apron/road network: the scatter-versus-pavement probe.",
@@ -543,6 +654,24 @@
       "name": "Engine plume against the skyline",
       "description": "Firing engine seen from below, camera pitched above the horizontal: probes fullscreen-composite draw order against sky and terrain in one frame.",
       "driver": "plume-skyline"
+    },
+    {
+      "id": "reentry",
+      "name": "Reentry shock layer",
+      "description": "Peak-heating shock layer on a vehicle entering belly-first: freestream driven by FlowDebugOverride so the state is reproducible without flying an entry. Scrub with THALOS_REENTRY_DENSITY / THALOS_REENTRY_SPEED.",
+      "driver": "reentry"
+    },
+    {
+      "id": "interstage",
+      "name": "Interstage shroud",
+      "description": "Two-stage Saturn on the pad, framed across the interstage: the regression probe for the flight-craft decoupler shroud.",
+      "driver": "interstage"
+    },
+    {
+      "id": "orbit-hull",
+      "name": "Orbital stainless hull",
+      "description": "Close on a stainless craft in low orbit with the planet behind it: the only framing that judges what a mirror hull REFLECTS in space. Every other orbital view frames the planet, so a hull reflecting a flat disc instead of continents is invisible in all of them.",
+      "driver": "orbit-hull"
     },
     {
       "id": "runway-atmosphere",

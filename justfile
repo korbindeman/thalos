@@ -25,8 +25,11 @@ capture_command := env_var_or_default("THALOS_CAPTURE_COMMAND", "cargo run -p th
 # (straight into the space-center hub over the spaceport, no craft — the
 # PLAY path without the start screen). `THALOS_AUTO_RUN=1`
 # also skips the start screen (agents keep a one-shot launch flow).
-# Set a persistent default with THALOS_SPAWN in `.env.just`.
+# Set a persistent default with THALOS_SPAWN in `.env.just`. The stop is the
+# friendly handoff from an idle capture host; the process-level renderer lease
+# remains the race-proof authority if another renderer starts concurrently.
 game mode=env_var_or_default("THALOS_SPAWN", "menu"):
+    cargo run -p thalos_capture --bin thalos_capture -- stop
     {{game_command}} -- {{mode}}
 
 # The ship editor is the in-game Bevy-UI editor: `just game shipyard`
@@ -45,6 +48,16 @@ preview:
 # the UI kit by reading the PNG. See crates/interface/ui/examples/kitchen_sink.rs.
 ui-preview:
     cargo run -p thalos_ui --features bevy/dynamic_linking,bevy/wayland,bevy/jpeg --example kitchen_sink
+
+# Navigation-display preview: renders the ND in eight approach situations
+# (straight-in, offset intercept, overflown, short final, reciprocal end,
+# crosswind strip, 60 km out, idle) to artifacts/visual/latest/nav_preview.png
+# headlessly, then exits. Every panel is a real approach plan drawn by the real
+# shader, so it is evidence about geometry/scale/symbology — not about ECS
+# wiring. See crates/runtime/game/examples/nav_preview.rs and
+# docs/gameplay/navigation.md.
+nd-preview:
+    cargo run -p thalos_runtime --features bevy/dynamic_linking --example nav_preview
 
 # Interactive window variant of `just ui-preview` (hover/press/typing feel;
 # S saves the same screenshot). User-run (opens a window).

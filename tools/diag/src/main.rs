@@ -101,11 +101,8 @@ fn run() -> Result<(), String> {
         activity.sessions,
         plural(activity.sessions),
         match (activity.oldest_ts, activity.newest_ts) {
-            (Some(oldest), Some(newest)) => format!(
-                " · {} → {}",
-                checks::stamp(oldest),
-                checks::stamp(newest)
-            ),
+            (Some(oldest), Some(newest)) =>
+                format!(" · {} → {}", checks::stamp(oldest), checks::stamp(newest)),
             _ => String::new(),
         }
     );

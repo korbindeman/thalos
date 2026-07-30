@@ -291,6 +291,7 @@ pub fn build_fuselage_mesh(fus: &Fuselage, effective_diameter: f32) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
+    crate::part_mesh::add_raytracing_tangents(&mut mesh);
     mesh
 }
 
@@ -645,4 +646,14 @@ mod tests {
             "tail tip radius scales (0.6 = 0.3·2)"
         );
     }
+    /// See `engine_mesh`'s copy: a mesh that misses the attribute set is
+    /// skipped by the BLAS builder silently.
+    #[test]
+    fn fuselage_mesh_is_raytracing_ready() {
+        assert!(crate::part_mesh::is_raytracing_ready(&build_fuselage_mesh(
+            &a220_fuselage(),
+            3.5
+        )));
+    }
+
 }

@@ -393,12 +393,17 @@ pub fn build_grass_tile_mesh(input: &GrassTileBuildInput) -> Option<GrassTileMes
         // Shared placement gate: height, grass material-mask weight, slope, and
         // the body-fixed terrain normal — the same stencil the tile baker
         // writes into the material attachment's grass channel.
-        let Some(sample) = placement_gate(source, &basis, dir, input.radius_m) else {
+        let Some(sample) = placement_gate(
+            source,
+            &basis,
+            dir,
+            input.radius_m,
+            // Sea/beach floor folded into the gate: underwater candidates cost
+            // one probe instead of five.
+            input.sea_level_m + crate::ground::scatter::VEG_BEACH_CLEAR_M,
+        ) else {
             continue;
         };
-        if sample.height_m <= input.sea_level_m + crate::ground::scatter::VEG_BEACH_CLEAR_M {
-            continue;
-        }
         if sample.slope > 0.45 {
             continue;
         }

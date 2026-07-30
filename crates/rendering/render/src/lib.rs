@@ -7,6 +7,7 @@ pub mod composite_order;
 pub mod craft;
 pub mod ground;
 pub mod impostor;
+pub mod rt;
 pub mod tiles;
 
 pub use clouds::*;

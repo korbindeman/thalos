@@ -269,7 +269,7 @@ impl Plugin for CraftRenderPlugin {
             .add_plugins(MaterialPlugin::<ShadowedStandardMaterial>::default())
             .init_resource::<CraftShadowMaps>()
             .add_systems(Startup, setup_craft_shadow_fallback)
-            .add_systems(PostUpdate, apply_craft_shadow);
+            .add_systems(Last, apply_craft_shadow);
     }
 }
 

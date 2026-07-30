@@ -111,8 +111,8 @@ impl Default for TileShadingParams {
 }
 
 /// Bindings mirror `ShadowReceiveExtension` (uniform 100, depth maps 101–103)
-/// plus the tile params at 104 and the cloud sun-transmittance cascade at
-/// 105–107.
+/// plus the tile params at 104, the cloud sun-transmittance cascade at
+/// 105–107, and the same-frame contact-shadow term at 108–109.
 #[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
 pub struct TileShadingExtension {
     #[uniform(100)]
@@ -139,6 +139,12 @@ pub struct TileShadingExtension {
     /// other depending on system order.
     #[uniform(107)]
     pub cloud_shadow: CloudShadowBlock,
+    /// Full-resolution contact shadow produced after the depth prepass and
+    /// before opaque shading. One field supplies both texture and sampler,
+    /// matching the cloud map convention above.
+    #[texture(108)]
+    #[sampler(109)]
+    pub contact_shadow_map: Handle<Image>,
 }
 
 impl MaterialExtension for TileShadingExtension {

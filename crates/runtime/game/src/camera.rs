@@ -465,6 +465,11 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         // ground beside it. Derived from the spine's own constants so it
         // cannot drift when either side is retuned.
         thalos_body_render::spine_parity_exposure(crate::rendering::lighting::LUX_PER_SPINE_FLUX),
+        // The same-frame contact-shadow pass reads this depth before opaque
+        // shading. Tile terrain and every regular opaque StandardMaterial
+        // participate; alpha foliage deliberately opts out in its material
+        // specializer.
+        bevy::core_pipeline::prepass::DepthPrepass,
         space_camera_post_stack(),
         OrbitCamera,
         ShipCamera,

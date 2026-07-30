@@ -78,11 +78,19 @@ just compare-cold spaceport-aerial ssao
 The server reuses presets with the same body, spawn scenario, hub mode,
 viewport, and startup-only override fingerprint. It restarts automatically when
 that boot context changes **and**
-whenever any workspace `.rs`/`.toml` is newer than the running host — the next
-capture stops it, rebuilds (dynamic relink), and boots it again
-(~1.5–2.5 min warm). There is no in-process Rust reload: dx/subsecond
-hot-patching was retired after an applied patch reproducibly crashed the app
-(INC-20260724T044418Z). `just capture-stop` remains as manual hygiene.
+whenever any workspace `.rs`/`.toml` **that can link into the host** differs by
+content from the running host's build fingerprint — the next capture stops it,
+rebuilds (dynamic relink), and boots it again (~1.5–2.5 min warm).
+`examples/`, `tests/`, and `benches/` trees are excluded from that fingerprint
+(2026-07-29): they never link into the host binary, and they were a steady
+source of spurious ~2 min restarts while agents iterated on exporters and
+benches (`restart_stale_source` dominated a 73 % boot rate). A stop that the
+host does not honour within 5 s now escalates to a confirmed forced kill;
+a stop that cannot be confirmed fails the shot instead of booting a second
+renderer beside a live one (INC-20260729T081809Z). There is no in-process Rust
+reload: dx/subsecond hot-patching was retired after an applied patch
+reproducibly crashed the app (INC-20260724T044418Z). `just capture-stop`
+remains as manual hygiene.
 
 `just capture <preset>...` batches several scenes through one controller
 invocation, amortizing the world/GPU boot wherever the boot context matches.
@@ -209,14 +217,53 @@ per-frame CPU/GPU ms rings + memory/count gauges) feeds three consumers:
   they hot-reload). `THALOS_DEBUG_VIEW=1` starts the view visible, which is
   how a headless capture can screenshot it.
 - **`frame_gauge`** every ~2 s: fps, cpu ms mean/p50/p95/max, gpu ms, SimStage
-  wall times, entities, mesh/image counts, tile-resident MiB, mesh-slab MiB.
-  Under 1 MB per played hour.
+  wall times, entities, mesh/image counts, tile-resident MiB, mesh-slab MiB,
+  plus the CPU side: `rss_mib` (whole-process working set) with
+  `mesh_cpu_mib` / `image_cpu_mib` to attribute it. Added 2026-07-29 because a
+  capture host was killed at 8.1 GiB RSS while every GPU-side gauge summed to
+  ~2 GiB (INC-20260729T081809Z) — `just diag`'s `memory_growth` prefers
+  `rss_mib` when a session carries it. Under 1 MB per played hour.
 - **`spike`** dumps: the collector keeps ~8.5 s of per-frame samples; a frame
   over max(3×median, 50 ms) dumps a 3 s window (2 s pre + 1 s post) of exact
   per-frame CPU/GPU values as comma-joined string fields. ≥5 s cooldown.
 - **`frame_block`** (opt-in, `THALOS_PERF_RECORD=1`): every frame recorded,
   emitted in 1 s blocks (~15–30 MB/hour) — for runs where the offline report
   should carry the complete timeline.
+
+The shadow rig emits `thalos::diagnostic::shadow` / `stability_gauge` once per
+second. `origin_frame_error_m` compares the cascade rig's render origin with the
+current camera cell origin; `footprint_scale`, `cascade0_texel_m`, and
+`active_cascades` provide the scale denominator. Any origin error above 1 cm is
+a frame-coherence failure, reported by `just diag` as `shadow_frame_desync`.
+
+The ground-contact pair on `thalos::diagnostic::local_physics` (both 1 Hz
+sim-time throttled, added with INC-20260729T073116Z): **`gear_contact`**
+(`wheels`, `wheels_loaded`, `ray_misses`, `max_compression_frac`,
+`normal_sum_n`) records how hard the wheels are actually carrying while any
+wheel bears load — a loaded wheel with `ray_misses > 0` was rescued by the
+analytic fallback; silent during airborne gear-down flight. Its counterpart
+**`backstop_intervention`** (`penetration_m`, `excess_m`, `gear_down`,
+`weight_on_wheels`, `destroyed`) records every frame-window where the terrain
+floor backstop carried the hull. The load-bearing combination —
+`gear_down = 1, weight_on_wheels = 0`, not destroyed, sustained ≥ 2 events — is
+the buried-suspension-ray signature (belly slide, no brakes), reported by
+`just diag` as `gear_carried_by_backstop`.
+
+On Windows, `THALOS_GPU_HEALTH=1` makes `thalos_diagnostics` load NVIDIA's NVML
+dynamically and emit `thalos::diagnostic::gpu_health` / `sample` once per
+second. This is an investigation mode, not an ordinary-play default. It reports
+the whole card rather than one process: used/total VRAM, temperature, draw/limit
+power, GPU/memory utilization, graphics clock, performance state, and throttle
+reasons. Systems without NVML emit one `availability=false` record and carry on.
+The first failed memory query emits `sample_error` and stops the sampler so a
+lost adapter has one precise timestamp without hammering the failed driver.
+This lane exists to separate per-process allocation growth from whole-card
+pressure, thermal/power instability, and a driver/PCIe disappearance
+(INC-20260729T092010Z). `just diag` treats NVML thermal throttle bits `0x20`
+(software) and `0x40` (hardware protection) as their own signal. NVIDIA defines
+software thermal slowdown as either the GPU or memory exceeding its maximum
+operating temperature, which still detects a hidden memory hotspot when the
+card exposes only its core-temperature sensor.
 
 **`just perf-report [session|latest|--list]`** (tools/perfreport) renders one
 session of that lane to `artifacts/diagnostics/reports/<session>/report.html`
@@ -283,7 +330,9 @@ Findings carry a stable `id`, a headline with its **denominator**, at most four
 evidence lines, and where to look next. Current checks: `error_events`,
 `warn_events`, `capture_failures`, `capture_retries`, `capture_boot_rate`,
 `capture_latency`, `capture_lock_contention`, `frame_spikes`, `slow_frames`,
-`memory_growth`, `tile_budget_brake`, `silent_sessions`, `lane_noise`,
+`memory_growth`, `tile_budget_brake`, `shadow_frame_desync`, `silent_sessions`, `lane_noise`,
+`gpu_adapter_lost`, `gpu_memory_pressure`, `gpu_thermal_pressure`,
+`gpu_thermal_throttle`,
 `empty_window`.
 
 Thresholds live in `tools/diag/src/finding.rs`, one named constant each with the
@@ -362,6 +411,18 @@ since both route through the same `capture()`:
 | `phase_validate_ms` | output decode, render-log scan, workspace re-snapshot, receipt |
 | `host_start_count`, `retry_count`, `rebuild_recovery_count` | boots, unhealthy-host retries, stale-artifact rebuild recoveries |
 | `outcome`, `error` | `ok` · `error` (first line of the failure) · `abandoned` (process died mid-run) |
+| `launcher_exit_kind` | present when the host died before it was ready: `renderer busy` · `workspace build failure` · `capture host panic` · `capture host aborted` · `toolchain corruption` · `silent exit` · `unclassified launcher exit`. `renderer busy` is the intentional game/capture GPU lease boundary, not a crash or quarantine trigger. A stable grouping key, free of run-specific text. |
+| `launcher_exit_detail` | the line that identifies *that* failure — the crate that failed to compile plus its `error[E….]` code, or the panic location plus its payload. |
+
+`error` carries the first line only (`ToolRun::fail`'s contract: the classifier
+belongs in the lane, the full text on stderr), so anything the lane must group by
+has to *be* that first line. `capture launcher exited` alone was a bucket rather
+than a classification — a triage window could see that 13 of 58 shots died and
+nothing about why — so the launcher log is now classified the same way
+`resource_fault_kind` classifies GPU faults, and `just diag` reports the cause
+with one example payload beneath it instead of a repeated opaque string.
+An `unclassified launcher exit` is a gap in that classifier and should be closed
+by adding the signature, not by ignoring the count.
 
 Machine-lock contention is its own `capture_lock` event (`wait_ms`, `queued`,
 `owner_pid`) rather than a phase of whichever shot happened to be first —
@@ -371,6 +432,29 @@ Still open, and worth knowing when reading a slow record: `phase_render_ms` is
 the client's outside view of the host. The host-internal split (scene settle vs.
 warmup frames vs. readback/encode) is not separated yet, and the offline tools
 (`bake`, `texgen`, `map`, `preview`) have no run record.
+
+### `just nd-preview` — navigation-display preview
+
+Renders the ND (`hud/mfd/widgets/nav_display.rs` + `assets/shaders/nav_display.wgsl`)
+in eight approach situations and writes
+`artifacts/visual/latest/nav_preview.png`, then exits. Agent-runnable, one
+process, no game boot.
+
+Each panel is a **real** `thalos_navigation::plan_approach` result, tessellated
+by the game's own `route::plan_display`, projected by the game's own
+`build_nav_scene`, and drawn by the real shader — so the image is evidence
+about planner geometry, projection, scale, and symbology. It is **not**
+evidence about ECS wiring: resource plumbing, widget auto-selection, click
+handling, and the PFD deviation scales are not exercised and still need an
+in-game check. Situations covered: straight-in, offset intercept,
+overflown-and-turning-back, short final, reciprocal end, crosswind strip,
+60 km out, and idle (nothing armed).
+
+The preview exists because the ND's hard cases are the slow ones to fly to;
+it turned up three real defects on its first two runs (a threshold bar that
+read as a box, sub-pixel strip widths, and a final-approach highlight that
+never drew). Source: `crates/runtime/game/examples/nav_preview.rs`. Spec:
+`docs/gameplay/navigation.md`.
 
 ### Generated artifact layout
 

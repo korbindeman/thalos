@@ -17,7 +17,7 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::DVec3;
 use bevy::prelude::{Resource, Vec3};
-use thalos_body_render::{GpuAtlasMirrorHandle, RenderedGround};
+use thalos_body_render::{GpuAtlasMirrorHandle, ImpostorAlbedo, RenderedGround};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
 use thalos_terrain::{
     BodyArchetype, DynamicSurfaceState, PackageSurface, PlanetSurface, ProceduralSurface,
@@ -66,6 +66,29 @@ impl RenderedGroundRegistry {
     /// unknown or drawn by another renderer.
     pub fn udlod_handle(&self, body_id: BodyId) -> Option<GpuAtlasMirrorHandle> {
         self.grounds.get(&body_id)?.udlod_handle()
+    }
+}
+
+/// The macro appearance of each body, as baked once at spawn.
+///
+/// The same bake feeds the distant body the player **looks at**
+/// (`SolidPlanetMaterial`'s albedo cube) and the planet a stainless hull
+/// **reflects** from orbit (`reflection_probe`). Two consumers, one authority —
+/// a reflected coastline that disagreed with the coastline beside it would be
+/// worse than no coastline at all. Absent for solid-colour and degraded bodies,
+/// which is the same "no cube" case the impostor shader already handles.
+#[derive(Resource, Default, Clone)]
+pub struct ImpostorAlbedoRegistry {
+    bakes: HashMap<BodyId, Arc<ImpostorAlbedo>>,
+}
+
+impl ImpostorAlbedoRegistry {
+    pub fn insert(&mut self, body_id: BodyId, bake: Arc<ImpostorAlbedo>) {
+        self.bakes.insert(body_id, bake);
+    }
+
+    pub fn get(&self, body_id: BodyId) -> Option<Arc<ImpostorAlbedo>> {
+        self.bakes.get(&body_id).cloned()
     }
 }
 

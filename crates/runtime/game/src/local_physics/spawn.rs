@@ -17,7 +17,7 @@ use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalBubble, LocalBubbleConfig, LocalCraftBody,
     LocalCraftSpawn, LocalPrimitiveCollider, LocalPrimitiveShape, spawn_local_craft_body,
 };
-use thalos_shipyard::{AttachNodes, Gear, Part, SurfaceMount};
+use thalos_shipyard::AttachNodes;
 use thalos_world::BodyId;
 
 use crate::debug::DebugMode;
@@ -51,13 +51,7 @@ pub(crate) fn spawn_player_avian_body(
     height_sources: Res<HeightSourceRegistry>,
     player_ship: Query<&GlobalTransform, With<PlayerShip>>,
     parts: PartColliderQuery,
-    gear_q: Query<
-        (&Gear, &SurfaceMount),
-        (
-            With<Part>,
-            Without<crate::shipyard_editor::core::EditorPart>,
-        ),
-    >,
+    gear_q: GearPartQuery,
     host_nodes: Query<&AttachNodes>,
 ) {
     if active.bubble.is_some() || *view != ViewMode::Ship {

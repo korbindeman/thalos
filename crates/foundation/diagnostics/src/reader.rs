@@ -54,6 +54,14 @@ impl Record {
         self.fields.get(field).and_then(Value::as_str)
     }
 
+    /// Read a boolean field. `tracing` records a `bool` value as a JSON `true` /
+    /// `false`, which neither [`Self::u64`] nor [`Self::str`] will return — a
+    /// check that reaches for either gets `None` and silently reads the field as
+    /// absent rather than false.
+    pub fn bool(&self, field: &str) -> Option<bool> {
+        self.fields.get(field).and_then(Value::as_bool)
+    }
+
     /// Subsystem name after the `thalos::diagnostic::` prefix.
     pub fn subsystem(&self) -> &str {
         self.target
@@ -143,7 +151,10 @@ pub fn load(dir: &Path, since_unix_ms: u128) -> io::Result<Stream> {
         .flatten()
         .map(|entry| entry.path())
         .filter(|path| {
-            path.is_file() && path.extension().is_some_and(|extension| extension == "jsonl")
+            path.is_file()
+                && path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl")
         })
         .collect();
     files.sort();

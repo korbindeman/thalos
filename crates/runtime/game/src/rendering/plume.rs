@@ -44,10 +44,9 @@
 
 use std::f32::consts::FRAC_PI_2;
 
-use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::NotShadowCaster;
-use bevy::mesh::{Indices, MeshVertexBufferLayoutRef, PrimitiveTopology};
+use bevy::mesh::MeshVertexBufferLayoutRef;
 use bevy::pbr::{Material, MaterialPipeline, MaterialPipelineKey, MaterialPlugin};
 use bevy::prelude::*;
 use bevy::reflect::TypePath;
@@ -55,14 +54,15 @@ use bevy::render::render_resource::{
     AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
 };
 
-use thalos_physics_canonical::canonical::Epoch;
 use thalos_shipyard::{
     Engine, EngineActivation, EngineGeometry, EngineOptimization, EngineThrust, ReactantRatio,
     Resource,
 };
 
 use crate::SimStage;
-use crate::rendering::SimulationState;
+use crate::rendering::flow::{
+    FlowProxyMesh, FlowSignals, axial_proxy_prism_mesh, update_flow_signals,
+};
 use crate::shipyard_editor::core::EditorPart;
 
 /// Bounds on `p_exit / p_ambient`. The low end is a deeply overexpanded nozzle in
@@ -71,10 +71,16 @@ use crate::shipyard_editor::core::EditorPart;
 const PRESSURE_RATIO_MIN: f32 = 0.015;
 const PRESSURE_RATIO_MAX: f32 = 64.0;
 
-/// Shared unit-quad plume mesh handle. The quad lives in plume-local space
-/// (x = lateral in [-1, 1], y = axial in [0, 1], 0 at the nozzle exit); the
-/// vertex shader rebuilds it as a camera-facing, axis-locked billboard whose
-/// width tracks the analytic sheath radius.
+/// Proxy-hull resolution. Only has to bound a smooth, monotonically widening
+/// envelope, so it is deliberately coarse — the silhouette comes from the
+/// density integral, not from these rings.
+const PROXY_SIDES: usize = 12;
+const PROXY_RINGS: usize = 16;
+
+/// Shared plume proxy-hull handle — the flow-effect prism from
+/// [`axial_proxy_prism_mesh`], which the vertex shader scales per ring by the
+/// envelope bound. Rings only have to track a smooth monotonic bound, so this is
+/// far coarser than the strip it replaced.
 #[derive(Resource)]
 struct PlumeMesh(Handle<Mesh>);
 
@@ -94,50 +100,17 @@ impl Plugin for PlumePlugin {
                 )
                     .chain()
                     .in_set(SimStage::Sync)
-                    // After the engine-thrust plumbing writes `EngineThrust`.
-                    .after(crate::engine::update_engine_thrust),
+                    // After the engine-thrust plumbing writes `EngineThrust`,
+                    // and after the shared flow boundary publishes the air.
+                    .after(crate::engine::update_engine_thrust)
+                    .after(update_flow_signals),
             );
     }
 }
 
 fn insert_plume_mesh(mut commands: Commands, mut meshes: ResMut<Assets<Mesh>>) {
-    let handle = meshes.add(plume_billboard_mesh());
+    let handle = meshes.add(axial_proxy_prism_mesh(PROXY_SIDES, PROXY_RINGS));
     commands.insert_resource(PlumeMesh(handle));
-}
-
-/// A subdivided unit quad, x ∈ [-1, 1] (lateral), y ∈ [0, 1] (axial, 0 = exit).
-/// Positions are normalized; the vertex shader scales and orients them. The row
-/// count sets how finely the strip follows the (curved, shock-modulated)
-/// envelope, so it needs to resolve several shock cells.
-fn plume_billboard_mesh() -> Mesh {
-    const ROWS: usize = 96;
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity((ROWS + 1) * 2);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity((ROWS + 1) * 2);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity((ROWS + 1) * 2);
-    let mut indices: Vec<u32> = Vec::with_capacity(ROWS * 6);
-    for row in 0..=ROWS {
-        let t = row as f32 / ROWS as f32;
-        for (col, x) in [-1.0_f32, 1.0].into_iter().enumerate() {
-            positions.push([x, t, 0.0]);
-            normals.push([0.0, 0.0, 1.0]);
-            uvs.push([col as f32, t]);
-        }
-    }
-    for row in 0..ROWS {
-        let a = (row * 2) as u32;
-        let b = a + 1;
-        let c = a + 2;
-        let d = a + 3;
-        indices.extend_from_slice(&[a, c, b, b, c, d]);
-    }
-    Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
-    )
-    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
-    .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, uvs)
-    .with_inserted_indices(Indices::U32(indices))
 }
 
 // ---------------------------------------------------------------------------
@@ -363,11 +336,19 @@ impl Material for PlumeMaterial {
         _layout: &MeshVertexBufferLayoutRef,
         _key: MaterialPipelineKey<Self>,
     ) -> Result<(), SpecializedMeshPipelineError> {
-        // The cylindrical billboard rebuilds the strip in the vertex shader.
-        // Mesh winding was authored in local XY and does not reliably face the
-        // camera after the axis-lock rotation, so default back-face culling
-        // drops the whole plume. Disable culling (same pattern as rings).
-        descriptor.primitive.cull_mode = None;
+        // The proxy prism is closed, so a ray crosses it twice. Culling one side
+        // is what keeps the raymarch from running — and additively blending —
+        // twice per pixel.
+        //
+        // Cull the *back* faces, keeping the near surface: its depth is where
+        // the column starts, so the plume keeps depth-testing against the hull
+        // and the terrain roughly where it used to. Drawing the far side instead
+        // would be more robust to the camera entering the exhaust, but would
+        // depth-test at a point behind the craft and let the hull erase the
+        // whole plume. The cost of this choice is that a camera *inside* the
+        // bounding prism loses the part of it that falls behind the near plane;
+        // fixing that properly means clamping the march against scene depth.
+        descriptor.primitive.cull_mode = Some(bevy::render::render_resource::Face::Back);
         Ok(())
     }
 }
@@ -421,6 +402,8 @@ fn spawn_engine_plumes(
                 Visibility::Hidden,
                 NoFrustumCulling,
                 NotShadowCaster,
+                // Not vehicle structure: keep it out of the craft-bounds sweep.
+                FlowProxyMesh,
                 PlumeVisual {
                     engine: entity,
                     material,
@@ -437,11 +420,12 @@ fn spawn_engine_plumes(
 }
 
 /// Publish [`PlumeSignals`] on each engine from its live runtime state (or the
-/// [`PlumeDebugOverride`]). Ambient pressure is resolved once per frame from the
-/// craft's altitude over its dominant body's atmosphere.
+/// [`PlumeDebugOverride`]). Ambient pressure is read from
+/// [`FlowSignals`] — the shared per-vehicle aerothermal boundary — so the plume
+/// and the reentry shock layer can never disagree about the air they are in.
 fn update_plume_signals(
     time: Res<Time>,
-    sim: Res<SimulationState>,
+    flow: Res<FlowSignals>,
     over: Res<PlumeDebugOverride>,
     mut engines: Query<
         (
@@ -454,9 +438,13 @@ fn update_plume_signals(
     >,
 ) {
     let dt = time.delta_secs();
+    // Ambient pressure comes from the one aerothermal boundary
+    // (`rendering::flow`), not from a private atmosphere lookup. The per-engine
+    // authoring override still wins, because `THALOS_PLUME_PRESSURE` scrubs a
+    // single engine's back-pressure without pretending the vehicle moved.
     let ambient = over
         .ambient_pressure_pa
-        .unwrap_or_else(|| craft_ambient_pressure_pa(&sim) as f32);
+        .unwrap_or(flow.ambient_pressure_pa);
 
     for (engine, activation, thrust, mut sig) in engines.iter_mut() {
         let enabled = activation.map(|a| a.enabled).unwrap_or(true);
@@ -794,31 +782,6 @@ fn resolve_params(
         tail: Vec4::new(dispersal, core_len_m, flicker_amp, flicker_rate),
         therm: Vec4::new(temp_exit, core_turbulence, tail_turbulence, cell_growth),
     }
-}
-
-/// Ambient pressure (Pa) at the craft, from its altitude over the dominant
-/// body's atmosphere. Zero in a vacuum / airless-body SOI.
-fn craft_ambient_pressure_pa(sim: &SimulationState) -> f64 {
-    let body_id = sim.simulation.dominant_body();
-    let Some(body) = sim.system.bodies.get(body_id) else {
-        return 0.0;
-    };
-    let Some(atmosphere) = body.terrestrial_atmosphere.as_ref() else {
-        return 0.0;
-    };
-    let body_pos = sim
-        .ephemeris
-        .state(body_id, Epoch(sim.simulation.sim_time()))
-        .position;
-    let ship_pos = sim.simulation.ship_state().position;
-    let altitude_m = (ship_pos - body_pos).length() - body.radius_m;
-    atmosphere
-        .sample_at_altitude_m(
-            altitude_m,
-            body.surface_pressure_pa(),
-            body.surface_gravity_m_s2(),
-        )
-        .pressure_pa
 }
 
 /// Design nozzle-exit pressure (Pa) for an engine. Exit pressure is set by the

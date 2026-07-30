@@ -272,6 +272,7 @@ fn finish_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
     mesh.insert_indices(Indices::U32(indices));
     mesh.compute_smooth_normals();
+    crate::part_mesh::add_raytracing_tangents(&mut mesh);
     mesh
 }
 
@@ -293,6 +294,7 @@ mod tests {
             diameter: 1.0,
             thrust: 1.0,
             isp: 1.0,
+            sea_level_isp: None,
             dry_mass: 1.0,
             reactants: vec![ReactantRatio {
                 resource: Resource::Kerosene,
@@ -344,4 +346,15 @@ mod tests {
         assert!(mean_x(&right) > 0.0, "wing at +π/2 → nacelle on +X");
         assert!(mean_x(&left) < 0.0, "wing at −π/2 → nacelle on −X");
     }
+    /// Every part mesher owes its output the raytracing attribute set — a mesh
+    /// that misses it is skipped by the BLAS builder **silently**, and the
+    /// symptom is a hull reflecting sky with no ship in it.
+    #[test]
+    fn nacelle_meshes_are_raytracing_ready() {
+        let engine = test_engine();
+        assert!(crate::part_mesh::is_raytracing_ready(
+            &build_jet_nacelle_body_mesh(&engine)
+        ));
+    }
+
 }

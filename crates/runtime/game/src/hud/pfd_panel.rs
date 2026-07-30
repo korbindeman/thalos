@@ -10,6 +10,12 @@
 //! speed, throttle, and heading readouts, plus FBW / A.PROT flight-assist
 //! annunciators.
 //!
+//! **Approach guidance** (localizer + glideslope deviation scales and a
+//! two-axis flight director) appears whenever [`crate::route`] has an armed
+//! approach, and is driven entirely by that module's published guidance — the
+//! PFD never computes a deviation of its own, so the needle the pilot follows
+//! and the route the ND draws cannot disagree.
+//!
 //! **Projection model:** the PFD is the view from the craft's nose,
 //! independent of the actual orbit camera. Pitch/bank/heading come from
 //! the craft attitude expressed in the local ENU frame at the craft
@@ -43,6 +49,7 @@ use crate::navball::markers::{
 use crate::navball::ui::NavballFrameRoot;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::target::TargetBody;
+use crate::units_settings::UnitDomain;
 use crate::velocity_frame::VelocityFrameState;
 
 use super::TopLeftRowAnchor;
@@ -189,6 +196,9 @@ pub(super) enum PfdReadout {
     SpeedFrame,
     AltDatum,
     VerticalSpeed,
+    /// Unit suffix under the `V/S` label, filled from the resolved aviation
+    /// unit (the V/S box itself carries no unit).
+    VerticalSpeedUnit,
     Throttle,
     Heading,
 }
@@ -197,6 +207,70 @@ pub(super) enum PfdReadout {
 pub(super) enum PfdAnnunciator {
     Fbw,
     AlphaProt,
+}
+
+// ---------------------------------------------------------------------------
+// Approach guidance (localizer / glideslope / flight director)
+// ---------------------------------------------------------------------------
+
+/// Half-length of each deviation scale (px): the distance from centre to a
+/// full-scale deflection.
+const DEV_SCALE_HALF_PX: f32 = 96.0;
+/// Localizer scale centre, below the pitch ladder.
+const LOC_SCALE_Y: f32 = 216.0;
+/// Glideslope scale centre-x, inboard of the altitude tape (`TAPE_INNER_X`).
+const GS_SCALE_X: f32 = 246.0;
+/// Dot radius on the deviation scales (px).
+const DEV_DOT_PX: f32 = 5.0;
+/// Deviation index (diamond) size (px).
+const DEV_INDEX_PX: f32 = 13.0;
+/// Flight-director bar length / thickness (px).
+const FD_BAR_LEN_PX: f32 = 150.0;
+const FD_BAR_THICK_PX: f32 = 3.0;
+/// Flight-director travel limit (px) — the cue saturates rather than flying off
+/// the display.
+const FD_LIMIT_PX: f32 = 110.0;
+/// Roll-cue scale: screen px per degree of bank error.
+const FD_PX_PER_BANK_DEG: f32 = 4.0;
+
+/// Root of the localizer (horizontal) deviation scale.
+#[derive(Component)]
+pub(super) struct PfdLocScale;
+
+/// Root of the glideslope (vertical) deviation scale.
+#[derive(Component)]
+pub(super) struct PfdGsScale;
+
+/// The moving localizer index.
+#[derive(Component)]
+pub(super) struct PfdLocIndex;
+
+/// The moving glideslope index.
+#[derive(Component)]
+pub(super) struct PfdGsIndex;
+
+/// The flight-director roll cue (a vertical bar you centre by rolling).
+#[derive(Component)]
+pub(super) struct PfdDirectorRoll;
+
+/// The flight-director pitch cue (a horizontal bar you fly to).
+#[derive(Component)]
+pub(super) struct PfdDirectorPitch;
+
+/// The approach annunciation text (`APPR RWY 03 · 12.4 km`).
+#[derive(Component)]
+pub(super) struct PfdApproachLabel;
+
+/// Screen offset (px) of a deviation index for a deflection in `[-1, 1]`.
+///
+/// **The index moves opposite the error**, which is the universal
+/// "fly toward the needle" convention: being right of course puts the course to
+/// your left, so the localizer index sits left of centre and you steer to it.
+/// Being high puts the glideslope below you, so the index sits low. Inverting
+/// this reads as a perfectly plausible instrument that flies you into the
+/// ground, so it is pinned by `deviation_index_offset_flies_toward_the_needle`.
+fn deviation_index_offset_px(deflection: f64) -> f32 {
+    -(deflection.clamp(-1.0, 1.0) as f32) * DEV_SCALE_HALF_PX
 }
 
 // ---------------------------------------------------------------------------
@@ -234,6 +308,8 @@ pub fn setup(mut commands: Commands, mut images: ResMut<Assets<Image>>, theme: R
                     spawn_vs_tape(anchor, &theme);
                     spawn_heading_readout(anchor, &theme);
                     spawn_annunciators(anchor, &theme);
+                    spawn_deviation_scales(anchor, &theme);
+                    spawn_flight_director(anchor);
                 });
         });
 }
@@ -662,7 +738,11 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 left: Val::Px(left),
                 top: Val::Px(VS_TAPE_H * 0.5 + 8.0),
                 width: Val::Px(VS_TAPE_W),
-                justify_content: JustifyContent::Center,
+                // Two stacked lines: the fixed "V/S" caption and, under it, the
+                // unit the tape is currently in. Stacked rather than inline
+                // because "V/S ft/min" overflows VS_TAPE_W at this font size.
+                flex_direction: FlexDirection::Column,
+                align_items: AlignItems::Center,
                 ..default()
             },
             Name::new("PfdVsLabel"),
@@ -676,6 +756,16 @@ fn spawn_vs_tape(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     ..default()
                 },
                 TextColor(HUD_AMBER_DIM),
+            ));
+            c.spawn((
+                Text::new("—"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(10.0),
+                    ..default()
+                },
+                TextColor(HUD_AMBER_DIM),
+                PfdReadout::VerticalSpeedUnit,
             ));
         });
 }
@@ -1227,9 +1317,14 @@ pub fn update_tapes(
         _ => 0.0,
     };
 
+    // The PFD is an aviation instrument, so its tapes read feet and knots even
+    // when the global preference is metric. Resolved once: every tick, readout,
+    // and threshold below must agree on one unit or the tape lies.
+    let system = units.system_for(UnitDomain::Aviation);
+
     // Tick columns. The tapes render in the active display unit so their ticks
     // match the readouts below (m/ft, m/s/kn, m/s / ft·min⁻¹).
-    if let Some(speed) = speed.map(|v| format::speed_tape_value(v, units.system)) {
+    if let Some(speed) = speed.map(|v| format::speed_tape_value(v, system)) {
         let step = nice_step((speed * 0.04).max(4.0));
         for (tick, mut node, mut text, mut vis) in &mut speed_ticks {
             apply_tape_tick(
@@ -1243,7 +1338,7 @@ pub fn update_tapes(
             }
         }
     }
-    let altitude_disp = format::altitude_tape_value(altitude, units.system);
+    let altitude_disp = format::altitude_tape_value(altitude, system);
     let alt_step = nice_step((altitude_disp.abs() * 0.04).max(10.0));
     for (tick, mut node, mut text, mut vis) in &mut alt_ticks {
         apply_tape_tick(
@@ -1257,7 +1352,7 @@ pub fn update_tapes(
             &mut vis,
         );
     }
-    let vs_disp = format::vertical_speed_value(vertical_speed, units.system);
+    let vs_disp = format::vertical_speed_value(vertical_speed, system);
     let vs_step = nice_step((vs_disp.abs() * 0.08).max(2.0));
     for (tick, mut node, mut text, mut vis) in &mut vs_ticks {
         apply_tape_tick(
@@ -1269,10 +1364,10 @@ pub fn update_tapes(
     for (readout, mut text) in &mut readout_q {
         let s = match readout {
             PfdReadout::SpeedValue => match speed {
-                Some(v) => format::speed(v, units.system),
+                Some(v) => format::speed(v, system),
                 None => "—".to_string(),
             },
-            PfdReadout::AltValue => format::altitude(altitude, units.system),
+            PfdReadout::AltValue => format::altitude(altitude, system),
             PfdReadout::SpeedFrame => match velocity_frame.active {
                 VelocityReferenceFrame::Orbit => "ORB".to_string(),
                 VelocityReferenceFrame::Surface => "SRF".to_string(),
@@ -1282,7 +1377,11 @@ pub fn update_tapes(
                 AltitudeDatum::Sea => "SEA".to_string(),
                 AltitudeDatum::Ground => "GND".to_string(),
             },
-            PfdReadout::VerticalSpeed => signed_speed(vertical_speed, units.system),
+            PfdReadout::VerticalSpeed => signed_speed(vertical_speed, system),
+            // The V/S box shows a bare signed number, so the unit has to be
+            // stated somewhere — and it now varies independently of the global
+            // setting, which makes an unlabelled tape actively misleading.
+            PfdReadout::VerticalSpeedUnit => format::vertical_speed_unit(system).to_string(),
             PfdReadout::Throttle => {
                 format!("THR {:3.0}%", throttle.commanded.clamp(0.0, 1.0) * 100.0)
             }
@@ -1550,5 +1649,431 @@ mod tests {
         // The shorter V/S tape culls sooner.
         assert!(tape_tick_layout(0.0, 2.0, 4, true, VS_TAPE_H).is_none());
         assert!(tape_tick_layout(0.0, 2.0, 3, true, VS_TAPE_H).is_some());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Approach guidance: spawners
+// ---------------------------------------------------------------------------
+
+/// Localizer (horizontal, under the ladder) and glideslope (vertical, inboard of
+/// the altitude tape) deviation scales. Both start hidden and are revealed only
+/// while an approach is armed.
+fn spawn_deviation_scales(anchor: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    // --- Localizer: five dots in a row with a centre index mark.
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(0.0),
+                top: Val::Px(LOC_SCALE_Y),
+                ..default()
+            },
+            Visibility::Hidden,
+            PfdLocScale,
+            Name::new("PfdLocScale"),
+        ))
+        .with_children(|scale| {
+            for i in -2..=2i32 {
+                if i == 0 {
+                    // Centre: a short vertical tick, not a dot, so "on course"
+                    // is unambiguous.
+                    scale.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(-1.0),
+                            top: Val::Px(-11.0),
+                            width: Val::Px(2.0),
+                            height: Val::Px(22.0),
+                            ..default()
+                        },
+                        BackgroundColor(HUD_AMBER),
+                    ));
+                    continue;
+                }
+                let x = i as f32 * (DEV_SCALE_HALF_PX * 0.5);
+                scale.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(x - DEV_DOT_PX * 0.5),
+                        top: Val::Px(-DEV_DOT_PX * 0.5),
+                        width: Val::Px(DEV_DOT_PX),
+                        height: Val::Px(DEV_DOT_PX),
+                        border_radius: BorderRadius::all(Val::Px(DEV_DOT_PX * 0.5)),
+                        ..default()
+                    },
+                    BackgroundColor(HUD_AMBER_DIM),
+                ));
+            }
+            scale.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(-DEV_INDEX_PX * 0.5),
+                    top: Val::Px(-DEV_INDEX_PX * 0.5),
+                    width: Val::Px(DEV_INDEX_PX),
+                    height: Val::Px(DEV_INDEX_PX),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                    ..default()
+                },
+                BorderColor::all(HUD_AMBER),
+                UiTransform {
+                    translation: Val2::ZERO,
+                    scale: Vec2::ONE,
+                    // A diamond is a 45-degree-rotated square.
+                    rotation: Rot2::degrees(45.0),
+                },
+                hud_glow(HUD_GLOW, 4.0),
+                PfdLocIndex,
+                Name::new("PfdLocIndex"),
+            ));
+            scale.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(-72.0),
+                    top: Val::Px(16.0),
+                    ..default()
+                },
+                Text::new(""),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(12.0),
+                    ..default()
+                },
+                TextColor(HUD_AMBER),
+                PfdApproachLabel,
+                Name::new("PfdApproachLabel"),
+            ));
+        });
+
+    // --- Glideslope: five dots in a column.
+    anchor
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(GS_SCALE_X),
+                top: Val::Px(0.0),
+                ..default()
+            },
+            Visibility::Hidden,
+            PfdGsScale,
+            Name::new("PfdGsScale"),
+        ))
+        .with_children(|scale| {
+            for i in -2..=2i32 {
+                if i == 0 {
+                    scale.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(-11.0),
+                            top: Val::Px(-1.0),
+                            width: Val::Px(22.0),
+                            height: Val::Px(2.0),
+                            ..default()
+                        },
+                        BackgroundColor(HUD_AMBER),
+                    ));
+                    continue;
+                }
+                let y = i as f32 * (DEV_SCALE_HALF_PX * 0.5);
+                scale.spawn((
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: Val::Px(-DEV_DOT_PX * 0.5),
+                        top: Val::Px(y - DEV_DOT_PX * 0.5),
+                        width: Val::Px(DEV_DOT_PX),
+                        height: Val::Px(DEV_DOT_PX),
+                        border_radius: BorderRadius::all(Val::Px(DEV_DOT_PX * 0.5)),
+                        ..default()
+                    },
+                    BackgroundColor(HUD_AMBER_DIM),
+                ));
+            }
+            scale.spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: Val::Px(-DEV_INDEX_PX * 0.5),
+                    top: Val::Px(-DEV_INDEX_PX * 0.5),
+                    width: Val::Px(DEV_INDEX_PX),
+                    height: Val::Px(DEV_INDEX_PX),
+                    border: UiRect::all(Val::Px(2.0)),
+                    border_radius: BorderRadius::all(Val::Px(2.0)),
+                    ..default()
+                },
+                BorderColor::all(HUD_AMBER),
+                UiTransform {
+                    translation: Val2::ZERO,
+                    scale: Vec2::ONE,
+                    rotation: Rot2::degrees(45.0),
+                },
+                hud_glow(HUD_GLOW, 4.0),
+                PfdGsIndex,
+                Name::new("PfdGsIndex"),
+            ));
+        });
+}
+
+/// The two flight-director cues: a vertical bar you centre by rolling and a
+/// horizontal bar you fly to in pitch. Both start hidden.
+fn spawn_flight_director(anchor: &mut ChildSpawnerCommands<'_>) {
+    anchor.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(-FD_BAR_THICK_PX * 0.5),
+            top: Val::Px(-FD_BAR_LEN_PX * 0.5),
+            width: Val::Px(FD_BAR_THICK_PX),
+            height: Val::Px(FD_BAR_LEN_PX),
+            ..default()
+        },
+        BackgroundColor(HUD_AMBER),
+        hud_glow(HUD_GLOW, 6.0),
+        Visibility::Hidden,
+        PfdDirectorRoll,
+        Name::new("PfdDirectorRoll"),
+    ));
+    anchor.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(-FD_BAR_LEN_PX * 0.5),
+            top: Val::Px(-FD_BAR_THICK_PX * 0.5),
+            width: Val::Px(FD_BAR_LEN_PX),
+            height: Val::Px(FD_BAR_THICK_PX),
+            ..default()
+        },
+        BackgroundColor(HUD_AMBER),
+        hud_glow(HUD_GLOW, 6.0),
+        Visibility::Hidden,
+        PfdDirectorPitch,
+        Name::new("PfdDirectorPitch"),
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// Approach guidance: update
+// ---------------------------------------------------------------------------
+
+/// Drive the deviation scales, the flight director, and the approach label from
+/// the guidance published by [`crate::route`].
+///
+/// Everything here is a *projection*: this system reads deviations and commands,
+/// converts them to pixels, and writes nodes. It derives no navigation quantity
+/// of its own.
+#[allow(clippy::too_many_arguments)]
+pub fn update_approach_guidance(
+    mode: Res<NavDisplayMode>,
+    route: Res<crate::route::RouteState>,
+    sim_state: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
+    units: Res<crate::units_settings::UnitsSettings>,
+    // Disjointness has to be spelled out for every pair of mutable queries over
+    // the same component, and a `ParamSet` only makes its OWN members exclusive —
+    // not exclusive against the params beside it. Four `&mut Node` views and four
+    // `&mut Visibility` views over marker components Bevy cannot prove disjoint is
+    // a boot panic (B0001), which takes the whole app (and the capture host) down
+    // rather than misbehaving quietly.
+    mut scales: ParamSet<(
+        Query<
+            &mut Visibility,
+            (
+                With<PfdLocScale>,
+                Without<PfdDirectorRoll>,
+                Without<PfdDirectorPitch>,
+            ),
+        >,
+        Query<
+            &mut Visibility,
+            (
+                With<PfdGsScale>,
+                Without<PfdDirectorRoll>,
+                Without<PfdDirectorPitch>,
+            ),
+        >,
+    )>,
+    mut loc_index: Query<
+        &mut Node,
+        (
+            With<PfdLocIndex>,
+            Without<PfdGsIndex>,
+            Without<PfdDirectorRoll>,
+            Without<PfdDirectorPitch>,
+        ),
+    >,
+    mut gs_index: Query<
+        &mut Node,
+        (
+            With<PfdGsIndex>,
+            Without<PfdLocIndex>,
+            Without<PfdDirectorRoll>,
+            Without<PfdDirectorPitch>,
+        ),
+    >,
+    mut director: ParamSet<(
+        Query<
+            (&mut Node, &mut Visibility),
+            (
+                With<PfdDirectorRoll>,
+                Without<PfdLocIndex>,
+                Without<PfdGsIndex>,
+                Without<PfdLocScale>,
+                Without<PfdGsScale>,
+            ),
+        >,
+        Query<
+            (&mut Node, &mut Visibility),
+            (
+                With<PfdDirectorPitch>,
+                Without<PfdLocIndex>,
+                Without<PfdGsIndex>,
+                Without<PfdLocScale>,
+                Without<PfdGsScale>,
+            ),
+        >,
+    )>,
+    mut label_q: Query<&mut Text, With<PfdApproachLabel>>,
+) {
+    let armed =
+        *mode == NavDisplayMode::Hud && route.plan.is_some() && route.guidance.is_some();
+    let target = if armed {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for mut vis in scales.p0().iter_mut() {
+        if *vis != target {
+            *vis = target;
+        }
+    }
+    for mut vis in scales.p1().iter_mut() {
+        if *vis != target {
+            *vis = target;
+        }
+    }
+
+    // The flight-director cue: `None` whenever it must not be shown, so there is
+    // exactly one place that decides its visibility.
+    let mut cue: Option<(f32, f32)> = None;
+    let plan_and_guidance = route
+        .plan
+        .as_ref()
+        .zip(route.guidance.as_ref())
+        .filter(|_| armed);
+
+    if let Some((plan, guidance)) = plan_and_guidance {
+    // --- Deviation indices.
+    let loc_px = deviation_index_offset_px(guidance.loc_deflection());
+    for mut node in &mut loc_index {
+        node.left = Val::Px(loc_px - DEV_INDEX_PX * 0.5);
+    }
+    let gs_px = deviation_index_offset_px(guidance.gs_deflection());
+    for mut node in &mut gs_index {
+        node.top = Val::Px(gs_px - DEV_INDEX_PX * 0.5);
+    }
+
+    // --- Flight director. The roll cue is bank error; the pitch cue is
+    // flight-path-angle error at the ladder's own px/degree, so the two read
+    // consistently against the pitch ladder behind them.
+    let sim = &sim_state.simulation;
+    let craft = sim.craft_state();
+    let angles = solar_system
+        .states
+        .as_deref()
+        .and_then(|st| st.get(sim.dominant_body()))
+        .and_then(|bs| {
+            attitude_angles(
+                craft.attitude.orientation,
+                craft.translation.position,
+                bs.position,
+            )
+        });
+
+    let speed = craft.translation.velocity.length();
+    let gamma_command = if speed > 1.0 {
+        (guidance.vertical_speed_command_m_s / speed)
+            .clamp(-1.0, 1.0)
+            .asin()
+    } else {
+        0.0
+    };
+
+    if let Some(angles) = angles {
+            let roll_px = ((guidance.bank_command_rad - angles.bank_rad).to_degrees() as f32
+                * FD_PX_PER_BANK_DEG)
+                .clamp(-FD_LIMIT_PX, FD_LIMIT_PX);
+            // Flight-path angle is pitch minus angle of attack; the PFD does not
+            // carry AoA and on a stabilised approach the difference is small and
+            // near-constant, so the cue is driven against pitch attitude and
+            // reads as a trim target rather than an exact path angle.
+            let pitch_px = (-(gamma_command - angles.pitch_rad).to_degrees() as f32
+                * PX_PER_DEG)
+                .clamp(-FD_LIMIT_PX, FD_LIMIT_PX);
+            cue = Some((roll_px, pitch_px));
+        }
+
+        // --- Annunciation. A trailing asterisk means not yet established
+        // (outside full-scale on either axis).
+        if let Ok(mut text) = label_q.single_mut() {
+            // Distance-to-go was hardcoded in km while the tapes right next to
+            // it were unit-aware; it is part of the same instrument.
+            let dtg = format::ground_distance(
+                guidance.dtg_m,
+                units.system_for(UnitDomain::Aviation),
+            );
+            let line = format!(
+                "APPR RWY {:02}  {}{}",
+                plan.designator,
+                dtg,
+                if guidance.established { "" } else { " *" }
+            );
+            if text.0 != line {
+                text.0 = line;
+            }
+        }
+    }
+
+    // One pass, one decision: the cue is shown only when it exists.
+    let cue_target = if cue.is_some() {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    };
+    for (mut node, mut vis) in director.p0().iter_mut() {
+        if let Some((roll_px, _)) = cue {
+            node.left = Val::Px(roll_px - FD_BAR_THICK_PX * 0.5);
+        }
+        if *vis != cue_target {
+            *vis = cue_target;
+        }
+    }
+    for (mut node, mut vis) in director.p1().iter_mut() {
+        if let Some((_, pitch_px)) = cue {
+            node.top = Val::Px(pitch_px - FD_BAR_THICK_PX * 0.5);
+        }
+        if *vis != cue_target {
+            *vis = cue_target;
+        }
+    }
+}
+
+#[cfg(test)]
+mod approach_guidance_tests {
+    use super::*;
+
+    #[test]
+    fn deviation_index_offset_flies_toward_the_needle() {
+        // Right of course (positive deflection) must put the index LEFT of
+        // centre, so steering toward it corrects the error. The inverse reads as
+        // a plausible instrument that flies you off the side of the runway.
+        assert!(deviation_index_offset_px(1.0) < 0.0);
+        assert!(deviation_index_offset_px(-1.0) > 0.0);
+        // High on the glideslope (positive) puts the index BELOW centre (screen
+        // y grows downward, so a positive offset is down).
+        assert!(deviation_index_offset_px(0.5) < 0.0);
+        assert_eq!(deviation_index_offset_px(0.0), 0.0);
+    }
+
+    #[test]
+    fn deviation_index_saturates_at_full_scale() {
+        assert_eq!(deviation_index_offset_px(4.0), -DEV_SCALE_HALF_PX);
+        assert_eq!(deviation_index_offset_px(-4.0), DEV_SCALE_HALF_PX);
     }
 }

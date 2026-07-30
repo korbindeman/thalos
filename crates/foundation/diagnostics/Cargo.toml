@@ -12,3 +12,15 @@ tracing-subscriber = { version = "0.3", default-features = false, features = [
     "std",
     "registry",
 ] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+libloading = "0.8.9"
+windows-sys = { version = "0.61.2", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }

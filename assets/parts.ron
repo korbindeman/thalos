@@ -51,12 +51,19 @@
                 (resource: Electricity, units: 1.5),
             ],
         )),
+        // Rocket Isp is authored as a (vacuum, sea-level) pair; thrust and
+        // effective Isp fall linearly with ambient pressure between them
+        // (nozzle back-pressure, mass flow fixed). Raptor-class references:
+        // SL Raptor ~330 s SL / ~350 s vac; RVac ~380 s vac but unusable at
+        // 1 atm (flow separation), hence the punitive sea-level numbers on
+        // vacuum bells.
         "zephyr": Engine((
             display_name: "Zephyr",
             optimized_for: Atmosphere,
             diameter: 2.5,
             thrust: 500000.0,
             isp: 355.0,
+            sea_level_isp: Some(330.0),
             dry_mass: 450.0,
             reactants: [
                 (resource: Methane, mass_fraction: 0.21739131),
@@ -72,6 +79,10 @@
             diameter: 4.0,
             thrust: 1800000.0,
             isp: 380.0,
+            // Big vacuum bell: at 1 atm back-pressure eats ~2/3 of the
+            // thrust — lighting this at the pad is a design error, not a
+            // free 380 s.
+            sea_level_isp: Some(120.0),
             dry_mass: 1800.0,
             reactants: [
                 (resource: Methane, mass_fraction: 0.21739131),
@@ -88,9 +99,16 @@
             display_name: "Typhon",
             optimized_for: Atmosphere,
             diameter: 4.0,
-            thrust: 2400000.0,
+            // Sized so the shipped Atlas leaves the pad with authority:
+            // 3.6 MN vacuum × (275/305) ≈ 3.25 MN at 1 atm → stage-1 pad
+            // TWR ≈ 1.26 (guarded by `atlas_sample_is_an_orbital_rocket`).
+            // The old 2.4 MN rating could not even lift the stack once
+            // staging (bottom engine only at ignition) and nozzle
+            // back-pressure were accounted for.
+            thrust: 3600000.0,
             isp: 305.0,
-            dry_mass: 2200.0,
+            sea_level_isp: Some(275.0),
+            dry_mass: 3000.0,
             reactants: [
                 (resource: Methane, mass_fraction: 0.21739131),
                 (resource: Lox,     mass_fraction: 0.78260869),
@@ -138,7 +156,16 @@
         )),
         "tank_methalox": Tank((
             display_name: "Methalox Tank",
-            wall_mass_per_m2: 12.0,
+            // 30 kg/m² is a *stage structure* areal density — skin (4 mm
+            // stainless alone is ~31), domes, baffles, pressurization,
+            // plumbing, and thrust structure amortized over the wall — not
+            // bare foil. With methalox at ~832 kg/m³ this lands stage dry
+            // fractions in the real 4–8% band (2.5 m × 8 m tank ≈ 6%,
+            // launcher-scale 4 m stages ≈ 4%) instead of the toy ~2.6% the
+            // old 12 kg/m² skin gave, which let single small stages carry
+            // ~12+ km/s and trivialized orbit. Same lesson as the loft
+            // fuselage's 12 → 40 correction below.
+            wall_mass_per_m2: 30.0,
             // 429 L/m³ CH4 + 571 L/m³ LOX → 1000 L/m³ total at stoichiometric
             // O/F ≈ 3.6 mass ratio (Raptor-class). Volume utilization 100%.
             storage: [
@@ -152,7 +179,9 @@
         )),
         "tank_kerosene": Tank((
             display_name: "Kerosene Tank",
-            wall_mass_per_m2: 12.0,
+            // Same stage-structure areal density as the methalox tank (see
+            // above) — a fuel tank is never bare skin.
+            wall_mass_per_m2: 30.0,
             // Near-full volume utilization for a single ambient-density
             // hydrocarbon fuel. Oxidizer is atmospheric for jet engines.
             storage: [

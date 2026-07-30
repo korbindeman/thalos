@@ -149,6 +149,10 @@ remaining exposure error.
   *brighter* than sunlit vegetation. Measure it as ground-region mean luminance
   + mean saturation on matched `THALOS_TILE_RENDERER=1` / `=0` captures rather
   than by eye — the wash reads as haze and invites chasing the atmosphere.
-- **Related open item:** the env cubemap's unit mismatch is untouched here (it
-  only contributes specular flavour today). Fixing it is `gfx` W7/F7 and must be
-  paired with lowering `AMBIENT_SKY_LUX_GAIN`.
+- **Resolved follow-up (2026-07-29):** the env cubemap's unit mismatch and
+  camera-wide ownership are fixed by
+  `INC-20260729T053218Z-craft-lighting-crossed-unit-scope-and-frame-boundaries`.
+  Its intensity now derives from `LUX_PER_SPINE_FLUX`, the probe is
+  craft-local, and its local consumer binds a black diffuse map so
+  `AMBIENT_SKY_LUX_GAIN` remains the sole diffuse-sky projection rather than
+  being counted twice.

@@ -55,7 +55,7 @@ pub struct CloudTargetMemory {
 pub const fn cloud_target_memory_for(width: u32, height: u32) -> CloudTargetMemory {
     let render_pixels = width as u64 * height as u64;
     let render_bytes = render_pixels * 16; // RGBA32F
-    let distance_bytes = render_pixels * 4; // R32F
+    let distance_bytes = render_pixels * 8; // RG32F (near hit, slab far end)
     let history_bytes = render_bytes;
     let history_distance_bytes = distance_bytes;
     let base_atlas_bytes = 0; // CLOUD-3 deleted the extruded 2-D shape atlas.
@@ -130,9 +130,12 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
     cloud_worley_image.texture_descriptor.usage =
         TextureUsages::COPY_DST | TextureUsages::STORAGE_BINDING | TextureUsages::TEXTURE_BINDING;
 
-    // Per-pixel nearest cloud-hit distance (metres from the camera; large
-    // sentinel where the ray hit no cloud). Written by the `update` raymarch,
-    // read by the game's `body_sky` composite for true depth occlusion.
+    // Per-pixel cloud-hit span (metres from the camera; large sentinel where the
+    // ray hit no cloud). `r` = nearest hit, `g` = the far end of the ray's
+    // optical-depth-weighted slab. Written by the `update` raymarch, read by the
+    // game's `body_sky` composite, which needs BOTH to occlude the marched
+    // volume against opaque geometry: one distance cannot say how much of the
+    // integrated cloud lies in front of a depth sample.
     let mut cloud_distance_image = Image::new_fill(
         Extent3d {
             width: RENDER_WIDTH,
@@ -140,8 +143,8 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 4],
-        TextureFormat::R32Float,
+        &[0; 4 * 2],
+        TextureFormat::Rg32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
     cloud_distance_image.texture_descriptor.usage = TextureUsages::COPY_DST
@@ -176,8 +179,8 @@ pub fn build_images(mut images: ResMut<Assets<Image>>) -> CloudImages {
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 4],
-        TextureFormat::R32Float,
+        &[0; 4 * 2],
+        TextureFormat::Rg32Float,
         RenderAssetUsages::RENDER_WORLD,
     );
     history_distance_image.texture_descriptor.usage =

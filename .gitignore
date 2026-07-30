@@ -18,9 +18,12 @@ rustc-ice-*.txt
 **/__pycache__/
 
 # Session-local Claude state stays ignored, but project skills (steer,
-# wgsl-bevy) are shared infrastructure and are tracked.
+# wgsl-bevy, expert-review) and the expert-review agent personas are shared
+# infrastructure and are tracked — the cloud review routine reads them from the
+# repo, so ignoring them would silently strip every persona.
 /.claude/*
 !/.claude/skills/
+!/.claude/agents/
 
 # Codex session state is local; the checked-in environment definition is not.
 /.codex/*
@@ -37,3 +40,4 @@ rustc-ice-*.txt
 # belongs in artifacts/visual/runs/ per docs/visual_testing.md.
 tools/agent_scratch/
 assets/terrain_packages/thalos_diffusion/thalos_site_detail_*.f32
+.claude/

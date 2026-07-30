@@ -930,6 +930,28 @@ Key modules:
   `BodySkyMaterial`), so the sky renders clear at near-zero GPU cost; the grass
   toggle; and the MSAA level. Add new render knobs here as fields + a control in
   `show_graphics_tab`.
+- `units_settings` — display-unit preference (the `units` section), edited from
+  the settings menu's Units tab. **SI is always the internal/simulation unit;**
+  this only changes how the HUD formats what it shows. Two fields, because one
+  global switch is the wrong model: `system` (`Metric` | `Imperial`) and
+  `aviation` (`Aeronautical` | `FollowGlobal`). Aviation is unit-conservative in
+  a way the rest of the world is not — feet, knots, ft/min, and nautical miles
+  are the instrument units in metric countries too — so the preference is
+  resolved **per `UnitDomain`** via `UnitsSettings::system_for(domain)`, which is
+  the only supported way to reach a display unit. `UnitDomain::Aviation` covers
+  the PFD tapes/readouts (`hud::pfd_panel`), the atmospheric TAS/q/Mach pill
+  (`hud::atmo_panel`), and the MFD navigation display
+  (`hud::mfd::widgets::nav_display`); `UnitDomain::General` (orbital altitude and
+  apsides, Δv, staging masses, map scales) follows `system` exactly. **An
+  instrument picks its own domain — never the craft or the flight regime**, so a
+  tape's unit cannot change mid-climb. All conversion lives in `hud::format`
+  (one function per quantity, each taking a resolved `UnitSystem`); a panel that
+  hardcodes `"{:.0} m/s"` or reads `UnitsSettings::system` directly is a defect.
+  A `Marine` domain (knots + nautical miles) is the obvious next one and is
+  deliberately absent until there is a ship instrument to attach it to.
+  Deliberately metric regardless: the EVA walking-speed pill, base-editor
+  building dimensions, the MFD trajectory-plot scale bar, freecam, and the
+  shipyard editor (which has its own metric-only `core::format`).
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `crates/runtime/game/src/lib.rs`), ensuring deterministic state flow each

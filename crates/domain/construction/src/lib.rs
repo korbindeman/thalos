@@ -18,6 +18,7 @@ pub mod engine_mesh;
 pub mod fuselage_mesh;
 pub mod gear_mesh;
 pub mod part;
+pub mod part_mesh;
 pub mod recompute;
 pub mod resource;
 pub mod sizing;
@@ -51,6 +52,7 @@ pub use fuselage_mesh::{
     v_offset_at as fuselage_v_offset_at,
 };
 pub use gear_mesh::{GearLegFrame, build_gear_bay_mesh, build_gear_mesh, gear_leg_frames};
+pub use part_mesh::add_raytracing_tangents;
 pub use part::{
     Adapter, AirIntake, CommandPod, ControlSurface, ControlSurfaceRole, Decoupler, Engine,
     EngineActivation, EngineThrust, EngineValidationError, FuelCrossfeed, FuelTank, Fuselage, Gear,

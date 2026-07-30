@@ -97,15 +97,15 @@ pub use rendered_height::{
 pub use rock_material::{RockMaterial, RockMaterialPlugin};
 pub use rock_mesh::{RockMeshData, RockMeshParams, build_rock_mesh, build_rock_mesh_data};
 pub use scatter::{
-    PlacementSample, ScatterClass, ScatterRegion, ScatterTreatment, VegInstance, VegLayer,
-    VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile, classify_scatter,
-    clump_field, combine_impostor_tile_mesh, combine_rock_tile_mesh, combine_tree_tile_mesh,
-    placement_gate,
+    PlacementSample, ScatterClass, ScatterRegion, ScatterTreatment, VEG_ALL_LAYERS, VegInstance,
+    VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement, build_scatter_tile,
+    classify_scatter, clump_field, combine_impostor_tile_mesh, combine_rock_tile_mesh,
+    combine_tree_tile_mesh, placement_gate,
 };
 pub use sky_material::BodySkyMaterial;
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
 pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
-pub use tile_synthesis_pool::tile_synthesis_pool;
+pub use tile_synthesis_pool::{tile_synthesis_pool, veg_scatter_pool};
 pub use tree_atlas::{
     ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, GRASS_CARD_VARIANTS, build_foliage_atlas,
     build_foliage_material_atlas, build_grass_card_atlas,

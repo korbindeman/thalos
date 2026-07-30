@@ -11,7 +11,11 @@
 //! - **Brakes** (`B`, the existing latched toggle): wheel brakes on the
 //!   ground *and* spoilers in the air. One key to shed speed — tap it on
 //!   descent to deploy the spoilers, and it is already latched for the
-//!   rollout when you touch down.
+//!   rollout when you touch down. The spoiler half is **airspeed-gated**
+//!   ([`SPOILER_DEPLOY_AIRSPEED_M_S`]): parked or taxiing with the parking
+//!   brake latched keeps the panels stowed (a parked aircraft with its
+//!   spoilers standing up made no sense), they auto-deploy for the rollout
+//!   lift dump while fast, and auto-stow as the rollout decays to taxi speed.
 //!
 //! The resource carries both the lever setting and the *actual* actuator
 //! positions (flaps travel slowly, spoilers snap faster). The aero model and
@@ -32,6 +36,16 @@ pub const FLAP_DETENTS: u8 = 2;
 const FLAP_TRAVEL_S: f64 = 6.0;
 /// Spoiler travel time, seconds.
 const SPOILER_TRAVEL_S: f64 = 0.8;
+/// Airspeed above which the brakes latch deploys the spoilers (m/s). Below
+/// flying speed the latch means *wheel brakes only* — a parked or taxiing
+/// aircraft never stands its spoiler panels up. Set below any plausible
+/// approach speed so a brakes-latched touchdown still gets its lift dump
+/// from the first frame of the rollout.
+const SPOILER_DEPLOY_AIRSPEED_M_S: f64 = 30.0;
+/// Airspeed below which deployed spoilers auto-stow (m/s). Hysteresis under
+/// [`SPOILER_DEPLOY_AIRSPEED_M_S`] so the panels don't flap around one
+/// threshold as the rollout decays through it.
+const SPOILER_STOW_AIRSPEED_M_S: f64 = 20.0;
 
 /// Flap lever + spoiler state. The lever detent is written by
 /// [`update_flight_config`] (the `F`/`R` keys) and the HUD flap gate
@@ -84,7 +98,9 @@ fn update_flight_config(
     clock: Res<SimClock>,
     intent: Res<GameInputIntent>,
     brake: Res<ParkingBrake>,
+    kin: Res<thalos_physics_local::LocalCraftKinematics>,
     mut config: ResMut<FlightConfig>,
+    mut fast_enough: Local<bool>,
 ) {
     if intent.flaps_extend {
         config.flap_setting = (config.flap_setting + 1).min(FLAP_DETENTS);
@@ -96,7 +112,24 @@ fn update_flight_config(
     let dt = clock.delta_secs_f64();
     let flap_target = config.flap_setting as f64 / FLAP_DETENTS as f64;
     config.flap_fraction = approach(config.flap_fraction, flap_target, dt / FLAP_TRAVEL_S);
-    let spoiler_target = if brake.engaged { 1.0 } else { 0.0 };
+    // Spoilers deploy only when the brakes latch is on AND the craft is at
+    // flying speed (with hysteresis) — see the module doc. The SLF velocity is
+    // air-relative (co-rotating frame, wind = 0), so it is the airspeed.
+    let airspeed = if kin.valid {
+        kin.slf_linear_velocity_m_s.length()
+    } else {
+        0.0
+    };
+    if airspeed >= SPOILER_DEPLOY_AIRSPEED_M_S {
+        *fast_enough = true;
+    } else if airspeed < SPOILER_STOW_AIRSPEED_M_S {
+        *fast_enough = false;
+    }
+    let spoiler_target = if brake.engaged && *fast_enough {
+        1.0
+    } else {
+        0.0
+    };
     config.spoiler_fraction = approach(
         config.spoiler_fraction,
         spoiler_target,

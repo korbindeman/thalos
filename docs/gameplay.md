@@ -1,9 +1,9 @@
 # Gameplay
 
-**Status: design capture (2026-07-21).** The horizon vision — the shape the game is
-aiming at, recorded so decisions downstream of it stay consistent. It is **not**
-scheduled work; the active sprints are the architecture consolidation pass (`clean`)
-and graphics fidelity (`gfx`). No backlog rows yet.
+**Status: horizon design (updated 2026-07-29).** The shape the game is aiming at,
+recorded so decisions downstream of it stay consistent. It is not a parallel
+status tracker: subsystem roadmaps hold strategy and `backlog.md` alone schedules
+their execution.
 
 Lore and setting live in [lore/civilization.md](lore/civilization.md) (progression
 phases, resource economy, the Pelagos question) and
@@ -399,6 +399,26 @@ the one the whole civilisation founded the programme to use.
 
 The exact coupling to light-time and bandwidth depends on the deferred communications
 system (§13); the principle stands independently of it.
+
+### 8.4 The ocean is a traversal domain
+
+Thalos's oceans are not scenery between launch sites, and Pelagos's ocean cannot
+be only a landing cutscene. The sea is a second terrain system: wave direction,
+swell, shelter, current and weather change the route, operating window and
+vehicle demands. The rendered surface and the vehicle response come from the same
+dynamic sea state.
+
+The experience is proved on Thalos before Pelagos depends on it: one small
+vessel, one heavenly showcase beach, one moving offshore storm, and a short route
+where forecasting and shelter matter. That gives the homeworld's maritime
+civilisation a mechanical presence while validating the rendering, weather,
+physics and controls against infrastructure already in the game.
+
+Pelagos is the culmination rather than the prototype. Ocean-world arrival,
+surface support, submersible deployment and the descent to a living reef reuse
+the Thalos-proven system with Pelagos-specific climate, bathymetry, ecology and
+consequences. The program and phase gates live in
+[`roadmap/ocean_systems.md`](roadmap/ocean_systems.md).
 
 ---
 

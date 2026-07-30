@@ -35,6 +35,7 @@ immediately:
 - `patch` — hit July 2026 in `gpu_grass.wgsl` (`let patch = …` → ``name `patch` is a reserved keyword``; the whole grass pipeline silently stopped rendering). Renamed to `mottle`.
 - `meta` — hit July 2026 in `body_terrain.wgsl` (struct field `meta: vec4<f32>` → ``name `meta` is a reserved keyword``; the terrain pipeline failed to build and the whole ground vanished while everything else kept rendering). Renamed to `header`. Uniform structs match the Rust mirror by declaration order, not name, so renaming only the WGSL side is safe.
 - `macro` — hit July 2026 in `clouds_compute.wgsl` (`let macro = …` → ``name `macro` is a reserved keyword``; both cloud compute pipelines failed at runtime even though Rust compiled). Renamed to `macro_noise`.
+- `partition` — hit July 2026 in `cloud_composite.wgsl` (`let partition = …` → ``name `partition` is a reserved keyword``). Renamed to `ramp`. Note the failure shape: the capture still wrote a plausible-looking PNG (BL-20), and only the pipeline-cache ERROR in stderr plus the capture client's non-zero exit distinguished it from a good run — read stderr before trusting the image.
 
 ### Strict numeric typing — no implicit conversions
 

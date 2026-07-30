@@ -7,6 +7,7 @@ edition.workspace = true
 [dependencies]
 thalos_physics_canonical = { path = "../../simulation/physics_canonical" }
 thalos_control = { path = "../../simulation/control" }
+thalos_navigation = { path = "../../simulation/navigation" }
 thalos_world = { path = "../../domain/world" }
 thalos_input = { path = "../../interface/input" }
 thalos_ui = { path = "../../interface/ui" }

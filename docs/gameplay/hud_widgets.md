@@ -65,7 +65,7 @@ from `HudPlugin`.
 | Kind | Relevance | Notes |
 |------|-----------|-------|
 | `Trajectory` | `!in_atmosphere && prediction_shown && (recently_burning \|\| has_nodes)` → 60 | Top-down orbital schematic (`system_map.wgsl`). The `!in_atmosphere` gate is the fix for the old panel popping up in cruise. |
-| `NavDisplay` | `in_atmosphere` → 100; else low over a runway → 90 | Airliner heading-up ND (`nav_display.wgsl`): compass rose, craft, runways + extended-centerline approach. |
+| `NavDisplay` | `in_atmosphere` → 100; else low over a runway → 90 | Airliner heading-up ND (`nav_display.wgsl`): compass rose, craft, **true-scale** runways with threshold bars, and the armed approach route. Owned by [navigation](navigation.md); the widget is a projection of `route::RouteState`. |
 | `Docking` | `None` (stub) | Placeholder until craft/port targets exist. |
 | `Interplanetary` | `None` (stub) | Placeholder for transfer-window / heliocentric plotting. |
 
@@ -84,37 +84,50 @@ from `HudPlugin`.
 
 ## Navigation-display projection
 
-The ND reuses the shared **`hud::geo::local_enu_basis(craft_pos, body_pos)`**
-(extracted from the PFD's `attitude_angles`, so ND and PFD headings agree):
-`up` = radial-out, `north` = world-Y projected onto the tangent plane (X-axis
-fallback at the poles), `east = north × up`.
+**The ND draws navigation; it does not compute it.** The route, the deviations,
+and the runway selection all come from `crate::route` / `thalos_navigation` —
+see [navigation.md](navigation.md), which is the spec for everything below the
+symbology. What lives here is only the projection and the drawing.
 
-Per runway from `StructureRegistry::sites_on(dominant)` (filtered to
-`StructureKind::Runway`):
+One `RouteFrame` anchored at the craft does every projection: runways, route
+points, and waypoints go through it into local east/north metres, then get rotated
+heading-up and divided by the plot range. That frame's basis is built exactly like
+the shared `hud::geo::local_enu_basis` (`up` = radial-out, `north` = world-Y
+projected onto the tangent plane with an X-axis fallback at the poles,
+`east = north × up`), so ND and PFD headings agree by construction.
 
-- Surface point (inertial), mirroring the runway's own placement, via
-  `mfd::runway_surface_inertial`:
-  `body_pos + body_orientation * (anchor_dir * (radius + elevation))`, where
-  `elevation` comes from `placement` (`FlattenTo { elevation_m, .. }`).
-- Heading `psi = atan2(nose·east, nose·north)` (0 = north, 90° = east).
-- Heading-up screen coords for a ground offset `(e, n)`:
-  `x = e·cos psi − n·sin psi`, `y_fwd = e·sin psi + n·cos psi`,
-  `y_screen = −y_fwd`, then scale by the adaptive view range.
-- Runway orientation: the projected `heading_tangent` rotated the same way; the
-  shader draws the runway rect along it and dashes the extended centerline back
-  from the threshold.
+- **Runways draw at true scale** from `StructureKind::Runway`'s half-extents, with
+  a bar across the end being landed on. Only the *width* has a floor (a 90 m strip
+  is sub-pixel at 20 km); length stays true. A strip longer than the plot still
+  draws — culling tests the nearest point of the strip, not its centre.
+- **The route is a real polyline** (arcs tessellated), with the final approach
+  segment in its own brighter colour and waypoint symbols at the join point,
+  threshold, and aim point.
+- **Selection has two paths, one writer.** Clicking a strip on the plot arms it
+  (clicking the armed one again lands the other way); the `< > FLIP CLR` row does
+  the same for an off-plot strip. Both send a `RouteRequest` — `crate::route`
+  stays the sole writer of the selection.
+- Range snaps to a 2 km – 300 km ladder containing the armed route (or the nearest
+  runway when nothing is armed), with step-down hysteresis.
 
-The range snaps to a 2 km – 150 km ladder containing the nearest runway, with
-hysteresis. `nav_display.wgsl` mirrors `NavDisplayData` and draws everything as
-signed-distance shapes in the normalised `[-1, 1]` plot space.
+Assembly is the pure `nav_display_data(&NavScene)` over a scene built by the pure
+`build_nav_scene(&NavSceneInputs)`, which is what lets **`just nd-preview`**
+render the real pipeline headlessly (see navigation.md § Verification).
+
+`nav_display.wgsl` mirrors `NavDisplayData` field-for-field and draws everything
+as signed-distance shapes in the normalised `[-1, 1]` plot space. Route points are
+packed two per `vec4`; the `MAX_*` counts must match on both sides.
 
 ## Verification
 
 - `just game cruise` (airliner in atmosphere) → the slot shows **ND**, not the
   orbital plot (the headline bug fix).
-- `just game runway-approach` → ND shows the heading rose, craft centred, the
-  runway at correct relative bearing/heading, and the dashed approach line;
-  bearing/heading track as the aircraft maneuvers.
+- `just nd-preview` → eight ND panels from real approach plans (agent-runnable;
+  covers scale, route drawing, and threshold marking, **not** ECS wiring).
+- `just game runway-approach` → ND shows the heading rose, craft centred, and both
+  runways at true size; arm one and confirm the drawn route and the PFD's
+  localizer/glideslope needles agree and track together as the aircraft
+  maneuvers.
 - A vacuum burn / pending node (`just game orbit`) → the slot shows
   **Trajectory**.
 - Selector: pin each tab, confirm it stays regardless of context (DOCK/IPL show

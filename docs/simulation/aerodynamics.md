@@ -170,11 +170,22 @@ mechanisms close that hole — there is no artificial speed clamp:
    engines (`requires_atmosphere`) scale thrust — and therefore mass flow — by
    `ρ/1.225`, the ambient density over the catalog's sea-level rating. This
    kills the "climb into thin air and keep accelerating" exploit and makes
-   service ceilings real. Rockets carry their own oxidizer and are unaffected.
-   The factor varies continuously with altitude, so
+   service ceilings real. The factor varies continuously with altitude, so
    `propulsion_config_changed` compares thrust/mass-flow with a *relative*
    (1%) threshold — an absolute epsilon would re-dirty trajectory prediction
    every frame of a climb.
+3. **Rocket nozzle back-pressure** (same site): a rocket carries its own
+   oxidizer, so it doesn't density-lapse — instead ambient *pressure* pushes
+   on the nozzle exit plane, `F(p) = F_vac − p·A_e`, exactly linear in `p`.
+   The catalog authors the two endpoints (`isp` in vacuum, `sea_level_isp` at
+   1 atm) and `Engine::pressure_thrust_factor` interpolates, clamped to
+   `[0, 1]`; the implied exit area never appears explicitly. Mass flow is a
+   pump property and stays at the vacuum rating (`F_vac/(Isp_vac·g0)`), so
+   the *effective Isp falls with the thrust* — the opposite mass-flow
+   behaviour from jets, and the reason lighting a big vacuum bell (Boreas:
+   380 s vac, 120 s at 1 atm) on the pad wastes most of its propellant.
+   Sea-level-optimized bells lose only a few percent (Typhon 305→275,
+   Zephyr 355→330). Engines without `sea_level_isp` are pressure-insensitive.
 
 **`M_dd` is derived from the authored wing geometry, not tuned per craft**
 (`build_ship_aero_config`): the Korn equation
@@ -213,7 +224,12 @@ management. `crates/runtime/game/src/flight_config.rs` owns the state
   wheel brakes on the ground *and* spoilers in the air. `Spoiler` windows
   deflect trailing-edge-up when engaged, dumping lift (`spoiler_dcl < 0`)
   and adding drag — the in-air deceleration tool, and it is already latched
-  for the rollout at touchdown.
+  for the rollout at touchdown. The spoiler half is **airspeed-gated**
+  (2026-07-29): panels deploy only above ~30 m/s and auto-stow below
+  ~20 m/s (hysteresis), so the latch means *wheel brakes only* while parked
+  or taxiing — a freshly spawned aircraft no longer sits on the apron with
+  its spoilers standing up — while a brakes-latched touchdown still gets
+  its lift dump from the first frame of the rollout.
 
 Both are authored as [`ControlSurface`] windows on the wing (roles `Flap` /
 `Spoiler` next to `Aileron`/`Elevator`/`Rudder`), so they get hinged meshes
@@ -453,8 +469,12 @@ for directions). Both groups start disabled.
 - `crates/runtime/game/src/hud/flight_config_panel.rs` — the capability-gated
   flaps/brakes HUD pills.
 - `crates/runtime/game/src/fuel.rs` — `air_breathing_thrust_factor` (jet density
-  lapse) inside `refresh_active_propulsion`; `active_thrust_fraction` (the
-  throttle gate the gimbal authority scales by).
+  lapse) and the rocket nozzle back-pressure application inside
+  `refresh_active_propulsion`; `active_thrust_fraction` (the throttle gate the
+  gimbal authority scales by).
+- `crates/domain/construction/src/part.rs` — `Engine::pressure_thrust_factor`
+  (the vacuum ↔ sea-level Isp interpolation; + unit tests) and
+  `ISP_REFERENCE_PRESSURE_PA`.
 - `crates/runtime/game/src/staging.rs` — `recompute_ship_inertia` aggregates every
   gimballed engine into `ShipParameters::gimbal_torque_full`.
 - `crates/runtime/game/src/local_physics/forces.rs` — `compute_angular_acceleration`

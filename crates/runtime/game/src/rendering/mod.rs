@@ -13,6 +13,7 @@
 mod body_lod;
 pub(crate) mod clouds;
 pub(crate) mod contact_shadow;
+pub(crate) mod flow;
 mod generation;
 mod gpu_grass;
 mod grass;
@@ -22,6 +23,7 @@ mod materials;
 mod ocean;
 pub(crate) mod plume;
 pub(crate) mod real_space;
+pub(crate) mod reentry;
 pub(crate) mod tile_cache;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
 // Re-enable by uncommenting this and the `RockScatterPlugin` registration below.
@@ -72,7 +74,7 @@ use materials::{
 };
 use real_space::{
     RealSpaceOrigin, attach_player_ship_to_big_space, attach_ship_camera_to_big_space,
-    setup_big_space, update_real_space_body_positions, update_real_space_origin,
+    setup_big_space, update_real_space_body_positions,
 };
 use scene_depth::SceneDepthPlugin;
 use spawn::spawn_bodies;
@@ -133,7 +135,10 @@ impl Plugin for RenderingPlugin {
             .add_plugins(grass::GrassRenderPlugin)
             .add_plugins(gpu_grass::GpuGrassPlugin)
             .add_plugins(vegetation::VegetationRenderPlugin)
+            // One aerothermal boundary, then the effects that read it.
+            .add_plugins(flow::FlowSignalsPlugin)
             .add_plugins(plume::PlumePlugin)
+            .add_plugins(reentry::ReentryPlugin)
             // Rocks/pebbles disabled — see `mod rocks` above.
             // .add_plugins(rocks::RockScatterPlugin)
             .insert_resource(LastClick::default())
@@ -193,9 +198,6 @@ impl Plugin for RenderingPlugin {
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),
                     update_real_space_body_positions.after(sync_solar_system_state),
-                    // The big_space render frame, for everything placed in real
-                    // space from *outside* the hierarchy (the sun-shadow rig).
-                    update_real_space_origin,
                     // F1: the Bevy sun is a projection of the spine's heliocentric
                     // flux, so it must read the per-frame exposure gain first.
                     update_sun_light

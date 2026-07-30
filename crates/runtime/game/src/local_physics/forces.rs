@@ -37,6 +37,7 @@ pub(crate) fn apply_local_forces(
     clock: Res<SimClock>,
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
+    weight_on_wheels: Res<WeightOnWheels>,
     mut sim: ResMut<SimulationState>,
     throttle: Res<ThrottleState>,
     mut craft_q: Query<(
@@ -74,7 +75,12 @@ pub(crate) fn apply_local_forces(
     else {
         return;
     };
-    let params = *sim.simulation.ship_params();
+    let mut params = *sim.simulation.ship_params();
+    // Ground control regime: with weight on the wheels the reaction wheels
+    // lose roll/yaw (keep pitch for rotation) — see `wheel_torque_ground_mask`.
+    // The controller (`control_bus::realize_control`) normalized against the
+    // same masked authority, so commanded and realized torque stay equal.
+    params.max_torque *= wheel_torque_ground_mask(weight_on_wheels.grounded);
     // A destroyed craft is inert debris: gravity still acts (so it falls and
     // settles), but thrust and reaction-wheel torque are cut. See
     // `docs/simulation/surface.md`.

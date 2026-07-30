@@ -16,8 +16,8 @@
                 length: 4.0,
             ),
             resources: {
-                Lox: 28701.592,
                 Methane: 21563.893,
+                Lox: 28701.592,
             },
         ),
         (
@@ -39,29 +39,20 @@
                 length: 8.0,
             ),
             resources: {
-                Methane: 43127.785,
                 Lox: 57403.184,
+                Methane: 43127.785,
             },
         ),
+        // First stage burns in the thick of the atmosphere: the sea-level
+        // Typhon. A vacuum Boreas here can no longer even lift the stack —
+        // nozzle back-pressure cuts it to ~120 s / ~570 kN at the pad.
         (
-            catalog_id: "boreas",
+            catalog_id: "typhon",
             params: r#None,
             resources: {},
         ),
     ],
     connections: [
-        (
-            parent: 1,
-            parent_node: "bottom",
-            child: 2,
-            child_node: "top",
-        ),
-        (
-            parent: 4,
-            parent_node: "bottom",
-            child: 5,
-            child_node: "top",
-        ),
         (
             parent: 2,
             parent_node: "bottom",
@@ -78,6 +69,18 @@
             parent: 3,
             parent_node: "bottom",
             child: 4,
+            child_node: "top",
+        ),
+        (
+            parent: 1,
+            parent_node: "bottom",
+            child: 2,
+            child_node: "top",
+        ),
+        (
+            parent: 4,
+            parent_node: "bottom",
+            child: 5,
             child_node: "top",
         ),
     ],

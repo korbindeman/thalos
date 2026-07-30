@@ -57,7 +57,10 @@ pub const THRESHOLD_NODES: usize = 8;
 /// of the disk-cache key the game uses to skip the multi-second Monte-Carlo
 /// at boot, and a stale hit silently calibrates yesterday's renderer —
 /// exactly the `GENERATOR_VERSION` rule the terrain tile cache follows.
-pub const FILL_LUT_VERSION: u32 = 9;
+/// 11: anvil gate blends instead of flooring `mass` (the orbital cloud-floor
+/// fix), derived formation threshold, and dome coefficients rescaled against
+/// σ(`shape`) — all three change the strata cube this march is fitted against.
+pub const FILL_LUT_VERSION: u32 = 11;
 
 /// Derived near-threshold curve + far opacity response for one body/climate.
 #[derive(Clone, Copy, Debug)]
@@ -539,10 +542,14 @@ fn sample_shaped(
 ) -> f32 {
     let threshold = threshold_at(nodes, s.env);
     let mut mass = s.shape - threshold - s.vertical_narrow;
-    if s.anvil_gate > 0.0 {
-        let anvil_shape = s.anvil_base - (threshold - 0.06);
-        mass = mass.max(anvil_shape * s.anvil_gate);
-    }
+    // Blend by the gate rather than `max`-ing against a gate-scaled value. The
+    // `> 0.0` guard this replaces stopped the fully-zero case but not a tiny
+    // positive gate, which still floored `mass` at ~0. Lockstep with
+    // `get_cloud_map_density` (clouds_compute.wgsl) and
+    // `cloud_surface_density_traced` (solar_system_state.rs), where the same
+    // shape emitted a planet-wide orbital cloud floor.
+    let anvil_mass = s.anvil_base - (threshold - 0.06);
+    mass += (mass.max(anvil_mass) - mass) * s.anvil_gate;
     let edge = 1.0 - smoothstep(0.02, 0.34, mass);
     if edge * detail_weight > 1.0e-3 {
         mass -= s.erode * edge * detail_weight * input.detail_strength * 0.55;
@@ -747,8 +754,11 @@ fn march_column(
 
             // Round-7 dome sculpting + thin top skins + height-typed erosion:
             // exact mirrors of `get_cloud_map_density` — keep in lockstep.
-            let vertical_narrow = h * 0.04 * stratus_w
-                + (h * h) * (0.42 * cumulus_w + 0.30 * storm_w) * (1.0 - 0.45 * column_tall);
+            // Dome coefficients are scaled against σ(`shape`) — see the
+            // derivation on `cloud_surface_density_traced`
+            // (solar_system_state.rs). Do not retune one mirror alone.
+            let vertical_narrow = h * 0.012 * stratus_w
+                + (h * h) * (0.130 * cumulus_w + 0.093 * storm_w) * (1.0 - 0.45 * column_tall);
             let anvil_profile = smoothstep(0.62, 0.76, h) * (1.0 - smoothstep(0.90, 1.0, h));
             let stratus_profile =
                 smoothstep(0.0, bottom_softness * 0.45, h) * (1.0 - smoothstep(0.72, 1.0, h));

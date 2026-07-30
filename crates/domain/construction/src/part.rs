@@ -369,6 +369,14 @@ pub struct Engine {
     pub thrust: f32,
     /// Specific impulse in vacuum, s.
     pub isp: f32,
+    /// Specific impulse at the 1-atm reference pressure
+    /// ([`ISP_REFERENCE_PRESSURE_PA`]), s. `None` = pressure-insensitive
+    /// (air-breathers, which lapse with density instead). For a rocket this
+    /// implicitly authors the nozzle exit area: thrust falls linearly with
+    /// ambient pressure (`F = F_vac − p·A_e`) while mass flow stays fixed,
+    /// so a vacuum-optimized bell is heavily penalized at sea level. See
+    /// [`Engine::pressure_thrust_factor`].
+    pub sea_level_isp: Option<f32>,
     pub dry_mass: f32,
     /// Which reactants this engine consumes, as mass fractions of its
     /// total mass flow. Fractions must sum to 1.0; resources must all be
@@ -419,5 +427,106 @@ impl Engine {
             return Err(EngineValidationError::ReactantFractionsNotNormalized);
         }
         Ok(())
+    }
+
+    /// Fraction of vacuum thrust deliverable at `ambient_pressure_pa`.
+    ///
+    /// Nozzle back-pressure: `F(p) = F_vac − p·A_e` is exactly linear in
+    /// ambient pressure, so the authored `sea_level_isp` pins the line at the
+    /// 1-atm reference and vacuum pins it at 1 — no explicit exit area needed
+    /// (`A_e = (1 − Isp_sl/Isp_vac)·F_vac / p_ref` falls out). Mass flow is a
+    /// pump property and does **not** change with altitude; callers keep
+    /// `mdot = F_vac/(Isp_vac·g0)` and let effective Isp follow the thrust.
+    /// Clamped to `[0, 1]`: pressures beyond the separation point simply kill
+    /// thrust rather than going negative. `None` / non-positive inputs → 1.
+    pub fn pressure_thrust_factor(&self, ambient_pressure_pa: f64) -> f64 {
+        let Some(sea_level_isp) = self.sea_level_isp else {
+            return 1.0;
+        };
+        if ambient_pressure_pa <= 0.0 || self.isp <= 0.0 || sea_level_isp >= self.isp {
+            return 1.0;
+        }
+        let loss_at_ref = 1.0 - sea_level_isp as f64 / self.isp as f64;
+        (1.0 - loss_at_ref * ambient_pressure_pa / ISP_REFERENCE_PRESSURE_PA).clamp(0.0, 1.0)
+    }
+}
+
+/// Reference ambient pressure (Pa) at which [`Engine::sea_level_isp`] is
+/// authored — one standard atmosphere.
+pub const ISP_REFERENCE_PRESSURE_PA: f64 = 101_325.0;
+
+#[cfg(test)]
+mod pressure_thrust_tests {
+    use super::*;
+    use crate::catalog::{EngineGeometry, EngineOptimization};
+    use crate::resource::Resource;
+
+    fn rocket(isp: f32, sea_level_isp: Option<f32>) -> Engine {
+        Engine {
+            model: "test".into(),
+            geometry: EngineGeometry::default(),
+            optimized_for: EngineOptimization::Atmosphere,
+            requires_atmosphere: false,
+            intake_requirement: None,
+            builtin_intake: None,
+            diameter: 2.5,
+            thrust: 500_000.0,
+            isp,
+            sea_level_isp,
+            dry_mass: 450.0,
+            reactants: vec![ReactantRatio {
+                resource: Resource::Methane,
+                mass_fraction: 1.0,
+            }],
+            power_draw_kw: 0.0,
+            gimbal_range_deg: 0.0,
+        }
+    }
+
+    #[test]
+    fn vacuum_gives_full_thrust() {
+        let e = rocket(355.0, Some(330.0));
+        assert_eq!(e.pressure_thrust_factor(0.0), 1.0);
+    }
+
+    #[test]
+    fn one_atm_matches_authored_sea_level_isp() {
+        // At the reference pressure the thrust (and, with fixed mdot, the
+        // effective Isp) must land exactly on the authored sea-level rating.
+        let e = rocket(355.0, Some(330.0));
+        let f = e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA);
+        assert!((f - 330.0 / 355.0).abs() < 1e-12);
+        assert!((e.isp as f64 * f - 330.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn loss_is_linear_in_pressure() {
+        let e = rocket(355.0, Some(330.0));
+        let half = e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA * 0.5);
+        let full = e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA);
+        assert!(((1.0 - half) * 2.0 - (1.0 - full)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn vacuum_bell_is_crippled_but_never_negative() {
+        // A big vacuum nozzle loses most of its thrust at 1 atm and clamps to
+        // zero (flow separation) instead of going negative at higher pressure.
+        let e = rocket(380.0, Some(120.0));
+        let f = e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA);
+        assert!((f - 120.0 / 380.0).abs() < 1e-12);
+        assert_eq!(e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA * 3.0), 0.0);
+    }
+
+    #[test]
+    fn unauthored_or_degenerate_is_pressure_insensitive() {
+        assert_eq!(
+            rocket(355.0, None).pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA),
+            1.0
+        );
+        // sea-level >= vacuum is a nonsense authoring; fail safe to 1.
+        assert_eq!(
+            rocket(355.0, Some(400.0)).pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA),
+            1.0
+        );
     }
 }

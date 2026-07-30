@@ -36,6 +36,7 @@ use crate::navball::ui::{NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX};
 use crate::navigation::{NavigationMode, NavigationState};
 use crate::rendering::SimulationState;
 use crate::target::TargetBody;
+use crate::units_settings::UnitDomain;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 
 /// Diameter of the circular panel (px).
@@ -1037,7 +1038,7 @@ pub fn update_maneuver_visuals(
         (
             format_duration_compact(directive.duration_s),
             theme.text_primary,
-            crate::hud::format::delta_v(remaining_dv, units.system),
+            crate::hud::format::delta_v(remaining_dv, units.system_for(UnitDomain::General)),
             theme.text_primary,
             start_label,
             if burn_start - now <= 0.0 {

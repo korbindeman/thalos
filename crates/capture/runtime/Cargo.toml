@@ -8,6 +8,7 @@ edition.workspace = true
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
 thalos_runtime = { path = "../../runtime/game" }
 thalos_capture_protocol = { path = "../protocol" }
+thalos_diagnostics = { workspace = true }
 
 [features]
 dev-renderer = ["thalos_runtime/dev-renderer"]

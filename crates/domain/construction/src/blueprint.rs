@@ -397,6 +397,7 @@ fn insert_part(
                     diameter: e.diameter,
                     thrust: e.thrust,
                     isp: e.isp,
+                    sea_level_isp: e.sea_level_isp,
                     dry_mass: e.dry_mass,
                     reactants: e.reactants.clone(),
                     power_draw_kw: e.power_draw_kw,
@@ -903,6 +904,25 @@ mod tests {
             s.current_acceleration() > THALOS_SURFACE_G,
             "atlas can't lift off ({:.1} m/s² ≤ g {THALOS_SURFACE_G})",
             s.current_acceleration()
+        );
+
+        // Pad TWR, honestly: staging ignites only the bottom booster, and at
+        // 1 atm its thrust is derated by the sea-level/vacuum Isp ratio
+        // (nozzle back-pressure — mass flow fixed, thrust falls linearly with
+        // ambient pressure). The shipped rocket must fly a sane ascent, not
+        // crawl off the pad.
+        let CatalogEntry::Engine(typhon) = cat.resolve("typhon").unwrap() else {
+            panic!("typhon should be an engine");
+        };
+        let sl_factor = typhon
+            .sea_level_isp
+            .map(|sl| sl as f64 / typhon.isp as f64)
+            .unwrap_or(1.0);
+        let pad_twr =
+            typhon.thrust as f64 * sl_factor / (s.wet_mass_kg() * THALOS_SURFACE_G);
+        assert!(
+            pad_twr > 1.2,
+            "atlas stage-1 pad TWR {pad_twr:.2} too low to leave the pad cleanly"
         );
 
         // Δv (single-stack lower bound: combined Isp over the full mass ratio —

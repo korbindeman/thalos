@@ -29,6 +29,7 @@ Use the smallest workflow that answers the question:
 | Isolate cloud internals | `just compare <scene> cloud-tier` or `cloud-reconstruction` | registered N-way variants |
 | Check whether your edits are present | read `<image>.capture.json` | `source_floor_guaranteed: true` proves the invocation floor is included; `workspace_matches` says whether the checkout stayed exact |
 | Hand framing to/from a human | human presses F9; agent runs `just screenshot <id>` | exact body-fixed camera, lens, scene, and saved time |
+| Hand the result back to a human | write a page with `{{img:…}}` tokens, run `python3 scripts/present_embed.py <page>.html`, publish the `.embedded.html` | *Presenting results* below |
 
 ### Framing versus fidelity
 
@@ -154,7 +155,7 @@ resolved pose, including the authored lens. Do not write only the rendered
 will restore its focus-derived pose on the next frame.
 
 The catalog is also the public registry for the existing agent views:
-spaceport, atmosphere, ocean, Mira, clouds, plume, and massif framings appear
+spaceport, atmosphere, ocean, coastline, Mira, clouds, plume, interstage, and massif framings appear
 in the same F8 list with an `[agent]` badge. Their JSON record selects a
 validated procedural driver so search-driven targets and diagnostics retain
 their behavior. Viewing one live applies its focus and camera framing;
@@ -337,6 +338,53 @@ BL-20 landed 2026-07-24: the controller scans the current request's host log
 to a failed request, validates that the output exists and decodes, and refuses
 to assemble comparisons from invalid variants. Cold variants receive the same
 log validation.
+
+## Presenting results
+
+Captures exist to be looked at. When a change lands whose result is visual — or
+whose shape is spatial or structural enough that a diagram beats prose — the
+hand-back is a presentation page, not a paragraph describing the images
+(CLAUDE.md · *Presenting your work*). Skip it for one-line fixes, doc edits, and
+anything with no visible surface; a padded presentation costs more than it
+returns.
+
+The page is a self-contained HTML file published with the Artifact tool. It is
+served under a strict CSP: no external host loads, and it cannot read the
+developer's disk, so `<img src="artifacts/visual/…">` and `file://` both render
+broken. Images have to be inlined as data URIs, which is what
+`scripts/present_embed.py` is for.
+
+Write the page with tokens where the captures go:
+
+```html
+<h2>Ridge stipple, before and after</h2>
+{{img:artifacts/visual/runs/comparisons/mira-eva/terrain-regolith-filter/01_legacy.png|legacy}}
+{{img:artifacts/visual/runs/comparisons/mira-eva/terrain-regolith-filter/02_filtered.png|footprint-filtered}}
+```
+
+Then embed and publish:
+
+```bash
+python3 scripts/present_embed.py report.html --width 1400
+```
+
+That writes `report.embedded.html` with every token replaced by an `<img>`
+carrying a downscaled data URI (JPEG q82, or PNG when the source has alpha), and
+prints the per-image and total payload size to stderr. Publish the
+`.embedded.html`; keep the token source, so a recapture only costs a rerun of
+the script. Token paths resolve relative to the page, then to the repository
+root. Aim for a page in the low single-digit MB — `--width` is the knob.
+
+What belongs on it: the matched before/after pair from one comparison run at
+identical framing and labelled (never two differently-framed stills), what you
+see in plain language, what you changed, what you deliberately left alone, what
+is still unverified, and the preset/axis names so the user can rerun it.
+Mermaid renders natively (```mermaid fence or `<pre class="mermaid">`) for flow
+and ownership diagrams; no external charting library will load.
+
+The page is a courtesy to the reader, not a record. It does not replace the
+backlog row, an ADR, or the `.capture.json` receipt beside each PNG, and nothing
+in `docs/` should link to it.
 
 ## Root-cause loop
 

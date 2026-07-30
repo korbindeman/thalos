@@ -67,6 +67,14 @@ pub struct PerfSamples {
     pub main_images: u32,
     pub tile_resident: u32,
     pub tile_mib: f32,
+    /// Whole-process resident set. The total the GPU-side gauges must be read
+    /// against: a host was killed at 8.1 GiB RSS while tile + slab summed to
+    /// ~2 GiB, and nothing measured the other six (2026-07-29, massif-aerial).
+    pub rss_mib: f32,
+    /// CPU bytes held by main-world `Assets<Mesh>` (vertex + index buffers).
+    pub mesh_cpu_mib: f32,
+    /// CPU bytes held by main-world `Assets<Image>` pixel data.
+    pub image_cpu_mib: f32,
 
     mem_head: usize,
     mem_filled: usize,
@@ -92,6 +100,9 @@ impl Default for PerfSamples {
             main_images: 0,
             tile_resident: 0,
             tile_mib: 0.0,
+            rss_mib: 0.0,
+            mesh_cpu_mib: 0.0,
+            image_cpu_mib: 0.0,
             mem_head: 0,
             mem_filled: 0,
             tile_mib_ring: [0.0; MEM_RING_LEN],
@@ -288,6 +299,38 @@ fn sample_gauges(
     let tile_mib =
         tile_roots.iter().map(|r| r.resident_bytes()).sum::<usize>() as f32 / (1024.0 * 1024.0);
     samples.tile_mib = tile_mib;
+    // CPU-side accounting, so `rss_mib` growth can be attributed rather than
+    // guessed at. Byte sums over borrowed buffers — no allocation.
+    let mib = |bytes: usize| bytes as f32 / (1024.0 * 1024.0);
+    samples.rss_mib = thalos_diagnostics::process::self_resident_bytes()
+        .map(|b| mib(b as usize))
+        .unwrap_or(0.0);
+    // `try_*`, not the plain accessors: a RENDER_WORLD-only mesh has had its
+    // CPU data moved out at extraction, and the plain accessors panic on it.
+    // Counting it as 0 is the truth this gauge wants — its CPU copy is gone.
+    samples.mesh_cpu_mib = mib(meshes
+        .iter()
+        .map(|(_, mesh)| {
+            let vertex_bytes = mesh
+                .try_attributes()
+                .map(|attributes| {
+                    attributes
+                        .map(|(_, values)| values.get_bytes().len())
+                        .sum::<usize>()
+                })
+                .unwrap_or(0);
+            let index_bytes = match mesh.try_indices_option() {
+                Ok(Some(bevy::render::mesh::Indices::U16(v))) => v.len() * 2,
+                Ok(Some(bevy::render::mesh::Indices::U32(v))) => v.len() * 4,
+                _ => 0,
+            };
+            vertex_bytes + index_bytes
+        })
+        .sum());
+    samples.image_cpu_mib = mib(images
+        .iter()
+        .map(|(_, image)| image.data.as_ref().map_or(0, Vec::len))
+        .sum());
     let slab_mib = store
         .get(MeshAllocatorDiagnosticPlugin::slabs_size_diagnostic_path())
         .and_then(|d| d.value())
@@ -360,6 +403,9 @@ fn record(
             tile_resident = u64::from(samples.tile_resident),
             tile_mib = f64::from(samples.tile_mib),
             slab_mib = f64::from(samples.slab_mib()),
+            rss_mib = f64::from(samples.rss_mib),
+            mesh_cpu_mib = f64::from(samples.mesh_cpu_mib),
+            image_cpu_mib = f64::from(samples.image_cpu_mib),
             "perf frame gauge"
         );
     }

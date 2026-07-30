@@ -426,6 +426,14 @@ and installs its pad through this path; a future building is a data entry
   load-bearing (the heightfield is a surface, not a closed solid, so fast
   descents can still tunnel). Demotion to a warning needs an intervention
   counter + zero-intervention runs across the descent scenarios first.
+  **2026-07-29:** its velocity correction became a contact impulse (normal +
+  Coulomb friction) at the deepest hull support point instead of a CoM
+  radial-velocity clamp — the clamp had zero torque, so a wheeled craft
+  (whose hull never solver-contacts the ground) that arrived wingtip-first
+  froze in that attitude (INC-20260729T073116Z). The gear suspension ray
+  also gained a lifted start + analytic-height fallback so a hull driven
+  below the surface (within the backstop skin) can't silently unload its
+  wheels.
 - **Heightfield rebuilds are synchronous** on the main thread
   (on re-anchor / height-source revision change) — a possible hitch near
   terrain streaming; async rebuild with atomic swap is the planned upgrade.

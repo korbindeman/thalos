@@ -149,13 +149,18 @@ pub fn realize_control(
     active: Res<ActiveLocalBubble>,
     tuning: Res<AeroTuning>,
     clock: Res<SimClock>,
-    kin: Res<LocalCraftKinematics>,
+    // Tuple-bundled to stay within Bevy's 16-param system limit.
+    kin_ground: (
+        Res<LocalCraftKinematics>,
+        Res<crate::local_physics::WeightOnWheels>,
+    ),
     ship_aero: ShipAeroQuery,
     mut sim: ResMut<SimulationState>,
     mut controller: ResMut<AttitudeControllerState>,
     mut sas: ResMut<SasState>,
     mut realized: ResMut<RealizedControl>,
 ) {
+    let (kin, weight_on_wheels) = kin_ground;
     // A destroyed craft accepts no attitude command: clear the hold target
     // and emit inert control so the wreck tumbles freely. `SasState` itself
     // is deliberately left alone — SAS is on by default, so the respawned
@@ -237,7 +242,15 @@ pub fn realize_control(
     let (aero_authority, flight) =
         player_aero_environment(&sim, &active, &tuning, &kin, &ship_aero, assist_armed);
     let attitude = *sim.simulation.attitude();
-    let params = *sim.simulation.ship_params();
+    let mut params = *sim.simulation.ship_params();
+    // Ground control regime: with weight on the wheels the reaction wheels
+    // lose roll/yaw (keep pitch for takeoff rotation) — on the ground the
+    // rudder + nosewheel own yaw and nothing should be able to roll the craft
+    // over its own gear at taxi speed. The controller must normalize its PD
+    // against this *masked* wheel authority, and `apply_local_forces` realizes
+    // against the same mask, so commanded torque equals realized torque.
+    params.max_torque *=
+        crate::local_physics::wheel_torque_ground_mask(weight_on_wheels.grounded);
     // Engine-gimbal authority: the full-thrust thrust-vectoring torque scaled
     // by the fraction of thrust actually firing (zero at coast). Folded into
     // the controller's non-wheel effector authority so its PD normalizes by the

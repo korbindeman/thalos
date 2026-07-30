@@ -26,6 +26,7 @@ use crate::hud::HudPanel;
 use crate::hud::format;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
 use crate::rendering::{SimulationState, SolarSystemState};
+use crate::units_settings::UnitDomain;
 
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
 
@@ -307,11 +308,11 @@ pub fn update(
     let (ap_str, pe_str) = match elements {
         Some(el) => {
             let ap = if el.apoapsis_m.is_finite() {
-                format::altitude(el.apoapsis_m - body.radius_m, units.system)
+                format::altitude(el.apoapsis_m - body.radius_m, units.system_for(UnitDomain::General))
             } else {
                 "—".to_string()
             };
-            let pe = format::altitude(el.periapsis_m - body.radius_m, units.system);
+            let pe = format::altitude(el.periapsis_m - body.radius_m, units.system_for(UnitDomain::General));
             (ap, pe)
         }
         None => ("—".to_string(), "—".to_string()),
@@ -377,7 +378,7 @@ pub fn update(
     };
     display.resolved = Some((chosen, alt_value));
 
-    set_text(&mut alt_q, format::altitude(alt_value, units.system));
+    set_text(&mut alt_q, format::altitude(alt_value, units.system_for(UnitDomain::General)));
 
     let anchor_str = format!("{} {}", body.name, datum_label);
     if let Ok((mut text, mut color)) = anchor_q.single_mut() {

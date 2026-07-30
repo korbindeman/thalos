@@ -58,7 +58,7 @@ use thalos_physics_canonical::types::{AttitudeState, BodyState};
 use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalPrimitiveShape, spawn_structure_collider,
 };
-use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
+use thalos_shipyard::{AttachNodes, EngineActivation};
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
@@ -452,13 +452,7 @@ fn finish_runway_spawn(
     // landing gear at the loaded static-sag equilibrium.
     gear_geometry: (
         crate::local_physics::PartColliderQuery,
-        Query<
-            (&Gear, &SurfaceMount),
-            (
-                With<Part>,
-                Without<crate::shipyard_editor::core::EditorPart>,
-            ),
-        >,
+        crate::local_physics::GearPartQuery,
         Query<&AttachNodes>,
         Res<crate::local_physics::GearTuning>,
     ),
@@ -966,13 +960,7 @@ pub(crate) fn measure_runway_clearance(
     mesh_q: &Query<(&GlobalTransform, &Mesh3d)>,
     meshes: &Assets<Mesh>,
     parts: &crate::local_physics::PartColliderQuery,
-    gear_q: &Query<
-        (&Gear, &SurfaceMount),
-        (
-            With<Part>,
-            Without<crate::shipyard_editor::core::EditorPart>,
-        ),
-    >,
+    gear_q: &crate::local_physics::GearPartQuery,
     host_nodes: &Query<&AttachNodes>,
     gear_tuning: &crate::local_physics::GearTuning,
 ) -> Option<f64> {

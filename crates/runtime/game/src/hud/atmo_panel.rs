@@ -12,6 +12,7 @@ use crate::aero::AeroReadout;
 
 use crate::hud::HudPanel;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
+use crate::units_settings::UnitDomain;
 
 /// Density (kg/m³) above which the panel is shown — i.e. "in atmosphere".
 const IN_ATMOSPHERE_DENSITY: f64 = 1.0e-6;
@@ -85,16 +86,13 @@ pub fn update(
         && let Ok(flight) = ship_q.single()
         && let Ok(mut text) = text_q.single_mut()
     {
-        // TAS reuses the shared speed formatter (m/s or knots); dynamic
-        // pressure is kPa metric / psf imperial; Mach is dimensionless.
-        let tas = crate::hud::format::speed(flight.airspeed_ms, units.system);
-        let value = if units.system.is_imperial() {
-            let q_psf = flight.dynamic_pressure_pa * 0.020_885_434;
-            format!("TAS {tas}  ·  q {q_psf:.0} psf  ·  M {:.2}", flight.mach)
-        } else {
-            let q_kpa = flight.dynamic_pressure_pa / 1000.0;
-            format!("TAS {tas}  ·  q {q_kpa:.1} kPa  ·  M {:.2}", flight.mach)
-        };
+        // An atmospheric-flight readout is an aviation instrument, so it reads
+        // knots and psf even when the global preference is metric.
+        let system = units.system_for(UnitDomain::Aviation);
+        let tas = crate::hud::format::speed(flight.airspeed_ms, system);
+        let q = crate::hud::format::dynamic_pressure(flight.dynamic_pressure_pa, system);
+        // Mach is dimensionless, so it needs no conversion.
+        let value = format!("TAS {tas}  ·  q {q}  ·  M {:.2}", flight.mach);
         if text.0 != value {
             text.0 = value;
         }

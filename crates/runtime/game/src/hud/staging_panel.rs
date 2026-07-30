@@ -22,6 +22,7 @@ use crate::hud::HudPanel;
 use crate::hud::format;
 use crate::hud::theme::{HudTheme, emphasis, label};
 use crate::staging::StagingSummaries;
+use crate::units_settings::UnitDomain;
 
 /// Pre-spawned stage cards. A rocket rarely exceeds this many stages.
 const MAX_STAGE_CARDS: usize = 8;
@@ -271,7 +272,7 @@ pub fn update(
             ),
             StageField::DeltaV => {
                 let s = if stage.has_engine {
-                    format::delta_v(stage.delta_v_m_s, units.system)
+                    format::delta_v(stage.delta_v_m_s, units.system_for(UnitDomain::General))
                 } else {
                     "drop only".to_string()
                 };
@@ -279,7 +280,7 @@ pub fn update(
             }
             StageField::Fuel => {
                 let s = if stage.fuel_kg > 0.0 {
-                    format::mass(stage.fuel_kg, units.system)
+                    format::mass(stage.fuel_kg, units.system_for(UnitDomain::General))
                 } else {
                     "—".to_string()
                 };
@@ -336,7 +337,7 @@ pub fn update(
                 format::resource_ratio(
                     t.mass_kg,
                     t.capacity * am.resource.density_kg_per_unit(),
-                    units.system,
+                    units.system_for(UnitDomain::General),
                 )
             })
             .unwrap_or_else(|| "—".to_string());

@@ -29,7 +29,7 @@ use bevy::window::PrimaryWindow;
 
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
-use thalos_shipyard::{AttachNodes, EngineActivation, Gear, Part, SurfaceMount};
+use thalos_shipyard::{AttachNodes, EngineActivation};
 use thalos_world::BodyId;
 
 use crate::camera::{ActiveCamera, ShipCamera};
@@ -456,7 +456,7 @@ fn apply_launch_placement(
     // 16-param system limit (as `runway::finish_runway_spawn` does).
     gear_geometry: (
         crate::local_physics::PartColliderQuery,
-        Query<(&Gear, &SurfaceMount), (With<Part>, Without<EditorPart>)>,
+        crate::local_physics::GearPartQuery,
         Query<&AttachNodes>,
         Res<crate::local_physics::GearTuning>,
     ),

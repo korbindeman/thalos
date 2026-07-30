@@ -131,11 +131,13 @@ pub struct CloudsImage {
     #[storage_texture(1, image_format = Rgba32Float, access = ReadWrite, dimension = "3d")]
     pub cloud_worley_image: Handle<Image>,
 
-    /// Nearest cloud-hit distance per pixel (metres from the camera; ≥ 1e8
-    /// sentinel = no cloud on this ray). The game samples it as a regular
-    /// texture in the `body_sky` composite; the raymarch's own history reads
-    /// go through `history_distance_image`.
-    #[storage_texture(2, image_format = R32Float, access = WriteOnly)]
+    /// Cloud-hit span per pixel (metres from the camera; ≥ 1e8 sentinel = no
+    /// cloud on this ray). `r` = nearest hit, `g` = the far end of the ray's
+    /// optical-depth-weighted slab — the pair the `body_sky` composite needs to
+    /// occlude the marched volume against opaque geometry. The game samples it
+    /// as a regular texture; the raymarch's own history reads go through
+    /// `history_distance_image`.
+    #[storage_texture(2, image_format = Rg32Float, access = WriteOnly)]
     pub cloud_distance_image: Handle<Image>,
 
     /// Planet-fixed cubemap weather field, sampled by body-fixed direction in

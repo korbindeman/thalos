@@ -104,12 +104,29 @@ apart from external forces integrated during the tick. The ejection impulse is
 internal, so its net linear impulse is zero.
 
 Catalog decoupler tuning must also open a visible gap across the supported
-launch-vehicle mass range. The standard 4 m decoupler supplies 8 kN·s, which
-produces about 0.28 m/s of relative separation at Saturn's conservative wet
-stage masses and a larger gap after booster burnout. Each separation logs the
-detached mass, impulse, and resulting relative speed; a persistent vessel whose
-relative speed is only centimetres per second is a tuning failure, not evidence
-that rendering or graph partitioning lost the stage.
+launch-vehicle mass range, and a fixed authored impulse cannot do that on its
+own: the relative separation speed it buys falls off as 1/mass, so the standard
+4 m decoupler's 8 kN·s gives a light probe metres per second and a fully fuelled
+Saturn about 0.28 m/s. The applied impulse is therefore the authored spring
+impulse **raised to a clearance floor**: the jettisoned assembly must fully clear
+the geometry it was nested inside — its interstage shroud, or a nominal bare
+decoupler face when there is none — within `SEPARATION_CLEARANCE_TIME_S`.
+Relative speed is `impulse / reduced mass`, so the floor is
+`reduced_mass × clearance / time`, which makes clearance mass-independent by
+construction. The authored value still wins whenever it is already stronger, so
+light separations stay as snappy as their hardware implies.
+
+Each separation logs the detached mass, applied impulse, resulting relative
+speed, and the clearance distance the floor was sized against; a persistent
+vessel whose relative speed is only centimetres per second is a tuning failure,
+not evidence that rendering or graph partitioning lost the stage.
+
+The interstage shroud (`thalos_runtime::shrouds`) is a child of the decoupler, so
+the graph cut carries it down with the jettisoned stage — the KSP convention, and
+the reason clearance is measured against the shroud's height rather than the
+decoupler's own. Separation strips the decoupler's `Attachment`, which would make
+it stop qualifying for a shroud, so the cut stamps `ShroudFired` on the shroud and
+the reconcile pass leaves it alone from then on.
 
 Separation does not automatically switch control. The active identity follows
 the selected command pod. If only one side has a command pod, that side remains

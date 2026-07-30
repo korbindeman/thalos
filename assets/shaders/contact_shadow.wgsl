@@ -7,10 +7,9 @@
 // regime the cascade rig structurally cannot serve, so it gets its own
 // mechanism: a short march through the copied scene depth toward the sun.
 //
-// Reads `SceneDepthImage` (`rendering::scene_depth`) — the same depth copy F5's
-// SSAO uses, and the only depth that sees the forked-udlod terrain. Everything
-// runs in VIEW space (camera-relative render metres), so it is f32-safe under
-// big_space's floating origin.
+// Reads the current frame's Bevy depth prepass and runs before opaque shading.
+// Everything runs in VIEW space (camera-relative render metres), so it is
+// f32-safe under big_space's floating origin.
 //
 // FULL RESOLUTION, unlike SSAO's half-res target. AO is a low-frequency field
 // and tolerates upsampling; a contact shadow is inherently high-frequency — the
@@ -36,7 +35,11 @@ struct ContactUniform {
     sun_view: vec4<f32>,
 }
 
+#ifdef CONTACT_DEPTH_MSAA
+@group(0) @binding(0) var scene_depth: texture_depth_multisampled_2d;
+#else
 @group(0) @binding(0) var scene_depth: texture_depth_2d;
+#endif
 @group(0) @binding(1) var<uniform> cs: ContactUniform;
 
 // Fixed step count. Short marches with few steps are the whole point — this is a

@@ -38,18 +38,18 @@ use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::light::NotShadowCaster;
 use bevy::math::{DVec3, Vec2, Vec3A};
 use bevy::prelude::*;
-use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
+use bevy::tasks::{Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
     AU_M, BakeParams, CanopyStyle, GrassParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout,
     ImpostorParams, LIGHT_AT_1AU, TerrainShadingStyle, TileKey, TileLattice, TreeBakeMaterial,
     TreeImpostorExtension, TreeImpostorMaterial, TreeMaterial, TreeMeshData, TreeMeshParams,
-    TreeShadingExtension, VegLayer, VegScatterInput, VegSpeciesPlacement, build_foliage_atlas,
-    build_foliage_material_atlas, build_scatter_tile, build_tree_mesh_data,
+    TreeShadingExtension, VegLayer, VegScatterInput, VegScatterTile, VegSpeciesPlacement,
+    build_foliage_atlas, build_foliage_material_atlas, build_scatter_tile, build_tree_mesh_data,
     combine_impostor_tile_mesh, combine_tree_tile_mesh, fallback_shadow_map, hemioct_decode,
     impostor_bake_rotation, make_impostor_atlas, recenter_tree_mesh, tree_bounding_sphere,
-    tree_impostor_material, tree_material,
+    tree_impostor_material, tree_material, veg_scatter_pool,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -58,7 +58,6 @@ use crate::SimStage;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
-use crate::rendering::sun_shadow::SunShadowState;
 use crate::rendering::types::CameraExposure;
 use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};
@@ -350,6 +349,57 @@ struct VegTileBuild {
     center_surface_body_m: DVec3,
     built_revision: u64,
     center_height_m: f32,
+    /// The placement this mesh was combined from, kept for re-LOD reuse (ring 0
+    /// only — the coarse rings never change LOD), tagged with the
+    /// [`VegLayer::mask`] bits that were actually placed.
+    scatter: Option<(u32, Arc<VegScatterTile>)>,
+    /// Wall time of the whole build (placement + combine), for the batched
+    /// `build_batch` telemetry.
+    build_micros: u64,
+    instance_count: u32,
+    /// True when placement came from the cache and only the combine ran.
+    reused_placement: bool,
+}
+
+/// Rolling per-build telemetry, batched like the tile renderer's `GenStats`:
+/// every 100 landings, one `build_batch` event with mean/p95 build wall time,
+/// mean instance count, and the share of builds that reused a cached placement
+/// — the numbers that say whether placement or combine is the current
+/// bottleneck, and whether the re-LOD cache is actually being hit.
+#[derive(Default)]
+struct VegBuildStats {
+    micros: Vec<u64>,
+    instances_sum: u64,
+    reused: u32,
+    total_landed: u64,
+}
+
+impl VegBuildStats {
+    fn record(&mut self, micros: u64, instances: u32, reused: bool) {
+        self.micros.push(micros);
+        self.instances_sum += instances as u64;
+        self.reused += reused as u32;
+        self.total_landed += 1;
+        if self.micros.len() >= 100 {
+            self.micros.sort_unstable();
+            let mean = self.micros.iter().sum::<u64>() / self.micros.len() as u64;
+            let p95 = self.micros[self.micros.len() * 95 / 100];
+            info!(
+                target: "thalos::diagnostic::vegetation",
+                event = "build_batch",
+                total_landed = self.total_landed,
+                sample_count = self.micros.len(),
+                mean_ms = mean as f64 / 1000.0,
+                p95_ms = p95 as f64 / 1000.0,
+                mean_instances = self.instances_sum as f64 / self.micros.len() as f64,
+                reused_placement_frac = self.reused as f64 / self.micros.len() as f64,
+                "vegetation build batch"
+            );
+            self.micros.clear();
+            self.instances_sum = 0;
+            self.reused = 0;
+        }
+    }
 }
 
 /// A tile key tagged with its clipmap ring (the same `(face,x,y)` indexes
@@ -371,6 +421,12 @@ struct BuiltTile {
     /// Whether the tile is realized as impostors (vs mesh) — drives re-LOD when
     /// the impostor band flips on/off (atlas readiness).
     impostor: bool,
+    /// Cached placement (ring 0 only) + the layer-mask it covers, so a re-LOD
+    /// at the same height revision skips placement and only re-combines.
+    /// Placement is the expensive half of a build and fully deterministic, so
+    /// the cold-fill impostor-first pass and the settle-refinement burst both
+    /// pay it once per tile, not once per LOD step.
+    scatter: Option<(u32, Arc<VegScatterTile>)>,
 }
 
 /// Driver state. **Sole writer:** the systems in this module (run sequentially
@@ -1032,7 +1088,11 @@ fn drive_veg_tiles(
         .and_then(|guard| thalos_terrain::nearest_flatten(&guard, cam_dir));
 
     let ground = mirror.as_ref();
-    let pool = AsyncComputeTaskPool::get();
+    // Dedicated bounded pool (see `veg_scatter_pool`): the shared
+    // AsyncComputeTaskPool's width was the cold-fill throughput ceiling, and
+    // scatter contended there with Avian's collider optimisation.
+    let pool = veg_scatter_pool();
+    let revision = height_source.revision();
     let mut dispatched = 0usize;
     for (_, rk, desired, want_impostor, _) in candidates {
         if dispatched >= slots {
@@ -1040,16 +1100,36 @@ fn drive_veg_tiles(
         }
         let ring = &TREE_RINGS[rk.ring as usize];
         let lat = lattices[rk.ring as usize];
-        // Far rings tolerate coarser terrain (their tiles are large), so the
-        // residency threshold scales with tile size (mirrors the grass gate).
-        let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
-        if let Some(ground) = ground {
-            let Some((center, _)) = lat.frame(rk.key) else {
-                continue;
-            };
-            match ground.best_resident_texel_m(center.as_vec3()) {
-                Some(texel) if texel <= texel_limit => {}
-                _ => continue,
+        // Layers this build can actually draw: shrubs render only in the
+        // innermost mesh band (`species_lod_for`), so every other build is
+        // trees-only — and skips the 2.3 m shrub grid, the densest (most
+        // expensive) part of placement.
+        let needed_mask = if !want_impostor && desired == 0 {
+            VegLayer::Tree.mask() | VegLayer::Shrub.mask()
+        } else {
+            VegLayer::Tree.mask()
+        };
+        // Re-LOD fast path: placement is deterministic, so a tile re-baked at
+        // the same height revision with a cached placement covering the needed
+        // layers only re-runs the combine — no height sampling at all (which
+        // is also why the residency gate below is skipped for it).
+        let cached: Option<(u32, Arc<VegScatterTile>)> = veg.tiles.get(&rk).and_then(|t| {
+            let (mask, scatter) = t.scatter.as_ref()?;
+            (t.built_revision == revision && mask & needed_mask == needed_mask)
+                .then(|| (*mask, Arc::clone(scatter)))
+        });
+        if cached.is_none() {
+            // Far rings tolerate coarser terrain (their tiles are large), so the
+            // residency threshold scales with tile size (mirrors the grass gate).
+            let texel_limit = ((ring.tile_size_m * 0.5) as f32).max(TREE_MAX_TERRAIN_TEXEL_M);
+            if let Some(ground) = ground {
+                let Some((center, _)) = lat.frame(rk.key) else {
+                    continue;
+                };
+                match ground.best_resident_texel_m(center.as_vec3()) {
+                    Some(texel) if texel <= texel_limit => {}
+                    _ => continue,
+                }
             }
         }
         let input = VegScatterInput {
@@ -1063,15 +1143,22 @@ fn drive_veg_tiles(
             flatten_exclusion,
             spacing_scale: ring.spacing_scale,
             keep_fraction: ring.keep_fraction,
+            layer_mask: needed_mask,
         };
-        let revision = height_source.revision();
+        // Only ring 0 re-LODs on approach, so only its placement is worth
+        // keeping (the coarse rings would be pure memory).
+        let keep_scatter = rk.ring == 0;
         let task = if want_impostor {
             // Impostor band: one natural-size (`grove_scale = 1`) billboard quad
             // per tree; count is bounded by the ring's spacing/keep decimation.
             let atlas_species = library.atlas_species.clone();
             let grove = ring.grove_scale;
             pool.spawn(async move {
-                let tile = build_scatter_tile(&input)?;
+                let started = std::time::Instant::now();
+                let (mask, tile, reused) = match cached {
+                    Some((mask, tile)) => (mask, tile, true),
+                    None => (needed_mask, Arc::new(build_scatter_tile(&input)?), false),
+                };
                 let mesh = combine_impostor_tile_mesh(&tile.instances, &atlas_species, grove)?;
                 Some(VegTileBuild {
                     mesh,
@@ -1079,13 +1166,21 @@ fn drive_veg_tiles(
                     center_surface_body_m: tile.center_surface_body_m,
                     built_revision: tile.built_revision,
                     center_height_m: tile.center_height_m,
+                    build_micros: started.elapsed().as_micros() as u64,
+                    instance_count: tile.instances.len() as u32,
+                    reused_placement: reused,
+                    scatter: keep_scatter.then_some((mask, tile)),
                 })
             })
         } else {
             // Near/mid band: a batched mesh-LOD tile.
             let species_lod = species_lod_for(&library, desired);
             pool.spawn(async move {
-                let tile = build_scatter_tile(&input)?;
+                let started = std::time::Instant::now();
+                let (mask, tile, reused) = match cached {
+                    Some((mask, tile)) => (mask, tile, true),
+                    None => (needed_mask, Arc::new(build_scatter_tile(&input)?), false),
+                };
                 let mesh = combine_tree_tile_mesh(&tile.instances, &species_lod)?;
                 Some(VegTileBuild {
                     mesh,
@@ -1093,6 +1188,10 @@ fn drive_veg_tiles(
                     center_surface_body_m: tile.center_surface_body_m,
                     built_revision: tile.built_revision,
                     center_height_m: tile.center_height_m,
+                    build_micros: started.elapsed().as_micros() as u64,
+                    instance_count: tile.instances.len() as u32,
+                    reused_placement: reused,
+                    scatter: keep_scatter.then_some((mask, tile)),
                 })
             })
         };
@@ -1111,6 +1210,7 @@ fn finalize_veg_tiles(
     root: Option<Res<RealSpaceRoot>>,
     library: Option<Res<SpeciesLibrary>>,
     mut meshes: ResMut<Assets<Mesh>>,
+    mut stats: Local<VegBuildStats>,
     mut commands: Commands,
 ) {
     if veg.in_flight.is_empty() {
@@ -1152,10 +1252,16 @@ fn finalize_veg_tiles(
                     center_height_m: 0.0,
                     lod,
                     impostor: want_impostor,
+                    scatter: None,
                 },
             );
             continue;
         };
+        stats.record(
+            build.build_micros,
+            build.instance_count,
+            build.reused_placement,
+        );
 
         let center = build.center_surface_body_m;
         let center_world = body_state.position + orientation * center;
@@ -1269,6 +1375,7 @@ fn finalize_veg_tiles(
                 center_height_m: build.center_height_m,
                 lod,
                 impostor: build.impostor,
+                scatter: build.scatter,
             },
         );
     }
@@ -1313,7 +1420,6 @@ fn update_tree_material(
     exposure: Res<CameraExposure>,
     bake: Res<ImpostorBake>,
     anchor: Res<ViewAnchor>,
-    sun_shadow: Option<Res<SunShadowState>>,
     cloud_shadow: Option<Res<thalos_body_render::clouds::CloudShadowMap>>,
     mut materials: ResMut<Assets<TreeMaterial>>,
     mut impostor_materials: ResMut<Assets<TreeImpostorMaterial>>,
@@ -1399,16 +1505,6 @@ fn update_tree_material(
             TREE_MESH_ONLY_FADE
         };
         material.extension.params = make_params(near, far, band);
-        // Bind the live sun-shadow map so trees self-shadow, shadow one another,
-        // and pick up the ground's shadows. `params.x` is 0 off-surface, so the
-        // shader skips sampling there. Only the near mesh ring receives — the
-        // far impostor band is outside the ~1.2 km shadow region anyway.
-        if let Some(sun_shadow) = sun_shadow.as_deref() {
-            material.extension.sun_shadow_map_0 = sun_shadow.images[0].clone();
-            material.extension.sun_shadow_map_1 = sun_shadow.images[1].clone();
-            material.extension.sun_shadow_map_2 = sun_shadow.images[2].clone();
-            material.extension.shadow = sun_shadow.block;
-        }
         // Cloud sun-transmittance: same map/block the tile ground samples, so a
         // stand under the deck dims exactly with the ground it grows from (the
         // spine tree never gated on clouds — one of the two "trees look pasted

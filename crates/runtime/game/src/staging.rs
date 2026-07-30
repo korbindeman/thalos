@@ -45,6 +45,7 @@ use thalos_world::StateVector;
 use crate::SimStage;
 use crate::rendering::{PlayerShip, SimulationState};
 use crate::ship_view::{CraftIdentity, CraftPart, CraftRoot, PartVisual};
+use crate::shrouds::{Shroud, ShroudFired};
 use crate::view::HideInMapView;
 
 pub struct StagingPlugin;
@@ -432,6 +433,61 @@ fn separation_delta_velocities(
     )
 }
 
+/// Wall-clock target for a jettisoned stage to fully clear the geometry it was
+/// nested inside — an interstage shroud, or the decoupler's own face when there
+/// is none. Separation reads as a deliberate push at this rate; much faster
+/// looks like an explosive charge, much slower like the two stages are welded.
+const SEPARATION_CLEARANCE_TIME_S: f64 = 2.0;
+
+/// Axial clearance assumed for a decoupler with no shroud: the two mating faces
+/// still have to visibly part, and a bare ring separating at millimetres per
+/// second reads as a failure even though nothing is intersecting.
+const BARE_SEPARATION_CLEARANCE_M: f64 = 1.0;
+
+/// Axial distance the jettisoned assembly must travel before the shrouded part
+/// above is clear of the decoupler's interstage. The shroud is a child of the
+/// decoupler and its height *is* the engine's visual length
+/// ([`crate::shrouds`]), so this is exactly the overlap to escape.
+fn separation_clearance_m(world: &World, decoupler: Entity) -> f64 {
+    let shroud_heights: Vec<f64> = world
+        .get::<Children>(decoupler)
+        .into_iter()
+        .flat_map(|children| children.iter())
+        .filter_map(|child| world.get::<Shroud>(child))
+        .map(|shroud| f64::from(shroud.height))
+        .collect();
+    shroud_heights
+        .into_iter()
+        .fold(BARE_SEPARATION_CLEARANCE_M, f64::max)
+}
+
+/// Separation impulse actually applied: the authored spring impulse, raised to
+/// whatever it takes to clear `clearance_m` in [`SEPARATION_CLEARANCE_TIME_S`].
+///
+/// The authored `ejection_impulse_per_diameter` is a fixed impulse, so the
+/// relative separation *speed* it buys falls off as 1/mass — the 4 m ring gives
+/// a light probe metres per second and a fully fuelled launch vehicle
+/// centimetres per second, which is how an engine ended up creeping out of a
+/// 3.6 m interstage for tens of seconds. Relative speed is `impulse / reduced
+/// mass` (each side takes `J/m` of it, oppositely), so the impulse that buys a
+/// given clearance rate is the reduced mass times that rate. Deriving the floor
+/// that way makes clearance mass-independent by construction instead of a
+/// constant that only holds for one vehicle.
+fn separation_impulse_n_s(
+    authored_n_s: f64,
+    clearance_m: f64,
+    remaining_mass_kg: f64,
+    detached_mass_kg: f64,
+) -> f64 {
+    if remaining_mass_kg <= 0.0 || detached_mass_kg <= 0.0 {
+        return authored_n_s;
+    }
+    let reduced_mass_kg =
+        remaining_mass_kg * detached_mass_kg / (remaining_mass_kg + detached_mass_kg);
+    let required_n_s = reduced_mass_kg * clearance_m / SEPARATION_CLEARANCE_TIME_S;
+    authored_n_s.max(required_n_s)
+}
+
 /// Turn graph-cut part sets into independently propagated canonical vessels
 /// and visible BigSpace roots. Runs as one exclusive deferred command so ECS
 /// ownership and canonical fleet creation become visible atomically.
@@ -458,15 +514,18 @@ fn materialize_separated_vessels(
         return;
     };
 
-    let assemblies: Vec<(SeparatedAssembly, PartAggregate, f64)> = separated
+    let assemblies: Vec<(SeparatedAssembly, PartAggregate, f64, f64)> = separated
         .into_iter()
         .filter_map(|assembly| {
             let aggregate = aggregate_world_parts(world, &assembly.parts)?;
-            let impulse = world
+            let authored_impulse = world
                 .get::<Decoupler>(assembly.decoupler)
                 .map(|decoupler| decoupler.ejection_impulse as f64)
                 .unwrap_or(0.0);
-            Some((assembly, aggregate, impulse))
+            // Read before the graph cut, while the shroud is still a child of
+            // the decoupler and its `Shroud` component is still reachable.
+            let clearance_m = separation_clearance_m(world, assembly.decoupler);
+            Some((assembly, aggregate, authored_impulse, clearance_m))
         })
         .collect();
     if assemblies.is_empty() {
@@ -501,11 +560,17 @@ fn materialize_separated_vessels(
         let inherited_params = *active_vessel.parameters();
         let mut active_velocity = active_state.translation.velocity;
 
-        for (assembly, aggregate, impulse) in &assemblies {
+        for (assembly, aggregate, authored_impulse, clearance_m) in &assemblies {
             let body_direction = (aggregate.center_of_mass - remaining.center_of_mass)
                 .try_normalize()
                 .unwrap_or(-DVec3::Y);
-            let world_impulse = active_state.attitude.orientation * body_direction * *impulse;
+            let impulse = separation_impulse_n_s(
+                *authored_impulse,
+                *clearance_m,
+                remaining.wet_mass_kg,
+                aggregate.wet_mass_kg,
+            );
+            let world_impulse = active_state.attitude.orientation * body_direction * impulse;
             let (parent_delta_v, detached_delta_v) = separation_delta_velocities(
                 world_impulse,
                 remaining.wet_mass_kg,
@@ -534,7 +599,8 @@ fn materialize_separated_vessels(
                 assembly.decoupler,
                 assembly.parts.clone(),
                 aggregate.wet_mass_kg,
-                *impulse,
+                impulse,
+                *clearance_m,
                 relative_speed_m_s,
             ));
         }
@@ -558,7 +624,7 @@ fn materialize_separated_vessels(
     }
     crate::local_physics::apply_inertial_delta_v(world, active_delta_v);
 
-    for (id, decoupler, parts, mass_kg, impulse_n_s, relative_speed_m_s) in created {
+    for (id, decoupler, parts, mass_kg, impulse_n_s, clearance_m, relative_speed_m_s) in created {
         let part_count = parts.len();
         let mut root = world.spawn((
             CraftRoot,
@@ -585,6 +651,21 @@ fn materialize_separated_vessels(
                 activation.enabled = false;
             }
             drop(part_entity);
+            if part == decoupler {
+                // The interstage rides down with the decoupler, KSP-style. Its
+                // `Attachment` is gone now, so `shrouds::sync_shrouds` would
+                // read the provider as no longer qualifying and despawn the
+                // shroud on the next frame — commit it instead.
+                let shrouds: Vec<Entity> = world
+                    .get::<Children>(part)
+                    .into_iter()
+                    .flat_map(|children| children.iter())
+                    .filter(|child| world.get::<Shroud>(*child).is_some())
+                    .collect();
+                for shroud in shrouds {
+                    world.entity_mut(shroud).insert(ShroudFired);
+                }
+            }
             world.entity_mut(detached_root).add_child(part);
         }
         let audit_parts = world
@@ -603,7 +684,8 @@ fn materialize_separated_vessels(
         info!(
             "stage separation created persistent vessel {id}: \
              {part_count} parts, {mass_kg:.0} kg, {impulse_n_s:.0} N·s, \
-             {relative_speed_m_s:.3} m/s relative separation"
+             {relative_speed_m_s:.3} m/s relative separation, \
+             {clearance_m:.1} m to clear"
         );
     }
 }
@@ -1033,6 +1115,57 @@ mod tests {
         assert!(
             relative_speed_m_s >= 0.25,
             "relative separation speed was only {relative_speed_m_s:.3} m/s"
+        );
+    }
+
+    /// The authored 4 m spring impulse alone leaves a fully fuelled launch
+    /// vehicle creeping out of its 3.6 m interstage for tens of seconds — the
+    /// defect the clearance floor exists to remove. Fails on the pre-floor
+    /// behaviour (`authored` alone) and passes on the derived impulse.
+    #[test]
+    fn clearance_floor_clears_a_saturn_interstage_on_time() {
+        let catalog =
+            PartCatalog::load_from_str(include_str!("../../../../assets/parts.ron")).unwrap();
+        let CatalogEntry::Decoupler(spec) = catalog.resolve("decoupler_std").unwrap() else {
+            panic!("decoupler_std must remain a decoupler");
+        };
+        let authored = f64::from(spec.ejection_impulse_per_diameter * 4.0);
+        // Boreas is a 4 m engine, so its shroud is 0.9 × 4 m of overlap.
+        let clearance_m = 3.6;
+        let (upper_kg, booster_kg) = (42_000.0, 87_000.0);
+
+        let bare_speed = {
+            let (a, b) = separation_delta_velocities(DVec3::Y * authored, upper_kg, booster_kg);
+            (b - a).length()
+        };
+        assert!(
+            clearance_m / bare_speed > 4.0 * SEPARATION_CLEARANCE_TIME_S,
+            "authored impulse alone already clears the interstage in \
+             {:.1} s — the floor under test is no longer load-bearing",
+            clearance_m / bare_speed
+        );
+
+        let impulse = separation_impulse_n_s(authored, clearance_m, upper_kg, booster_kg);
+        let (upper_delta_v, booster_delta_v) =
+            separation_delta_velocities(DVec3::Y * impulse, upper_kg, booster_kg);
+        let relative_speed_m_s = (booster_delta_v - upper_delta_v).length();
+        let clear_time_s = clearance_m / relative_speed_m_s;
+        assert!(
+            (clear_time_s - SEPARATION_CLEARANCE_TIME_S).abs() < 0.05,
+            "interstage clears in {clear_time_s:.2} s, wanted \
+             {SEPARATION_CLEARANCE_TIME_S:.2} s"
+        );
+    }
+
+    /// A light pair keeps the authored spring impulse: the floor raises weak
+    /// separations, it never caps a snappy one.
+    #[test]
+    fn clearance_floor_never_weakens_a_light_separation() {
+        let authored = 8_000.0;
+        let impulse = separation_impulse_n_s(authored, 3.6, 900.0, 1_100.0);
+        assert!(
+            (impulse - authored).abs() < 1.0e-9,
+            "floor overrode the authored impulse: {impulse:.1} N·s"
         );
     }
 }

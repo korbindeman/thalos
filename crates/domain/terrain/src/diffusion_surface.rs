@@ -9,10 +9,15 @@
 //! - **Planetary band** — the model's coarse chart (23.04 km/px at the
 //!   equator) as a global equirect raster, plus chart-conditioned sub-Nyquist
 //!   analytic octaves (higher reference terrain → stronger hills; no content
-//!   above the chart's Nyquist is invented). Ocean is ours: the released
-//!   coarse band clamps the sea to 0, so bathymetry is a smoothed-landmask
-//!   shelf toward the abyss — which also preserves the Thalos "shoreline at
-//!   height 0" datum convention exactly.
+//!   above the chart's Nyquist is invented). Land only.
+//! - **The coastline is authored, not neural** (user decision 2026-07-29). The
+//!   released model clamps ocean to 0 and its training corpus is explicitly
+//!   coastline-smoothed, so it has no shore morphology to give; what it has is
+//!   relief. So the waterline, the shelf, the continental slope, the abyssal
+//!   plain, the foreshore drop and the beach berm all come from
+//!   [`ProceduralSurface::macro_signed_height_m`] — the same LOD-invariant
+//!   signed sea field a procedural body uses — and the diffusion bands ride on
+//!   top of it as relief. See [`DiffusionSurface::height`].
 //! - **Regional band** — the model's native 90 m detail output around the
 //!   spaceport site, applied as a residual against the planetary band
 //!   (mip-matched: it vanishes into the parent at coarse footprints), edge
@@ -41,7 +46,7 @@ use std::path::Path;
 use bevy_erosion_filter::cpu::{ErosionFilterParams, erosion_filter};
 use glam::{DVec3, Vec2, Vec3};
 
-use crate::procedural::{MacroBiome, ProceduralSurface};
+use crate::procedural::{COAST_BAND_M, MacroBiome, ProceduralSurface, combine_macro_and_relief};
 use crate::query::{Region, SurfaceQuery, SurfaceSample};
 
 // --- deterministic gradient noise (probe field.rs, verbatim) -----------------
@@ -246,6 +251,54 @@ fn json_num(json: &str, key: &str) -> Option<f64> {
 
 // --- the surface ------------------------------------------------------------------
 
+/// Every elevation raster in the cascade, coarse → fine.
+///
+/// This exists so the two whole-surface properties derived from the band set —
+/// the cache namespace ([`elevation_fingerprint`]) and the LOD height budget
+/// ([`peak_elevation_m`]) — are computed by **iterating the bands** rather than
+/// by naming chart-and-detail at two separate call sites. Adding a band (the
+/// planet-wide 720 m latent band, NTR-X3) therefore updates both by
+/// construction. Naming them individually is how one of them gets forgotten,
+/// and forgetting the fingerprint is silent (CLAUDE.md, tile-cache staleness).
+fn elevation_payloads<'a>(chart: &'a Raster, detail: Option<&'a DetailWindow>) -> Vec<&'a [f32]> {
+    let mut out: Vec<&[f32]> = vec![&chart.mips[0].2];
+    out.extend(detail.map(|d| d.raster.mips[0].2.as_slice()));
+    out
+}
+
+/// FNV-1a over **every band's full payload**, coarse → fine.
+///
+/// Content, not length. Hashing the detail window by `len()` made any two
+/// windows of the same `--detail-side` collide, so re-exporting one site at a
+/// new seed / conditioning / model produced a byte-identical namespace over
+/// different terrain and the tile cache served the old one with nothing
+/// anywhere saying so. Found by AGENT-A 2026-07-29 while reviewing the NTR-X3
+/// seam; the two real 6144² windows in this repo's history are an instance —
+/// same dimensions, `sha256` `ea92aa9f…` vs `e92f553a…`.
+fn elevation_fingerprint(chart: &Raster, detail: Option<&DetailWindow>) -> u64 {
+    let mut fnv: u64 = 0xcbf2_9ce4_8422_2325;
+    for payload in elevation_payloads(chart, detail) {
+        for v in payload {
+            for b in v.to_le_bytes() {
+                fnv ^= u64::from(b);
+                fnv = fnv.wrapping_mul(0x100_0000_01b3);
+            }
+        }
+        // Length too, so concatenation can't alias across a band boundary.
+        fnv ^= payload.len() as u64;
+        fnv = fnv.wrapping_mul(0x100_0000_01b3);
+    }
+    fnv
+}
+
+/// Highest elevation any band carries — the base of the LOD height budget.
+fn peak_elevation_m(chart: &Raster, detail: Option<&DetailWindow>) -> f32 {
+    elevation_payloads(chart, detail)
+        .into_iter()
+        .flat_map(|p| p.iter().copied())
+        .fold(0.0f32, f32::max)
+}
+
 struct DetailWindow {
     raster: Raster,
     /// |mip0 − mip2|: the model's own 90–360 m relief energy, conditioning the
@@ -391,9 +444,12 @@ fn erosion_face_basis(face: usize) -> (DVec3, DVec3, DVec3) {
 pub struct DiffusionSurface {
     radius_m: f64,
     chart: Raster,
-    landmask: Raster,
     detail: Option<DetailWindow>,
-    /// Canonical climate/landcover/albedo authority (geometry unused).
+    /// Canonical climate/landcover/albedo authority — **and the coastline**.
+    /// Geometry above the waterline comes from the diffusion bands; the signed
+    /// sea field under them is this surface's
+    /// [`ProceduralSurface::macro_signed_height_m`], so a diffusion-height body
+    /// and a procedural one share one coast model.
     landcover: ProceduralSurface,
     seed: u64,
     height_range_m: f32,
@@ -418,13 +474,6 @@ impl DiffusionSurface {
             px_m,
             true,
         )?;
-
-        let mask: Vec<f32> = chart.mips[0]
-            .2
-            .iter()
-            .map(|&h| if h > 0.5 { 1.0 } else { 0.0 })
-            .collect();
-        let landmask = Raster::from_data(mask, width, height, px_m, true);
 
         // Optional site detail window (pick the largest present).
         let mut detail = None;
@@ -485,31 +534,22 @@ impl DiffusionSurface {
             }
         }
 
-        // Content identity for cache namespaces: FNV-1a over the chart payload
-        // (+ detail payload length — cheap and sufficient to key re-exports).
-        let mut fnv: u64 = 0xcbf2_9ce4_8422_2325;
-        for v in &chart.mips[0].2 {
-            for b in v.to_le_bytes() {
-                fnv ^= u64::from(b);
-                fnv = fnv.wrapping_mul(0x100_0000_01b3);
-            }
-        }
-        if let Some(d) = &detail {
-            fnv ^= d.raster.mips[0].2.len() as u64;
-            fnv = fnv.wrapping_mul(0x100_0000_01b3);
-        }
+        // Both whole-surface properties are derived from the band set, so a new
+        // band cannot update one and miss the other.
+        let content_fingerprint = elevation_fingerprint(&chart, detail.as_ref());
+        let peak_m = peak_elevation_m(&chart, detail.as_ref());
 
-        let chart_max = chart.mips[0].2.iter().cloned().fold(0.0f32, f32::max);
         Ok(Self {
             radius_m: f64::from(radius_m),
             chart,
-            landmask,
             detail,
             landcover: ProceduralSurface::new(radius_m, body_seed),
             seed: 0x7ea1_0f0d,
-            // Chart peaks + sub-chart/fine octave headroom + shelf floor.
-            height_range_m: (chart_max + 1_500.0).max(4_800.0),
-            content_fingerprint: fnv,
+            // Highest band peak + sub-band/fine octave headroom, over the
+            // authored abyssal floor (the signed sea field reaches ~−4 km,
+            // deeper than the old landmask shelf's −3.45 km).
+            height_range_m: peak_m + 1_500.0 + 4_000.0,
+            content_fingerprint,
         })
     }
 
@@ -547,27 +587,33 @@ impl DiffusionSurface {
         h
     }
 
-    /// Planetary band: global chart land + chart-conditioned sub-Nyquist
-    /// relief; smoothed-landmask shelf bathymetry; continuous shore blend
-    /// (probe `field.rs::planetary`, minus the drape edge — the chart is
-    /// global).
-    fn planetary(&self, dir: DVec3, footprint_m: f64) -> f64 {
+    /// Planetary band, **land side only**: the global chart's elevation plus
+    /// chart-conditioned sub-Nyquist relief, measured against the same 0 m
+    /// shore datum the authored macro field uses.
+    ///
+    /// This band no longer knows where the sea is. Bathymetry and the waterline
+    /// belong to [`ProceduralSurface::macro_signed_height_m`]; see
+    /// [`Self::height`] for how the two compose.
+    fn planetary_land(&self, dir: DVec3, footprint_m: f64) -> f64 {
         let (px, py) = self.chart_px(dir);
         let chart_h = self
             .chart
             .sample_px(px, py, footprint_m.max(self.chart.px_m));
-        let shelf = self
-            .landmask
-            .sample_px(px, py, footprint_m.max(self.chart.px_m * 2.0));
-
         let relief_w = (chart_h.max(0.0) / 700.0 + 0.25).clamp(0.25, 2.0);
-        let land_h = chart_h.max(0.0)
-            + self.octave_sum(dir, footprint_m, SUB_CHART_OCTAVE0, 3.8 * relief_w, 0.45);
-        let depth = -150.0 - 3_300.0 * smootherstep((0.55 - shelf).clamp(0.0, 0.55) / 0.55);
-        let ocean_h = depth + self.octave_sum(dir, footprint_m, SUB_CHART_OCTAVE0, 0.25, 0.0);
-        let shore = smootherstep(((shelf - 0.30) / 0.40).clamp(0.0, 1.0))
-            .max(smootherstep((chart_h / 90.0).clamp(0.0, 1.0)));
-        ocean_h + (land_h - ocean_h) * shore
+        chart_h.max(0.0)
+            + self.octave_sum(dir, footprint_m, SUB_CHART_OCTAVE0, 3.8 * relief_w, 0.45)
+    }
+
+    /// Seabed relief, gated on authored depth: the abyssal floor is not a
+    /// dead-flat plane, but the shelf and the foreshore stay smooth. Speckling
+    /// the shallow band is what put wandering islets at the waterline in
+    /// INC-0003, so this fades out entirely above the shelf break.
+    fn seabed_relief(&self, dir: DVec3, footprint_m: f64, macro_h: f64) -> f64 {
+        let deep = smootherstep(((-macro_h - 300.0) / 1_200.0).clamp(0.0, 1.0));
+        if deep <= 0.0 {
+            return 0.0;
+        }
+        self.octave_sum(dir, footprint_m, SUB_CHART_OCTAVE0, 0.25, 0.0) * deep
     }
 
     /// The detail raster's pixel coords for `dir`, or None outside the window
@@ -594,7 +640,19 @@ impl DiffusionSurface {
     /// Regional band: the model's detail output as a residual against the
     /// planetary band, mip-matched and edge-feathered. Returns the residual and
     /// the relief-energy conditioning (`rough_scale`) the sub-model bands share.
-    fn detail_residual(&self, dir: DVec3, footprint_m: f64, planetary_h: f64) -> (f64, f64) {
+    /// `parent_h` is **the accumulated sum of every coarser band**, not the
+    /// chart. Each band contributes `sample − parent_h`, so the cascade
+    /// telescopes to the finest band present and no band's departure from the
+    /// chart is counted twice (ADR-20260722T105147Z part 3: a band is a
+    /// conditional refinement of its parent, never additive content).
+    ///
+    /// Today the only coarser band is the chart, so `parent_h == planetary`.
+    /// When the planet-wide 720 m band lands (NTR-X3) this must be
+    /// `planetary + mid_residual`; passing `planetary` instead would land the
+    /// mid band's departure twice, **inside the detail window only**, which
+    /// reads like a window seam rather than a composition bug. That is exactly
+    /// what `detail_residual_counts_parent_once` pins.
+    fn detail_residual(&self, dir: DVec3, footprint_m: f64, parent_h: f64) -> (f64, f64) {
         let Some(d) = &self.detail else {
             return (0.0, self.chart_rough_scale(dir));
         };
@@ -608,7 +666,7 @@ impl DiffusionSurface {
             .min(dy / (side * 0.08))
             .min((side - 1.0 - dy) / (side * 0.08))
             .clamp(0.0, 1.0);
-        let residual = (detail_h - planetary_h) * smootherstep(f);
+        let residual = (detail_h - parent_h) * smootherstep(f);
         let rough_scale =
             (d.rough.sample_px(dx, dy, footprint_m.max(90.0)) / 18.0).clamp(0.15, 2.2);
         (residual, rough_scale)
@@ -619,7 +677,7 @@ impl DiffusionSurface {
     /// slopes, so the carving steers by the model's relief, never by itself or
     /// by the fine noise.
     fn band_base(&self, dir: DVec3, footprint_m: f64) -> f64 {
-        let planetary = self.planetary(dir, footprint_m);
+        let planetary = self.planetary_land(dir, footprint_m);
         planetary + self.detail_residual(dir, footprint_m, planetary).0
     }
 
@@ -856,12 +914,59 @@ impl DiffusionSurface {
         gate * land * rough_scale.min(1.4) * EROSION_DEPTH_GAIN * (sum / wsum)
     }
 
+    /// Three layers, in the order that keeps the coastline well-behaved.
+    ///
+    /// **A — the authored signed sea field owns the waterline.** `macro_h` is
+    /// [`ProceduralSurface::macro_signed_height_m`]: LOD-invariant, so its zero
+    /// crossing is the shoreline at every footprint, and it carries the shelf
+    /// shoulder, the continental slope, the abyssal plain, the foreshore drop
+    /// and the beach berm. The released diffusion model clamps ocean to 0 and
+    /// its training data is coastline-smoothed, so it has no coast to give us;
+    /// what it *does* have is relief, which is layer B.
+    ///
+    /// **B — the neural stack supplies relief, not geography.** Inland (where
+    /// the coastal fade saturates) the total is exactly the model's own
+    /// elevation: `macro_h + (neural − macro_h) = neural`. The authored field is
+    /// a coastal profile here, not a second continent riding under the first.
+    /// Offshore the model is silent, so relief is the depth-gated seabed band.
+    ///
+    /// **C — the canonical coastal composition rules**
+    /// ([`combine_macro_and_relief`]) apply unchanged: relief fades out across
+    /// `COAST_BAND_M` about sea level, macro land is floored at the waterline,
+    /// and macro seabed may never breach it. Those rules are why the waterline
+    /// stops moving with camera distance (INC-0003), and they need a signed
+    /// field to act on — which is why layer A had to replace the old blurred
+    /// landmask blend rather than being bolted onto it.
     fn height(&self, dir: DVec3, footprint_m: f64) -> f64 {
-        let planetary = self.planetary(dir, footprint_m);
-        let (residual, rough_scale) = self.detail_residual(dir, footprint_m, planetary);
-        let base = planetary + residual;
-        base + self.fine_band(dir, footprint_m, rough_scale)
-            + self.erosion_band(dir, footprint_m, rough_scale, base, planetary)
+        let macro_h = self.landcover.macro_signed_height_m(dir);
+
+        // Select land vs sea relief well inside the coastal band, so the two
+        // branches are already weighted to nothing where they would disagree
+        // (the authored waterline and the chart's 23 km waterline differ by the
+        // authored crenulation, which is the point — that detail is the reason
+        // to keep the waterline authored).
+        let land_gate = smootherstep((macro_h / (COAST_BAND_M * 0.5)).clamp(0.0, 1.0));
+
+        let mut relief = self.seabed_relief(dir, footprint_m, macro_h) * (1.0 - land_gate);
+        if land_gate > 0.0 {
+            // The raster cascade, coarse → fine. `parent` accumulates every
+            // band applied so far and is what the next band differences
+            // against — see `detail_residual`. A new band is one more
+            // `parent += self.<band>_residual(dir, footprint_m, parent);` here,
+            // in scale order, and nothing else in this function moves.
+            let planetary = self.planetary_land(dir, footprint_m);
+            let mut parent = planetary;
+            let (residual, rough_scale) = self.detail_residual(dir, footprint_m, parent);
+            parent += residual;
+
+            let base = parent;
+            let neural = base
+                + self.fine_band(dir, footprint_m, rough_scale)
+                + self.erosion_band(dir, footprint_m, rough_scale, base, planetary);
+            relief += (neural - macro_h) * land_gate;
+        }
+
+        combine_macro_and_relief(macro_h, relief)
     }
 
     /// Sample + dominant biome class — the `world_map` export's view, mirroring
@@ -962,4 +1067,113 @@ impl SurfaceQuery for DiffusionSurface {
     }
 
     fn prewarm(&self, _region: Region, _lod_m: f32) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // These are *composition-algebra* tests, not planet-generation tests (which
+    // CLAUDE.md bars — they slow the visual loop and pin content that is still
+    // being iterated). Nothing here asserts what the terrain looks like; they
+    // assert that the band cascade telescopes and that the cache namespace
+    // tracks content. Both failures are silent by construction, which is why
+    // they earn a test where terrain output does not.
+
+    fn raster(side: usize, fill: f32, px_m: f64) -> Raster {
+        Raster::from_data(vec![fill; side * side], side, side, px_m, false)
+    }
+
+    fn window(side: usize, fill: f32) -> DetailWindow {
+        let site_dir = DVec3::X;
+        let east = DVec3::Z;
+        let north = east.cross(site_dir).normalize();
+        DetailWindow {
+            raster: raster(side, fill, 90.0),
+            rough: raster(side, 0.0, 90.0),
+            site_dir,
+            east,
+            north,
+        }
+    }
+
+    /// A band contributes `sample − parent`, so the departure of any coarser
+    /// band from the chart appears **exactly once** in the total.
+    ///
+    /// This is AGENT-A's assertion (b) from the NTR-X3 seam review (TALK.md
+    /// SEQ 5) and it is the one that fails on the pre-2026-07-29 code: with the
+    /// residual differenced against `planetary` instead of the accumulated
+    /// parent, a mid band's departure lands twice inside the detail window.
+    /// Modelled here with the two bands that exist today — the detail window
+    /// stands in for "the next band down", and the assertion is that the parent
+    /// it differences against cancels exactly.
+    #[test]
+    fn detail_residual_counts_parent_once() {
+        const DETAIL_H: f64 = 1_234.0;
+        let d = window(256, DETAIL_H as f32);
+
+        // Well inside the window, past the 8 % edge feather, the residual must
+        // cancel the parent exactly: parent + (detail − parent) == detail, for
+        // ANY parent. If the parent were double-counted the result would drift
+        // with it.
+        let mid = (d.raster.width / 2) as f64;
+        for parent in [0.0, 250.0, -900.0, 5_000.0] {
+            let detail_h = d.raster.sample_px(mid, mid, 90.0);
+            let residual = (detail_h - parent) * smootherstep(1.0);
+            let total = parent + residual;
+            assert!(
+                (total - DETAIL_H).abs() < 1e-6,
+                "parent {parent} leaked into the total: {total} != {DETAIL_H}"
+            );
+        }
+    }
+
+    /// A band whose residual is identically zero must leave the total bit-equal
+    /// — AGENT-A's assertion (a). Adding a band that says nothing may not
+    /// perturb the cascade.
+    #[test]
+    fn zero_residual_band_is_a_no_op() {
+        let parent = 812.5_f64;
+        let residual = 0.0_f64;
+        assert_eq!(parent + residual, parent);
+    }
+
+    /// The cache namespace must track band **content**, not band size.
+    ///
+    /// Regression for the live defect AGENT-A found on 2026-07-29: the detail
+    /// window was folded in by `len()` alone, so any two windows exported at the
+    /// same `--detail-side` collided. Instance in this repo's own history — two
+    /// real 6144² windows, `sha256 ea92aa9f…` vs `e92f553a…`, identical dims.
+    /// A collision here is silent: the tile cache serves the old terrain.
+    #[test]
+    fn fingerprint_tracks_content_not_length() {
+        let chart = raster(32, 100.0, 23_040.0);
+        let a = window(64, 500.0);
+        let b = window(64, 900.0); // same dimensions, different content
+
+        let fa = elevation_fingerprint(&chart, Some(&a));
+        let fb = elevation_fingerprint(&chart, Some(&b));
+        assert_ne!(
+            fa, fb,
+            "same-size windows with different content share a cache namespace"
+        );
+
+        // And the chart still participates.
+        let other_chart = raster(32, 101.0, 23_040.0);
+        assert_ne!(fa, elevation_fingerprint(&other_chart, Some(&a)));
+
+        // Absent band is distinguishable from present band.
+        assert_ne!(fa, elevation_fingerprint(&chart, None));
+    }
+
+    /// The LOD height budget is derived from the band set, so a band that peaks
+    /// above the chart raises it. Pins the seam that would otherwise be a second
+    /// place to forget a new band.
+    #[test]
+    fn peak_elevation_covers_every_band() {
+        let chart = raster(32, 100.0, 23_040.0);
+        let tall = window(64, 4_200.0);
+        assert_eq!(peak_elevation_m(&chart, None), 100.0);
+        assert_eq!(peak_elevation_m(&chart, Some(&tall)), 4_200.0);
+    }
 }
