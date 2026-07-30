@@ -472,6 +472,7 @@ pub(super) fn update_sun_light(
     sky_ambient: Res<crate::reflection_probe::SkyAmbient>,
     time: Res<Time<Real>>,
     height_sources: Option<Res<thalos_physics_local::HeightSourceRegistry>>,
+    view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
     mut ambient: ResMut<GlobalAmbientLight>,
     mut sun_daylight: ResMut<SunDaylight>,
     mut light_query: Query<(&mut Transform, &mut DirectionalLight), With<SunLight>>,
@@ -509,48 +510,35 @@ pub(super) fn update_sun_light(
         return; // Focus is on (or very near) the star; direction undefined.
     }
 
-    // Day/night gate, evaluated at the craft's position (not the camera focus,
-    // which may be a remote body in map view) over the body it's gravitationally
-    // bound to. `daylight` ∈ [0,1]: 1 with the sun high overhead, 0 on the deep
-    // night side. Falls back to full daylight when the craft sits in the star's
-    // SOI (interplanetary cruise) — there's no nearby horizon to occlude.
+    // Day/night gate, evaluated at the VIEW — the resolved `ViewAnchor`, i.e.
+    // the camera's position over the nearest terrain-backed body — not at the
+    // craft. The shadow rig (INC-20260724T232104Z) and celestial visibility
+    // (BL-12) already moved to the anchor for the same reason: freecam, god
+    // view, and viewpoint replay must light what the CAMERA sees, and the
+    // craft may sit around the terminator (or on another body entirely) from
+    // the frame being rendered. Falls back to the craft when the anchor is
+    // unresolved (boot, deferred-world menu) — which for the flight camera is
+    // the same point to within metres. `daylight` ∈ [0,1]: 1 with the sun
+    // high overhead, 0 on the deep night side; full daylight in the star's
+    // SOI (no nearby horizon to occlude).
     let craft_pos = player
         .as_deref()
         .and_then(|state| state.active_position_m())
         .unwrap_or_else(|| sim.simulation.ship_state().position);
     let dominant = sim.simulation.dominant_body();
+    let (gate_body, gate_pos) = view_anchor
+        .resolved
+        .map(|a| (a.body, a.cam_world(states)))
+        .unwrap_or((dominant, craft_pos));
     // Kept for the diagnostics log below (NaN = star-SOI fallback branch).
     let mut logged_sun_elev = f64::NAN;
-    // Terrain horizon-angle sun visibility at the craft (W12 object-side v1):
-    // a mountain between the craft and the low sun pulls the direct term to 0,
-    // so the parked ship / structures / EVA fall into the same relief shadow
-    // the terrain shader's own self-shadow march darkens the valley with. The
-    // ambient sky fill below deliberately does NOT take this factor — shadowed
-    // ground still sees the sky.
-    let mut horizon_vis = 1.0_f32;
-    let daylight = match states.get(dominant) {
-        Some(body) if dominant != 0 => {
-            let to_center = body.position - craft_pos;
+    let daylight = match states.get(gate_body) {
+        Some(body) if gate_body != 0 => {
+            let to_center = body.position - gate_pos;
             let r = to_center.length();
-            let radius = sim.simulation.bodies()[dominant].radius_m;
+            let radius = sim.simulation.bodies()[gate_body].radius_m;
             let up = (-to_center).normalize_or_zero();
-            let to_sun = (star_pos - craft_pos).normalize_or_zero();
-            // Horizon march only near the surface (relief occlusion is
-            // negligible from altitude) and only when the body has a live
-            // height source (terrain resident).
-            if r - radius < 15_000.0
-                && let Some(source) = height_sources.as_deref().and_then(|hs| hs.get(dominant))
-            {
-                let inv_orient = body.orientation.normalize().inverse();
-                let craft_bf = inv_orient * (craft_pos - body.position);
-                let sun_bf = inv_orient * to_sun;
-                horizon_vis = thalos_body_render::horizon_sun_visibility(
-                    craft_bf,
-                    sun_bf,
-                    radius,
-                    source.as_ref(),
-                );
-            }
+            let to_sun = (star_pos - gate_pos).normalize_or_zero();
             // One shared terminator (altitude-aware umbra entry) — see
             // `surface_daylight`. At the surface this reduces to the terrain
             // shader's `smoothstep(-0.06, 0.12, sun_elevation)`.
@@ -560,6 +548,51 @@ pub(super) fn update_sun_light(
         }
         _ => 1.0,
     };
+
+    // Terrain horizon-angle sun visibility at the CRAFT (W12 object-side v1):
+    // a mountain between the craft and the low sun pulls the direct term to 0,
+    // so the parked ship / structures / EVA fall into the same relief shadow
+    // the terrain's self-shadow march darkens the valley with. The ambient sky
+    // fill below deliberately does NOT take this factor — shadowed ground
+    // still sees the sky. This term deliberately stays CRAFT-anchored (unlike
+    // the terminator above): view-anchoring it would relight the parked craft
+    // whenever the camera swings out of the occlusion, defeating its purpose.
+    // But the craft's horizon says nothing about ground kilometres away, and
+    // it used to floor the whole frame's sun to 0 from a freecam ridge while
+    // the sky showed daylight (reviews/20260730T011353Z §10) — so its effect
+    // now fades with view–craft separation. With one global scalar light no
+    // anchor is fully correct; the real resolution is per-receiver sun
+    // visibility (NTR-RT2 / W12r).
+    let mut horizon_vis = 1.0_f32;
+    if dominant != 0
+        && let Some(body) = states.get(dominant)
+    {
+        let to_center = body.position - craft_pos;
+        let r = to_center.length();
+        let radius = sim.simulation.bodies()[dominant].radius_m;
+        // Horizon march only near the surface (relief occlusion is negligible
+        // from altitude) and only when the body has a live height source.
+        if r - radius < 15_000.0
+            && let Some(source) = height_sources.as_deref().and_then(|hs| hs.get(dominant))
+        {
+            let inv_orient = body.orientation.normalize().inverse();
+            let craft_bf = inv_orient * (craft_pos - body.position);
+            let sun_bf = inv_orient * (star_pos - craft_pos).normalize_or_zero();
+            horizon_vis = thalos_body_render::horizon_sun_visibility(
+                craft_bf,
+                sun_bf,
+                radius,
+                source.as_ref(),
+            );
+        }
+    }
+    // Full effect while the view hovers the craft (flight, near god view),
+    // gone once the camera is inspecting ground the craft's horizon cannot
+    // speak for. The near bound comfortably covers the flight camera's boom;
+    // the far bound is where a freecam frame is clearly *about* other terrain.
+    let view_craft_sep_m = (gate_pos - craft_pos).length();
+    let horizon_share = 1.0 - smoothstep(1_000.0, 5_000.0, view_craft_sep_m) as f32;
+    let horizon_vis = 1.0 + (horizon_vis - 1.0) * horizon_share;
 
     // Heliocentric flux the craft receives, in the SAME units the shading spine
     // gives every terrain/vegetation surface (`build_scene_lighting`):
@@ -676,6 +709,9 @@ pub(super) fn update_sun_light(
             sun_lux = illuminance,
             sun_elevation = logged_sun_elev,
             daylight,
+            gate_body,
+            view_craft_sep_m,
+            horizon_vis,
             sim_time_s = sim.simulation.sim_time(),
             "resolved global ambient light"
         );
@@ -714,6 +750,7 @@ pub(super) fn update_moon_light(
     cache: Res<SolarSystemState>,
     sim: Res<SimulationState>,
     player: Option<Res<crate::player_controller::PlayerControllerState>>,
+    view_anchor: Res<crate::rendering::view_anchor::ViewAnchor>,
     mut light_query: Query<(&mut Transform, &mut DirectionalLight), With<MoonLight>>,
 ) {
     let Some(ref states) = cache.states else {
@@ -732,19 +769,26 @@ pub(super) fn update_moon_light(
         .and_then(|state| state.active_position_m())
         .unwrap_or_else(|| sim.simulation.ship_state().position);
     let dominant = sim.simulation.dominant_body();
-    let dominant_pos = states.get(dominant).map(|b| b.position);
+    // Same view anchoring as `update_sun_light`: the moon fill lights what the
+    // camera sees, so its night gate, horizon rise, and phase resolve at the
+    // anchor (craft fallback when unresolved).
+    let (gate_body, gate_pos) = view_anchor
+        .resolved
+        .map(|a| (a.body, a.cam_world(states)))
+        .unwrap_or((dominant, craft_pos));
+    let gate_body_pos = states.get(gate_body).map(|b| b.position);
 
-    // Night gate over the dominant body's horizon at the craft (mirrors
+    // Night gate over the anchor body's horizon at the view (mirrors
     // `update_sun_light`): moonlight fades in as the sun sets. Zero in the star's
     // own SOI (no nearby body to set night) — moonlight is a surface effect.
-    let night = match dominant_pos {
-        Some(dpos) if dominant != 0 => {
+    let night = match gate_body_pos {
+        Some(dpos) if gate_body != 0 => {
             // Same terminator the sun + ground use, so moonlight fades in exactly
             // as the sun's day-fill fades out (no overlap band, no gap).
-            let to_center = dpos - craft_pos;
+            let to_center = dpos - gate_pos;
             let r = to_center.length();
-            let radius = sim.simulation.bodies()[dominant].radius_m;
-            let to_sun = (star_pos - craft_pos).normalize_or_zero();
+            let radius = sim.simulation.bodies()[gate_body].radius_m;
+            let to_sun = (star_pos - gate_pos).normalize_or_zero();
             let up = (-to_center).normalize_or_zero();
             let ratio = if r > 0.0 { radius / r } else { 1.0 };
             1.0 - surface_daylight(up.dot(to_sun), ratio) as f32
@@ -752,23 +796,23 @@ pub(super) fn update_moon_light(
         _ => 0.0,
     };
 
-    if night <= 0.0 || dominant_pos.is_none() {
+    if night <= 0.0 || gate_body_pos.is_none() {
         light.illuminance = 0.0;
         return;
     }
-    let up = (craft_pos - dominant_pos.unwrap()).normalize_or_zero();
+    let up = (gate_pos - gate_body_pos.unwrap()).normalize_or_zero();
 
     let mut best_lux = 0.0f32;
     let mut best_dir = bevy::math::DVec3::Y;
     let mut best_color = Color::WHITE;
     for moon in sim.simulation.bodies() {
-        if !matches!(moon.kind, thalos_world::BodyKind::Moon) || moon.parent != Some(dominant) {
+        if !matches!(moon.kind, thalos_world::BodyKind::Moon) || moon.parent != Some(gate_body) {
             continue;
         }
         let Some(moon_state) = states.get(moon.id) else {
             continue;
         };
-        let to_moon = moon_state.position - craft_pos;
+        let to_moon = moon_state.position - gate_pos;
         let d = to_moon.length();
         if d <= 0.0 {
             continue;
@@ -782,8 +826,8 @@ pub(super) fn update_moon_light(
         // Lambert phase as seen from the craft: angle AT the moon between the
         // star and the craft (full moon → 0 → phase 1).
         let to_star_from_moon = (star_pos - moon_state.position).normalize_or_zero();
-        let to_craft_from_moon = (craft_pos - moon_state.position).normalize_or_zero();
-        let cos_g = to_star_from_moon.dot(to_craft_from_moon).clamp(-1.0, 1.0);
+        let to_view_from_moon = (gate_pos - moon_state.position).normalize_or_zero();
+        let cos_g = to_star_from_moon.dot(to_view_from_moon).clamp(-1.0, 1.0);
         let g = cos_g.acos();
         let phase =
             ((g.sin() + (std::f64::consts::PI - g) * cos_g) / std::f64::consts::PI).clamp(0.0, 1.0);
