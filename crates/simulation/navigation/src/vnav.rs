@@ -229,11 +229,7 @@ mod tests {
             epsilon = 1e-9
         );
         // The capture altitude is the glideslope evaluated at the final point.
-        assert_abs_diff_eq!(
-            p.capture_altitude_m,
-            700.0 + 9_000.0 * tan3,
-            epsilon = 1e-9
-        );
+        assert_abs_diff_eq!(p.capture_altitude_m, 700.0 + 9_000.0 * tan3, epsilon = 1e-9);
     }
 
     #[test]
@@ -284,8 +280,15 @@ mod tests {
         let p = profile();
         let d = 5_000.0;
         let on_slope = p.aim_altitude_m + d * p.glideslope_rad.tan();
-        assert_abs_diff_eq!(p.glideslope_deviation_rad(d, on_slope), 0.0, epsilon = 1e-12);
-        assert!(p.glideslope_deviation_rad(d, on_slope + 200.0) > 0.0, "high");
+        assert_abs_diff_eq!(
+            p.glideslope_deviation_rad(d, on_slope),
+            0.0,
+            epsilon = 1e-12
+        );
+        assert!(
+            p.glideslope_deviation_rad(d, on_slope + 200.0) > 0.0,
+            "high"
+        );
         assert!(p.glideslope_deviation_rad(d, on_slope - 200.0) < 0.0, "low");
     }
 
@@ -294,7 +297,10 @@ mod tests {
         let p = profile();
         // The same 40 m high is a much larger angular error up close.
         let near = p
-            .glideslope_deviation_rad(600.0, p.aim_altitude_m + 600.0 * p.glideslope_rad.tan() + 40.0)
+            .glideslope_deviation_rad(
+                600.0,
+                p.aim_altitude_m + 600.0 * p.glideslope_rad.tan() + 40.0,
+            )
             .abs();
         let far = p
             .glideslope_deviation_rad(

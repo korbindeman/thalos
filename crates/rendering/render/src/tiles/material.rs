@@ -118,12 +118,19 @@ impl Default for TileShadingParams {
 pub struct TileShadingExtension {
     #[uniform(100)]
     pub shadow: ShadowCascadeBlock,
-    #[texture(101, sample_type = "depth")]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(110, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(102, sample_type = "depth")]
+    #[texture(101, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(103, sample_type = "depth")]
+    #[texture(102, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(103, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
     #[uniform(104)]
     pub params: TileShadingParams,
     /// Cloud sun-transmittance cascade (CLOUD-5 / W2): `r` = the fraction of

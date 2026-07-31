@@ -47,7 +47,6 @@ use thalos_shipyard::{
 use thalos_world::AtmosphereSample;
 
 use crate::SimStage;
-use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 use crate::ship_view::CraftPart;
 use crate::sim_clock::SimClock;
@@ -102,13 +101,29 @@ pub(crate) struct LastBurnRecipe {
 /// Player throttle state, persisted across frames so Shift/Ctrl can ramp
 /// continuously and absolute HOTAS axes can publish a stable command.
 ///
-/// `commanded` is what the player asked for; `effective` is what was
-/// actually applied this frame after the fuel-availability cap (the
-/// two diverge only when a tank is running dry). HUD reads both.
+/// `commanded` is the pilot's persistent setpoint, `selected` is the winner of
+/// control-bus arbitration for this frame, and `effective` is what was actually
+/// applied after the fuel-availability cap. HUD keeps reading the pilot
+/// setpoint/effective pair; an autothrottle never overwrites the setpoint.
 #[derive(Resource, Debug, Default)]
 pub struct ThrottleState {
     pub commanded: f64,
+    pub selected: f64,
     pub effective: f64,
+    /// A completed autoflight mode may hand the channel back only after
+    /// forcing idle. The hold prevents a stale non-zero pilot setpoint from
+    /// surging the craft after automatic disengagement; the next deliberate
+    /// throttle movement clears it.
+    pub hold_idle_until_pilot_move: bool,
+}
+
+/// One-frame pilot takeover edge produced while sampling throttle input.
+///
+/// Input is sampled even while autoflight owns the channel so deliberate
+/// movement can disengage it. A stationary HOTAS lever does not assert this.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct PilotThrottleInput {
+    pub moved: bool,
 }
 
 /// The throttle fraction that is *actually producing thrust* this frame — the
@@ -143,6 +158,7 @@ impl Plugin for FuelPlugin {
         app.init_resource::<ActivePropulsion>()
             .init_resource::<LastBurnRecipe>()
             .init_resource::<ThrottleState>()
+            .init_resource::<PilotThrottleInput>()
             .add_systems(
                 Update,
                 (
@@ -246,22 +262,18 @@ fn finish_with_throttle(
 /// A lever held still lets keyboard adjustments stick; nudging the lever again
 /// reclaims the throttle at its physical position.
 ///
-/// Gated by [`ControlLocks::throttle`] — when set, player input is
-/// dropped because some programmatic system (today the scheduled-burn
-/// autopilot) owns the throttle. See [`crate::controls`] for who
-/// publishes the locks.
+/// Sampling is never gated by autoflight ownership: deliberate movement is the
+/// takeover gesture. Realization is still arbitrated later by `control_bus`.
 pub fn handle_throttle_input(
     input: Res<GameInputIntent>,
     clock: Res<SimClock>,
-    locks: Res<ControlLocks>,
     mut throttle: ResMut<ThrottleState>,
+    mut pilot: ResMut<PilotThrottleInput>,
     // The lever position at which it last asserted (or yielded) control; `None`
     // until the axis first reports. Survives across frames.
     mut lever_anchor: Local<Option<f32>>,
 ) {
-    if locks.throttle {
-        return;
-    }
+    pilot.moved = false;
 
     let lever_now = input.throttle_absolute.map(|lever| lever.clamp(0.0, 1.0));
 
@@ -278,6 +290,8 @@ pub fn handle_throttle_input(
             Some(anchor) if (lever - anchor).abs() > THROTTLE_LEVER_MOVE_EPS => {
                 *lever_anchor = Some(lever);
                 throttle.commanded = lever as f64;
+                throttle.hold_idle_until_pilot_move = false;
+                pilot.moved = true;
                 return;
             }
             None => *lever_anchor = Some(lever),
@@ -313,6 +327,10 @@ pub fn handle_throttle_input(
     if keyboard_acted && let Some(lever) = lever_now {
         *lever_anchor = Some(lever);
     }
+    if keyboard_acted {
+        throttle.hold_idle_until_pilot_move = false;
+    }
+    pilot.moved = keyboard_acted;
 }
 
 /// Every flight part (the editor's build world is filtered out, since it
@@ -884,7 +902,7 @@ pub fn gate_throttle_on_fuel_availability(
         return;
     }
 
-    let throttle_in_use = throttle.commanded;
+    let throttle_in_use = throttle.selected;
     let drain_dt = real_dt;
 
     if throttle_in_use <= 0.0

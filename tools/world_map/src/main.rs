@@ -166,6 +166,29 @@ impl MapSurface {
     }
 }
 
+
+/// Attach the baked drainage raster when one is installed for this backing
+/// (NTR-X2q). Absent is fine — rivers are an optional landcover channel — but a
+/// raster baked from the *other* backing is a hard error, because rivers that
+/// followed different terrain run visibly uphill.
+fn attach_rivers(surface: ProceduralSurface, backing: &str) -> ProceduralSurface {
+    let dir = std::path::Path::new("assets/terrain_packages/thalos_rivers");
+    match thalos_terrain::RiverField::load(dir, backing) {
+        Ok(Some(r)) => {
+            println!(
+                "world_map: rivers attached ({} backing)",
+                r.backing
+            );
+            surface.with_rivers(std::sync::Arc::new(r))
+        }
+        Ok(None) => surface,
+        Err(e) => {
+            println!("world_map: rivers NOT attached — {e}");
+            surface
+        }
+    }
+}
+
 fn main() {
     let radius_m = env_f64("WORLD_RADIUS_KM")
         .map(|km| km * 1000.0)
@@ -179,15 +202,27 @@ fn main() {
         match DiffusionSurface::load(dir, radius_m as f32, seed) {
             Ok(s) => {
                 println!("world_map: terrain-diffusion surface ({})", dir.display());
+                let rd = std::path::Path::new("assets/terrain_packages/thalos_rivers");
+                let s = match thalos_terrain::RiverField::load(rd, "diffusion") {
+                    Ok(Some(r)) => {
+                        println!("world_map: rivers attached (diffusion backing)");
+                        s.with_rivers(std::sync::Arc::new(r))
+                    }
+                    Ok(None) => s,
+                    Err(e) => {
+                        println!("world_map: rivers NOT attached — {e}");
+                        s
+                    }
+                };
                 MapSurface::Diffusion(s)
             }
             Err(e) => {
                 eprintln!("THALOS_TERRAIN=diffusion: {e}; falling back to procedural");
-                MapSurface::Procedural(ProceduralSurface::new(radius_m as f32, seed))
+                MapSurface::Procedural(attach_rivers(ProceduralSurface::new(radius_m as f32, seed), "procedural"))
             }
         }
     } else {
-        MapSurface::Procedural(ProceduralSurface::new(radius_m as f32, seed))
+        MapSurface::Procedural(attach_rivers(ProceduralSurface::new(radius_m as f32, seed), "procedural"))
     };
 
     // Zoom mode: WORLD_ZOOM="lat,lon,half_km" renders a tangent-plane crop
@@ -578,6 +613,7 @@ fn render_zoom(surface: &dyn SurfaceQuery, radius_m: f64, spec: &str) {
     // LOD ≈ pixel spacing, so the cascade resolves what the grid can show.
     let lod_m = px.max(0.5) as f32;
 
+    let zoom_biome = matches!(std::env::var("WORLD_MODE").as_deref(), Ok("biome"));
     let sample = |ex: f64, ny: f64| -> f64 {
         let p = up * radius_m + east * ex + north * ny;
         surface.sample_height_m(p.normalize().as_vec3(), lod_m) as f64
@@ -613,7 +649,18 @@ fn render_zoom(surface: &dyn SurfaceQuery, radius_m: f64, spec: &str) {
             let dzdy = (h[ju * n + i] - h[jd * n + i]) / (px * (ju - jd) as f64);
             let normal = DVec3::new(-dzdx, -dzdy, 1.0).normalize();
             let shade = (normal.dot(light).max(0.0) * 0.8 + 0.2).clamp(0.0, 1.0);
-            let base = hypso_color(z);
+            // `WORLD_MODE=biome` colours by the real landcover albedo, which is
+            // the only view that can show landcover-only channels such as the
+            // riparian band (NTR-X2q) — the hypso ramp is a function of height
+            // alone and is structurally blind to them.
+            let base = if zoom_biome {
+                let ex = (i as f64 / (n - 1) as f64 - 0.5) * 2.0 * half_m;
+                let ny = (j as f64 / (n - 1) as f64 - 0.5) * 2.0 * half_m;
+                let d = (up * radius_m + east * ex + north * ny).normalize();
+                srgb8(surface.sample_d(d, lod_m).albedo_linear.to_array())
+            } else {
+                hypso_color(z)
+            };
             img.put_pixel(
                 i as u32,
                 j as u32,

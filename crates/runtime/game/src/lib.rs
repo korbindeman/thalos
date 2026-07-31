@@ -30,6 +30,7 @@ mod map_view;
 mod mem_diag;
 mod navball;
 mod navigation;
+mod orbit_program;
 mod pause_menu;
 mod perf;
 mod photo_mode;
@@ -39,6 +40,7 @@ mod regime;
 mod relaunch;
 mod rendering;
 pub mod route;
+mod route_autopilot;
 
 /// Seam for the headless display previews (`examples/nav_preview.rs`).
 ///
@@ -48,9 +50,19 @@ pub mod route;
 /// look-alike. Nothing else should import through here.
 pub mod display_preview {
     pub use crate::hud::mfd::widgets::nav_display::{
-        NavDisplayMaterial, NavScene, NavSceneInputs, NavStrip, build_nav_scene,
-        nav_display_data,
+        NavDisplayMaterial, NavScene, NavSceneInputs, NavStrip, build_nav_scene, nav_display_data,
     };
+}
+/// Seam for the headless loading-screen preview (`examples/loading_preview.rs`).
+///
+/// The loading screen despawns before any capture preset can shoot it, so this
+/// is the only way to look at it. Same rule as [`display_preview`]: the preview
+/// renders the code the game runs, not a look-alike. Nothing else should import
+/// through here.
+pub mod loading_preview {
+    pub use crate::loading::{LoadingScreenPreviewPlugin, LoadingTracker, StepDesc, step};
+    pub use crate::perf::PerfSamples;
+    pub use crate::vram_bar::VramBarPlugin;
 }
 mod runtime_diagnostics;
 mod runway;
@@ -76,6 +88,7 @@ mod units_settings;
 mod velocity_frame;
 mod view;
 pub mod viewpoints;
+mod vram_bar;
 mod warp_to_maneuver;
 mod window_settings;
 
@@ -126,6 +139,7 @@ use maneuver::ManeuverPlugin;
 use map_view::MapViewPlugin;
 use navball::NavballPlugin;
 use navigation::NavigationPlugin;
+use orbit_program::OrbitProgramPlugin;
 use pause_menu::PauseMenuPlugin;
 use photo_mode::PhotoModePlugin;
 use player_controller::PlayerControllerPlugin;
@@ -750,6 +764,8 @@ impl AppBuilder {
             .add_plugins(ManeuverPlugin)
             .add_plugins(NavigationPlugin)
             .add_plugins(AutopilotPlugin)
+            .add_plugins(OrbitProgramPlugin)
+            .add_plugins(route_autopilot::RouteAutopilotPlugin)
             .add_plugins(ControlLocksPlugin)
             .add_plugins(control_bus::ControlBusPlugin)
             .add_plugins(WarpToManeuverPlugin)
@@ -797,6 +813,7 @@ impl AppBuilder {
             .add_plugins(space_center::SpaceCenterPlugin)
             .add_plugins(BodyTreePanelPlugin)
             .add_plugins(mem_diag::MemDiagPlugin)
+            .add_plugins(vram_bar::VramBarPlugin)
             .add_plugins(DebugPlugin);
 
         // Headless graphics settings are request-scoped and must never rewrite

@@ -202,7 +202,10 @@ fn resolve_regime(
         warp_target_speed: warp.target_speed(),
         warp_ladder: &warp_ladder,
         throttle_effective: throttle.effective,
-        throttle_commanded: throttle.commanded,
+        // `selected` is the control-bus winner. Reading `commanded` here
+        // would see only the persistent pilot setpoint, leaving a landed
+        // craft pinned under BodyFixed during an autoflight launch.
+        throttle_selected: throttle.selected,
         authority: sim.simulation.authority().into(),
         walking,
         // Capability proxy: the EVA capsule's collider is removed at spawn.

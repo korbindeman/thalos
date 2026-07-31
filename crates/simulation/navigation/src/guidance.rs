@@ -6,6 +6,23 @@
 //! separate re-derivations that drift apart. Anything stateful (mode
 //! engagement, selection, plan refresh policy) belongs to the caller.
 //!
+//! # Two different questions, two different answers
+//!
+//! This module answers both, and they must not be confused:
+//!
+//! - **"Where should I point?"** — the steering director
+//!   ([`Guidance::desired_heading_rad`], [`Guidance::fpa_command_rad`], and the
+//!   `director_*` deflections). This is **route-relative**: it follows the
+//!   planned path, whatever leg the craft is on, and when the craft is off
+//!   course it points along a *flyable rejoin* ([`crate::rejoin`]) rather than
+//!   at the nearest bit of line. The destination being a runway is incidental —
+//!   the same cue works for any route.
+//! - **"How far off the beam am I?"** — the ILS-style localizer and glideslope
+//!   deviations. These are **runway-relative** by definition: they are measured
+//!   against the final approach centreline, exactly like the ground equipment
+//!   they imitate, and they are meaningless on a base leg. A display should show
+//!   them only once established on final.
+//!
 //! # Deviations: angular where a pilot expects angular
 //!
 //! Cross-track is metres, because that is what a map shows. The **localizer and
@@ -43,6 +60,14 @@ const ALTITUDE_GAIN_PER_S: f64 = 0.06;
 /// Vertical-speed command clamp (m/s) — keeps the correction civilised.
 const MAX_VS_CORRECTION_M_S: f64 = 8.0;
 
+/// Full-scale lateral director deflection (rad): a 25° heading error pegs the
+/// cue. That is a normal intercept angle, so the cue uses its whole travel for
+/// corrections a pilot actually makes rather than saturating instantly.
+pub const DIRECTOR_HEADING_FULL_SCALE_RAD: f64 = 0.436_332_313; // 25°
+/// Full-scale vertical director deflection (rad): a 4° flight-path-angle error.
+/// Sized against the 3° glideslope, so "one dot low" is a real correction.
+pub const DIRECTOR_FPA_FULL_SCALE_RAD: f64 = 0.069_813_170; // 4°
+
 /// Craft state the guidance needs, in body-fixed terms.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GuidanceInput {
@@ -53,6 +78,10 @@ pub struct GuidanceInput {
     pub track_dir_body_fixed: DVec3,
     /// Ground speed (m/s) — sizes the lookahead and converts turn rate to bank.
     pub ground_speed_m_s: f64,
+    /// Vertical speed (m/s, + = climbing). With ground speed this gives the
+    /// craft's current flight-path angle, which is what the vertical half of the
+    /// director is measured against.
+    pub vertical_speed_m_s: f64,
     /// Local gravitational acceleration (m/s²) for the turn-rate ↔ bank relation.
     pub gravity_m_s2: f64,
     /// Bank the command is clamped to (rad).
@@ -74,9 +103,16 @@ pub struct Guidance {
     pub course_heading_rad: f64,
     /// Craft ground track (compass rad).
     pub track_heading_rad: f64,
-    /// Track the craft should fly now to capture and hold the route (compass
-    /// rad) — course plus the intercept correction.
+    /// Track the craft should fly now (compass rad) — **the steering answer**.
+    /// With a rejoin supplied this points along the flyable path back onto the
+    /// route; without one it falls back to a lookahead intercept of the route
+    /// itself.
     pub desired_heading_rad: f64,
+    /// The craft's current flight-path angle (rad, + = climbing).
+    pub fpa_rad: f64,
+    /// The flight-path angle to fly now (rad, + = climbing) — the vertical half
+    /// of the steering answer, derived from the profile's vertical-speed command.
+    pub fpa_command_rad: f64,
     /// Distance still to fly along the route, to the aim point (m).
     pub dtg_m: f64,
     /// Distance flown along the route (m).
@@ -107,6 +143,21 @@ pub struct Guidance {
 }
 
 impl Guidance {
+    /// Lateral steering deflection in `[-1, 1]`, **positive = turn right**.
+    ///
+    /// This is the route-relative director: a cue driven by it points where the
+    /// craft should go, on any leg, including along a rejoin when off course.
+    pub fn director_lateral(&self) -> f64 {
+        (crate::wrap_angle(self.desired_heading_rad - self.track_heading_rad)
+            / DIRECTOR_HEADING_FULL_SCALE_RAD)
+            .clamp(-1.0, 1.0)
+    }
+
+    /// Vertical steering deflection in `[-1, 1]`, **positive = pitch up**.
+    pub fn director_vertical(&self) -> f64 {
+        ((self.fpa_command_rad - self.fpa_rad) / DIRECTOR_FPA_FULL_SCALE_RAD).clamp(-1.0, 1.0)
+    }
+
     /// Localizer deflection as a fraction of full scale, clamped to `[-1, 1]`.
     pub fn loc_deflection(&self) -> f64 {
         (self.loc_deviation_rad / LOC_FULL_SCALE_RAD).clamp(-1.0, 1.0)
@@ -120,9 +171,19 @@ impl Guidance {
 
 /// Compute guidance for `plan` at the craft state in `input`.
 ///
+/// `rejoin` is the flyable path back onto the route, planned by the caller (it
+/// holds the frame-to-frame hint that keeps the capture point steady — this
+/// function stays stateless, per ADR-20260730T005746Z). When it is `None` the
+/// steering falls back to a lookahead intercept of the route, which is correct
+/// but does not know the craft's turn radius.
+///
 /// Returns `None` only when the plan's path is empty (which
 /// [`crate::approach::plan_approach`] never produces).
-pub fn compute_guidance(plan: &ApproachPlan, input: &GuidanceInput) -> Option<Guidance> {
+pub fn compute_guidance(
+    plan: &ApproachPlan,
+    input: &GuidanceInput,
+    rejoin: Option<&crate::rejoin::Rejoin>,
+) -> Option<Guidance> {
     let frame = &plan.frame;
     let local = frame.to_local(input.position_body_fixed);
     let altitude_m = frame.altitude_of(input.position_body_fixed);
@@ -141,17 +202,32 @@ pub fn compute_guidance(plan: &ApproachPlan, input: &GuidanceInput) -> Option<Gu
         None => closest.theta,
     };
 
-    // --- Lateral: L1-style capture. Aim at a point one lookahead ahead on the
-    // path; the correction is the angle to it, capped at a 45° intercept.
+    // --- Lateral steering.
     let lookahead = (input.ground_speed_m_s.max(0.0) * LOOKAHEAD_TIME_S).max(MIN_LOOKAHEAD_M);
-    // Positive cross-track means the craft is RIGHT of course, so the desired
-    // track must rotate to the left of the course — and left is CCW, i.e. a
-    // positive θ offset (see `crate::waypoint`). Flipping this sign turns the
-    // capture law into a divergence law.
-    let intercept = (closest.cross_track_m / lookahead)
-        .atan()
-        .clamp(-MAX_INTERCEPT_RAD, MAX_INTERCEPT_RAD);
-    let desired_theta = closest.theta + intercept;
+    let desired_theta = match rejoin.and_then(|r| r.aim(lookahead)) {
+        // Pure pursuit along the planned rejoin: aim at the point one lookahead
+        // along it. Near the end of the rejoin that point is on the route
+        // itself, so capture needs no mode change — the cue simply converges.
+        Some((aim, _)) => {
+            let to_aim = aim - local;
+            if to_aim.length() > 1.0 {
+                theta_of(to_aim)
+            } else {
+                closest.theta
+            }
+        }
+        // Fallback with no rejoin: a lookahead intercept of the route. Positive
+        // cross-track means the craft is RIGHT of course, so the desired track
+        // rotates to the left of the course — and left is CCW, i.e. a positive θ
+        // offset (see `crate::waypoint`). Flipping this sign turns the capture
+        // law into a divergence law.
+        None => {
+            let intercept = (closest.cross_track_m / lookahead)
+                .atan()
+                .clamp(-MAX_INTERCEPT_RAD, MAX_INTERCEPT_RAD);
+            closest.theta + intercept
+        }
+    };
     let heading_error = crate::wrap_angle(desired_theta - track_theta);
 
     // Turn rate → bank: `tan φ = ω·v/g`.
@@ -181,6 +257,16 @@ pub fn compute_guidance(plan: &ApproachPlan, input: &GuidanceInput) -> Option<Gu
     let vertical_speed_command_m_s = profile_vs
         + (-ALTITUDE_GAIN_PER_S * altitude_error_m)
             .clamp(-MAX_VS_CORRECTION_M_S, MAX_VS_CORRECTION_M_S);
+
+    // Flight-path angles, from vertical speed over ground speed. Guarded at low
+    // ground speed, where the ratio is meaningless rather than merely large.
+    let speed_floor = input.ground_speed_m_s.max(1.0);
+    let fpa_rad = (input.vertical_speed_m_s / speed_floor)
+        .clamp(-1.0, 1.0)
+        .asin();
+    let fpa_command_rad = (vertical_speed_command_m_s / speed_floor)
+        .clamp(-1.0, 1.0)
+        .asin();
 
     // --- ILS-style deviations, measured against the final approach centerline
     // (not the whole route — a localizer needle has no opinion about a base leg).
@@ -221,6 +307,8 @@ pub fn compute_guidance(plan: &ApproachPlan, input: &GuidanceInput) -> Option<Gu
         course_heading_rad: theta_to_heading(closest.theta),
         track_heading_rad: theta_to_heading(track_theta),
         desired_heading_rad: theta_to_heading(desired_theta),
+        fpa_rad,
+        fpa_command_rad,
         dtg_m,
         along_m: closest.along_m,
         threshold_range_m,
@@ -293,6 +381,9 @@ mod tests {
             position_body_fixed: sc.frame.to_body_fixed(local, altitude),
             track_dir_body_fixed: sc.plan.end.landing_dir(),
             ground_speed_m_s: 80.0,
+            // On a 3-degree slope at 80 m/s the craft is sinking ~4.2 m/s; the
+            // helper's states are otherwise "on profile", so match it.
+            vertical_speed_m_s: -80.0 * 3.0_f64.to_radians().tan(),
             gravity_m_s2: crate::EARTH_G_M_S2,
             bank_limit_rad: 25.0_f64.to_radians(),
         }
@@ -305,8 +396,12 @@ mod tests {
     #[test]
     fn on_course_and_on_slope_reads_zero_everywhere() {
         let sc = scene();
-        let g = compute_guidance(&sc.plan, &state(&sc, 5_000.0, 0.0, on_slope_altitude(&sc, 5_000.0)))
-            .expect("guidance");
+        let g = compute_guidance(
+            &sc.plan,
+            &state(&sc, 5_000.0, 0.0, on_slope_altitude(&sc, 5_000.0)),
+            None,
+        )
+        .expect("guidance");
         assert_abs_diff_eq!(g.cross_track_m, 0.0, epsilon = 1e-6);
         assert_abs_diff_eq!(g.loc_deviation_rad, 0.0, epsilon = 1e-9);
         assert_abs_diff_eq!(g.gs_deviation_rad, 0.0, epsilon = 1e-6);
@@ -321,8 +416,12 @@ mod tests {
     fn right_of_course_commands_a_left_bank() {
         let sc = scene();
         let dist = 6_000.0;
-        let g = compute_guidance(&sc.plan, &state(&sc, dist, 400.0, on_slope_altitude(&sc, dist)))
-            .expect("guidance");
+        let g = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, 400.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("guidance");
         assert!(g.cross_track_m > 0.0, "right of course is positive");
         assert!(g.loc_deviation_rad > 0.0, "localizer reads right");
         assert!(
@@ -331,11 +430,117 @@ mod tests {
             g.bank_command_rad.to_degrees()
         );
         // Mirrored on the other side.
-        let g2 = compute_guidance(&sc.plan, &state(&sc, dist, -400.0, on_slope_altitude(&sc, dist)))
-            .expect("guidance");
+        let g2 = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, -400.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("guidance");
         assert!(g2.cross_track_m < 0.0);
         assert!(g2.bank_command_rad > 0.0, "must roll right");
         assert_abs_diff_eq!(g.bank_command_rad, -g2.bank_command_rad, epsilon = 1e-9);
+    }
+
+    #[test]
+    fn the_director_points_where_the_craft_should_turn() {
+        let sc = scene();
+        let dist = 6_000.0;
+        // Right of course: the director must call for a LEFT turn.
+        let right = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, 500.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("g");
+        assert!(
+            right.director_lateral() < 0.0,
+            "right of course should steer left, got {}",
+            right.director_lateral()
+        );
+        let left = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, -500.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("g");
+        assert!(left.director_lateral() > 0.0);
+        // On course and aligned: centred.
+        let on = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, 0.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("g");
+        assert_abs_diff_eq!(on.director_lateral(), 0.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn the_vertical_director_points_where_the_craft_should_pitch() {
+        let sc = scene();
+        let dist = 6_000.0;
+        let on_slope = on_slope_altitude(&sc, dist);
+        // Low: the profile calls for less sink than the craft has, so the cue
+        // says pitch up.
+        let low =
+            compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on_slope - 200.0), None).expect("g");
+        assert!(
+            low.director_vertical() > 0.0,
+            "low should steer up, got {}",
+            low.director_vertical()
+        );
+        let high =
+            compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on_slope + 200.0), None).expect("g");
+        assert!(high.director_vertical() < 0.0, "high should steer down");
+        // On profile with the matching sink rate: centred.
+        let on = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on_slope), None).expect("g");
+        assert_abs_diff_eq!(on.director_vertical(), 0.0, epsilon = 0.02);
+    }
+
+    #[test]
+    fn the_director_saturates_rather_than_running_away() {
+        let sc = scene();
+        let mut st = state(&sc, 8_000.0, 30_000.0, 4_000.0);
+        st.track_dir_body_fixed = -sc.plan.end.landing_dir();
+        st.vertical_speed_m_s = -60.0;
+        let g = compute_guidance(&sc.plan, &st, None).expect("g");
+        assert!(g.director_lateral().abs() <= 1.0);
+        assert!(g.director_vertical().abs() <= 1.0);
+    }
+
+    #[test]
+    fn a_rejoin_steers_along_the_flyable_path_not_at_the_nearest_point() {
+        // Well off to the right of the final: aiming at the nearest point on the
+        // route would demand a hard turn toward it; the rejoin's aim point is
+        // further down the route, so the commanded turn is gentler.
+        let sc = scene();
+        let dist = 12_000.0;
+        let st = state(&sc, dist, 4_000.0, on_slope_altitude(&sc, dist));
+        let local = sc.plan.frame.to_local(st.position_body_fixed);
+        let track = sc
+            .plan
+            .frame
+            .direction_to_local(st.track_dir_body_fixed)
+            .normalize();
+        let pose = crate::dubins::Pose2::new(local, crate::waypoint::theta_of(track));
+        let closest = sc.plan.path.closest(local).expect("on path");
+        let params = crate::rejoin::RejoinParams::for_radius(1_400.0);
+        let rejoin =
+            crate::rejoin::plan_rejoin(&sc.plan.path, pose, closest.along_m, &params, None)
+                .expect("rejoin");
+
+        let with_rejoin = compute_guidance(&sc.plan, &st, Some(&rejoin)).expect("g");
+        let without = compute_guidance(&sc.plan, &st, None).expect("g");
+        // Both turn the same way (toward the route, i.e. left).
+        assert!(with_rejoin.director_lateral() < 0.0);
+        assert!(without.director_lateral() < 0.0);
+        // The planned rejoin knows the turn radius, so it does not demand the
+        // full-scale intercept the radius-blind fallback does.
+        assert!(
+            with_rejoin.director_lateral().abs() < without.director_lateral().abs(),
+            "rejoin steering {} should be gentler than fallback {}",
+            with_rejoin.director_lateral(),
+            without.director_lateral()
+        );
     }
 
     #[test]
@@ -345,7 +550,7 @@ mod tests {
         let mut st = state(&sc, 8_000.0, 20_000.0, 3_000.0);
         st.track_dir_body_fixed = -sc.plan.end.landing_dir();
         st.ground_speed_m_s = 250.0;
-        let g = compute_guidance(&sc.plan, &st).expect("guidance");
+        let g = compute_guidance(&sc.plan, &st, None).expect("guidance");
         assert!(
             g.bank_command_rad.abs() <= 25.0_f64.to_radians() + 1e-12,
             "bank {} exceeded the limit",
@@ -358,10 +563,10 @@ mod tests {
         let sc = scene();
         let dist = 7_000.0;
         let on = on_slope_altitude(&sc, dist);
-        let high = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on + 150.0)).expect("g");
+        let high = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on + 150.0), None).expect("g");
         assert!(high.gs_deviation_rad > 0.0, "high reads positive");
         assert!(high.altitude_error_m > 0.0);
-        let low = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on - 150.0)).expect("g");
+        let low = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on - 150.0), None).expect("g");
         assert!(low.gs_deviation_rad < 0.0, "low reads negative");
         // Being low must command a shallower descent than being high.
         assert!(
@@ -376,8 +581,12 @@ mod tests {
     fn on_profile_vertical_command_matches_the_glideslope_geometry() {
         let sc = scene();
         let dist = 5_000.0;
-        let g = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on_slope_altitude(&sc, dist)))
-            .expect("g");
+        let g = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, 0.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("g");
         // 80 m/s down a 3° slope is ~4.2 m/s of sink.
         let expected = -80.0 * 3.0_f64.to_radians().tan();
         assert_abs_diff_eq!(g.vertical_speed_command_m_s, expected, epsilon = 0.05);
@@ -390,11 +599,13 @@ mod tests {
         let far = compute_guidance(
             &sc.plan,
             &state(&sc, 15_000.0, 60.0, on_slope_altitude(&sc, 15_000.0)),
+            None,
         )
         .expect("g");
         let near = compute_guidance(
             &sc.plan,
             &state(&sc, 1_000.0, 60.0, on_slope_altitude(&sc, 1_000.0)),
+            None,
         )
         .expect("g");
         assert!(near.loc_deviation_rad > far.loc_deviation_rad * 5.0);
@@ -422,22 +633,27 @@ mod tests {
             position_body_fixed: craft,
             track_dir_body_fixed: sc.plan.end.landing_dir(),
             ground_speed_m_s: 100.0,
+            vertical_speed_m_s: 0.0,
             gravity_m_s2: crate::EARTH_G_M_S2,
             bank_limit_rad: 25.0_f64.to_radians(),
         };
         assert_eq!(
-            compute_guidance(&sc.plan, &at_start).expect("g").phase,
+            compute_guidance(&sc.plan, &at_start, None)
+                .expect("g")
+                .phase,
             ApproachPhase::Transition
         );
         let on_final = state(&sc, 4_000.0, 0.0, on_slope_altitude(&sc, 4_000.0));
         assert_eq!(
-            compute_guidance(&sc.plan, &on_final).expect("g").phase,
+            compute_guidance(&sc.plan, &on_final, None)
+                .expect("g")
+                .phase,
             ApproachPhase::Final
         );
         // Over the strip, past the aim point.
         let over = state(&sc, -100.0, 0.0, sc.plan.frame.origin_altitude_m + 2.0);
         assert_eq!(
-            compute_guidance(&sc.plan, &over).expect("g").phase,
+            compute_guidance(&sc.plan, &over, None).expect("g").phase,
             ApproachPhase::Touchdown
         );
     }
@@ -447,7 +663,8 @@ mod tests {
         let sc = scene();
         // Offset far to the side: route distance-to-go must exceed the straight
         // line to the threshold is NOT guaranteed, but they must not be equal.
-        let g = compute_guidance(&sc.plan, &state(&sc, 3_000.0, 2_000.0, 1_200.0)).expect("g");
+        let g =
+            compute_guidance(&sc.plan, &state(&sc, 3_000.0, 2_000.0, 1_200.0), None).expect("g");
         assert!(
             (g.dtg_m - g.threshold_range_m).abs() > 100.0,
             "dtg {} and threshold range {} should differ off-centerline",
@@ -462,7 +679,7 @@ mod tests {
         let mut st = state(&sc, 4_000.0, 100.0, 900.0);
         st.ground_speed_m_s = 0.0;
         st.track_dir_body_fixed = DVec3::ZERO;
-        let g = compute_guidance(&sc.plan, &st).expect("g");
+        let g = compute_guidance(&sc.plan, &st, None).expect("g");
         assert!(g.bank_command_rad.is_finite());
         assert!(g.vertical_speed_command_m_s.is_finite());
         assert!(g.desired_heading_rad.is_finite());
@@ -473,10 +690,18 @@ mod tests {
     fn headings_are_compass_and_agree_with_the_runway() {
         let sc = scene();
         let dist = 6_000.0;
-        let g = compute_guidance(&sc.plan, &state(&sc, dist, 0.0, on_slope_altitude(&sc, dist)))
-            .expect("g");
+        let g = compute_guidance(
+            &sc.plan,
+            &state(&sc, dist, 0.0, on_slope_altitude(&sc, dist)),
+            None,
+        )
+        .expect("g");
         // The strip points due north, so course/track/desired are all ~0/360.
-        for h in [g.course_heading_rad, g.track_heading_rad, g.desired_heading_rad] {
+        for h in [
+            g.course_heading_rad,
+            g.track_heading_rad,
+            g.desired_heading_rad,
+        ] {
             let deg = h.to_degrees();
             assert!(
                 !(1.0..=359.0).contains(&deg),

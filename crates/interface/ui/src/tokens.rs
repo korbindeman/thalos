@@ -30,6 +30,9 @@ pub const TEXT_FAINT: Color = Color::srgba(1.0, 1.0, 1.0, 0.48);
 pub const ACCENT: Color = Color::srgba(1.0, 0.78, 0.40, 1.0);
 /// Dimmed accent for secondary accent uses (latched toggles at rest).
 pub const ACCENT_DIM: Color = Color::srgba(0.80, 0.64, 0.36, 1.0);
+/// Third step of the accent ramp, for charts that need one more "ours"
+/// swatch after [`ACCENT`] and [`ACCENT_DIM`] (the VRAM bar's segments).
+pub const ACCENT_FAINT: Color = Color::srgba(0.58, 0.47, 0.28, 1.0);
 /// Text drawn on top of an accent-filled control.
 pub const ON_ACCENT: Color = Color::srgba(0.10, 0.08, 0.04, 1.0);
 /// Destructive / warning.

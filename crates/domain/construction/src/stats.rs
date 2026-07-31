@@ -406,7 +406,7 @@ impl ShipBlueprint {
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
             let m = part_total_mass(pb, entry);
             com_total_mass += m;
-            com_weighted += geo[i].position * m;
+            com_weighted += (geo[i].position + part_centroid_offset(entry, &pb.params, geo[i].diameter)) * m;
         }
         let com = if com_total_mass > 0.0 {
             com_weighted / com_total_mass
@@ -429,8 +429,12 @@ impl ShipBlueprint {
                 let (r, l) = part_cylinder_dims(entry, &pb.params, geo[i].diameter);
                 cylinder_principal_inertia(m, r, l)
             };
-            moment_of_inertia_kg_m2 +=
-                self_inertia + parallel_axis_inertia(m, geo[i].position - com);
+            moment_of_inertia_kg_m2 += self_inertia
+                + parallel_axis_inertia(
+                    m,
+                    geo[i].position + part_centroid_offset(entry, &pb.params, geo[i].diameter)
+                        - com,
+                );
         }
 
         // Nose-on frontal area from the widest propagated part diameter.
@@ -971,6 +975,42 @@ fn part_cylinder_dims(entry: &CatalogEntry, params: &PartParams, effective_d: f3
         _ => 0.0,
     };
     (r, l)
+}
+
+/// Offset from a part's origin (its `top` mating node) to its **mass
+/// centroid**, in the part's local frame, metres. Axial parts hang their body
+/// toward local `-Y` (the `bottom` node), so their mass sits half the modeled
+/// cylinder length down the axis — weighting a part's mass at its *origin*
+/// put a 35 m fuselage's ~10 t at its nose tip and skewed the ship CoM
+/// metres forward (the Meridian's phantom nose-heaviness). The length comes
+/// from [`part_cylinder_dims`] — the same model the self-inertia uses — so
+/// the centroid, the inertia, and the live-part twin
+/// ([`live_part_centroid_offset`]) can never disagree.
+///
+/// Wings and gear return zero: a wing's mass stays at its mount root (a
+/// mirrored pair cancels laterally; the sweep-induced aft shift is
+/// second-order and left for a wing-planform centroid pass), and a gearbox is
+/// modeled as a stub about its mount. Offsets are applied un-rotated on the
+/// blueprint side, matching the axis-aligned-stack approximation the whole
+/// stats inertia model already makes.
+fn part_centroid_offset(entry: &CatalogEntry, params: &PartParams, effective_d: f32) -> DVec3 {
+    if matches!(entry, CatalogEntry::Wing(_) | CatalogEntry::Gear(_)) {
+        return DVec3::ZERO;
+    }
+    let (_, l) = part_cylinder_dims(entry, params, effective_d);
+    DVec3::new(0.0, -0.5 * l, 0.0)
+}
+
+/// Live-part twin of [`part_centroid_offset`]: offset from the part entity's
+/// transform origin to its mass centroid, in the part's **local** frame —
+/// rotate by the part's transform rotation before adding to its body-frame
+/// position. Wings and gear return zero (see the blueprint-side doc).
+pub fn live_part_centroid_offset(part: EntityRef) -> DVec3 {
+    if part.get::<Wing>().is_some() || part.get::<Gear>().is_some() {
+        return DVec3::ZERO;
+    }
+    let (_, l) = live_part_cylinder_dims(part);
+    DVec3::new(0.0, -0.5 * l, 0.0)
 }
 
 /// Principal-axis moment of inertia of a solid cylinder about its own

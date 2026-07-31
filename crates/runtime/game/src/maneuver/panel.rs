@@ -366,7 +366,10 @@ pub(super) fn update_editor(
             EditorField::DvTotal => {
                 format!(
                     "Δv {}",
-                    crate::hud::format::delta_v_fine(total_dv, units.system_for(UnitDomain::General))
+                    crate::hud::format::delta_v_fine(
+                        total_dv,
+                        units.system_for(UnitDomain::General)
+                    )
                 )
             }
             EditorField::Burn => burn_text.clone(),
@@ -377,15 +380,18 @@ pub(super) fn update_editor(
                     "Delete".into()
                 }
             }
-            EditorField::AxisValue(DvAxis::Prograde) => {
-                crate::hud::format::delta_v_fine(node_dv.prograde, units.system_for(UnitDomain::General))
-            }
-            EditorField::AxisValue(DvAxis::Normal) => {
-                crate::hud::format::delta_v_fine(node_dv.normal, units.system_for(UnitDomain::General))
-            }
-            EditorField::AxisValue(DvAxis::Radial) => {
-                crate::hud::format::delta_v_fine(node_dv.radial, units.system_for(UnitDomain::General))
-            }
+            EditorField::AxisValue(DvAxis::Prograde) => crate::hud::format::delta_v_fine(
+                node_dv.prograde,
+                units.system_for(UnitDomain::General),
+            ),
+            EditorField::AxisValue(DvAxis::Normal) => crate::hud::format::delta_v_fine(
+                node_dv.normal,
+                units.system_for(UnitDomain::General),
+            ),
+            EditorField::AxisValue(DvAxis::Radial) => crate::hud::format::delta_v_fine(
+                node_dv.radial,
+                units.system_for(UnitDomain::General),
+            ),
         };
         if **text != value {
             **text = value;

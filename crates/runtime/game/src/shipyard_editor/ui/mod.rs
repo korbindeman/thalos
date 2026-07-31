@@ -97,6 +97,7 @@ impl Plugin for EditorUiPlugin {
                     top_bar::update_stats_text.after(refresh_stats_cache),
                     top_bar::sync_ship_name,
                     palette::handle_part_clicks,
+                    palette::refresh_summaries,
                 )
                     .run_if(editor_open),
             )
@@ -117,7 +118,13 @@ impl Plugin for EditorUiPlugin {
     }
 }
 
-fn setup_editor_ui(mut commands: Commands, theme: Res<UiTheme>, catalog: Res<PartCatalog>) {
+fn setup_editor_ui(
+    mut commands: Commands,
+    theme: Res<UiTheme>,
+    catalog: Res<PartCatalog>,
+    units: Res<crate::units_settings::UnitsSettings>,
+) {
+    let system = units.system_for(crate::units_settings::UnitDomain::General);
     commands
         .spawn((
             Node {
@@ -139,7 +146,7 @@ fn setup_editor_ui(mut commands: Commands, theme: Res<UiTheme>, catalog: Res<Par
         ))
         .with_children(|root| {
             top_bar::spawn(root, &theme);
-            palette::spawn(root, &theme, &catalog);
+            palette::spawn(root, &theme, &catalog, system);
             inspector::spawn(root, &theme);
             staging_panel::spawn(root, &theme);
             spawn_pending_pill(root, &theme);

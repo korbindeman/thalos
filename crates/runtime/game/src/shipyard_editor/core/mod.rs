@@ -51,8 +51,7 @@ use thalos_shipyard::sizing::propagate_node_sizes;
 pub use commands::{CollectQuery, collect_blueprint};
 pub use files::SavedShip;
 pub use format::{
-    format_delta_v, format_mass_kg, kind_order, palette_category_label, palette_category_order,
-    palette_part_summary,
+    kind_order, palette_category_label, palette_category_order, palette_part_summary,
 };
 pub use placement::symmetry_edit_target;
 pub use state::{

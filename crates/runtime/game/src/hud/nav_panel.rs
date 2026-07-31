@@ -25,7 +25,7 @@
 use bevy::prelude::*;
 use bevy::ui::Val2;
 
-use crate::autopilot::{Autopilot, AutopilotBurnSchedule, AutopilotState};
+use crate::autopilot::{AutoflightMode, Autopilot, AutopilotBurnSchedule, AutopilotState};
 use crate::controls::ControlLocks;
 use crate::hud::HudPanel;
 use crate::hud::nav_attitude::NavAttitudeRenderTarget;
@@ -35,6 +35,8 @@ use crate::navball::markers::{MarkerIconState, MarkerKind, marker_icon_image};
 use crate::navball::ui::{NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX};
 use crate::navigation::{NavigationMode, NavigationState};
 use crate::rendering::SimulationState;
+use crate::route::RouteState;
+use crate::route_autopilot::{LandAutopilot, LandPhase};
 use crate::target::TargetBody;
 use crate::units_settings::UnitDomain;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
@@ -61,7 +63,7 @@ const ASSIST_BUTTON_HEIGHT: f32 = 25.0;
 
 const TOP_RIGHT_PANEL_RIGHT_PX: f32 = 16.0;
 const AUTOPILOT_PANEL_TOP_PX: f32 = 52.0;
-const AUTOPILOT_PANEL_HEIGHT: f32 = 51.0;
+const AUTOPILOT_PANEL_HEIGHT: f32 = 83.0;
 const AUTOPILOT_BUTTON_WIDTH: f32 = 82.0;
 const AUTOPILOT_BUTTON_HEIGHT: f32 = 27.0;
 
@@ -141,6 +143,12 @@ pub(super) struct AutopilotToggleButton;
 
 #[derive(Component, Debug, Clone, Copy)]
 pub(super) struct AutopilotToggleText;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct LandToggleButton;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct LandToggleText;
 
 #[derive(Component, Debug, Clone, Copy)]
 pub(super) struct ManeuverPanelRoot;
@@ -470,6 +478,35 @@ fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
                     AutopilotToggleText,
                 ));
             });
+            p.spawn((
+                Button,
+                Node {
+                    width: Val::Px(AUTOPILOT_BUTTON_WIDTH),
+                    height: Val::Px(AUTOPILOT_BUTTON_HEIGHT),
+                    border: UiRect::all(Val::Px(1.0)),
+                    border_radius: BorderRadius::all(Val::Px(3.0)),
+                    justify_content: JustifyContent::Center,
+                    align_items: AlignItems::Center,
+                    ..default()
+                },
+                BackgroundColor(theme.panel_bg_alt),
+                BorderColor::all(theme.panel_border),
+                Interaction::None,
+                LandToggleButton,
+                Name::new("LandToggleButton"),
+            ))
+            .with_children(|c| {
+                c.spawn((
+                    Text::new("LAND"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: FontSize::Px(12.0),
+                        ..default()
+                    },
+                    TextColor(theme.text_primary),
+                    LandToggleText,
+                ));
+            });
         });
 }
 
@@ -697,12 +734,14 @@ pub fn handle_clicks(
         &Interaction,
         (Changed<Interaction>, With<AutopilotToggleButton>),
     >,
+    land_interactions: Query<&Interaction, (Changed<Interaction>, With<LandToggleButton>)>,
     warp_interactions: Query<&Interaction, (Changed<Interaction>, With<ManeuverWarpButton>)>,
     dismiss_interactions: Query<&Interaction, (Changed<Interaction>, With<ManeuverDismissButton>)>,
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
     sim: Res<SimulationState>,
+    route: Res<RouteState>,
     mut nav: ResMut<NavigationState>,
     mut sas: ResMut<crate::control_bus::SasState>,
     mut autopilot: ResMut<Autopilot>,
@@ -724,7 +763,14 @@ pub fn handle_clicks(
 
     for interaction in &autopilot_interactions {
         if matches!(interaction, Interaction::Pressed) {
-            autopilot.enabled = !autopilot.enabled;
+            autopilot.toggle_mode(AutoflightMode::Maneuver);
+        }
+    }
+
+    let land_available = route.destination_guidance.is_some() || route.guidance.is_some();
+    for interaction in &land_interactions {
+        if matches!(interaction, Interaction::Pressed) && land_available {
+            autopilot.toggle_mode(AutoflightMode::Land);
         }
     }
 
@@ -880,21 +926,32 @@ pub fn update_button_visuals(
 
 pub fn update_autopilot_visuals(
     autopilot: Res<Autopilot>,
+    land: Res<LandAutopilot>,
+    route: Res<RouteState>,
     theme: Res<HudTheme>,
     mut buttons: Query<
         (&Interaction, &mut BorderColor, &mut BackgroundColor),
         With<AutopilotToggleButton>,
     >,
     mut toggle_text: Query<(&mut Text, &mut TextColor), With<AutopilotToggleText>>,
+    mut land_buttons: Query<
+        (&Interaction, &mut BorderColor, &mut BackgroundColor),
+        (With<LandToggleButton>, Without<AutopilotToggleButton>),
+    >,
+    mut land_text: Query<
+        (&mut Text, &mut TextColor),
+        (With<LandToggleText>, Without<AutopilotToggleText>),
+    >,
 ) {
+    let maneuver_active = autopilot.mode() == AutoflightMode::Maneuver;
     for (interaction, mut border, mut bg) in &mut buttons {
         let (border_color, bg_color) =
-            nav_button_colors(&theme, autopilot.enabled, true, false, interaction);
+            nav_button_colors(&theme, maneuver_active, true, false, interaction);
         apply_button_colors(&mut border, &mut bg, border_color, bg_color);
     }
 
     let toggle_label = "MNVR";
-    let toggle_color = if autopilot.enabled {
+    let toggle_color = if maneuver_active {
         theme.text_accent
     } else {
         theme.text_dim
@@ -905,6 +962,38 @@ pub fn update_autopilot_visuals(
         }
         if color.0 != toggle_color {
             color.0 = toggle_color;
+        }
+    }
+
+    let land_active = autopilot.mode() == AutoflightMode::Land;
+    let land_available = route.destination_guidance.is_some() || route.guidance.is_some();
+    for (interaction, mut border, mut bg) in &mut land_buttons {
+        let (border_color, bg_color) =
+            nav_button_colors(&theme, land_active, land_available, false, interaction);
+        apply_button_colors(&mut border, &mut bg, border_color, bg_color);
+    }
+    let land_color = if land_active {
+        theme.text_accent
+    } else if land_available {
+        theme.text_dim
+    } else {
+        disabled_text_color()
+    };
+    let land_label = match land.phase() {
+        LandPhase::Enroute => "LAND ENR",
+        LandPhase::TerminalCapture => "LAND CAP",
+        LandPhase::Final => "LAND FNL",
+        LandPhase::Flare => "LAND FLR",
+        LandPhase::Rollout => "LAND ROL",
+        LandPhase::GoAround => "LAND G/A",
+        LandPhase::Off | LandPhase::Stopped | LandPhase::Unable => "LAND",
+    };
+    for (mut text, mut color) in &mut land_text {
+        if text.0 != land_label {
+            text.0 = land_label.to_string();
+        }
+        if color.0 != land_color {
+            color.0 = land_color;
         }
     }
 }

@@ -39,12 +39,19 @@ pub struct GroundPatchMaterial {
     /// material binds. Each a plain `texture_depth_2d`; always valid (see
     /// [`fallback_shadow_map`](crate::ground::fallback_shadow_map)).
     /// `shadow.gate.x` gates whether they're sampled.
-    #[texture(2, sample_type = "depth")]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(5, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(3, sample_type = "depth")]
+    #[texture(2, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(4, sample_type = "depth")]
+    #[texture(3, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(4, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
 }
 
 impl Material for GroundPatchMaterial {

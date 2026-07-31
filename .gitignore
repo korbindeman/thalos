@@ -41,3 +41,5 @@ rustc-ice-*.txt
 tools/agent_scratch/
 assets/terrain_packages/thalos_diffusion/thalos_site_detail_*.f32
 .claude/
+# Baked drainage raster (NTR-X2q) — 50 MB, regenerate with examples/bake_rivers.rs
+assets/terrain_packages/thalos_rivers/*.u8

@@ -35,6 +35,18 @@ auto-skips non-matching views; there is no `render_device()` on `RenderContext`
   `queue_terrain::<M>.after(RenderSystems::QueueMeshes).before(RenderSystems::PhaseSort)`,
   or it gets dequeued after it adds itself and never draws.
 
+**A hand-written `Projection` must seat `area` itself.**
+`OrthographicProjection::get_clip_from_view()` reads `self.area`, not the
+scaling mode, and `default_3d()` leaves `area` at a ±1 m placeholder. Only
+`camera_system` recomputes it, and any system that replaces the component and
+is unordered against `camera_system` races it: `update_frusta` then culls with
+a **two metre frustum** while extraction renders from the previous frame's
+cached `computed.clip_from_view` — draws look right, small meshes silently
+vanish from that camera (every building lost its shadow,
+INC-20260731T011523Z). Call
+`CameraProjection::update(w, h)` (exact for `ScalingMode::Fixed`; arguments
+ignored) before storing the projection.
+
 **Resources are components now.** `#[derive(Resource)]` also implements
 `Component`. Broad `EntityRef` / `Query<Entity>`-style queries can conflict with
 resource access — our `PartQuery` (fuel.rs / staging.rs) filters

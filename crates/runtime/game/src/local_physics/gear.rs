@@ -220,10 +220,22 @@ pub struct GearVisualCompression(pub HashMap<Entity, (DVec3, f64)>);
 /// wheels: **pitch (body X) keeps** wheel assist so takeoff rotation stays
 /// available on marginal elevator authority; **roll (body Y) and yaw (body Z)
 /// are zeroed** — roll is the flip axis and has no legitimate on-ground use,
-/// and yaw belongs to the rudder + nosewheel steering. Airborne: full torque.
-pub fn wheel_torque_ground_mask(grounded: bool) -> DVec3 {
-    if grounded {
+/// and yaw belongs to the rudder + nosewheel steering.
+///
+/// A craft on its **hull** with no wheel bearing load (tipped onto a wing, or
+/// a gear-up belly slide — [`super::HullGroundContact`]) loses **all** wheel
+/// torque: with the wheels unloaded the old mask handed SAS its full roll/yaw
+/// authority back, and its attempt to right the tipped craft power-slid it
+/// across the pavement in a constant pirouette (with the saturated commands
+/// slamming the control surfaces side to side as the error axis swept
+/// through the body frame). Weight-on-wheels wins when both are true, so a
+/// tail-graze during takeoff rotation cannot drop the pitch assist.
+/// Airborne: full torque.
+pub fn wheel_torque_ground_mask(weight_on_wheels: bool, hull_grounded: bool) -> DVec3 {
+    if weight_on_wheels {
         DVec3::new(1.0, 0.0, 0.0)
+    } else if hull_grounded {
+        DVec3::ZERO
     } else {
         DVec3::ONE
     }
@@ -392,7 +404,7 @@ pub(crate) fn apply_landing_gear_forces(
     tuning: Res<GearTuning>,
     gear_state: Res<GearState>,
     parking_brake: Res<ParkingBrake>,
-    intent: Res<GameInputIntent>,
+    ground_control: Res<crate::control_bus::ResolvedGroundControl>,
     spatial: SpatialQuery,
     sim: Res<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
@@ -489,7 +501,12 @@ pub(crate) fn apply_landing_gear_forces(
     // its main gear.
     let ground_speed = linear_velocity.0.length();
     let steer_scale = 1.0 / (1.0 + (ground_speed / tuning.steer_fade_speed_m_s).powi(2));
-    let steer = (intent.attitude.z as f64).clamp(-1.0, 1.0) * tuning.max_steer_rad * steer_scale;
+    let steer = ground_control.steer.clamp(-1.0, 1.0) * tuning.max_steer_rad * steer_scale;
+    let brake_command = if parking_brake.engaged {
+        1.0
+    } else {
+        ground_control.brake.clamp(0.0, 1.0)
+    };
     let filter = SpatialQueryFilter::default().with_excluded_entities([bubble.craft_entity]);
 
     let mut net_force = DVec3::ZERO;
@@ -619,8 +636,9 @@ pub(crate) fn apply_landing_gear_forces(
         let roll_speed = v_rel.dot(roll_w);
         // Parking brake engaged → high-gain fore/aft hold (pins the craft);
         // released → free rolling resistance only.
-        let f_roll = if parking_brake.engaged {
-            -roll_w * (tuning.parking_brake_stiffness * roll_speed).clamp(-mu_n, mu_n)
+        let f_roll = if brake_command > 0.0 {
+            -roll_w
+                * (tuning.parking_brake_stiffness * brake_command * roll_speed).clamp(-mu_n, mu_n)
         } else {
             // Coulomb rolling resistance: a stiff hold clamped to a small
             // `μ_roll·N` cap. The constant (non-viscous) cap means a coasting

@@ -121,6 +121,20 @@ pub struct BodySkyExtra {
     /// against the near tier's blue-white (measured 2026-07-29).
     pub cloud_ambient_top: Vec4,
     pub cloud_ambient_bottom: Vec4,
+    /// Cloud time. x = sim-time seconds driving `cloud_cell_field`'s
+    /// per-octave drift (cells growing and dissolving); y = the near marcher's
+    /// render-target width in pixels, so the composite reproduces the
+    /// marcher's budget frontier with the marcher's own pixel angle (the
+    /// cloud target renders at `resolution_scale` of the viewport — using the
+    /// full-res angle put the two integrators in different reach regimes on
+    /// the same ray); zw reserved (the synoptic weather-cube crossfade lands
+    /// here). SIM time, never wall clock — captures pin sim time, so a
+    /// wall-clock phase would make every screenshot irreproducible. **The
+    /// near marcher reads the same values from its own uniform
+    /// (`CloudsUniform::cell_evolution_s` / `render_resolution`); if these
+    /// ever disagree the tiers render different cloud shapes at the same
+    /// instant.**
+    pub cloud_time: Vec4,
 }
 
 impl Default for BodySkyExtra {
@@ -147,6 +161,7 @@ impl Default for BodySkyExtra {
             fill_cell_solid: [Vec4::ZERO; 4],
             cloud_ambient_top: Vec4::ZERO,
             cloud_ambient_bottom: Vec4::ZERO,
+            cloud_time: Vec4::ZERO,
         }
     }
 }
@@ -238,7 +253,16 @@ impl TerrainShadingStyle {
 /// their shaders. Each cascade has its OWN `texture_depth_2d` (a known-good
 /// binding) — **not** a depth array, which broke terrain rendering. Keep in sync
 /// with the per-cascade texture bindings + unrolled sampling in the WGSL.
-pub const CASCADE_COUNT: usize = 3;
+///
+/// **4 since 2026-07-31.** Cascade 0 used to be a ±400 m box, i.e. ~0.2 m per
+/// texel — and because the map is square in the LIGHT plane, a low sun smeared
+/// each texel across the ground by `1/sin(elevation)`, so near-field shadow
+/// edges quantized to ~0.85 m at a 15° sun and read as a coarse staircase. The
+/// added cascade 0 is a ±64 m box (~0.03 m/texel) covering the band the eye
+/// actually inspects; the old three shift out one slot. The companion change is
+/// the square-on-GROUND box in `sun_shadow.rs` — resolution alone does not fix
+/// projective smear.
+pub const CASCADE_COUNT: usize = 4;
 
 /// Sun-shadow cascade transforms + per-cascade compare params (the UNIFORM half
 /// of the cascade binding; the depth maps are separate `texture_depth_2d`
@@ -249,10 +273,13 @@ pub struct ShadowCascadeBlock {
     /// Render-space → cascade clip (Bevy reverse-z orthographic), one per cascade.
     pub view_proj: [Mat4; CASCADE_COUNT],
     /// Per cascade: x = clip units per metre of light-space depth
-    /// (`1 / (far − near)`), y = shadow-map texel size in world metres. The
-    /// sampler derives its capped texel-proportional bias + receiver
-    /// normal-offset from these (stable-CSM W6 — see the bias model note in
-    /// `shadow.wgsl`). zw reserved.
+    /// (`1 / (far − near)`), y = shadow-map texel size in world metres along the
+    /// map's **U (cross-sun) axis**, z = texel size along its **V (along-sun)
+    /// axis**. The sampler derives its capped texel-proportional bias + receiver
+    /// normal-offset from `y` (stable-CSM W6 — see the bias model note in
+    /// `shadow.wgsl`), and uses the `y`/`z` pair to shape the PCSS kernel, which
+    /// must be a circle in LIGHT space and is therefore an ellipse in map space
+    /// once the box stops being square (see `sun_shadow.rs`). `w` reserved.
     pub params: [Vec4; CASCADE_COUNT],
     /// x = strength (0 ⇒ skip), y = active cascade count,
     /// z = **contact-shadow gate** (0 = skip, 1 = apply, 2 = paint raw —
@@ -459,11 +486,11 @@ pub struct BodyTerrainMaterial {
     /// `extras.shadow.config.x == 0` skips them. Bound on every instance so the
     /// depth `sample_type` always has a valid texture.
     #[texture(3, sample_type = "depth")]
-    pub sun_shadow_map_0: Handle<Image>,
-    #[texture(4, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(5, sample_type = "depth")]
+    #[texture(4, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(5, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
     /// Half-res screen-space AO (`rendering::ssao`'s `AoImage`, R8Unorm; 1 =
     /// unoccluded), multiplied into the ambient occlusion term only — graphics F5.
     /// Default handle binds the white fallback (no AO); the game patches the live
@@ -483,6 +510,18 @@ pub struct BodyTerrainMaterial {
     #[texture(8)]
     #[sampler(9)]
     pub contact_shadow: Handle<Image>,
+    /// Cascade 0 — the ±64 m near box added in 2026-07-31's fidelity pass.
+    ///
+    /// **Field name = cascade index; binding number is just a free slot.** The
+    /// new cascade is the NEAREST one, so it would naturally take slot 3 and
+    /// push the other three maps (and AO, and the contact tier) up by one in
+    /// both this derive and every WGSL that mirrors it. Renumbering that many
+    /// live bindings to express an ordering nothing reads is pure risk: the only
+    /// thing that must stay near→far is the ARGUMENT ORDER at the
+    /// `thalos::shadow` call site. So the old three keep bindings 3/4/5 and this
+    /// one takes the next free index. Fan-out stays `map_N = images[N]`.
+    #[texture(10, sample_type = "depth")]
+    pub sun_shadow_map_0: Handle<Image>,
 }
 
 impl Material for BodyTerrainMaterial {

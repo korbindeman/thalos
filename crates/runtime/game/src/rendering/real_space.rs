@@ -46,9 +46,21 @@ impl RealSpaceOrigin {
 /// Publish the floating origin's cell origin as [`RealSpaceOrigin`].
 ///
 /// Runs in `PostUpdate`, after every `SimStage::Camera` driver has written the
-/// current `CellCoord` and immediately before transform propagation. Consumers
-/// placed outside big_space therefore use the exact cell origin the current
-/// frame will render against, including on a cell crossing.
+/// current `CellCoord`, after big_space's own
+/// [`CellCoord::recenter_large_transforms`] has settled it, and before transform
+/// propagation. Consumers placed outside big_space therefore use the exact cell
+/// origin the current frame will render against, including on a cell crossing.
+///
+/// **That last ordering edge is load-bearing and not implied by the schedule.**
+/// `recenter_large_transforms` is registered plain in `PostUpdate`, *outside*
+/// `TransformSystems::Propagate`, so a `.before(TransformSystems::Propagate)`
+/// does not constrain it — it could be scheduled between this system and its
+/// consumers, publishing an origin one grid cell (1 km) behind the frame that
+/// actually rendered. The edge is declared where this system is registered
+/// (`rendering::sun_shadow`'s plugin); keep it there if this moves.
+/// `origin_frame_error_m` on the shadow lane's `stability_gauge` is the standing
+/// tell — it is 0 when the frame is coherent and an exact cell multiple when it
+/// is not (INC-20260730T223451Z).
 pub(super) fn update_real_space_origin(
     grid: Query<&Grid, With<BigSpace>>,
     floating_origin: Query<&CellCoord, With<FloatingOrigin>>,
@@ -236,7 +248,11 @@ mod tests {
 
     #[test]
     fn all_authored_bodies_fit_inside_big_space_cells() {
-        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets");
+        // Three levels: `crates/runtime/game` → repo root. The crate moved a
+        // level deeper in CAP-1 (`crates/game` → `crates/runtime/game`) and
+        // this path did not follow, so the test had been failing on a missing
+        // file rather than on the invariant it exists to check.
+        let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets");
         let system = load_solar_system_from_dir(&assets).expect("load authored solar system");
         assert!(system.name_to_id.contains_key("Mira"));
         assert!(system.name_to_id.contains_key("Nereus"));

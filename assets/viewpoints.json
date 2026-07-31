@@ -518,6 +518,12 @@
       "driver": "cloud-limb"
     },
     {
+      "id": "cloud-leo",
+      "name": "Cloud LEO",
+      "description": "LEO oblique view (~404 km) probing whole-disc cloud coverage continuity.",
+      "driver": "cloud-leo"
+    },
+    {
       "id": "cloud-motion",
       "name": "Cloud motion",
       "description": "Moving near-sun runway view for temporal reconstruction and disocclusion.",
@@ -658,8 +664,14 @@
     {
       "id": "reentry",
       "name": "Reentry shock layer",
-      "description": "Peak-heating shock layer on a vehicle entering belly-first: freestream driven by FlowDebugOverride so the state is reproducible without flying an entry. Scrub with THALOS_REENTRY_DENSITY / THALOS_REENTRY_SPEED.",
+      "description": "Peak-heating shock layer on a vehicle in a real atmosphere, entering belly-first: freestream driven by FlowDebugOverride so the state is reproducible without flying an entry. Scrub with THALOS_REENTRY_DENSITY / THALOS_REENTRY_SPEED.",
       "driver": "reentry"
+    },
+    {
+      "id": "vapor-cone",
+      "name": "Transonic vapour cone",
+      "description": "The sunlit condensation collar around a cruising airframe near Mach 1. Humidity, density, speed and nose-side arrival direction are driven by FlowDebugOverride because all three gates must open at once; atmospheric presence remains real. Scrub with THALOS_VAPOR_MACH / THALOS_VAPOR_HUMIDITY / THALOS_VAPOR_Q.",
+      "driver": "vapor-cone"
     },
     {
       "id": "interstage",

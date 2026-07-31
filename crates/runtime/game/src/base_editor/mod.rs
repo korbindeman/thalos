@@ -171,6 +171,42 @@ pub(crate) fn spawn_default_base(
         height_m: h,
     };
 
+    // --- Launchpads, registered in their own **cardinal** frame ---
+    // A craft standing on a pad takes its yaw from the pad's registered heading
+    // tangent (`place_on_launchpad` → `vertical_attitude` points the dorsal
+    // along it). The rest of the base is laid out in the runway frame, but the
+    // parked rocket should be cardinal-aligned, KSP-style: pad heading **due
+    // east**, so the pitch-over toward a prograde (eastward) orbit is a pure
+    // pitch with no yaw correction. The pad slab is rotationally symmetric, so
+    // only the parked craft (and the launch flows reading `heading_tangent`)
+    // see this frame. Positions stay in the runway frame with the rest of the
+    // complex. `center_dir × +Y` is local east (Thalos spins about +Y); at a
+    // pole east is undefined and the pad falls back to the runway heading.
+    // Placed before `place_one` exists because the closure's `&mut` captures
+    // preclude interleaved direct calls; these were the first placements anyway.
+    let pad_heading = center_dir
+        .cross(DVec3::Y)
+        .try_normalize()
+        .unwrap_or(heading);
+    let pad_across = pad_heading.cross(center_dir).normalize();
+    for pad_along in [PAD_ALONG, -PAD_ALONG] {
+        place::place_structure(
+            commands,
+            meshes,
+            &mats,
+            registry,
+            root,
+            body_id,
+            Some(basin_site_id),
+            dir(pad_along, PAD_OFF),
+            pad_heading,
+            pad_across,
+            pad_r,
+            launchpad(50.0),
+            0.0,
+        );
+    }
+
     // Launch-complex geometry (`+off` side), in runway-frame (along, off) metres.
     // The VAB sits nearest the runway of the complex; the two launchpads sit
     // furthest out — well back from the runway, beyond the VAB — each flanking
@@ -227,9 +263,8 @@ pub(crate) fn spawn_default_base(
         )
     };
 
-    // --- Launch complex ---
-    place_one(PAD_ALONG, PAD_OFF, launchpad(50.0));
-    place_one(-PAD_ALONG, PAD_OFF, launchpad(50.0));
+    // --- Launch complex (the pads themselves are placed above, in their
+    // cardinal frame) ---
     let vab = place_one(0.0, VAB_OFF, vab_kind);
     // Flame diverters just outboard of each pad.
     place_one(PAD_ALONG, PAD_OFF + 112.0, building(14.0, 44.0, 4.0));

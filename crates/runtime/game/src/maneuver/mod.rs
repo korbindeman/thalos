@@ -10,7 +10,7 @@ use thalos_input::enhanced::ContextActivity;
 use thalos_input::game::GameManeuverPrecisionContext;
 
 use interaction::{
-    arrow_drag_end, arrow_drag_start, handle_maneuver_events, maneuver_input,
+    arrow_drag_end, arrow_drag_start, end_drag_on_release, handle_maneuver_events, maneuver_input,
     slide_sphere_drag_end, slide_sphere_drag_start, sync_node_delta_v,
 };
 use panel::{
@@ -24,7 +24,8 @@ use render::{
 use state::{ArrowHitbox, ArrowStretchState, NodeSlideSphere, SelectedNodeView, SlidePreview};
 
 pub use state::{
-    GameNode, InteractionMode, ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode,
+    GameNode, InteractionMode, ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, NodeSource,
+    SelectedNode,
 };
 
 /// Block camera rotation whenever a maneuver element is hovered or any
@@ -149,6 +150,18 @@ impl Plugin for ManeuverPlugin {
             .add_systems(
                 Startup,
                 setup_maneuver_editor.after(crate::hud::theme::init_theme),
+            )
+            // Outside the `not_game_paused` tuple below, deliberately: a drag
+            // must end when the button comes up even if the release lands with
+            // the pause menu open. It reads only the input intent and the mode,
+            // so it is safe to run in any state.
+            .add_systems(
+                Update,
+                end_drag_on_release
+                    .before(update_camera_block)
+                    .before(sync_maneuver_precision_context)
+                    .before(maneuver_input)
+                    .before(crate::SimStage::Physics),
             )
             .add_systems(
                 Update,

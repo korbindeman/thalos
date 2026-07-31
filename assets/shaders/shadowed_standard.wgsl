@@ -43,12 +43,14 @@
 // `body_render::craft` (uniform 100, depth maps 101–103).
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> recv_shadow: ShadowCascadeBlock;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+@group(#{MATERIAL_BIND_GROUP}) @binding(107)
 var recv_shadow_map_0: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var recv_shadow_map_1: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
 var recv_shadow_map_2: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+var recv_shadow_map_3: texture_depth_2d;
 // Cloud sun-transmittance cascade — same block/texture the tile ground and
 // trees sample (fanned by `apply_craft_shadow`), so structures and the runway
 // dim under the deck with the ground they stand on instead of glowing full-sun
@@ -95,6 +97,7 @@ fn fragment(
         recv_shadow_map_0,
         recv_shadow_map_1,
         recv_shadow_map_2,
+        recv_shadow_map_3,
     );
     // × the cloud deck's sun transmittance — one gate for the whole direct
     // beam, exactly as the tile ground and trees compose it.

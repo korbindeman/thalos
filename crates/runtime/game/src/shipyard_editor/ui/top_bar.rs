@@ -14,8 +14,7 @@ use thalos_ui::{
 use crate::game_context::{ContextHistory, GameContext, back_out};
 use crate::relaunch::{RelaunchRequest, RelaunchSpec};
 use crate::shipyard_editor::core::{
-    BuildOrientation, EditorPart, EditorState, PlacementSnap, SymmetryMode, format_delta_v,
-    format_mass_kg,
+    BuildOrientation, EditorPart, EditorState, PlacementSnap, SymmetryMode,
 };
 use crate::spawn::SpawnSituation;
 
@@ -243,11 +242,14 @@ pub(super) fn update_toggle_latches(
 
 pub(super) fn update_stats_text(
     cache: Res<EditorStatsCache>,
+    units: Res<crate::units_settings::UnitsSettings>,
     mut texts: Query<&mut Text, With<StatsText>>,
 ) {
     let Ok(mut text) = texts.single_mut() else {
         return;
     };
+    // The editor is not a flight instrument, so it follows the global switch.
+    let system = units.system_for(crate::units_settings::UnitDomain::General);
     let line = match (&cache.stats, &cache.staging) {
         (Some(Ok(stats)), staging) => {
             // `.max(0.0)` keeps an engine-less build from reading "Δv -0 m/s"
@@ -259,8 +261,8 @@ pub(super) fn update_stats_text(
                 .unwrap_or(0.0);
             let mut line = format!(
                 "MASS {}  ·  Δv {}",
-                format_mass_kg(stats.wet_mass_kg()),
-                format_delta_v(total_dv),
+                crate::hud::format::mass_large(stats.wet_mass_kg(), system),
+                crate::hud::format::delta_v(total_dv, system),
             );
             if stats.wet_mass_kg() > 0.0 && stats.total_thrust_n > 0.0 {
                 line.push_str(&format!(
@@ -269,7 +271,10 @@ pub(super) fn update_stats_text(
                 ));
             }
             if stats.wing_area_m2 > 0.0 {
-                line.push_str(&format!("  ·  WING {:.1} m²", stats.wing_area_m2));
+                line.push_str(&format!(
+                    "  ·  WING {}",
+                    crate::hud::format::area(stats.wing_area_m2, system)
+                ));
             }
             line
         }

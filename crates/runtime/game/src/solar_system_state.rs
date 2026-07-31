@@ -8,6 +8,7 @@ use thalos_physics_canonical::{
 };
 use thalos_terrain::DynamicSurfaceState;
 use thalos_terrain::cubemap::{CubemapFace, face_uv_to_dir};
+use thalos_weather::{WeatherSim, WeatherSimParams};
 use thalos_world::{BodyId, CloudClimate, SolarSystemDefinition};
 
 use crate::SimStage;
@@ -126,42 +127,92 @@ impl CloudWeatherField {
             [0.25, 0.55, 0.20]
         };
 
+        // Planet-scale circulation constants, fixed per seed. The ITCZ sits
+        // OFF the equator (Earth's annual mean is ~6°N — a centered band is a
+        // tell of synthetic weather), and one hemisphere's storm track is
+        // stronger than the other's (Earth: the ocean hemisphere).
+        let itcz_lat = 0.10 * if hash01(climate.seed, 0x17C2) < 0.5 { 1.0 } else { -1.0 };
+        let storm_boost = if hash01(climate.seed, 0x570B) < 0.5 {
+            [1.15, 0.85]
+        } else {
+            [0.85, 1.15]
+        };
+
+        // ── The synoptic layer is SIMULATED, not painted ────────────────
+        // A seeded shallow-water spin-up (thalos_weather) supplies the
+        // planet's synoptic organization: jets, Rossby-wave trains, cyclones
+        // with wound fronts and dry slots, ITCZ convergence rain. Painted
+        // approximations of this structure — curl-warped noise, analytic
+        // vortex rotations, ridged-noise fronts — all converged on the same
+        // marbled-fluid, spirograph verdict (2026-07-31); shapes read as
+        // weather only when they are histories of an actual flow. The sim is
+        // deterministic per seed; ~24 model days is past spin-up transients.
+        let sim = {
+            let mut sim = WeatherSim::new(WeatherSimParams {
+                seed: climate.seed,
+                itcz_lat_rad: itcz_lat,
+                ..WeatherSimParams::default()
+            });
+            sim.run_days(24.0);
+            sim
+        };
+        let (sim_nx, sim_ny) = (sim.nx(), sim.ny());
+        let sim_cloud = sim.cloud();
+        // Rain normalized to [0, 1] with the same scaling the sim's own cloud
+        // diagnostic uses: strong precipitation marks fronts and the ITCZ.
+        let sim_rain: Vec<f32> = {
+            let raw = sim.precip_field();
+            let mut out = vec![0.0f32; raw.len()];
+            for j in 0..sim_ny {
+                let qs = sim.qsat_of_row(j);
+                for i in 0..sim_nx {
+                    let idx = j * sim_nx + i;
+                    out[idx] = smoothstep(0.45, 1.2, raw[idx] / (2.8e-6 * qs));
+                }
+            }
+            out
+        };
+        // Bilinear equirect sampler (zonal wrap, meridional clamp).
+        let sample_sim = |map: &[f32], dir: Vec3| -> f32 {
+            let lon = dir.z.atan2(dir.x);
+            let lat = dir.y.clamp(-1.0, 1.0).asin();
+            let xf = (lon / std::f32::consts::TAU + 0.5) * sim_nx as f32 - 0.5;
+            let yf = ((lat / std::f32::consts::PI) + 0.5) * sim_ny as f32 - 0.5;
+            let yf = yf.clamp(0.0, (sim_ny - 1) as f32);
+            let y0 = yf.floor() as usize;
+            let y1 = (y0 + 1).min(sim_ny - 1);
+            let ty = yf - y0 as f32;
+            let xw = xf.rem_euclid(sim_nx as f32);
+            let x0 = xw.floor() as usize % sim_nx;
+            let x1 = (x0 + 1) % sim_nx;
+            let tx = xw - xw.floor();
+            let a = map[y0 * sim_nx + x0] + (map[y0 * sim_nx + x1] - map[y0 * sim_nx + x0]) * tx;
+            let b = map[y1 * sim_nx + x0] + (map[y1 * sim_nx + x1] - map[y1 * sim_nx + x0]) * tx;
+            a + (b - a) * ty
+        };
+
         for face in CubemapFace::ALL {
             for y in 0..face_size {
                 let v = (y as f32 + 0.5) / face_size as f32;
                 for x in 0..face_size {
                     let u = (x as f32 + 0.5) / face_size as f32;
                     let dir_raw = face_uv_to_dir(face, u, v).normalize();
-                    // ── Flow-warped synoptic domain ──────────────────────
-                    // A cloud field is a passive tracer of the atmosphere's
-                    // rotational flow, so every synoptic-scale lookup happens
-                    // in a CURL-WARPED domain. The displacement is the
-                    // tangential curl of a scalar stream function, which is
-                    // divergence-free: it shears masses into filaments,
-                    // fronts and cyclonic commas without creating or
-                    // destroying cloudy area, so authored mean coverage still
-                    // means what it says. Gradient warping (the usual fbm
-                    // domain warp) cannot do this — it only dilates and
-                    // compresses, which is why the un-warped producer rendered
-                    // every system as the same round blob (2026-07-25 verdict).
-                    // Two octaves: cyclone-scale spirals, then frontal-scale
-                    // filaments.
-                    //
-                    // The warp is applied to the SYNOPTIC domain only. Warping
-                    // every scale — the first thing that was tried — advects
-                    // the cellular fields too, and cloud cells stop being cells:
-                    // the planet renders as a marbled fluid, all ribbon and no
-                    // puff. Real weather is exactly this split, an organized
-                    // rotational flow carrying a granular convective texture,
-                    // so the domains are kept separate here: full displacement
-                    // for the fields that draw systems, a fraction of it for
-                    // the mesoscale that those systems drag along, and none at
-                    // all for the cell-scale shape.
-                    let flow = curl_warp(dir_raw, climate.seed ^ 0x57EA_1F10, 1.7, 0.26)
-                        + curl_warp(dir_raw, climate.seed ^ 0xF20D_7A11, 4.1, 0.06)
-                        - 2.0 * dir_raw;
-                    let dir = zonal_shear((dir_raw + flow).normalize(), climate.seed ^ 0x5EA7_0055);
-                    let dir_meso = (dir_raw + 0.40 * flow).normalize();
+                    // ── Simulated synoptic fields ────────────────────────
+                    // The sim's cloud field carries the system-scale
+                    // organization (Rossby-wave trains, cyclones with dry
+                    // slots, jets); its rain field marks fronts and the ITCZ.
+                    // Only the SYNOPTIC scale comes from the sim: the
+                    // mesoscale and cell-scale texture stay noise layers in
+                    // the UNWARPED domain — an organized flow carrying a
+                    // granular convective texture, never a marbled fluid.
+                    // (That anti-marble split survives from the warp era; the
+                    // warps themselves are gone because painted rotations of
+                    // static noise read as spirograph, however tuned —
+                    // 2026-07-31 verdict, see thalos_weather's module notes.)
+                    let sim_occ_raw = sample_sim(&sim_cloud, dir_raw);
+                    let rain = sample_sim(&sim_rain, dir_raw);
+                    let dir = dir_raw;
+                    let dir_meso = dir_raw;
                     // Meteorological banding is a *bias*, not a paint ring:
                     // warp the latitude the profile reads (so band edges
                     // meander like jet streams) and gate its strength with a
@@ -175,39 +226,54 @@ impl CloudWeatherField {
                             climate.seed ^ 0xBA9D,
                             3,
                         ) - 0.5);
-                    let band_gate = (0.35
-                        + 1.30
+                    // The gate keeps a floor: a belt may thin to half strength
+                    // regionally but never vanish — at the old 0.35 floor whole
+                    // quadrants lost their climatology and the disc read as one
+                    // uniform texture at every latitude.
+                    let band_gate = (0.55
+                        + 0.90
                             * fbm3(
                                 dir * 2.1 + Vec3::new(-2.0, 9.0, 5.0),
                                 climate.seed ^ 0x6A7E,
                                 3,
                             ))
                     .clamp(0.0, 1.0);
-                    let band = latitude_band_profile(dir.y.asin() + band_warp) * band_gate;
-                    // Zonally-elongated ridge field: fronts. Compressing the
-                    // noise domain in latitude while stretching it in
-                    // longitude makes features read as elongated frontal
-                    // bands; the ridge transform sharpens them into lines of
-                    // enhanced coverage. The ridge domain must be warped by an
-                    // independent field: un-warped ridged value noise draws
-                    // closed contours around every lattice extremum, which the
-                    // far projection rendered as bullseye rings across the
-                    // whole disc. Squaring keeps only the strong crests.
-                    let front_warp = fbm3(
-                        dir * 1.9 + Vec3::new(-6.0, 2.0, 14.0),
-                        climate.seed ^ 0x11AB,
-                        2,
-                    ) - 0.5;
-                    let frontal_raw = fbm3(
-                        Vec3::new(dir.x * 2.2, dir.y * 7.5, dir.z * 2.2)
-                            + Vec3::new(3.0, -8.0, 1.0)
-                            + Vec3::splat(1.6 * front_warp),
-                        climate.seed ^ 0xF407,
-                        3,
-                    );
-                    let ridge = 1.0 - (2.0 * frontal_raw - 1.0).abs();
-                    let frontal = ridge * ridge;
-                    let regional = fbm3(dir * 2.5, climate.seed, 4);
+                    // The ITCZ is a train of convective clusters, not a solid
+                    // line: a zonally-stretched cluster field turns the band
+                    // into beads-on-a-string with gaps of comparable size.
+                    let itcz_beads = 0.15
+                        + 1.10
+                            * smoothstep(
+                                0.32,
+                                0.64,
+                                fbm3(
+                                    Vec3::new(dir.x * 2.4, dir.y * 7.0, dir.z * 2.4)
+                                        + Vec3::new(9.0, 17.0, -4.0),
+                                    climate.seed ^ 0x17C2,
+                                    3,
+                                ),
+                            );
+                    // The meander is a JET feature: mid-latitude belt edges
+                    // wander ±16° with it, but the ITCZ holds within a few
+                    // degrees of its mean latitude — warped at full amplitude
+                    // the 5°-wide band scattered into unconnected patches and
+                    // never read as a line (probe round 4).
+                    let lat_raw = dir.y.clamp(-1.0, 1.0).asin();
+                    let meander_scale = 0.22 + 0.78 * smoothstep(0.18, 0.55, lat_raw.abs());
+                    let lat_banded = lat_raw + band_warp * meander_scale;
+                    let itcz_gauss = {
+                        let z = (lat_banded - itcz_lat) / 0.09;
+                        (-z * z).exp()
+                    };
+                    let itcz = itcz_beads * itcz_gauss;
+                    let band = zonal_climatology(lat_banded, itcz, storm_boost) * band_gate;
+                    // Fronts come from the sim's precipitation: long thin
+                    // bands of strong rain along convergence lines, wound
+                    // around the lows that made them. The ridged-noise front
+                    // field this replaces drew the same worm filament at
+                    // every latitude, which is exactly the painted look the
+                    // sim exists to kill.
+                    let frontal = rain;
                     // Coverage needs two meteorological scales. The synoptic
                     // component establishes planetary bands and fronts while
                     // the mesoscale component breaks those systems into the
@@ -259,8 +325,24 @@ impl CloudWeatherField {
                     // Occupancy: threshold the synoptic field at the quantile
                     // matching authored mean coverage; soft edges so systems
                     // thin out rather than shear off.
-                    let system_field =
-                        regional + 0.35 * climate.band_strength * band + 0.08 * (mesoscale - 0.5);
+                    // The sim's honest domain ends at its polar sponge
+                    // (~66°); poleward, occupancy hands over to a broken
+                    // stratus-sheet climatology (real polar caps run 0.6–0.7
+                    // cloud fraction — the first wired cube rendered them
+                    // pitch black).
+                    let polar_occ = 0.52 + 0.55 * (mesoscale - 0.5);
+                    let sim_occ = sim_occ_raw
+                        + (polar_occ - sim_occ_raw) * smoothstep(1.05, 1.30, lat_raw.abs());
+                    // The synoptic driver is the SIM's cloud field, centered
+                    // so the authored-coverage quantile mapping below keeps
+                    // its meaning (sim mean ~0.38 → recentered near 0.5). The
+                    // climatology band rides on top as a bias — belts, clear
+                    // subtropics, the beaded ITCZ — and the mesoscale term
+                    // breaks system edges below sim resolution.
+                    let system_field = 0.12
+                        + sim_occ
+                        + 1.2 * climate.band_strength * band
+                        + 0.08 * (mesoscale - 0.5);
                     let occ_threshold = 0.70 - 0.36 * climate.coverage.clamp(0.0, 1.0);
                     // The gate's transition has to be wide relative to the
                     // synoptic field's own spread, or it acts as a binary cut:
@@ -283,11 +365,22 @@ impl CloudWeatherField {
                     let fair_weather = 0.20
                         * smoothstep(0.52, 0.84, 0.58 * cellular + 0.42 * mesoscale)
                         * (0.40 + 0.60 * system_edge);
-                    let occupancy = system_edge.max(fair_weather);
+                    // ITCZ convective clusters occupy DIRECTLY: deep tropical
+                    // convection is driven by surface convergence, not by the
+                    // mid-latitude synoptic state, and routing it through the
+                    // shared threshold left the band visible only where
+                    // `regional` already happened to sit near the cut — no
+                    // coherent line at any additive weight (probe rounds 3–5).
+                    let itcz_occ = smoothstep(0.45, 0.85, itcz);
+                    let occupancy = system_edge.max(fair_weather).max(itcz_occ);
                     // 0 at a system's fringe, 1 deep inside: deep systems are
                     // more developed (storm potential, higher fill).
-                    let intensity =
-                        smoothstep(occ_threshold + 0.02, occ_threshold + 0.22, system_field);
+                    // ITCZ clusters and strongly precipitating frontal bands
+                    // count as developed systems: deep convection shares the
+                    // storm/depth pathway the synoptic cores use.
+                    let intensity = smoothstep(occ_threshold + 0.02, occ_threshold + 0.22, system_field)
+                        .max(0.6 * itcz_occ)
+                        .max(0.55 * rain);
 
                     // Regime selector: an independent low-frequency partition,
                     // uniformized so the authored type_mix reads as area
@@ -335,6 +428,8 @@ impl CloudWeatherField {
                     // binarizes the field twice, and stacked thresholds turn
                     // every partly-cloudy region into harsh salt-and-pepper
                     // dither instead of broken cloud.
+                    // (Dry slots need no explicit carve-out any more — the
+                    // sim's subsidence drying digs them into `sim_occ`.)
                     let deck_cov = (occupancy * cov_regime + 0.28 * frontal_boost).clamp(0.0, 1.0);
 
                     // ── High thin veil (cirrus / cirrostratus) ───────────
@@ -359,7 +454,8 @@ impl CloudWeatherField {
                     //
                     // Cirrus is sheared far harder than the deck: it lives in
                     // the jet, so its filaments are strongly zonal and it
-                    // trails downstream of frontal ridges.
+                    // trails downstream of the rain bands (the `frontal` bias
+                    // below is sim rain).
                     let veil_dir = zonal_shear(
                         zonal_shear(dir_raw, climate.seed ^ 0xC144_05EE),
                         climate.seed ^ 0xC144_1EE5,
@@ -431,9 +527,23 @@ impl CloudWeatherField {
                     // congestus rendered as a squat sheet. Building cells now
                     // carry more of the growth so broken fields read as
                     // mixed-height puffs rather than one flat deck.
+                    // Round 8 (2026-07-30): **judge cumulus depth against the
+                    // CELL WIDTH, not against the shell.** Cells here are
+                    // 5.4 km across (`CELL_PERIOD_M`), so the round-7 envelope
+                    // — measured p50 1,647 m — drew every median column at an
+                    // aspect ratio near 0.3, i.e. a pancake, and read flat no
+                    // matter how well the dome sculpted its top. That is why
+                    // the "clouds are flat" verdict survived round 7's top
+                    // sculpting: the sculpting was working (58.9% of columns
+                    // reached their own top) on columns with nothing to sculpt.
+                    // Convective cells are roughly as tall as they are wide;
+                    // this puts the median near 3 km (aspect ~0.55) and leaves
+                    // the growth term to carry congestus past 6 km.
+                    // `cloud_weather_probe`'s HEIGHT table is the check —
+                    // re-measure there rather than adjusting these by eye.
                     let top_cumulus = base_cumulus
-                        + 0.14
-                        + 0.58 * (0.42 * cell_broken + 0.58 * congestus)
+                        + 0.24
+                        + 0.78 * (0.42 * cell_broken + 0.58 * congestus)
                         + 0.09 * vertical_noise;
                     let top_storm = 0.60 + 0.38 * storm_core;
                     let deck_base = stratus_region * base_stratus
@@ -952,42 +1062,6 @@ pub fn cloud_surface_density_traced(
     }
 }
 
-/// Divergence-free domain warp on the unit sphere.
-///
-/// Returns `dir` displaced along the tangential curl of a scalar stream
-/// function `psi = fbm3(dir * freq)`. Because the displacement is a curl it
-/// has (to first order) zero divergence: it shears and folds the field it
-/// warps without dilating or compressing it, so authored mean coverage is
-/// preserved while round noise blobs become the filaments, frontal lines and
-/// cyclonic commas that organized weather actually shows. A gradient warp —
-/// the usual `p + fbm(p)` trick — cannot produce rotation, which is why the
-/// un-warped producer rendered every system as an isotropic blob.
-///
-/// The returned vector is NOT normalized; callers that need a direction
-/// normalize after summing octaves.
-fn curl_warp(dir: Vec3, seed: u64, freq: f32, amplitude: f32) -> Vec3 {
-    // Tangent basis. The `Vec3::Y` reference degenerates at the poles, so
-    // swap axes there — an arbitrary but continuous-enough choice, since the
-    // stream function is isotropic and only the basis orientation changes.
-    let reference = if dir.y.abs() < 0.9 { Vec3::Y } else { Vec3::X };
-    let e1 = dir.cross(reference).normalize_or_zero();
-    if e1 == Vec3::ZERO {
-        return dir;
-    }
-    let e2 = dir.cross(e1);
-
-    // Central differences of the stream function in the tangent plane. The
-    // step is comfortably above the noise lattice spacing at these
-    // frequencies, so the gradient is smooth rather than hash-quantized.
-    const EPS: f32 = 0.03;
-    let psi = |p: Vec3| fbm3(p * freq + Vec3::new(5.0, -13.0, 21.0), seed, 3);
-    let d1 = (psi(dir + e1 * EPS) - psi(dir - e1 * EPS)) / (2.0 * EPS);
-    let d2 = (psi(dir + e2 * EPS) - psi(dir - e2 * EPS)) / (2.0 * EPS);
-    // grad psi = d1*e1 + d2*e2; rotating it a quarter turn inside the tangent
-    // plane gives the divergence-free flow.
-    dir + (e1 * d2 - e2 * d1) * amplitude
-}
-
 /// Latitude-dependent rotation about the spin axis.
 ///
 /// Zonal wind is the dominant organizing motion of a rotating atmosphere: it
@@ -1011,13 +1085,52 @@ fn zonal_shear(dir: Vec3, seed: u64) -> Vec3 {
     )
 }
 
-fn latitude_band_profile(lat: f32) -> f32 {
+/// Zonal cloud climatology: the W-curve every terrestrial full-disc image
+/// shows. Three cloudy belts — a sharp ITCZ (deliberately OFF the equator;
+/// `itcz_lat` carries the seeded offset, ~±6°), two broad mid-latitude storm
+/// tracks — separated by deep clear subtropical belts, with a mild polar
+/// decline. Numbers follow the satellite climatology shape: subtropical
+/// minima near 24°, storm-track maxima near 53°, and one hemisphere's track
+/// stronger than the other's (`storm_boost` = [north, south] scale).
+///
+/// `itcz_beads` multiplies only the ITCZ term: the real band is a train of
+/// convective clusters, and a solid bright ring is the giveaway of a painted
+/// climatology.
+///
+/// `lat` is signed radians (callers pass the jet-meander-warped latitude so
+/// belt edges wander instead of tracing perfect circles).
+fn zonal_climatology(lat: f32, itcz: f32, storm_boost: [f32; 2]) -> f32 {
     let gauss =
         |x: f32, center: f32, width: f32| (-((x - center) / width) * ((x - center) / width)).exp();
     let a = lat.abs();
-    gauss(a, 0.0, 0.10) + 0.7 * gauss(a, 0.96, 0.24)
-        - 0.8 * gauss(a, 0.44, 0.15)
-        - 0.4 * gauss(a, std::f32::consts::FRAC_PI_2, 0.25)
+    let hemisphere = if lat >= 0.0 {
+        storm_boost[0]
+    } else {
+        storm_boost[1]
+    };
+    // The ITCZ reads as a band only because the trades around it are CLEAR:
+    // a broad equatorial suppression (the trade-cumulus belts, sparse by
+    // nature) with the sharp beaded peak riding on top. Without the
+    // suppression the deep tropics grew full-strength synoptic worms and the
+    // band vanished into them (probe round 3). `itcz` arrives precomputed
+    // (beads × line gaussian) because the caller also feeds it into occupancy
+    // directly — see the note there.
+    // Polar decline is MILD: real polar caps carry 0.6–0.7 broken stratus,
+    // well above the subtropical minima — the caps must not go dark.
+    1.35 * itcz + 0.95 * hemisphere * gauss(a, 0.92, 0.24) - 0.40 * gauss(a, 0.0, 0.22)
+        - 0.90 * gauss(a, 0.40, 0.17)
+        - 0.10 * gauss(a, std::f32::consts::FRAC_PI_2, 0.22)
+}
+
+/// Small deterministic uniform in [0, 1) keyed off the climate seed — the
+/// per-planet circulation constants (ITCZ side, storm-track asymmetry) come
+/// from here so they are stable per seed and independent of the texel loop.
+fn hash01(seed: u64, key: u64) -> f32 {
+    let mut h = seed ^ key.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    h ^= h >> 31;
+    h = h.wrapping_mul(0xD6E8_FEB8_6659_FD93);
+    h ^= h >> 32;
+    (h & 0x00FF_FFFF) as f32 / 16_777_216.0
 }
 
 fn hash3(p: IVec3, seed: u64) -> f32 {

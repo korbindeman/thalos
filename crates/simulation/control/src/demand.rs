@@ -11,6 +11,8 @@
 
 use glam::DVec3;
 
+use crate::flight::PlaneHoldTarget;
+
 /// What a source wants the craft's attitude to do this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AttitudeDemand {
@@ -26,6 +28,12 @@ pub enum AttitudeDemand {
     /// / target / maneuver-node / scheduled-burn pointing). `+Y` body is
     /// the nose.
     PointNose(DVec3),
+    /// Fly an explicit pitch attitude and bank angle through the plane FBW law.
+    ///
+    /// Unlike [`Self::Hold`], this target is supplied by a guidance source
+    /// rather than captured from the current aircraft attitude. It still uses
+    /// the same coordinated-turn, auto-trim, and AoA-protection path.
+    FlightPath(PlaneHoldTarget),
     /// Direct normalized per-axis command in `[-1, 1]` (body frame:
     /// `x` = pitch, `y` = roll, `z` = yaw). Deflected stick. Under SAS
     /// this also slews the hold target so releasing the stick holds the
@@ -49,6 +57,10 @@ impl AttitudeDemand {
 pub struct ControlDemand {
     pub attitude: AttitudeDemand,
     pub throttle: Option<f64>,
+    /// Normalized ground steering, positive = nose right.
+    pub ground_steer: Option<f64>,
+    /// Normalized wheel braking in `[0, 1]`.
+    pub wheel_brake: Option<f64>,
 }
 
 impl ControlDemand {
@@ -56,12 +68,16 @@ impl ControlDemand {
     pub const NONE: Self = Self {
         attitude: AttitudeDemand::Free,
         throttle: None,
+        ground_steer: None,
+        wheel_brake: None,
     };
 
     pub const fn attitude(attitude: AttitudeDemand) -> Self {
         Self {
             attitude,
             throttle: None,
+            ground_steer: None,
+            wheel_brake: None,
         }
     }
 
@@ -69,6 +85,31 @@ impl ControlDemand {
         Self {
             attitude: AttitudeDemand::Free,
             throttle: Some(value),
+            ground_steer: None,
+            wheel_brake: None,
+        }
+    }
+
+    pub const fn autoflight(
+        attitude: AttitudeDemand,
+        throttle: Option<f64>,
+        ground_steer: Option<f64>,
+        wheel_brake: Option<f64>,
+    ) -> Self {
+        Self {
+            attitude,
+            throttle,
+            ground_steer,
+            wheel_brake,
+        }
+    }
+
+    pub const fn ground(steer: f64, brake: f64) -> Self {
+        Self {
+            attitude: AttitudeDemand::Free,
+            throttle: None,
+            ground_steer: Some(steer),
+            wheel_brake: Some(brake),
         }
     }
 }
@@ -108,6 +149,13 @@ mod tests {
     fn free_is_the_only_inactive_demand() {
         assert!(!AttitudeDemand::Free.is_active());
         assert!(AttitudeDemand::Hold.is_active());
+        assert!(
+            AttitudeDemand::FlightPath(PlaneHoldTarget {
+                pitch_rad: 0.0,
+                bank_rad: 0.0
+            })
+            .is_active()
+        );
         assert!(AttitudeDemand::Rate(DVec3::ZERO).is_active());
     }
 }

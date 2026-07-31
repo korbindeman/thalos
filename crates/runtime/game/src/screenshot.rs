@@ -24,7 +24,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -50,9 +50,10 @@ use thalos_body_render::{
     BodyTerrainMaterial, CloudsConfig, HeightSource, cloud_target_memory_for,
 };
 use thalos_capture_protocol::{
-    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CameraOptics as CameraOpticsSpec, CaptureAction,
-    CaptureCameraOverride, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
-    CaptureServerState, CaptureSourceSnapshot, CapturedCameraState, Viewpoint,
+    CAPTURE_PROTOCOL_SCHEMA, CameraOptics as CameraOpticsSpec, CaptureAction,
+    CaptureCameraOverride, CaptureClock, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
+    CaptureServerState, CaptureSourceSnapshot, CaptureTerrainResidency, CapturedCameraState,
+    Viewpoint,
 };
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
@@ -66,6 +67,7 @@ use crate::rendering::contact_shadow::ContactShadowConfig;
 use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
 use crate::rendering::ssao::SsaoConfig;
 use crate::rendering::{SimulationState, SolarSystemState};
+use crate::sim_clock::SimClockDrive;
 use crate::space_center::{HubContext, hub_context};
 use crate::spawn::{Homeworld, SpawnSituation};
 use crate::structures::StructureRegistry;
@@ -242,6 +244,16 @@ pub enum ScreenshotPreset {
     /// sky, long slant-path haze, terrain recession, structures, and the real
     /// runway scenario through the same `ShipCamera` used in play.
     RunwayAtmosphere,
+    /// The parked runway craft framed as a **whole vehicle** — gear stance,
+    /// wing position, and the wing-body fairing all legible in one shot.
+    ///
+    /// Exists because every other runway preset frames the *field*, so a
+    /// gear/stance or mass-distribution change had no headless probe
+    /// (INC-20260730T225319Z). The focus is craft-centred on a local-up pole
+    /// (`craft_stance_context`), so azimuth walks around the aircraft and
+    /// elevation reads as degrees above the pavement. Boots the `runway`
+    /// scenario alongside [`Self::SpaceportAerial`].
+    CraftStance,
     /// Eye-level along the base's paved network — taxiway, apron and service
     /// road filling the near frame from ~13 m up.
     ///
@@ -353,6 +365,11 @@ pub enum ScreenshotPreset {
     CloudInterior,
     /// Low-orbit tangent view of the cloud line inside the atmosphere limb.
     CloudLimb,
+    /// LEO oblique view (~400 km, horizon in the upper frame) — the player's
+    /// on-orbit framing. Probes whole-disc cloud coverage continuity across
+    /// the near-march/far-projection handoff, where 2026-07-31 showed clouds
+    /// covering only an annulus of the visible disc.
+    CloudLeo,
     /// Full planetary disc from outside the terrain LOD swap — CLOUD-6 orbital
     /// impostor / weather-layer regression (SolidPlanet + atmosphere limb).
     CloudPlanet,
@@ -390,14 +407,33 @@ pub enum ScreenshotPreset {
     /// The reentry shock layer at peak heating, framed three-quarter on the
     /// vehicle so both the stagnation cap and the swept flank are in one image.
     ///
-    /// Boots a plain orbit and drives [`FlowDebugOverride`] to a peak-heating
-    /// freestream (`THALOS_REENTRY_DENSITY` kg/m³, `THALOS_REENTRY_SPEED` m/s),
-    /// because the alternative — actually flying an entry — is neither
-    /// deterministic nor reachable headlessly. The wind is put on the craft's
-    /// **belly** (`-Z` local, the same dorsal convention the gear uses), which is
-    /// the attitude a lifting body actually enters in, so the shell is exercised
-    /// off-axis rather than in the degenerate nose-on case.
+    /// Boots the atmospheric landing approach and drives [`FlowDebugOverride`]
+    /// to a peak-heating freestream (`THALOS_REENTRY_DENSITY` kg/m³,
+    /// `THALOS_REENTRY_SPEED` m/s), because the alternative — actually flying an
+    /// entry — is neither deterministic nor reachable headlessly. The wind is
+    /// put on the craft's **belly** (`-Z` local, the same dorsal convention the
+    /// gear uses), which is the attitude a lifting body actually enters in, so
+    /// the shell is exercised off-axis rather than in the degenerate nose-on
+    /// case.
     Reentry,
+    /// The transonic vapour cone: the condensation collar around an airframe near
+    /// Mach 1, lit by the sun.
+    ///
+    /// Boots the atmospheric Meridian cruise and drives [`FlowDebugOverride`] to
+    /// a **humid, dense, Mach 0.98** freestream, because all three gates must open
+    /// at once and no reachable headless state supplies them together. The
+    /// freestream is authored on the nose side because a cold capture can spend
+    /// minutes waiting for terrain and no longer retain the scenario's initial
+    /// velocity; the live direction convention is pinned separately at the
+    /// `FlowSignals` producer. Scrub with
+    /// `THALOS_VAPOR_MACH`, `THALOS_VAPOR_HUMIDITY` (0..1) and `THALOS_VAPOR_Q`
+    /// (dynamic pressure, Pa).
+    ///
+    /// Unlike `Plume` and `Reentry` this collar is a **scattering** medium, so it
+    /// is the one flow-effect probe whose framing has to care where the sun is:
+    /// the forward-scatter lobe is most of the look, and a shot with the sun
+    /// behind the camera cannot show it.
+    VaporCone,
     /// The two-stage Saturn on its pad, framed side-on across the **interstage**
     /// between its stages.
     ///
@@ -594,83 +630,46 @@ enum ScreenshotFraming {
     },
 }
 
-impl ScreenshotPreset {
-    const ALL: &'static [Self] = &[
-        Self::LatestPerspective,
-        Self::SpaceportAerial,
-        Self::RunwayAtmosphere,
-        Self::PavedGround,
-        Self::Hub,
-        Self::DryBelt,
-        Self::ForestStand,
-        Self::EarthReference,
-        Self::Ocean,
-        Self::OceanSlopes,
-        Self::Coastline,
-        Self::MiraOrbit,
-        Self::MiraSurface,
-        Self::MiraEva,
-        Self::MiraDisc,
-        Self::MiraApproach,
-        Self::MiraRim,
-        Self::CloudRunway,
-        Self::CloudMotion,
-        Self::CloudCruise,
-        Self::CloudInterior,
-        Self::CloudLimb,
-        Self::CloudPlanet,
-        Self::CloudSunset,
-        Self::CloudGodray,
-        Self::Plume,
-        Self::PlumeSkyline,
-        Self::Reentry,
-        Self::Interstage,
-        Self::OrbitHull,
-        Self::MassifAerial,
-        Self::MassifRidge,
-        Self::MassifValley,
-    ];
+/// Expands the shared catalog into this enum's ordering, wire names, and
+/// canonical parse.
+///
+/// Both directions are compile-enforced: an entry naming a variant that does
+/// not exist fails to resolve, and a variant missing from the catalog makes
+/// `name`'s match non-exhaustive. That is what replaced the runtime
+/// `debug_assert_eq!` this file used to carry — see
+/// [`thalos_capture_protocol::capture_preset_catalog!`].
+macro_rules! screenshot_preset_catalog {
+    ($($variant:ident => $name:literal,)*) => {
+        impl ScreenshotPreset {
+            /// Every preset, in the catalog's canonical order — the same order
+            /// as `CAPTURE_PRESETS`, because both expand from that one list.
+            const ALL: &'static [Self] = &[$(Self::$variant),*];
 
-    fn name(self) -> &'static str {
-        match self {
-            Self::LatestPerspective => "latest-perspective",
-            Self::SpaceportAerial => "spaceport-aerial",
-            Self::RunwayAtmosphere => "runway-atmosphere",
-            Self::PavedGround => "paved-ground",
-            Self::Hub => "hub",
-            Self::DryBelt => "dry-belt",
-            Self::ForestStand => "forest-stand",
-            Self::EarthReference => "earth-reference",
-            Self::Ocean => "ocean",
-            Self::OceanSlopes => "ocean-slopes",
-            Self::Coastline => "coastline",
-            Self::MiraOrbit => "mira-orbit",
-            Self::MiraSurface => "mira-surface",
-            Self::MiraEva => "mira-eva",
-            Self::MiraDisc => "mira-disc",
-            Self::MiraApproach => "mira-approach",
-            Self::MiraRim => "mira-rim",
-            Self::CloudRunway => "cloud-runway",
-            Self::CloudMotion => "cloud-motion",
-            Self::CloudCruise => "cloud-cruise",
-            Self::CloudInterior => "cloud-interior",
-            Self::CloudLimb => "cloud-limb",
-            Self::CloudPlanet => "cloud-planet",
-            Self::CloudSunset => "cloud-sunset",
-            Self::CloudGodray => "cloud-godray",
-            Self::Plume => "plume",
-            Self::PlumeSkyline => "plume-skyline",
-            Self::Reentry => "reentry",
-            Self::Interstage => "interstage",
-            Self::OrbitHull => "orbit-hull",
-            Self::MassifAerial => "massif-aerial",
-            Self::MassifRidge => "massif-ridge",
-            Self::MassifValley => "massif-valley",
+            fn name(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $name,)*
+                }
+            }
+
+            /// Parse a preset from its canonical wire name, already trimmed and
+            /// lowercased. Aliases live in [`Self::try_parse`]; this is the
+            /// arm that cannot be forgotten when a preset is added.
+            fn from_canonical_name(normalized: &str) -> Option<Self> {
+                Some(match normalized {
+                    $($name => Self::$variant,)*
+                    _ => return None,
+                })
+            }
         }
-    }
+    };
+}
 
+thalos_capture_protocol::capture_preset_catalog!(screenshot_preset_catalog);
+
+impl ScreenshotPreset {
     fn try_parse(raw: &str) -> Option<Self> {
-        Some(match raw.trim().to_ascii_lowercase().as_str() {
+        let normalized = raw.trim().to_ascii_lowercase();
+        Some(match normalized.as_str() {
             "latest" | "perspective" | "latest-perspective" | "latest_perspective" => {
                 Self::LatestPerspective
             }
@@ -680,6 +679,7 @@ impl ScreenshotPreset {
             "runway-atmosphere" | "runway_atmosphere" | "runway-sky" | "surface-atmosphere" => {
                 Self::RunwayAtmosphere
             }
+            "stance" | "craft_stance" | "meridian-stance" | "meridian" => Self::CraftStance,
             "paved-ground" | "paved_ground" | "pavement" | "taxiway" | "apron" => Self::PavedGround,
             "hub" | "space-center" | "spacecenter" | "play" => Self::Hub,
             "dry" | "dry-belt" | "drybelt" | "desert" | "biome" => Self::DryBelt,
@@ -703,6 +703,7 @@ impl ScreenshotPreset {
                 Self::CloudInterior
             }
             "cloud-limb" | "cloud_limb" | "cloud-orbit" | "clouds-orbit" => Self::CloudLimb,
+            "cloud-leo" | "cloud_leo" | "leo-clouds" | "cloud-station" => Self::CloudLeo,
             "cloud-planet" | "cloud_planet" | "cloud-globe" | "cloud_globe" | "cloud-disc"
             | "cloud_disc" | "full-planet" | "planet-disc" => Self::CloudPlanet,
             "cloud-sunset" | "cloud_sunset" | "clouds-sunset" => Self::CloudSunset,
@@ -711,12 +712,17 @@ impl ScreenshotPreset {
             "plume" | "engine" | "exhaust" | "rocket" => Self::Plume,
             "plume-skyline" | "plume_skyline" | "plume-sky" | "plume-ascent" => Self::PlumeSkyline,
             "reentry" | "re-entry" | "entry" | "shock" | "plasma" => Self::Reentry,
+            "vapour-cone" | "vapor" | "sonic-cone" | "mach-cone" => Self::VaporCone,
             "interstage" | "shroud" | "decoupler" | "staging" => Self::Interstage,
             "orbit-hull" | "orbit_hull" | "stainless" | "hull-reflection" => Self::OrbitHull,
             "massif-aerial" | "massif_aerial" | "massif" | "mountains" => Self::MassifAerial,
             "massif-ridge" | "massif_ridge" | "ridge" => Self::MassifRidge,
             "massif-valley" | "massif_valley" | "valley" => Self::MassifValley,
-            _ => return None,
+            // Everything above is the *alias* table — nicknames and
+            // underscore spellings. The canonical wire name is generated from
+            // the shared catalog, so a preset added without an alias arm still
+            // parses under its own name.
+            _ => return Self::from_canonical_name(&normalized),
         })
     }
 
@@ -728,6 +734,7 @@ impl ScreenshotPreset {
             Self::LatestPerspective => SpawnSituation::ShipOrbit,
             Self::SpaceportAerial
             | Self::RunwayAtmosphere
+            | Self::CraftStance
             | Self::PavedGround
             | Self::CloudRunway
             | Self::CloudMotion => SpawnSituation::Runway,
@@ -757,6 +764,7 @@ impl ScreenshotPreset {
             Self::CloudCruise
             | Self::CloudInterior
             | Self::CloudLimb
+            | Self::CloudLeo
             | Self::CloudPlanet
             | Self::CloudSunset
             | Self::CloudGodray => SpawnSituation::ShipOrbit,
@@ -767,10 +775,12 @@ impl ScreenshotPreset {
             // plume, a lit sky, and ground still in frame — all three needed
             // for the composite-order probe.
             Self::PlumeSkyline => SpawnSituation::FinalApproach,
-            // Plain orbit; the freestream is supplied by `FlowDebugOverride`
-            // rather than by the craft's real altitude, so the probe does not
-            // depend on flying a trajectory to a particular moment.
-            Self::Reentry => SpawnSituation::ShipOrbit,
+            // Both probes author the hard-to-reach flow point, but environmental
+            // presence remains real: an override must never manufacture air in
+            // orbit. Landing keeps the Apollo inside air; cruise supplies the
+            // Meridian airframe for the cone's shape/placement probe.
+            Self::Reentry => SpawnSituation::Landing,
+            Self::VaporCone => SpawnSituation::Cruise,
             // The only scenario that flies a multi-stage rocket — and therefore
             // the only one whose craft has a decoupler to shroud.
             Self::Interstage => SpawnSituation::Launch,
@@ -858,6 +868,33 @@ impl ScreenshotPreset {
                 tail_frames: 24,
                 keep_hud: false,
                 report: thalos_diagnostics::paths::default_jsonl_path("runway_atmosphere.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
+            // The parked runway craft as a whole vehicle — gear, wing
+            // position, and wing-body fairing all legible. Exists because
+            // every other runway preset frames the *field* (twice in one day a
+            // gear/stance change could not be verified headlessly). The focus
+            // is craft-centred on a local-up pole (`craft_stance_context`), so
+            // azimuth walks around the aircraft and elevation is degrees above
+            // the pavement; the runway parks the craft heading ~east
+            // (azimuth 0 ≈ local east), so 215° lands a three-quarter
+            // front-left hero view.
+            Self::CraftStance => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/craft_stance.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 215.0,
+                elevation_deg: 8.0,
+                distance_m: 42.0,
+                warmup_frames: 480,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("craft_stance.jsonl"),
                 framing: ScreenshotFraming::GodView,
                 cloud_quality: CloudCaptureQuality::Baseline,
                 cloud_temporal: true,
@@ -1074,6 +1111,35 @@ impl ScreenshotPreset {
                 cloud_temporal: true,
                 cloud_coverage_scale: None,
             },
+            Self::CloudLeo => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/cloud_leo.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 0.0,
+                elevation_deg: 8.0,
+                distance_m: 4200.0,
+                warmup_frames: 360,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("cloud_leo.jsonl"),
+                framing: ScreenshotFraming::LocalCloud {
+                    // The player's LEO vantage (2026-07-31 report: clouds
+                    // covered only part of the visible disc from ~404 km).
+                    camera_altitude_m: 404_000.0,
+                    // Oblique down-look: horizon in the upper frame, most of
+                    // the frame filled by the disc from near-nadir to limb, so
+                    // every camera-to-shell entry distance band is in shot.
+                    look_elevation_deg: -22.0,
+                    site_sun_elevation_deg: Some(40.0),
+                    tangent_limb: false,
+                    look_at_body_center: false,
+                },
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
             Self::CloudPlanet => ScreenshotConfig {
                 preset: self,
                 viewpoint: None,
@@ -1198,6 +1264,28 @@ impl ScreenshotPreset {
             // Black sky for the same reason as `Plume` — the shell is an additive
             // emitter and a sunlit backdrop washes out the colour ramp that
             // carries the temperature information.
+            // Craft-centred GodView, framed close: the collar is a thin sheet
+            // hugging the airframe, and a wide shot loses the very thing the probe
+            // exists to judge. Azimuth places the sun broadly beyond the craft —
+            // the forward-scatter lobe is most of the look.
+            Self::VaporCone => ScreenshotConfig {
+                preset: self,
+                viewpoint: None,
+                out: PathBuf::from("artifacts/visual/latest/vapor_cone.png"),
+                width: 1920,
+                height: 1080,
+                azimuth_deg: 55.0,
+                elevation_deg: 10.0,
+                distance_m: 45.0,
+                warmup_frames: 90,
+                tail_frames: 24,
+                keep_hud: false,
+                report: thalos_diagnostics::paths::default_jsonl_path("vapor_cone.jsonl"),
+                framing: ScreenshotFraming::GodView,
+                cloud_quality: CloudCaptureQuality::Baseline,
+                cloud_temporal: true,
+                cloud_coverage_scale: None,
+            },
             Self::Reentry => ScreenshotConfig {
                 preset: self,
                 viewpoint: None,
@@ -1937,11 +2025,17 @@ const CAPTURE_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SSAO",
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
+    // Read per request, not just at host boot. The host is a machine-wide
+    // shared process an agent usually does not own, so a boot-time-only flag
+    // silently produced a normal-looking PNG with the F3 view simply off
+    // (BL-20260730T184038Z). `perf::overlay::apply_debug_view_override` is the
+    // reader.
+    "THALOS_DEBUG_VIEW",
 ];
 
 #[derive(Resource, Clone, Debug, Default)]
-struct CaptureRuntimeOverrides {
-    values: BTreeMap<String, String>,
+pub(crate) struct CaptureRuntimeOverrides {
+    pub(crate) values: BTreeMap<String, String>,
 }
 
 impl CaptureRuntimeOverrides {
@@ -2007,6 +2101,55 @@ fn parse_size(s: &str) -> Option<(u32, u32)> {
 
 fn same_aspect([left_w, left_h]: [u32; 2], [right_w, right_h]: [u32; 2]) -> bool {
     u64::from(left_w) * u64::from(right_h) == u64::from(right_w) * u64::from(left_h)
+}
+
+#[cfg(test)]
+mod preset_catalog_tests {
+    use super::ScreenshotPreset;
+    use thalos_capture_protocol::CAPTURE_PRESETS;
+
+    /// The compile gate makes `ALL` and `CAPTURE_PRESETS` the same list by
+    /// construction; this pins the *property* that gate buys, so a future
+    /// refactor that reintroduces a hand-maintained table fails here rather
+    /// than in a booted capture host.
+    #[test]
+    fn runtime_and_protocol_catalogs_are_one_list() {
+        let runtime: Vec<&str> = ScreenshotPreset::ALL
+            .iter()
+            .map(|preset| preset.name())
+            .collect();
+        assert_eq!(runtime, CAPTURE_PRESETS);
+    }
+
+    #[test]
+    fn preset_names_are_unique() {
+        let mut names: Vec<&str> = CAPTURE_PRESETS.to_vec();
+        names.sort_unstable();
+        let count = names.len();
+        names.dedup();
+        assert_eq!(names.len(), count, "duplicate preset name in the catalog");
+    }
+
+    /// The alias table still lists canonical names by hand, so an arm could
+    /// map a canonical name at the wrong variant — which the generated
+    /// fallback would never see, because the alias arm matches first.
+    #[test]
+    fn every_canonical_name_parses_back_to_its_own_preset() {
+        for &preset in ScreenshotPreset::ALL {
+            let name = preset.name();
+            assert_eq!(
+                ScreenshotPreset::try_parse(name),
+                Some(preset),
+                "{name} does not parse back to itself"
+            );
+            // Capture clients pass user-typed strings straight through.
+            assert_eq!(
+                ScreenshotPreset::try_parse(&format!("  {} ", name.to_ascii_uppercase())),
+                Some(preset),
+                "{name} does not survive trimming and case folding"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2105,6 +2248,13 @@ struct PersistentCaptureServer {
     requested_camera: CaptureCameraOverride,
     active_camera: Option<CapturedCameraState>,
     active_graphics: Option<CaptureGraphicsSettings>,
+    /// Ground residency sampled at the active request's readback, for the
+    /// receipt. `None` until a tile-rendered body has been observed.
+    active_terrain: Option<CaptureTerrainResidency>,
+    /// Wall or driven clock, for the receipt. A **boot** property of the host
+    /// (it changes how local physics steps), so it is fixed for every request
+    /// this host serves — same shape as `THALOS_TILE_RENDERER`.
+    clock: CaptureClock,
     /// Last requested render state. The normal camera authority reasserts the
     /// active gameplay camera in `Update`; the persistent host overrides that
     /// decision in `Last`, immediately before extraction.
@@ -2146,6 +2296,8 @@ impl PersistentCaptureServer {
             source: self.active_source.clone(),
             camera: self.active_camera,
             graphics: self.active_graphics,
+            terrain: self.active_terrain,
+            clock: self.clock,
         };
         if let Err(error) = write_json(capture_response_path(), &response) {
             warn!(target: "thalos::screenshot", "could not publish capture response: {error}");
@@ -2208,6 +2360,25 @@ struct ScreenshotDriver {
     /// view, and how long it has held without improving.
     terrain_best_lod_m: Option<f32>,
     terrain_lod_hold_s: f64,
+    /// Wall-clock seconds spent holding the readback for the tile memory brake
+    /// to let go. See [`BRAKE_RECOVER_TIMEOUT_S`].
+    brake_wait_s: f64,
+    /// Worst tile split scale seen between this request arming and its
+    /// readback. `None` while no tile root has been observed at all (the udlod
+    /// path, or a body this renderer has not installed on) — which the receipt
+    /// reports as "not applicable" rather than pretending it was unbraked.
+    worst_split_scale: Option<f64>,
+    /// Wall-clock instant of the previous driving frame, feeding the streaming
+    /// and brake holds below.
+    ///
+    /// Those are **real elapsed-time ceilings**, so they must not ride
+    /// `Time<Real>`: the offline render drives it to a fixed step
+    /// (`sim_clock::SimClockDrive`), which would silently reinterpret the 180 s
+    /// stream ceiling as 10 800 frames and the 45 s brake ceiling as 2 700 —
+    /// i.e. a wedged host would hang instead of warning. `None` between
+    /// requests so a host that idled for minutes does not credit that idle to
+    /// the next shot's hold.
+    wall_tick: Option<Instant>,
 }
 
 /// Streamed-terrain readiness inputs for the massif warmup hold, plus the
@@ -2216,7 +2387,6 @@ struct ScreenshotDriver {
 #[derive(bevy::ecs::system::SystemParam)]
 struct TerrainReadiness<'w, 's> {
     active_captures: Query<'w, 's, (), With<Capturing>>,
-    time: Res<'w, Time<Real>>,
     tile_roots: Query<
         'w,
         's,
@@ -2242,10 +2412,42 @@ struct TerrainReadiness<'w, 's> {
 /// site is ~20–60 s; past this something is wedged and the capture proceeds
 /// (with a warning) rather than hanging the host.
 const MASSIF_STREAM_TIMEOUT_S: f64 = 180.0;
+
+/// Ceiling on holding a readback for the tile memory brake to release.
+///
+/// The brake recovers by landing coarse ancestors and retiring their children
+/// through the normal merge certificate, which is a streaming round-trip: the
+/// 2026-07-30 `cloud-godray` episode went 0.333 → 1.0 in ~15 s. 45 s is three
+/// of those, so a wait that reaches it is not a slow recovery but a framing
+/// that genuinely does not fit the share — worth an image plus a warning
+/// rather than a hung host.
+const BRAKE_RECOVER_TIMEOUT_S: f64 = 45.0;
 /// udlod path: how long the finest resident LOD at the view must hold without
 /// improving before the ground counts as streamed (wall clock — headless frame
 /// rates make frame counts meaningless against ~30 ms/tile bakes).
 const MASSIF_LOD_PLATEAU_S: f64 = 6.0;
+
+/// Boot-time clock selection for the headless host: `wall` (default), `driven`
+/// (60 fps), `driven:<fps>`, or a bare frame rate.
+///
+/// A **boot** knob, not a per-request override: the driven clock changes how
+/// Avian steps and how every warmup frame advances the world, so it is fixed
+/// for the life of a host — same shape as `THALOS_TILE_RENDERER`. Switching it
+/// needs a host restart (`just capture-stop`), and the choice is recorded in
+/// every receipt this host writes.
+const CAPTURE_CLOCK_ENV: &str = "THALOS_CAPTURE_CLOCK";
+
+/// Resolve [`CAPTURE_CLOCK_ENV`]. An unparseable value is a hard error rather
+/// than a silent fall back to wall time: a sequence render that quietly ran on
+/// the wall clock produces plausible frames with the wrong world state, which
+/// is exactly the non-crash failure class the capture lane exists to catch.
+fn capture_clock_drive_from_env() -> Result<SimClockDrive, String> {
+    match env::var(CAPTURE_CLOCK_ENV) {
+        Ok(raw) => SimClockDrive::parse(&raw)
+            .map_err(|error| format!("{CAPTURE_CLOCK_ENV}={raw:?}: {error}")),
+        Err(_) => Ok(SimClockDrive::Wall),
+    }
+}
 
 pub struct HeadlessScreenshotPlugin {
     pub persistent: bool,
@@ -2253,9 +2455,26 @@ pub struct HeadlessScreenshotPlugin {
 
 impl Plugin for HeadlessScreenshotPlugin {
     fn build(&self, app: &mut App) {
+        match capture_clock_drive_from_env() {
+            Ok(drive) => {
+                if let Some(dt_s) = drive.dt_s() {
+                    info!(
+                        target: "thalos::screenshot",
+                        "capture clock driven at {:.1} fps ({dt_s:.5} s/frame)",
+                        1.0 / dt_s,
+                    );
+                }
+                app.insert_resource(drive);
+            }
+            Err(error) => error!(target: "thalos::screenshot", "{error}; using wall time"),
+        }
+
         app.init_resource::<ScreenshotDriver>()
             .insert_resource(CaptureRuntimeOverrides::from_env())
-            .add_systems(Startup, setup_screenshot_target)
+            .add_systems(
+                Startup,
+                (setup_screenshot_target, initialize_flow_effect_capture),
+            )
             .add_systems(
                 Update,
                 (
@@ -2322,8 +2541,13 @@ fn record_shader_reloads(
 
 fn initialize_capture_server(
     cfg: Res<ScreenshotConfig>,
+    drive: Res<SimClockDrive>,
     mut server: ResMut<PersistentCaptureServer>,
 ) {
+    server.clock = match drive.dt_s() {
+        Some(dt_s) => CaptureClock::driven(dt_s),
+        None => CaptureClock::WALL,
+    };
     server.boot_scene = Some(cfg.scene_name());
     server.boot_width = cfg.width;
     server.boot_height = cfg.height;
@@ -2351,14 +2575,9 @@ fn capture_source_snapshot_from_env() -> CaptureSourceSnapshot {
 /// target body, spawn scenario, hub wiring, and viewport-sized render resources
 /// cannot.
 fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
-    debug_assert_eq!(
-        ScreenshotPreset::ALL
-            .iter()
-            .map(|preset| preset.name())
-            .collect::<Vec<_>>(),
-        CAPTURE_PRESETS,
-        "capture protocol and runtime preset catalogs diverged"
-    );
+    // No catalog reconciliation here any more: `ALL` and `CAPTURE_PRESETS` both
+    // expand from `capture_preset_catalog!`, so a divergence is a compile error
+    // rather than a host panic six shots into an evening.
     let mut scenes = ScreenshotPreset::ALL
         .iter()
         .copied()
@@ -2632,6 +2851,13 @@ fn poll_capture_requests(
     driver.capture_time_applied = false;
     driver.captured = false;
     driver.tail = 0;
+    // Residency is judged per request, not per host: a brake that bit during
+    // an earlier shot must not taint this one's receipt.
+    driver.brake_wait_s = 0.0;
+    driver.worst_split_scale = None;
+    // Idle between requests is not this shot's streaming time.
+    driver.wall_tick = None;
+    server.active_terrain = None;
     // A caller-time jump can change every sun-relative/site search. Re-resolve
     // those body-fixed choices instead of carrying a site selected at the
     // previous request's epoch across the persistent host.
@@ -2922,6 +3148,14 @@ fn configure_plume_capture(
 ///
 /// `THALOS_REENTRY_DENSITY` (kg/m³) and `THALOS_REENTRY_SPEED` (m/s) scrub the
 /// entry point: the defaults are peak-heating conditions for a capsule entry.
+fn initialize_flow_effect_capture(
+    cfg: Res<ScreenshotConfig>,
+    runtime: Res<CaptureRuntimeOverrides>,
+    mut over: ResMut<crate::rendering::flow::FlowDebugOverride>,
+) {
+    apply_flow_effect_capture(&cfg, &runtime, &mut over);
+}
+
 fn configure_reentry_capture(
     cfg: Res<ScreenshotConfig>,
     runtime: Res<CaptureRuntimeOverrides>,
@@ -2930,7 +3164,23 @@ fn configure_reentry_capture(
     if !cfg.is_changed() && !runtime.is_changed() {
         return;
     }
-    if cfg.preset != ScreenshotPreset::Reentry {
+    apply_flow_effect_capture(&cfg, &runtime, &mut over);
+}
+
+/// Resolve the authored point inside the craft's real atmospheric environment.
+///
+/// Called once in `Startup` so the initial host cannot miss its override through
+/// change-tick ordering, then from the Update wrapper for later persistent-host
+/// requests.
+fn apply_flow_effect_capture(
+    cfg: &ScreenshotConfig,
+    runtime: &CaptureRuntimeOverrides,
+    over: &mut crate::rendering::flow::FlowDebugOverride,
+) {
+    if !matches!(
+        cfg.preset,
+        ScreenshotPreset::Reentry | ScreenshotPreset::VaporCone
+    ) {
         *over = crate::rendering::flow::FlowDebugOverride::default();
         return;
     }
@@ -2942,6 +3192,40 @@ fn configure_reentry_capture(
             .unwrap_or(fallback)
             .max(0.0)
     };
+    if cfg.preset == ScreenshotPreset::VaporCone {
+        // Sea-level-ish humid air just below Mach 1: all three gates open at once,
+        // which is exactly the state unreachable by accident.
+        let mach = read("THALOS_VAPOR_MACH", 0.98).clamp(0.1, 3.0);
+        let humidity = read("THALOS_VAPOR_HUMIDITY", 0.85).clamp(0.0, 1.0);
+        let q = read("THALOS_VAPOR_Q", 40_000.0);
+        let speed_of_sound = 340.0f32;
+        let speed = mach * speed_of_sound;
+        // Density FOLLOWS from the requested dynamic pressure, so q, speed and
+        // density stay one consistent air instead of describing three different
+        // ones — the same discipline as the reentry probe below.
+        let density = (2.0 * q / (speed * speed)).max(1.0e-6);
+        over.density_kg_m3 = Some(density);
+        over.airspeed_m_s = Some(speed);
+        over.static_temp_k = Some(288.0);
+        over.speed_of_sound_m_s = Some(speed_of_sound);
+        over.relative_humidity_frac = Some(humidity);
+        // The cold host may spend minutes waiting for terrain, long enough for
+        // the scenario's initial flight state to decay to zero. Author the
+        // upstream side for this visual probe; the shared producer's live sign
+        // has its own unit regression.
+        over.flow_from_local = Some(Vec3::Y);
+        info!(
+            target: "thalos::diagnostic::capture",
+            event = "vapor_cone_probe_configuration",
+            mach = mach,
+            humidity_frac = humidity,
+            dynamic_pressure_pa = q,
+            density_kg_m3 = density,
+            "vapor cone probe configuration"
+        );
+        return;
+    }
+
     let density = read("THALOS_REENTRY_DENSITY", 3.0e-4);
     let speed = read("THALOS_REENTRY_SPEED", 7_400.0);
     // Upper-atmosphere static temperature and the matching speed of sound, so
@@ -2953,6 +3237,7 @@ fn configure_reentry_capture(
     over.airspeed_m_s = Some(speed);
     over.static_temp_k = Some(static_temp);
     over.speed_of_sound_m_s = Some(speed_of_sound);
+    over.relative_humidity_frac = None;
     // Wind on the belly: craft `+Z` is dorsal, so the freestream arrives from
     // `-Z`. This is the entry attitude of a lifting body, and it is the framing
     // that would expose a shell wrongly keyed to the craft's nose axis.
@@ -3158,6 +3443,18 @@ fn drive_headless_screenshot(
         return;
     }
 
+    // Real elapsed time since the previous driving frame. The streaming and
+    // brake holds below are wall-clock ceilings on a *machine*, not on world
+    // time, so they are measured here rather than from `Time<Real>` — which the
+    // offline render drives to a fixed step. Zero on the first frame of a
+    // request. See `ScreenshotDriver::wall_tick`.
+    let frame_instant = Instant::now();
+    let wall_dt_s = driver
+        .wall_tick
+        .replace(frame_instant)
+        .map(|previous| (frame_instant - previous).as_secs_f64())
+        .unwrap_or(0.0);
+
     // Resolve the focus and pose the camera. If anything is not ready yet, hold
     // the frame counter so warmup only starts once the requested site is framed.
     let ctx = match cfg.preset {
@@ -3229,9 +3526,10 @@ fn drive_headless_screenshot(
             eva_surface_context(&sim, &solar, &height_sources, homeworld.0).map(CaptureFocus::from)
         }
         // Frame the craft itself, not a surface site.
-        ScreenshotPreset::Plume | ScreenshotPreset::Reentry | ScreenshotPreset::OrbitHull => {
-            craft_context(&sim).map(CaptureFocus::from)
-        }
+        ScreenshotPreset::Plume
+        | ScreenshotPreset::Reentry
+        | ScreenshotPreset::VaporCone
+        | ScreenshotPreset::OrbitHull => craft_context(&sim).map(CaptureFocus::from),
         ScreenshotPreset::PlumeSkyline => {
             plume_skyline_context(&sim, &solar).map(CaptureFocus::from)
         }
@@ -3386,7 +3684,7 @@ fn drive_headless_screenshot(
             | ScreenshotPreset::MassifValley
     ) && !driver.terrain_ready
     {
-        let dt = readiness.time.delta_secs_f64();
+        let dt = wall_dt_s;
         let ready = if crate::rendering::tile_terrain::tile_renderer_enabled() {
             // Tile path: the eye follows the posed camera, so "the desired
             // selection is fully resident" is exactly "the site is streamed".
@@ -3444,6 +3742,65 @@ fn drive_headless_screenshot(
     driver.running_frames += 1;
     if driver.running_frames < cfg.warmup_frames {
         return;
+    }
+
+    // The tile memory brake coarsens *selection* when residency runs over the
+    // share, so a frame read back while it is biting renders the ground
+    // coarser than the preset authored — a plausible PNG that is quietly wrong,
+    // which is the failure class BL-20 is about. Headless capture runs a
+    // deliberately small 2 GiB machine allowance, and a warmup transient can
+    // ask several times the settled working set (`cloud-godray` hit the 0.333
+    // floor on 2026-07-30), so this is reachable in normal use.
+    //
+    // The brake recovers on its own once the coarse ancestors land, so the fix
+    // is to wait for it rather than to fail: the host is already sitting here
+    // settling. Same shape as the massif stream hold above — bounded wait, then
+    // warn and capture anyway, with the verdict recorded in the receipt so the
+    // image is never silently coarse.
+    let ground = readiness
+        .tile_roots
+        .iter()
+        .find(|(_, body)| body.body_id == homeworld.0)
+        .map(|(root, _)| root);
+    if let Some(root) = ground {
+        let scale = root.split_scale();
+        driver.worst_split_scale = Some(driver.worst_split_scale.unwrap_or(1.0).min(scale));
+        if scale < 1.0 {
+            driver.brake_wait_s += wall_dt_s;
+            if driver.brake_wait_s < BRAKE_RECOVER_TIMEOUT_S {
+                return;
+            }
+            warn!(
+                target: "thalos::screenshot",
+                "tile memory brake still holding detail back after {:.0} s \
+                 (split scale {scale:.2}) — capturing anyway; the receipt records it",
+                driver.brake_wait_s,
+            );
+        } else if driver.brake_wait_s > 0.0 {
+            info!(
+                target: "thalos::screenshot",
+                "tile memory brake released after {:.1} s — capturing at full detail",
+                driver.brake_wait_s,
+            );
+            driver.brake_wait_s = 0.0;
+        }
+    }
+    if let Some(server) = server.as_deref_mut() {
+        server.active_terrain = ground.map(|root| CaptureTerrainResidency {
+            split_scale: root.split_scale(),
+            worst_split_scale: driver.worst_split_scale.unwrap_or(1.0),
+            resident_tiles: root.resident_count(),
+            desired_tiles: root.desired_count(),
+            resident_mib: root.resident_bytes() as f64 / (1024.0 * 1024.0),
+            budget_mib: match thalos_body_render::tiles::residency_budget_bytes() {
+                // `usize::MAX` is the documented "budget disabled" sentinel;
+                // reporting it as a number would read as a 17 exabyte budget.
+                usize::MAX => None,
+                bytes => Some(bytes as f64 / (1024.0 * 1024.0)),
+            },
+            instances: thalos_body_render::tiles::vram_share::live_instances(),
+            brake_wait_s: driver.brake_wait_s,
+        });
     }
 
     if let Some(parent) = cfg.out.parent() {
@@ -3580,10 +3937,12 @@ pub(crate) fn pose_scripted_viewpoint(
         ScreenshotPreset::MiraEva => {
             eva_surface_context(sim, solar, height_sources, body_id).map(CaptureFocus::from)
         }
-        ScreenshotPreset::Plume | ScreenshotPreset::Reentry | ScreenshotPreset::OrbitHull => {
-            craft_context(sim).map(CaptureFocus::from)
-        }
+        ScreenshotPreset::Plume
+        | ScreenshotPreset::Reentry
+        | ScreenshotPreset::VaporCone
+        | ScreenshotPreset::OrbitHull => craft_context(sim).map(CaptureFocus::from),
         ScreenshotPreset::PlumeSkyline => plume_skyline_context(sim, solar).map(CaptureFocus::from),
+        ScreenshotPreset::CraftStance => craft_stance_context(sim, solar).map(CaptureFocus::from),
         ScreenshotPreset::Interstage => {
             craft_context_at(sim, INTERSTAGE_FOCUS_OFFSET_M).map(CaptureFocus::from)
         }
@@ -4154,9 +4513,32 @@ fn craft_context_at(sim: &SimulationState, offset_m: f64) -> Option<HubContext> 
 /// the radial makes the framing say exactly that, and keeps it true no matter
 /// how the descending craft happens to be pointed.
 fn plume_skyline_context(sim: &SimulationState, solar: &SolarSystemState) -> Option<HubContext> {
-    /// Shift the focus down the stack toward the bell, as [`craft_context`]
-    /// does, so the column rather than the pod centres the frame.
-    const FOCUS_OFFSET_M: f64 = -4.0;
+    // Shift the focus down the stack toward the bell, as [`craft_context`]
+    // does, so the column rather than the pod centres the frame.
+    craft_up_context(sim, solar, -4.0)
+}
+
+/// Focus context for [`ScreenshotPreset::CraftStance`]: the parked runway
+/// craft, framed as a whole vehicle. Same local-up pole as
+/// [`plume_skyline_context`] — for a craft sitting on its gear, azimuth must
+/// orbit in the horizontal plane and elevation must mean "degrees above the
+/// pavement", not "off the waist". The focus sits mid-fuselage: the craft
+/// state is at the ship root (the Meridian's nose tip), and centring a 35 m
+/// airframe means looking ~40 % of a fuselage aft. Approximate on purpose,
+/// like [`INTERSTAGE_FOCUS_OFFSET_M`] — coupling the harness to one ship's
+/// part list would be worse than a slightly off-centre hero shot.
+fn craft_stance_context(sim: &SimulationState, solar: &SolarSystemState) -> Option<HubContext> {
+    craft_up_context(sim, solar, -14.0)
+}
+
+/// Craft-centred focus poled on **local up**, the shared core of
+/// [`plume_skyline_context`] and [`craft_stance_context`]; `offset_m` shifts
+/// the focus along the nose axis (negative = aft).
+fn craft_up_context(
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+    offset_m: f64,
+) -> Option<HubContext> {
     let body_id = sim.simulation.dominant_body();
     // No body state yet (the frame the solar cache has not filled): fall back to
     // the nose-poled hero framing rather than returning no focus at all. It
@@ -4179,7 +4561,7 @@ fn plume_skyline_context(sim: &SimulationState, solar: &SolarSystemState) -> Opt
         .unwrap_or(DVec3::Y);
     Some(HubContext {
         body_id,
-        center_world: craft + nose * FOCUS_OFFSET_M,
+        center_world: craft + nose * offset_m,
         up_world,
         pad_r: 0.0,
     })

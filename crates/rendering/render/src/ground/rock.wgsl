@@ -47,9 +47,10 @@ struct RockParams {
 // `ground_patch.wgsl` (params, shadow block, three cascade depth maps).
 @group(3) @binding(0) var<uniform> rock: RockParams;
 @group(3) @binding(1) var<uniform> rock_shadow: ShadowCascadeBlock;
-@group(3) @binding(2) var sun_shadow_map_0: texture_depth_2d;
-@group(3) @binding(3) var sun_shadow_map_1: texture_depth_2d;
-@group(3) @binding(4) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(5) var sun_shadow_map_0: texture_depth_2d;
+@group(3) @binding(2) var sun_shadow_map_1: texture_depth_2d;
+@group(3) @binding(3) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(4) var sun_shadow_map_3: texture_depth_2d;
 
 // Stone is fairly rough but not chalk — a touch of broad sheen reads as a worn,
 // slightly-damp pebble rather than dust.
@@ -122,7 +123,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let sky = compute_surface_sky(rock.sky_tau.xyz, rock.sky_tau.w, up, sun_dir, sun_flux);
     // Tree-cast (and self-) sun shadows — the same cascade the ground samples.
     let shadow = sun_shadow_factor(
-        in.world_position, rock_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+        in.world_position, rock_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2, sun_shadow_map_3,
     );
 
     var scene: SceneLighting;  // zeroed; the dielectric path never reads it.

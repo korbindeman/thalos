@@ -1,0 +1,1 @@
+{"width":3336,"height":1668,"px_m_equator":6000,"planet_radius_m":3186000,"backing":"diffusion","log_decades":7,"units":"u8 = 255*log10(catchment_km2)/log_decades","mapping":"equirect"}

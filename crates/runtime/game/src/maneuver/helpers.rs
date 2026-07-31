@@ -1025,6 +1025,7 @@ mod tests {
             delta_v,
             reference_body: 0,
             phase: super::super::state::NodeBurnPhase::Planned,
+            source: super::super::state::NodeSource::Manual,
         }
     }
 

@@ -918,8 +918,7 @@ mod tests {
             .sea_level_isp
             .map(|sl| sl as f64 / typhon.isp as f64)
             .unwrap_or(1.0);
-        let pad_twr =
-            typhon.thrust as f64 * sl_factor / (s.wet_mass_kg() * THALOS_SURFACE_G);
+        let pad_twr = typhon.thrust as f64 * sl_factor / (s.wet_mass_kg() * THALOS_SURFACE_G);
         assert!(
             pad_twr > 1.2,
             "atlas stage-1 pad TWR {pad_twr:.2} too low to leave the pad cleanly"

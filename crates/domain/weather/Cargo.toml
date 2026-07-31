@@ -1,0 +1,16 @@
+[package]
+name = "thalos_weather"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Pure crate: NO Bevy, same rule as thalos_terrain / thalos_world. The sim is
+# deliberately dependency-light so the weather iteration loop (edit → probe
+# PNG) compiles in seconds instead of rebuilding the runtime crate.
+[dependencies]
+rayon = "1.12"
+
+[dev-dependencies]
+# The sim probe renders diagnostic PNGs. Not Bevy, so the no-Bevy CI guard is
+# unaffected.
+image = { version = "0.25", default-features = false, features = ["png"] }

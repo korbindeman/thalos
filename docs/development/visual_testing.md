@@ -348,13 +348,41 @@ hand-back is a presentation page, not a paragraph describing the images
 anything with no visible surface; a padded presentation costs more than it
 returns.
 
-The page is a self-contained HTML file published with the Artifact tool. It is
-served under a strict CSP: no external host loads, and it cannot read the
-developer's disk, so `<img src="artifacts/visual/…">` and `file://` both render
-broken. Images have to be inlined as data URIs, which is what
-`scripts/present_embed.py` is for.
+The page is a self-contained HTML file in `artifacts/reports/`
+(`<date>-<slug>.html`, gitignored like all evidence), handed back by showing it
+in the agent's in-app browser pane. Images are inlined as data URIs even though a
+local file could reference them live: `artifacts/visual/latest/` and the
+comparison dirs are overwritten on every rerun, so a page linking them would
+silently change under the reader — embedding freezes the evidence at hand-back
+time. It also keeps the file portable: the same page can be published as a
+claude.ai Artifact (whose CSP blocks every external load) when it needs to
+travel off the machine. `scripts/present_embed.py` does the inlining.
 
-Write the page with tokens where the captures go:
+### Design language
+
+**Start from `scripts/present_template.html`: copy it, keep the stylesheet
+untouched, replace the content.** Every report reads the same way, so the user
+never has to re-learn a page. The look is a research paper, not a dashboard:
+
+- One centered serif column (~46rem). A title block with a one-line meta row
+  (`date · preset · axis`), plain sentence-case headings, figures numbered
+  and captioned (`Figure 1. …`).
+- The page is white in the viewer's light theme and black in dark, through the
+  template's theme tokens. There is no accent color.
+- Hairline rules and thin image borders are the only decoration. No cards,
+  shadows, gradients, background tints, or hero sections.
+- Never `text-transform: uppercase` and never letter-spacing. No em-dashes in
+  page copy: use commas, colons, or the meta row's middle dot.
+- **Text budget is a slide deck's.** The user reads the agent's chat reply
+  regardless, so the page carries only what the visuals need: a few bullets per
+  section, one sentence per figure caption saying what to look at and where.
+  Prose paragraphs on the page are a smell.
+- Before/after pairs use the template's `.pair` grid: two matched captures side
+  by side, short labels under each half, one shared caption for the pair.
+
+### Handing it back
+
+Write the page in `artifacts/reports/` with tokens where the captures go:
 
 ```html
 <h2>Ridge stipple, before and after</h2>
@@ -362,18 +390,24 @@ Write the page with tokens where the captures go:
 {{img:artifacts/visual/runs/comparisons/mira-eva/terrain-regolith-filter/02_filtered.png|footprint-filtered}}
 ```
 
-Then embed and publish:
+Then embed it:
 
 ```bash
-python3 scripts/present_embed.py report.html --width 1400
+python3 scripts/present_embed.py artifacts/reports/report.html --width 1400
 ```
 
-That writes `report.embedded.html` with every token replaced by an `<img>`
+and present the result by navigating the agent browser pane to the
+`.embedded.html`'s `file://` path (pass `force: true` if the pane is showing a
+stale snapshot of an earlier file). In a session with no browser pane, publish
+the same file as a claude.ai Artifact or fall back to markdown with PNG paths.
+
+The script writes `report.embedded.html` with every token replaced by an `<img>`
 carrying a downscaled data URI (JPEG q82, or PNG when the source has alpha), and
-prints the per-image and total payload size to stderr. Publish the
-`.embedded.html`; keep the token source, so a recapture only costs a rerun of
-the script. Token paths resolve relative to the page, then to the repository
-root. Aim for a page in the low single-digit MB — `--width` is the knob.
+prints the per-image and total payload size to stderr. Open the
+`.embedded.html`; keep the token source beside it, so a recapture only costs a
+rerun of the script. Token paths resolve relative to the page, then to the
+repository root. Aim for a page in the low single-digit MB — `--width` is the
+knob.
 
 What belongs on it: the matched before/after pair from one comparison run at
 identical framing and labelled (never two differently-framed stills), what you

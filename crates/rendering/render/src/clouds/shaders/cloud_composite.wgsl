@@ -20,10 +20,13 @@
     CLOUD_MARCH_FADE_FRACTION,
 }
 #import thalos::lighting::{SCENE_FLUX_SCALE, SURFACE_DIRECT_SCALE}
+#import thalos::volumetrics::water_cloud_albedo
 
-// Diffusion-limit reflectance of a water cloud. MUST equal `CLOUD_MS_ALBEDO`
-// in clouds_compute.wgsl — it is the single number both tiers are anchored to.
-const FAR_CLOUD_ALBEDO: f32 = 0.80;
+// The diffusion-limit reflectance both tiers are anchored to now has ONE
+// definition, in `thalos::volumetrics`. It used to be written out here with a
+// comment saying it MUST equal `CLOUD_MS_ALBEDO` in clouds_compute.wgsl — read
+// `water_cloud_albedo()` instead. (It cannot be a `const` here: naga_oil does not
+// carry imported consts across, and a `const` initializer cannot call.)
 // `orbital_cloud_shade`'s radiance scale for a fully lit, optically thick,
 // storm-free column (lit = 1, core ≈ 0.9): 0.72 · (0.18 + 0.82) · 0.85.
 const FAR_SHADE_LIT: f32 = 0.61;
@@ -76,6 +79,9 @@ struct CloudCompositeParams {
     // near march's exact ambient inputs — SkyAmbient irradiance/π).
     cloud_ambient_top:         vec4<f32>,
     cloud_ambient_bottom:      vec4<f32>,
+    // x = cell-scale cloud evolution, sim seconds; yzw reserved. Must match the
+    // near marcher's `config.cell_evolution_s` or the tiers disagree on shape.
+    cloud_time:                vec4<f32>,
 }
 @group(3) @binding(1) var<uniform> cloud_params: CloudCompositeParams;
 @group(3) @binding(2) var scene_depth_texture: texture_depth_2d;
@@ -404,10 +410,22 @@ fn sample_orbital_cloud(
         return CloudOverlay(vec3<f32>(0.0), 0.0);
     }
 
-    // One per-pixel angle for the whole tier — the same quantity the marcher
-    // derives from its own projection.
+    // Per-pixel angle of THIS full-resolution pass — the far tier's own
+    // sampling/LOD footprint.
     let pixel_angle = 2.0 / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
-    let reach = far_ownership(oc_len_sq, b, pixel_angle);
+    // Ownership, however, must reproduce the MARCHER's budget law, and the
+    // marcher's pixel is the resolution-scaled cloud target's, not this
+    // pass's: at the default 2/3 scale the two angles differ by 1.5×, which
+    // is enough to put the two integrators in DIFFERENT reach regimes on the
+    // same ray — the composite blocking the far tier over rays the marcher
+    // had already abandoned (2026-07-31, the LEO bare annulus). The target
+    // width rides in `cloud_time.y`; fall back to this pass's angle if a
+    // driver ever leaves it unset.
+    var march_pixel_angle = pixel_angle;
+    if (cloud_params.cloud_time.y >= 1.0) {
+        march_pixel_angle = 2.0 / max(cloud_params.cloud_time.y * view.clip_from_view[0][0], 1.0);
+    }
+    let reach = far_ownership(oc_len_sq, b, march_pixel_angle);
     let base_alt = max(cloud_atmosphere.cloud_shape.x, 0.0);
     let thickness = max(cloud_atmosphere.cloud_shape.y, 1.0);
 
@@ -598,6 +616,7 @@ fn sample_orbital_cloud(
         planet_radius,
         px_morph,
         cloud_cell_style(n_morph, type_morph),
+        cloud_params.cloud_time.x,
     );
 
     // One derived response for every footprint regime: the LUT stores the
@@ -635,6 +654,7 @@ fn sample_orbital_cloud(
                 planet_radius,
                 px_seg,
                 cloud_cell_style(n_seg, seg_type[s]),
+                cloud_params.cloud_time.x,
             );
             let a_col = far_column_opacity(seg_profile[s], cell_s, px_seg);
             chord_trans *= 1.0 - min(a_col * seg_w[s], 0.95);
@@ -730,7 +750,7 @@ fn sample_orbital_cloud(
     // eye against the near tier; re-derive it if either side's photometry
     // moves.
     let far_radiance_k =
-        FAR_CLOUD_ALBEDO * SURFACE_DIRECT_SCALE / (FAR_CLOUD_TINT.g * FAR_SHADE_LIT);
+        water_cloud_albedo() * SURFACE_DIRECT_SCALE / (FAR_CLOUD_TINT.g * FAR_SHADE_LIT);
     var radiance = cloud_atmosphere.cloud_albedo_coverage.rgb
         * FAR_CLOUD_TINT
         * sun_chroma

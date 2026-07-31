@@ -22,8 +22,9 @@ use crate::canonical::AuthorityMode;
 /// literals in `stable_contact_reached` and the game's grounded checks.
 pub const STABLE_THROTTLE_EPSILON: f64 = 1.0e-3;
 
-/// Commanded-throttle threshold that releases a landed (`BodyFixed`) ship
-/// back to live physics. Mirror of the game's `LANDED_THROTTLE_RELEASE`.
+/// Selected-throttle threshold that releases a landed (`BodyFixed`) ship
+/// back to live physics. This is the control-arbitration winner, regardless
+/// of whether the pilot or autoflight supplied it.
 pub const LANDED_THROTTLE_RELEASE: f64 = 1.0e-3;
 
 // ---------------------------------------------------------------------------
@@ -211,8 +212,8 @@ pub struct RegimeInputs<'a> {
     pub warp_ladder: &'a [WarpLevel],
     /// Post-fuel-gate throttle actually producing thrust.
     pub throttle_effective: f64,
-    /// Player/autopilot throttle setpoint (drives the landed release).
-    pub throttle_commanded: f64,
+    /// Control-arbitration winner before the fuel gate (drives landed release).
+    pub throttle_selected: f64,
     /// Canonical authority at the time of resolution (frame start).
     pub authority: AuthorityKind,
     /// `Some` while the walking locomotion controller is active.
@@ -484,7 +485,7 @@ pub fn expected_authority(inputs: &RegimeInputs, regime: &CraftRegime) -> Author
     let mut authority = inputs.authority;
     let mut just_released = false;
     if authority == AuthorityKind::BodyFixed {
-        if inputs.throttle_commanded > LANDED_THROTTLE_RELEASE {
+        if inputs.throttle_selected > LANDED_THROTTLE_RELEASE {
             // Landed release on commanded throttle. The release routes through
             // `OnRails` for the handoff frame *on purpose*: `OnRails` Kepler-
             // propagates canonical so it keeps pace with the body's orbital
@@ -567,7 +568,7 @@ mod tests {
             warp_target_speed: 1.0,
             warp_ladder: &LADDER,
             throttle_effective: 0.0,
-            throttle_commanded: 0.0,
+            throttle_selected: 0.0,
             authority: AuthorityKind::OnRails,
             walking: None,
             craft_has_collider: true,
@@ -682,10 +683,10 @@ mod tests {
     }
 
     #[test]
-    fn landed_release_on_commanded_throttle() {
+    fn landed_release_on_selected_throttle() {
         let mut inputs = coast_inputs();
         inputs.authority = AuthorityKind::BodyFixed;
-        inputs.throttle_commanded = 0.5;
+        inputs.throttle_selected = 0.5;
         let (regime, _) = resolve(&inputs, &RegimeMemory::default());
         // Effective throttle is still 0 this frame, so the release lands on
         // OnRails; the backend takes over once thrust becomes effective. The

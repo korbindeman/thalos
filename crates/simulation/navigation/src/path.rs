@@ -63,10 +63,16 @@ impl Arc2 {
 /// a fabricated course is a wrong course on every display downstream.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Leg {
-    Line { from: DVec2, to: DVec2 },
+    Line {
+        from: DVec2,
+        to: DVec2,
+    },
     Arc(Arc2),
     /// A zero-length leg that still knows which way it faces.
-    Point { at: DVec2, theta: f64 },
+    Point {
+        at: DVec2,
+        theta: f64,
+    },
 }
 
 impl Leg {
@@ -273,7 +279,10 @@ impl LateralPath {
     pub fn polyline(&self, max_sag_m: f64) -> Vec<DVec2> {
         let mut out: Vec<DVec2> = Vec::new();
         let push = |p: DVec2, out: &mut Vec<DVec2>| {
-            if out.last().is_none_or(|last| last.distance_squared(p) > 1e-6) {
+            if out
+                .last()
+                .is_none_or(|last| last.distance_squared(p) > 1e-6)
+            {
                 out.push(p);
             }
         };
@@ -360,7 +369,8 @@ mod tests {
         );
         // Past the end never goes negative.
         assert_abs_diff_eq!(
-            p.distance_to_go(DVec2::new(0.0, 2_000.0)).expect("non-empty"),
+            p.distance_to_go(DVec2::new(0.0, 2_000.0))
+                .expect("non-empty"),
             0.0,
             epsilon = 1e-9
         );
@@ -376,11 +386,26 @@ mod tests {
             sweep: std::f64::consts::FRAC_PI_2,
         };
         // At the start the radius points +x, so travel must be +y (north).
-        assert_abs_diff_eq!(left.theta_at_t(0.0), std::f64::consts::FRAC_PI_2, epsilon = 1e-12);
-        let right = Arc2 { sweep: -std::f64::consts::FRAC_PI_2, ..left };
+        assert_abs_diff_eq!(
+            left.theta_at_t(0.0),
+            std::f64::consts::FRAC_PI_2,
+            epsilon = 1e-12
+        );
+        let right = Arc2 {
+            sweep: -std::f64::consts::FRAC_PI_2,
+            ..left
+        };
         // Same start point, opposite sense: travel is −y.
-        assert_abs_diff_eq!(right.theta_at_t(0.0), -std::f64::consts::FRAC_PI_2, epsilon = 1e-12);
-        assert_abs_diff_eq!(left.length(), 100.0 * std::f64::consts::FRAC_PI_2, epsilon = 1e-9);
+        assert_abs_diff_eq!(
+            right.theta_at_t(0.0),
+            -std::f64::consts::FRAC_PI_2,
+            epsilon = 1e-12
+        );
+        assert_abs_diff_eq!(
+            left.length(),
+            100.0 * std::f64::consts::FRAC_PI_2,
+            epsilon = 1e-9
+        );
     }
 
     #[test]
@@ -428,7 +453,11 @@ mod tests {
         };
         let path = LateralPath::new(vec![Leg::Arc(arc)]);
         let pts = path.polyline(2.0);
-        assert!(pts.len() > 4, "half-turn needs subdivision, got {}", pts.len());
+        assert!(
+            pts.len() > 4,
+            "half-turn needs subdivision, got {}",
+            pts.len()
+        );
         // Every chord midpoint must sit within the sag budget of the true arc.
         for w in pts.windows(2) {
             let mid = (w[0] + w[1]) * 0.5;

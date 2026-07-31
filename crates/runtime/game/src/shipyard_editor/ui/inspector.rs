@@ -13,6 +13,7 @@ use bevy::ui::RelativeCursorPosition;
 use crate::shipyard_editor::core::{
     EditorPart, EditorState, inspector_params, symmetry_edit_target,
 };
+use crate::units_settings::UnitSystem;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, CatalogRef, CommandPod, Decoupler, Engine, FuelTank, Fuselage,
     Gear, PartCatalog, PartResources, Resource, ResourcePool, SymmetryGroup, Wing,
@@ -142,7 +143,11 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme) {
 
 /// The selection key the inspector content is built for. Pool set included
 /// so add/remove-resource rebuilds the rows.
-type InspectorKey = (Entity, bool, Vec<Resource>);
+/// Identity of the currently-rendered inspector. The measurement system is
+/// part of it: the sliders bake their unit into `SliderFormat` at spawn time,
+/// so a preference change has to invalidate the panel like a new selection
+/// would.
+type InspectorKey = (Entity, bool, Vec<Resource>, UnitSystem);
 
 fn kind_label(
     pod: Option<&CommandPod>,
@@ -185,11 +190,14 @@ pub(super) fn rebuild_inspector(
     state: Res<EditorState>,
     theme: Res<UiTheme>,
     catalog: Res<PartCatalog>,
+    units: Res<crate::units_settings::UnitsSettings>,
     groups: Query<(Entity, &SymmetryGroup), With<EditorPart>>,
     parts: KindQuery,
     content: Query<(Entity, Option<&Children>), With<InspectorContent>>,
     mut shown: Local<Option<Option<InspectorKey>>>,
 ) {
+    // The editor is not a flight instrument: it follows the global switch.
+    let system = units.system_for(crate::units_settings::UnitDomain::General);
     let key: Option<InspectorKey> = state.selected.map(|sel| {
         let target = symmetry_edit_target(sel, &groups);
         let is_root = Some(target) == state.ship_root;
@@ -198,7 +206,7 @@ pub(super) fn rebuild_inspector(
             .ok()
             .and_then(|p| p.12.map(|r| r.pools.keys().copied().collect()))
             .unwrap_or_default();
-        (target, is_root, pools)
+        (target, is_root, pools, system)
     });
     if shown.as_ref() == Some(&key) {
         return;
@@ -214,7 +222,7 @@ pub(super) fn rebuild_inspector(
         }
     }
 
-    let Some((target, is_root, _)) = key else {
+    let Some((target, is_root, ..)) = key else {
         let placeholder = theme.faint("(no selection)");
         commands.entity(content_entity).with_children(|c| {
             c.spawn(placeholder);
@@ -291,6 +299,15 @@ pub(super) fn rebuild_inspector(
 
         use ParamBinding as B;
         use SliderFormat as F;
+        // Dimension sliders read in the active unit while storing metres, so
+        // the range and step stay authored in SI. `length_display` keeps the
+        // metre→foot factor in the one place that owns it.
+        let (factor, suffix) = crate::hud::format::length_display(system);
+        let len = F::Scaled {
+            factor: factor as f32,
+            suffix,
+            decimals: 2,
+        };
         if let Some(d) = &dec_v {
             if is_root {
                 slider(
@@ -299,21 +316,13 @@ pub(super) fn rebuild_inspector(
                     d.diameter,
                     0.3,
                     6.0,
-                    F::Meters,
+                    len,
                     B::DecouplerDiameter,
                 );
             }
         } else if let Some(a) = &adapter_v {
             if is_root {
-                slider(
-                    c,
-                    "DIAMETER",
-                    a.diameter,
-                    0.3,
-                    6.0,
-                    F::Meters,
-                    B::AdapterDiameter,
-                );
+                slider(c, "DIAMETER", a.diameter, 0.3, 6.0, len, B::AdapterDiameter);
             }
             slider(
                 c,
@@ -321,60 +330,20 @@ pub(super) fn rebuild_inspector(
                 a.target_diameter,
                 0.3,
                 6.0,
-                F::Meters,
+                len,
                 B::AdapterTargetDiameter,
             );
         } else if let Some(t) = &tank_v {
             if is_root {
-                slider(
-                    c,
-                    "DIAMETER",
-                    t.diameter,
-                    0.3,
-                    6.0,
-                    F::Meters,
-                    B::TankDiameter,
-                );
+                slider(c, "DIAMETER", t.diameter, 0.3, 6.0, len, B::TankDiameter);
             }
-            slider(
-                c,
-                "LENGTH",
-                t.length,
-                0.5,
-                tank_max_len,
-                F::Meters,
-                B::TankLength,
-            );
+            slider(c, "LENGTH", t.length, 0.5, tank_max_len, len, B::TankLength);
         } else if let Some(f) = &fuselage_v {
-            slider(
-                c,
-                "LENGTH",
-                f.length,
-                2.0,
-                60.0,
-                F::Meters,
-                B::FuselageLength,
-            );
+            slider(c, "LENGTH", f.length, 2.0, 60.0, len, B::FuselageLength);
             if is_root {
-                slider(
-                    c,
-                    "WIDTH (Ø)",
-                    f.max_width,
-                    0.5,
-                    8.0,
-                    F::Meters,
-                    B::FuselageWidth,
-                );
+                slider(c, "WIDTH (Ø)", f.max_width, 0.5, 8.0, len, B::FuselageWidth);
             }
-            slider(
-                c,
-                "HEIGHT",
-                f.max_height,
-                0.5,
-                8.0,
-                F::Meters,
-                B::FuselageHeight,
-            );
+            slider(c, "HEIGHT", f.max_height, 0.5, 8.0, len, B::FuselageHeight);
             slider(
                 c,
                 "ROUNDNESS",
@@ -417,7 +386,7 @@ pub(super) fn rebuild_inspector(
                 f.nose_droop,
                 0.0,
                 2.0,
-                F::Meters,
+                len,
                 B::FuselageNoseDroop,
             );
             slider(
@@ -426,7 +395,7 @@ pub(super) fn rebuild_inspector(
                 f.tail_upsweep,
                 0.0,
                 3.0,
-                F::Meters,
+                len,
                 B::FuselageTailUpsweep,
             );
             slider(
@@ -435,7 +404,7 @@ pub(super) fn rebuild_inspector(
                 f.tail_tip_diameter,
                 0.0,
                 3.0,
-                F::Meters,
+                len,
                 B::FuselageTailTipDiameter,
             );
             slider(
@@ -448,25 +417,17 @@ pub(super) fn rebuild_inspector(
                 B::FuselageTailBluntness,
             );
         } else if let Some(w) = &wing_v {
-            slider(c, "SPAN /SIDE", w.span, 0.5, 30.0, F::Meters, B::WingSpan);
+            slider(c, "SPAN /SIDE", w.span, 0.5, 30.0, len, B::WingSpan);
             slider(
                 c,
                 "ROOT CHORD",
                 w.root_chord,
                 0.3,
                 15.0,
-                F::Meters,
+                len,
                 B::WingRootChord,
             );
-            slider(
-                c,
-                "TIP CHORD",
-                w.tip_chord,
-                0.1,
-                15.0,
-                F::Meters,
-                B::WingTipChord,
-            );
+            slider(c, "TIP CHORD", w.tip_chord, 0.1, 15.0, len, B::WingTipChord);
             slider(
                 c,
                 "SWEEP",
@@ -510,7 +471,7 @@ pub(super) fn rebuild_inspector(
                 g.strut_length,
                 0.3,
                 4.0,
-                F::Meters,
+                len,
                 B::GearStrutLength,
             );
             slider(
@@ -519,7 +480,7 @@ pub(super) fn rebuild_inspector(
                 g.wheel_radius,
                 0.1,
                 1.2,
-                F::Meters,
+                len,
                 B::GearWheelRadius,
             );
         }
@@ -617,10 +578,18 @@ pub(super) fn rebuild_inspector(
 /// only on change.
 pub(super) fn update_info_text(
     state: Res<EditorState>,
+    units: Res<crate::units_settings::UnitsSettings>,
     groups: Query<(Entity, &SymmetryGroup), With<EditorPart>>,
     parts: KindQuery,
     mut info: Query<&mut Text, With<InspectorInfoText>>,
 ) {
+    // The editor is not a flight instrument: it follows the global switch.
+    let system = units.system_for(crate::units_settings::UnitDomain::General);
+    // Ø at two decimals; masses at the vehicle-scale tiering. Percentages,
+    // ratios, and specific impulse (seconds) are unit-system-invariant.
+    let d = |v: f32| crate::hud::format::length(v as f64, 2, system);
+    let kg = |v: f32| crate::hud::format::mass_large(v as f64, system);
+    let a = |v: f32| crate::hud::format::area(v as f64, system);
     let Ok(mut text) = info.single_mut() else {
         return;
     };
@@ -649,38 +618,41 @@ pub(super) fn update_info_text(
 
     let mut lines: Vec<String> = vec![format!("catalog: {}", catalog_ref.id)];
     if let Some(p) = pod {
-        lines.push(format!("{} · Ø{:.2} m (fixed)", p.model, p.diameter));
-        lines.push(format!("dry mass {:.0} kg (fixed)", p.dry_mass));
-    } else if let Some(d) = dec {
+        lines.push(format!("{} · Ø{} (fixed)", p.model, d(p.diameter)));
+        lines.push(format!("dry mass {} (fixed)", kg(p.dry_mass)));
+    } else if let Some(dec_part) = dec {
         if Some(target) != state.ship_root {
-            lines.push(format!("Ø{:.2} m (from parent)", d.diameter));
+            lines.push(format!("Ø{} (from parent)", d(dec_part.diameter)));
         }
-        lines.push(format!("ejection {:.0} N·s", d.ejection_impulse));
-        lines.push(format!("dry mass {:.0} kg", d.dry_mass));
-    } else if let Some(a) = adapter {
+        lines.push(format!(
+            "ejection {}",
+            crate::hud::format::impulse(dec_part.ejection_impulse as f64, system)
+        ));
+        lines.push(format!("dry mass {}", kg(dec_part.dry_mass)));
+    } else if let Some(adp) = adapter {
         if Some(target) != state.ship_root {
-            lines.push(format!("Ø{:.2} m (from parent)", a.diameter));
+            lines.push(format!("Ø{} (from parent)", d(adp.diameter)));
         }
-        lines.push(format!("dry mass {:.0} kg", a.dry_mass));
+        lines.push(format!("dry mass {}", kg(adp.dry_mass)));
     } else if let Some(t) = tank {
         if Some(target) != state.ship_root {
-            lines.push(format!("Ø{:.2} m (from parent)", t.diameter));
+            lines.push(format!("Ø{} (from parent)", d(t.diameter)));
         }
-        lines.push(format!("dry mass {:.0} kg", t.dry_mass));
+        lines.push(format!("dry mass {}", kg(t.dry_mass)));
     } else if let Some(f) = fuselage {
         if Some(target) != state.ship_root {
-            lines.push(format!("Ø{:.2} m (from parent)", f.max_width));
+            lines.push(format!("Ø{} (from parent)", d(f.max_width)));
         }
-        lines.push(format!("dry mass {:.0} kg", f.dry_mass));
+        lines.push(format!("dry mass {}", kg(f.dry_mass)));
     } else if let Some(e) = engine {
         lines.push(format!("{} · {}", e.model, e.geometry.label()));
         lines.push(format!(
-            "Ø{:.2} m · {:.0} kN · Isp {:.0} s (fixed)",
-            e.diameter,
-            e.thrust / 1000.0,
+            "Ø{} · {} · Isp {:.0} s (fixed)",
+            d(e.diameter),
+            crate::hud::format::thrust(e.thrust as f64, system),
             e.isp
         ));
-        lines.push(format!("dry mass {:.0} kg", e.dry_mass));
+        lines.push(format!("dry mass {}", kg(e.dry_mass)));
         for r in &e.reactants {
             lines.push(format!(
                 "  {} {:.0}%",
@@ -690,28 +662,28 @@ pub(super) fn update_info_text(
         }
         if let Some(req) = e.intake_requirement {
             lines.push(format!(
-                "intake req {:.2} m² {}",
-                req.area_m2,
+                "intake req {} {}",
+                a(req.area_m2),
                 req.kind.label()
             ));
         }
         if let Some(cap) = e.builtin_intake {
             lines.push(format!(
-                "built-in intake {:.2} m² ({:.0}%)",
-                cap.area_m2,
+                "built-in intake {} ({:.0}%)",
+                a(cap.area_m2),
                 cap.efficiency * 100.0
             ));
         }
     } else if let Some(i) = intake {
-        lines.push(format!("{} · Ø{:.2} m (fixed)", i.model, i.diameter));
+        lines.push(format!("{} · Ø{} (fixed)", i.model, d(i.diameter)));
         lines.push(format!(
-            "capture {:.2} m² {} ({:.0}%)",
-            i.capture.area_m2,
+            "capture {} {} ({:.0}%)",
+            a(i.capture.area_m2),
             i.capture.kind.label(),
             i.capture.efficiency * 100.0
         ));
     } else if let Some(w) = wing {
-        lines.push(format!("dry mass {:.0} kg/panel", w.dry_mass));
+        lines.push(format!("dry mass {}/panel", kg(w.dry_mass)));
         lines.push(if groups.get(target).is_ok() {
             "symmetry: mirrored pair (edits sync)".into()
         } else {
@@ -723,11 +695,11 @@ pub(super) fn update_info_text(
         } else {
             "nose gear".into()
         });
-        lines.push(format!("dry mass {:.0} kg", g.dry_mass));
+        lines.push(format!("dry mass {}", kg(g.dry_mass)));
     }
     let mut node_line = String::from("nodes:");
     for (id, node) in &nodes.nodes {
-        node_line.push_str(&format!(" {id} Ø{:.2}m", node.diameter));
+        node_line.push_str(&format!(" {id} Ø{}", d(node.diameter)));
     }
     lines.push(node_line);
 

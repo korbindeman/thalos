@@ -24,7 +24,7 @@
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::{Aabb, MeshAabb};
-use bevy::math::{Affine3A, Vec3A};
+use bevy::math::{Affine3A, DVec3, Vec3A};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
@@ -45,6 +45,18 @@ const SUTTON_GRAVES_K: f64 = 1.7415e-4;
 /// on the sample, so this is the air-like default; it only sets how fast
 /// `T_stagnation` climbs with Mach, never whether the effect exists.
 const GAMMA: f64 = 1.4;
+
+/// Relative humidity at the surface, and the altitude over which it decays.
+///
+/// **A stand-in, and a named seam.** The atmosphere model carries no water
+/// vapour, so this is a plain exponential: humid in the boundary layer, dry above
+/// the troposphere. It exists because condensation effects (vapour cones now,
+/// contrail persistence later) are *gated* on humidity — without it they either
+/// never appear or appear everywhere, and both read as a bug. The cloud system
+/// already models weather; when it publishes a moisture field per column, this is
+/// what it replaces.
+const SURFACE_HUMIDITY_FRAC: f64 = 0.70;
+const HUMIDITY_SCALE_HEIGHT_M: f64 = 9_000.0;
 
 /// Airspeed below which the flow is treated as still. Below this the direction
 /// of `flow_from_dir` is numerical noise, and every consumer wants "off" rather
@@ -102,6 +114,9 @@ pub struct FlowSignals {
     pub stagnation_temp_k: f32,
     /// Sutton–Graves cold-wall stagnation-point heat flux, W/m².
     pub heat_flux_w_m2: f32,
+    /// Relative humidity of the freestream, 0..1. See [`SURFACE_HUMIDITY_FRAC`] —
+    /// currently an altitude profile, not a weather field.
+    pub relative_humidity_frac: f32,
     /// Unit direction the freestream arrives **from**, in render space. Zero
     /// when `airspeed_m_s` is below the floor. Render space is canonical space
     /// scaled and translated with no rotation, so this is the canonical
@@ -110,13 +125,20 @@ pub struct FlowSignals {
     /// Effective nose radius used in the heating correlation, m. See
     /// [`NOSE_RADIUS_FRACTION`].
     pub nose_radius_m: f32,
-    /// Descendant meshes the bounds sweep actually measured. Zero means the sweep
-    /// found nothing and every attached effect is running on a default size.
+    /// Descendant meshes that actually contributed to the bounds. Zero means the
+    /// sweep found nothing and every attached effect is running on a default size;
+    /// below the craft's real part count it measured only part of the vehicle.
     pub measured_mesh_count: u32,
     /// Radius of the craft's visual bounding sphere about its origin, m.
     pub craft_radius_m: f32,
-    /// Half-extents of the craft's visual bounding box about its origin, in
-    /// **craft-local axes**, m.
+    /// Centre of the craft's visual bounding box, in **craft-local axes**, m.
+    ///
+    /// Attached effects must offset themselves by this. A craft's origin is not
+    /// its centre (a rocket's sits near the engine end), so a body fitted about
+    /// the origin is half empty space at one end.
+    pub craft_bounds_centre_m: Vec3,
+    /// Half-extents of the craft's visual bounding box, in **craft-local axes**,
+    /// m.
     ///
     /// Attached effects must size themselves against this, not against
     /// [`Self::craft_radius_m`]. A bounding *sphere* is a bad stand-in for an
@@ -129,6 +151,15 @@ pub struct FlowSignals {
     /// in the craft's own frame (as any hull-fitted effect must) does not have to
     /// reconstruct it.
     pub flow_from_local: Vec3,
+    /// The craft's world rotation.
+    ///
+    /// Published here so an effect can map any world-space quantity (the sun
+    /// direction, a wind vector) into the craft frame **without a second query on
+    /// the craft's `Transform`**. That second query is the B0001 trap: paired with
+    /// an effect's own `&mut Transform` it is a boot panic unless the disjointness
+    /// is spelled out, and it has already taken the app down twice in this
+    /// subsystem's history.
+    pub craft_rotation: Quat,
 }
 
 impl Default for FlowSignals {
@@ -145,31 +176,41 @@ impl Default for FlowSignals {
             dynamic_pressure_pa: 0.0,
             stagnation_temp_k: 0.0,
             heat_flux_w_m2: 0.0,
+            relative_humidity_frac: 0.0,
             flow_from_dir: Vec3::ZERO,
             nose_radius_m: 1.0,
             measured_mesh_count: 0,
             craft_radius_m: 1.0,
             craft_half_extents_m: Vec3::ONE,
+            craft_bounds_centre_m: Vec3::ZERO,
             flow_from_local: Vec3::ZERO,
+            craft_rotation: Quat::IDENTITY,
         }
     }
 }
 
 /// Authoring / capture override. Any `Some` field replaces the resolved value,
-/// so a headless preset can park a vehicle in a chosen flow state without
-/// flying it there — the same pattern as `plume::PlumeDebugOverride`, and the
-/// only reason reentry is screenshot-verifiable at all.
+/// so a headless preset can pose a vehicle at a chosen point in the flight
+/// envelope without flying the whole trajectory — the same pattern as
+/// `plume::PlumeDebugOverride`, and the only reason reentry is
+/// screenshot-verifiable at all.
 ///
 /// Overrides are applied to the *inputs* where possible (density, airspeed) so
 /// the derived quantities stay mutually consistent; a test that forced
 /// `heat_flux` directly while leaving airspeed at zero would render a state no
 /// atmosphere can produce.
+///
+/// **Environmental presence is not overridable.** `in_atmosphere` always comes
+/// from the body's real atmosphere sample at the craft's real altitude. A probe
+/// must therefore boot inside an atmosphere; authored density must never light a
+/// vapour cone or shock layer on a craft visibly parked in vacuum.
 #[derive(Resource, Debug, Default, Clone, Copy)]
 pub struct FlowDebugOverride {
     pub density_kg_m3: Option<f32>,
     pub static_temp_k: Option<f32>,
     pub speed_of_sound_m_s: Option<f32>,
     pub airspeed_m_s: Option<f32>,
+    pub relative_humidity_frac: Option<f32>,
     /// Freestream arrival direction in **craft-local** axes, normalized by the
     /// consumer. Lets a preset put the shock cap on a chosen face without
     /// orienting the whole vehicle.
@@ -184,6 +225,7 @@ impl FlowDebugOverride {
             || self.static_temp_k.is_some()
             || self.speed_of_sound_m_s.is_some()
             || self.airspeed_m_s.is_some()
+            || self.relative_humidity_frac.is_some()
             || self.flow_from_local.is_some()
     }
 }
@@ -199,18 +241,42 @@ impl FlowDebugOverride {
 #[derive(Component)]
 pub struct FlowProxyMesh;
 
-/// How many consecutive stable measurements end the re-measure loop.
+/// How many consecutive *complete* measurements end the re-measure loop.
 ///
-/// Gating on descendant mesh *count* alone is not enough. Every part entity exists
-/// from the first frame, but `Mesh::compute_aabb` returns `None` until the asset is
-/// loaded, so an early sweep sees the right number of meshes and the wrong size —
-/// and then never looks again. Measured: a ~10 m craft cached as a 4 m box, which
-/// scaled every attached effect wrong. So the sweep repeats until the answer stops
-/// growing.
+/// Two conditions have to hold before a measurement counts, and both were learned
+/// by getting them wrong:
+///
+/// 1. **Every counted mesh must have folded in.** Part entities all exist from the
+///    first frame, but `Mesh::compute_aabb` returns `None` until the asset loads.
+///    Gating on descendant mesh *count* alone therefore sees the right number of
+///    meshes and the wrong size.
+/// 2. **A "stable" run of ticks is not enough on its own.** With only condition 1
+///    missing, an early partial sweep repeats the same small answer every frame,
+///    never "grows", and locks itself in. Measured twice: a craft whose real box is
+///    2.0 x 11.2 x 2.0 m cached as a 2 x 2 x 2 m cube, which scaled every attached
+///    effect to a body less than a fifth of the vehicle's length.
 const BOUNDS_STABLE_TICKS: u32 = 8;
 
 /// Relative growth below which a new measurement counts as unchanged.
 const BOUNDS_STABLE_EPS: f32 = 0.01;
+
+/// Seconds between re-arming the bounds sweep, even after it has settled.
+///
+/// **A settled measurement is not necessarily a correct one.** The sweep runs in
+/// `SimStage::Sync` but transform propagation runs in `PostUpdate`, so a child
+/// spawned this frame still carries a stale `GlobalTransform` and folds in near
+/// the craft origin. That yields a box that is wrong, *small*, and perfectly
+/// stable — satisfying both "every mesh folded" and "stopped growing" — and a
+/// permanent latch then keeps it for the whole session.
+///
+/// Measured: consecutive captures of the same scenario resolved the same craft as
+/// 2.0 x 5.6 x 2.0 m and 2.0 x 2.0 x 2.0 m with an identical mesh count, so the
+/// vehicle's size — and every attached effect sized from it — was
+/// nondeterministic run to run.
+///
+/// Re-arming costs one `compute_aabb` sweep over a handful of meshes twice a
+/// second and lets a bad early answer self-correct instead of persisting.
+const BOUNDS_REMEASURE_S: f32 = 0.5;
 
 /// Cached craft geometry for flow effects.
 ///
@@ -226,6 +292,12 @@ pub struct CraftFlowGeometry {
     stable_ticks: u32,
     radius_m: f32,
     half_extents_m: Vec3,
+    centre_m: Vec3,
+    /// Meshes that actually yielded an AABB in the last sweep. Below
+    /// `mesh_count` the measurement is incomplete.
+    folded_meshes: usize,
+    /// Elapsed time at which the sweep is re-armed. See [`BOUNDS_REMEASURE_S`].
+    next_remeasure_s: f32,
 }
 
 pub struct FlowSignalsPlugin;
@@ -242,6 +314,7 @@ impl Plugin for FlowSignalsPlugin {
 /// Publish [`FlowSignals`] from canonical ship state against the dominant
 /// body's atmosphere.
 pub fn update_flow_signals(
+    time: Res<Time>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     over: Res<FlowDebugOverride>,
@@ -261,17 +334,23 @@ pub fn update_flow_signals(
             &children_q,
             &mesh_q,
             &meshes,
+            time.elapsed_secs(),
         );
     }
     let craft_radius_m = geometry.radius_m.max(0.1);
     let craft_half_extents_m = geometry.half_extents_m.max(Vec3::splat(0.05));
+    let craft_bounds_centre_m = geometry.centre_m;
     // The nose radius is a *windward* curvature, so it scales with the smallest
     // cross-section, not with the vehicle's length. Using the bounding radius
     // here would make a long rocket read as a very blunt body and under-heat it.
-    let nose_radius_m = (craft_half_extents_m.min_element() as f64 * NOSE_RADIUS_FRACTION)
-        .max(0.05);
+    let nose_radius_m =
+        (craft_half_extents_m.min_element() as f64 * NOSE_RADIUS_FRACTION).max(0.05);
 
     let resolved = resolve_flow(&sim, &solar);
+    // This is environmental truth, not another authored input. Keeping it on the
+    // resolved side prevents capture overrides from manufacturing air around an
+    // orbiting craft.
+    let in_atmosphere = resolved_atmosphere_present(&resolved);
 
     let density = over
         .density_kg_m3
@@ -289,14 +368,24 @@ pub fn update_flow_signals(
         .airspeed_m_s
         .map(|v| v as f64)
         .unwrap_or(resolved.airspeed_m_s);
+    let humidity = over
+        .relative_humidity_frac
+        .map(|v| v as f64)
+        .unwrap_or_else(|| {
+            if resolved.density_kg_m3 <= 0.0 {
+                0.0
+            } else {
+                SURFACE_HUMIDITY_FRAC
+                    * (-resolved.altitude_m.max(0.0) / HUMIDITY_SCALE_HEIGHT_M).exp()
+            }
+        })
+        .clamp(0.0, 1.0);
 
     // Direction: a local-axis override is resolved through the craft's current
     // orientation, so a preset says "wind on the nose" and gets that whatever
     // attitude the vehicle is parked in.
     let flow_from_dir = match (over.flow_from_local, ship) {
-        (Some(local), Some((_, root_gt))) => {
-            (root_gt.rotation() * local).normalize_or_zero()
-        }
+        (Some(local), Some((_, root_gt))) => (root_gt.rotation() * local).normalize_or_zero(),
         (Some(local), None) => local.normalize_or_zero(),
         (None, _) => resolved.flow_from_dir,
     };
@@ -306,11 +395,6 @@ pub fn update_flow_signals(
     } else {
         0.0
     };
-    // Only claim air when there is measurable density AND the flow direction is
-    // meaningful — the two conditions every consumer would otherwise re-test.
-    let in_atmosphere =
-        density > 0.0 && airspeed >= AIRSPEED_FLOOR_M_S && flow_from_dir != Vec3::ZERO;
-
     let stagnation_temp = if static_temp > 0.0 {
         static_temp * (1.0 + 0.5 * (GAMMA - 1.0) * mach * mach)
     } else {
@@ -334,17 +418,20 @@ pub fn update_flow_signals(
         dynamic_pressure_pa: (0.5 * density * airspeed * airspeed) as f32,
         stagnation_temp_k: stagnation_temp as f32,
         heat_flux_w_m2: heat_flux as f32,
+        relative_humidity_frac: humidity as f32,
         flow_from_dir,
         nose_radius_m: nose_radius_m as f32,
-        measured_mesh_count: geometry.mesh_count as u32,
+        measured_mesh_count: geometry.folded_meshes as u32,
         craft_radius_m,
         craft_half_extents_m,
+        craft_bounds_centre_m,
         flow_from_local: match ship {
             Some((_, root_gt)) => {
                 (root_gt.rotation().inverse() * flow_from_dir).normalize_or_zero()
             }
             None => flow_from_dir,
         },
+        craft_rotation: ship.map(|(_, gt)| gt.rotation()).unwrap_or(Quat::IDENTITY),
     };
 }
 
@@ -371,6 +458,30 @@ impl ResolvedFlow {
     };
 }
 
+/// Whether the craft's real location lies inside the dominant body's atmosphere.
+///
+/// Deliberately accepts only the resolved environment, not [`FlowDebugOverride`]:
+/// authoring can choose a point in the local flight envelope, but cannot create
+/// an atmosphere outside the body that owns it.
+fn resolved_atmosphere_present(resolved: &ResolvedFlow) -> bool {
+    resolved.density_kg_m3 > 0.0
+}
+
+/// Direction the freestream arrives **from** in render space.
+///
+/// `air_relative` points where the craft is moving through the co-rotating
+/// airmass, i.e. toward the upstream air. The air's velocity in craft space is
+/// the negative of this vector, but consumers do that downstream inversion
+/// themselves. Negating here as well puts attached effects ahead of the craft.
+fn flow_arrival_direction(air_relative: DVec3) -> Vec3 {
+    let airspeed_m_s = air_relative.length();
+    if airspeed_m_s >= AIRSPEED_FLOOR_M_S {
+        (air_relative / airspeed_m_s).as_vec3()
+    } else {
+        Vec3::ZERO
+    }
+}
+
 fn resolve_flow(sim: &SimulationState, solar: &SolarSystemState) -> ResolvedFlow {
     let body_id = sim.simulation.dominant_body();
     let Some(catalog) = sim.system.bodies.get(body_id) else {
@@ -392,11 +503,7 @@ fn resolve_flow(sim: &SimulationState, solar: &SolarSystemState) -> ResolvedFlow
     let air_velocity = state.velocity + state.angular_velocity.cross(rel);
     let air_relative = ship.velocity - air_velocity;
     let airspeed_m_s = air_relative.length();
-    let flow_from_dir = if airspeed_m_s >= AIRSPEED_FLOOR_M_S {
-        (-air_relative / airspeed_m_s).as_vec3()
-    } else {
-        Vec3::ZERO
-    };
+    let flow_from_dir = flow_arrival_direction(air_relative);
 
     let Some(atmosphere) = catalog.terrestrial_atmosphere.as_ref() else {
         return ResolvedFlow {
@@ -430,6 +537,7 @@ fn refresh_craft_geometry(
     children_q: &Query<&Children>,
     mesh_q: &Query<(&GlobalTransform, &Mesh3d), Without<FlowProxyMesh>>,
     meshes: &Assets<Mesh>,
+    now_s: f32,
 ) {
     let mut count = 0usize;
     let mut stack: Vec<Entity> = Vec::new();
@@ -449,13 +557,15 @@ fn refresh_craft_geometry(
     let changed = geometry.measured_for != Some(root) || geometry.mesh_count != count;
     if changed {
         geometry.stable_ticks = 0;
-    } else if geometry.stable_ticks >= BOUNDS_STABLE_TICKS {
+        geometry.next_remeasure_s = 0.0;
+    } else if geometry.stable_ticks >= BOUNDS_STABLE_TICKS && now_s < geometry.next_remeasure_s {
         return;
     }
 
     let root_inv = root_gt.affine().inverse();
-    let mut radius = 0.0f32;
-    let mut extents = Vec3::ZERO;
+    let mut lo = Vec3::splat(f32::INFINITY);
+    let mut hi = Vec3::splat(f32::NEG_INFINITY);
+    let mut folded = 0usize;
     for e in pending {
         let Ok((gt, mesh3d)) = mesh_q.get(e) else {
             continue;
@@ -463,28 +573,46 @@ fn refresh_craft_geometry(
         let Some(aabb) = meshes.get(&mesh3d.0).and_then(Mesh::compute_aabb) else {
             continue;
         };
-        accumulate_bounds(&aabb, root_inv * gt.affine(), &mut radius, &mut extents);
+        accumulate_bounds(&aabb, root_inv * gt.affine(), &mut lo, &mut hi);
+        folded += 1;
     }
     geometry.measured_for = Some(root);
     geometry.mesh_count = count;
-    if radius <= 0.0 {
+    if !lo.is_finite() || !hi.is_finite() || hi.cmple(lo).any() {
         // Nothing measurable yet (assets still loading). Keep looking.
         geometry.stable_ticks = 0;
         return;
     }
+    // A real AABB: centre AND half-extents.
+    //
+    // Taking half-extents as `max(|corner|)` about the craft ORIGIN instead is a
+    // trap, because a craft's origin is not its centre — a rocket's is near the
+    // engine end. That measures a box symmetric about the origin, so on an
+    // asymmetric vehicle it bulges as far past the nose as the hull reaches
+    // behind it. An attached shell then wraps a body that is half empty space,
+    // and the protruding cap glows with nothing to occlude it: measured as a
+    // teardrop streaming off the nose while the windward flank stayed faint.
+    let centre = (lo + hi) * 0.5;
+    let extents = (hi - lo) * 0.5;
+    let radius = extents.length();
     let grew = radius > geometry.radius_m * (1.0 + BOUNDS_STABLE_EPS);
     geometry.radius_m = radius;
     geometry.half_extents_m = extents;
-    if grew {
+    geometry.centre_m = centre;
+    geometry.folded_meshes = folded;
+    // Incomplete or still growing: keep looking. Only a sweep that folded every
+    // counted mesh AND did not grow may age toward settled.
+    if grew || folded < count {
         geometry.stable_ticks = 0;
     } else {
         geometry.stable_ticks = geometry.stable_ticks.saturating_add(1);
     }
+    geometry.next_remeasure_s = now_s + BOUNDS_REMEASURE_S;
 }
 
-/// Fold one mesh AABB into the craft's bounding radius and per-axis half-extents,
-/// both measured about the craft origin in craft-local axes.
-fn accumulate_bounds(aabb: &Aabb, to_root: Affine3A, radius: &mut f32, extents: &mut Vec3) {
+/// Fold one mesh AABB into the craft's running min/max corner, in craft-local
+/// axes.
+fn accumulate_bounds(aabb: &Aabb, to_root: Affine3A, lo: &mut Vec3, hi: &mut Vec3) {
     let c = aabb.center;
     let h = aabb.half_extents;
     for sx in [-1.0f32, 1.0] {
@@ -492,8 +620,8 @@ fn accumulate_bounds(aabb: &Aabb, to_root: Affine3A, radius: &mut f32, extents: 
             for sz in [-1.0f32, 1.0] {
                 let corner = Vec3A::new(c.x + sx * h.x, c.y + sy * h.y, c.z + sz * h.z);
                 let local = Vec3::from(to_root.transform_point3a(corner));
-                *radius = radius.max(local.length());
-                *extents = extents.max(local.abs());
+                *lo = lo.min(local);
+                *hi = hi.max(local);
             }
         }
     }
@@ -569,6 +697,52 @@ pub fn axial_proxy_prism_mesh(sides: usize, rings: usize) -> Mesh {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `flow_from_dir` names the upstream side of the craft, not the velocity of
+    /// the air in craft space. A rising rocket therefore sees the flow arriving
+    /// from above; downstream effects trail below it.
+    #[test]
+    fn flow_arrival_direction_points_upstream() {
+        assert_eq!(flow_arrival_direction(DVec3::new(0.0, 320.0, 0.0)), Vec3::Y);
+        assert_eq!(
+            flow_arrival_direction(DVec3::new(0.0, -320.0, 0.0)),
+            Vec3::NEG_Y
+        );
+        assert_eq!(flow_arrival_direction(DVec3::splat(0.1)), Vec3::ZERO);
+    }
+
+    /// An authoring override may pose a reproducible speed and density only
+    /// inside real air. It must not manufacture an atmosphere around an orbiting
+    /// craft, which previously made both vapour and reentry effects visible in
+    /// vacuum captures.
+    #[test]
+    fn debug_density_cannot_create_an_atmosphere() {
+        let resolved = ResolvedFlow::VACUUM;
+        let over = FlowDebugOverride {
+            density_kg_m3: Some(0.9),
+            airspeed_m_s: Some(320.0),
+            ..default()
+        };
+        let driven_density = over
+            .density_kg_m3
+            .map(f64::from)
+            .unwrap_or(resolved.density_kg_m3);
+
+        assert!(driven_density > 0.0, "the authored flow point is dense");
+        assert!(
+            !resolved_atmosphere_present(&resolved),
+            "authored density must not turn vacuum into an atmosphere"
+        );
+    }
+
+    #[test]
+    fn real_atmosphere_is_present_even_when_the_craft_is_still() {
+        let resolved = ResolvedFlow {
+            density_kg_m3: 0.9,
+            ..ResolvedFlow::VACUUM
+        };
+        assert!(resolved_atmosphere_present(&resolved));
+    }
 
     /// Heat flux must be driven by air *and* speed together. The standing trap
     /// is a brightness term that rides on speed alone: that lights a fireball

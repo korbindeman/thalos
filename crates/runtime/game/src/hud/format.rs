@@ -19,6 +19,8 @@ const MPS_TO_KN: f64 = 1.943_844_492;
 const MPS_TO_FPM: f64 = 196.850_393_7;
 const KG_TO_LB: f64 = 2.204_622_622;
 const PA_TO_PSF: f64 = 0.020_885_434;
+const N_TO_LBF: f64 = 0.224_808_943;
+const M2_TO_FT2: f64 = 10.763_910_417;
 
 /// Compact altitude string.
 ///
@@ -151,6 +153,95 @@ pub fn vertical_speed_unit(system: UnitSystem) -> &'static str {
         "ft/min"
     } else {
         "m/s"
+    }
+}
+
+// ── Construction-scale quantities (the shipyard) ───────────────────────────────
+//
+// Part dimensions, thrust, and areas never appear on a flight instrument, so
+// they have no aviation convention of their own — they follow the global system
+// via `UnitDomain::General`. They live here anyway, because the conversion
+// factors must have exactly one home.
+
+/// A part dimension — diameter, span, chord, strut length. Metric: metres.
+/// Imperial: feet. `decimals` is the caller's precision (the palette summarises
+/// at 1, the inspector and its sliders read at 2).
+pub fn length(meters: f64, decimals: usize, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        let ft = meters * M_TO_FT;
+        format!("{ft:.decimals$} ft")
+    } else {
+        format!("{meters:.decimals$} m")
+    }
+}
+
+/// Scale factor and suffix for a length, for callers that must render the
+/// number themselves — the shipyard's edit sliders, whose widget owns its own
+/// formatting. Keeps the conversion factor from being copied into the UI crate.
+pub fn length_display(system: UnitSystem) -> (f64, &'static str) {
+    if system.is_imperial() {
+        (M_TO_FT, "ft")
+    } else {
+        (1.0, "m")
+    }
+}
+
+/// Engine thrust. Metric: kilonewtons. Imperial: pounds-force, in thousands
+/// once it passes 100,000 lbf so a heavy first stage stays readable.
+pub fn thrust(newtons: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        let lbf = newtons * N_TO_LBF;
+        if lbf.abs() >= 100_000.0 {
+            format!("{:.1}k lbf", lbf / 1_000.0)
+        } else {
+            format!("{lbf:.0} lbf")
+        }
+    } else {
+        format!("{:.0} kN", newtons / 1_000.0)
+    }
+}
+
+/// A surface area — wing planform, intake capture. Metric: m². Imperial: ft².
+pub fn area(square_meters: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        format!("{:.2} ft²", square_meters * M2_TO_FT2)
+    } else {
+        format!("{square_meters:.2} m²")
+    }
+}
+
+/// Impulse, as quoted for a decoupler's separation charge. Metric: newton-
+/// seconds. Imperial: pound-force-seconds.
+pub fn impulse(newton_seconds: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        format!("{:.0} lbf·s", newton_seconds * N_TO_LBF)
+    } else {
+        format!("{newton_seconds:.0} N·s")
+    }
+}
+
+/// Mass at *vehicle* scale, for the shipyard's totals.
+///
+/// Deliberately coarser than [`mass`]: a HUD stage readout wants kilograms to
+/// resolve a nearly-dry tank, while a VAB total is a whole launch vehicle and
+/// would be unreadable in them. Metric adds a kilotonne tier; imperial adds
+/// millions of pounds.
+pub fn mass_large(kg: f64, system: UnitSystem) -> String {
+    if system.is_imperial() {
+        let lb = kg * KG_TO_LB;
+        if lb.abs() >= 999_500.0 {
+            format!("{:.2}M lb", lb / 1_000_000.0)
+        } else if lb.abs() >= 9_999.5 {
+            format!("{:.1}k lb", lb / 1_000.0)
+        } else {
+            format!("{lb:.0} lb")
+        }
+    } else if kg.abs() >= 999_500.0 {
+        format!("{:.2} kt", kg / 1_000_000.0)
+    } else if kg.abs() >= 9_999.5 {
+        format!("{:.1} t", kg / 1_000.0)
+    } else {
+        format!("{kg:.0} kg")
     }
 }
 
@@ -330,6 +421,41 @@ mod tests {
     fn dynamic_pressure_switches_unit() {
         assert_eq!(dynamic_pressure(10_000.0, Metric), "10.0 kPa");
         assert_eq!(dynamic_pressure(10_000.0, Imperial), "209 psf");
+    }
+
+    /// Construction-scale factors, pinned against their definitions.
+    #[test]
+    fn construction_factors_match_the_definitions() {
+        // 1 ft is exactly 0.3048 m; 1 lbf is 4.448222 N; 1 m² is 10.7639 ft².
+        assert_eq!(length(0.3048, 2, Imperial), "1.00 ft");
+        assert_eq!(length(2.5, 1, Metric), "2.5 m");
+        assert_eq!(thrust(4448.222, Imperial), "1000 lbf");
+        assert_eq!(thrust(4448.222, Metric), "4 kN");
+        assert_eq!(area(1.0, Imperial), "10.76 ft²");
+        assert_eq!(impulse(4448.222, Imperial), "1000 lbf·s");
+    }
+
+    /// The slider path must scale by the same factor the string path uses, or
+    /// an edit control and the info text beside it would disagree.
+    #[test]
+    fn length_display_agrees_with_the_length_formatter() {
+        for system in UnitSystem::ALL {
+            let (factor, suffix) = length_display(system);
+            assert_eq!(length(1.0 / factor, 2, system), format!("1.00 {suffix}"));
+        }
+    }
+
+    /// Vehicle-scale mass is deliberately coarser than the HUD's stage readout.
+    #[test]
+    fn mass_large_tiers_at_vehicle_scale() {
+        assert_eq!(mass_large(800.0, Metric), "800 kg");
+        assert_eq!(mass_large(45_000.0, Metric), "45.0 t");
+        assert_eq!(mass_large(2.5e6, Metric), "2.50 kt");
+        // The same 45 t in pounds is ~99.2k lb.
+        assert_eq!(mass_large(45_000.0, Imperial), "99.2k lb");
+        // ...where the HUD's finer `mass` would still be counting kilograms.
+        assert_eq!(mass(45_000.0, Metric), "45.0 t");
+        assert_eq!(mass(800.0, Metric), "800 kg");
     }
 
     #[test]

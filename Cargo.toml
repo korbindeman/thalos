@@ -8,6 +8,7 @@ members = [
     "crates/domain/construction",
     "crates/domain/terrain",
     "crates/domain/terrain/erosion_filter",
+    "crates/domain/weather",
     "crates/domain/world",
     "crates/foundation/diagnostics",
     "crates/interface/input",

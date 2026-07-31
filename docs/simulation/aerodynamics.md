@@ -249,7 +249,10 @@ and animation through the same path as the attitude surfaces — but they
 deflect from the `FlightConfig` *actuator positions*, not the fly-by-wire
 command. Actuators chase their targets at real travel rates (flaps ~6 s full
 travel, spoilers ~0.8 s) on `SimClock`, and the aero model consumes the same
-smoothed positions the visuals show, so deployment forces build smoothly. A
+smoothed positions the visuals show, so deployment forces build smoothly.
+Aircraft placed on a runway are the deliberate exception: the lever and
+actuator both start at T/O because the aircraft is already configured for its
+takeoff roll; airborne and non-runway spawns retain their existing state. A
 freshly placed `Lift` wing gets a default inboard flap + outboard aileron
 (`default_control_surfaces`).
 

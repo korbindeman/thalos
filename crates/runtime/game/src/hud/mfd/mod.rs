@@ -17,6 +17,11 @@
 //!   (spawn its root + children under the area, hidden), `relevance`
 //!   (a pure priority from [`FlightContext`]), and optionally an `update`
 //!   system that refreshes its contents while active.
+//! - [`WidgetKind::available`] gates by *craft type* (via the context's
+//!   `winged` proxy), orthogonal to `relevance`'s situation ranking: an
+//!   unavailable widget loses its tab, is never auto-picked, and a pin on it
+//!   resolves as AUTO until the craft can use it again — e.g. a rocket never
+//!   sees the navigation display.
 //! - [`select_active_widget`] is the single owner of per-widget + slot
 //!   visibility. It resolves [`MfdSelection`] → an [`ActiveWidget`] and, in
 //!   one pass, shows the chosen root and hides every other.
@@ -49,9 +54,8 @@ use crate::view::ViewMode;
 use super::HudPanel;
 use super::theme::{HudTheme, panel_frame, panel_node};
 
-/// Density (kg/m³) above which the craft counts as "in atmosphere" — the
-/// same threshold the atmospheric readout panel uses.
-const IN_ATMOSPHERE_DENSITY: f64 = 1.0e-6;
+use super::IN_ATMOSPHERE_DENSITY;
+
 /// Keep `recently_burning` latched this long after the last throttle blip so
 /// the trajectory widget doesn't flicker between burns.
 const BURN_LINGER_SECS: f32 = 5.0;
@@ -96,6 +100,20 @@ impl WidgetKind {
             WidgetKind::Interplanetary => widgets::interplanetary::relevance(ctx),
         }
     }
+
+    /// Whether this widget makes sense for the current *craft* at all —
+    /// orthogonal to `relevance`, which ranks the current *situation*. An
+    /// unavailable widget loses its selector tab, is never auto-picked, and a
+    /// pin on it resolves as AUTO until the craft changes back.
+    pub fn available(self, ctx: &FlightContext) -> bool {
+        match self {
+            // An airliner-style navigation display is meaningless without
+            // wings: a rocket or capsule has no approach to fly, even when
+            // it happens to be inside an atmosphere or near a runway.
+            WidgetKind::NavDisplay => ctx.winged,
+            WidgetKind::Trajectory | WidgetKind::Docking | WidgetKind::Interplanetary => true,
+        }
+    }
 }
 
 /// Pilot's slot selection. **Sole writer:** [`handle_tab_clicks`].
@@ -106,7 +124,9 @@ pub enum MfdSelection {
     #[default]
     Auto,
     /// Pin one widget regardless of context (shows its "no data" state when
-    /// the context wouldn't otherwise pick it).
+    /// the context wouldn't otherwise pick it). If the current craft can't
+    /// use the pinned widget ([`WidgetKind::available`]), the slot behaves
+    /// as [`MfdSelection::Auto`] without clearing the pin.
     Pinned(WidgetKind),
     /// Hide the slot entirely.
     Hidden,
@@ -122,12 +142,31 @@ pub struct ActiveWidget(pub Option<WidgetKind>);
 #[derive(Resource, Default, Clone, Copy)]
 pub struct FlightContext {
     pub in_atmosphere: bool,
+    /// The craft generates lift — a winged aircraft or spaceplane, as opposed
+    /// to a rocket or capsule. Taken from the live aero config's `lift_slope`,
+    /// which the blueprint's lifting panels already produce; there is no craft
+    /// class in the model, and this is the honest proxy for one.
+    pub winged: bool,
     pub prediction_shown: bool,
     pub recently_burning: bool,
     pub has_nodes: bool,
     pub altitude_m: f64,
     /// Distance to the nearest runway on the dominant body, if any.
     pub nearest_runway_m: Option<f64>,
+}
+
+impl FlightContext {
+    /// Whether the player is *flying an aeroplane* right now — a winged craft
+    /// inside an atmosphere.
+    ///
+    /// This is the "type of thing **and** situation" test that picks the unit
+    /// convention for the readouts shared between spaceflight and aviation
+    /// (see [`crate::units_settings::UnitDomain::shared`]). A rocket climbing
+    /// through the same air is not flying: it keeps m/s, because knots would be
+    /// meaningless on an ascent profile.
+    pub fn airplane_flight(self) -> bool {
+        self.in_atmosphere && self.winged
+    }
 }
 
 /// Marker on the slot container (panel frame). Its visibility gates the whole
@@ -182,6 +221,8 @@ impl Plugin for MfdPlugin {
             .register_type::<MfdSelection>()
             .register_type::<WidgetKind>()
             .init_resource::<ActiveWidget>()
+            .init_resource::<widgets::nav_display::NavZoom>()
+            .init_resource::<widgets::nav_display::NavRangeState>()
             .init_resource::<FlightContext>()
             .add_systems(Startup, setup_mfd.after(super::theme::init_theme))
             .add_systems(
@@ -192,6 +233,7 @@ impl Plugin for MfdPlugin {
                     widgets::trajectory::update,
                     widgets::nav_display::update,
                     widgets::nav_display::handle_canvas_click,
+                    widgets::nav_display::handle_zoom,
                     widgets::nav_display::handle_select_buttons,
                     handle_tab_clicks,
                     update_tab_visuals,
@@ -327,6 +369,7 @@ fn update_flight_context(
     solar: Res<SolarSystemState>,
     throttle: Res<ThrottleState>,
     structures: Res<StructureRegistry>,
+    aero_layout: Res<crate::aero::ShipAeroLayout>,
     aero_q: Query<&AeroReadout, With<LocalCraftBody>>,
     time: Res<Time>,
     mut ctx: ResMut<FlightContext>,
@@ -336,6 +379,9 @@ fn update_flight_context(
         .single()
         .map(|r| r.density_kgm3 > IN_ATMOSPHERE_DENSITY)
         .unwrap_or(false);
+    // A bluff body (rocket, capsule, EVA) is built with `lift_slope == 0`; any
+    // lifting panel on the blueprint raises it. See `aero::build_aero_config`.
+    let winged = aero_layout.config.lift_slope > 0.0;
 
     let s = &sim.simulation;
     let prediction_shown = s.prediction().is_some();
@@ -364,8 +410,13 @@ fn update_flight_context(
             if !matches!(site.kind, StructureKind::Runway { .. }) {
                 continue;
             }
-            let surf =
-                runway_surface_inertial(&structures, site, body_radius_m, bs.position, bs.orientation);
+            let surf = runway_surface_inertial(
+                &structures,
+                site,
+                body_radius_m,
+                bs.position,
+                bs.orientation,
+            );
             best = best.min((surf - ship.position).length());
         }
         if best.is_finite() {
@@ -375,6 +426,7 @@ fn update_flight_context(
 
     *ctx = FlightContext {
         in_atmosphere,
+        winged,
         prediction_shown,
         recently_burning,
         has_nodes,
@@ -392,6 +444,9 @@ fn update_flight_context(
 fn auto_pick(ctx: &FlightContext) -> Option<WidgetKind> {
     let mut best: Option<(WidgetKind, i32)> = None;
     for kind in WidgetKind::ALL {
+        if !kind.available(ctx) {
+            continue;
+        }
         if let Some(priority) = kind.relevance(ctx)
             && best.is_none_or(|(_, bp)| priority > bp)
         {
@@ -419,7 +474,12 @@ fn select_active_widget(
     let chosen = if ship_view {
         match *selection {
             MfdSelection::Hidden => None,
-            MfdSelection::Pinned(kind) => Some(kind),
+            MfdSelection::Pinned(kind) if kind.available(&ctx) => Some(kind),
+            // Pinned a widget this craft can't use (e.g. ND pinned in a plane,
+            // then switched to a rocket): behave as AUTO without clearing the
+            // pin, so it comes back with the craft. The selection resource is
+            // untouched — `handle_tab_clicks` stays its sole writer.
+            MfdSelection::Pinned(_) => auto_pick(&ctx),
             MfdSelection::Auto => auto_pick(&ctx),
         }
     } else {
@@ -493,17 +553,31 @@ fn handle_tab_clicks(
 fn update_tab_visuals(
     selection: Res<MfdSelection>,
     active: Res<ActiveWidget>,
+    ctx: Res<FlightContext>,
     theme: Res<HudTheme>,
     mut tabs: Query<(
         &MfdTab,
         &Interaction,
+        &mut Node,
         &mut BorderColor,
         &mut BackgroundColor,
         &Children,
     )>,
     mut text_q: Query<&mut TextColor>,
 ) {
-    for (tab, interaction, mut border, mut bg, children) in &mut tabs {
+    for (tab, interaction, mut node, mut border, mut bg, children) in &mut tabs {
+        // Widgets this craft can't use lose their tab entirely (a rocket has
+        // no ND). AUTO / OFF always stay reachable.
+        let display = match tab {
+            MfdTab::Pin(kind) if !kind.available(&ctx) => Display::None,
+            _ => Display::Flex,
+        };
+        if node.display != display {
+            node.display = display;
+        }
+        if display == Display::None {
+            continue;
+        }
         let selected = match (*selection, tab) {
             (MfdSelection::Auto, MfdTab::Auto) => true,
             (MfdSelection::Pinned(k), MfdTab::Pin(j)) => k == *j,

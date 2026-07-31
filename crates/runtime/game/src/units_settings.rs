@@ -65,12 +65,37 @@ impl UnitSystem {
 /// absent until there is a ship instrument to attach it to.)
 #[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnitDomain {
-    /// Spaceflight and everything else: orbital altitude and apsides, Δv,
-    /// staging masses, map scales. Follows the global [`UnitSystem`] exactly.
+    /// Spaceflight, construction, and everything else: Δv, staging masses, map
+    /// scales, the shipyard. Follows the global [`UnitSystem`] exactly.
     General,
     /// Aviation instruments: the PFD tapes and readouts, the atmospheric
     /// TAS/q/Mach pill, and the MFD navigation display.
     Aviation,
+}
+
+impl UnitDomain {
+    /// Domain for the readouts **shared** between spaceflight and aviation —
+    /// the altitude cluster and the velocity readout.
+    ///
+    /// Most instruments state their own domain, because a PFD tape is an
+    /// aviation instrument in orbit too. These two cannot: the same widget
+    /// shows apoapsis on a transfer and approach altitude on final, so there is
+    /// no static answer and the *situation* has to pick. `airplane_flight` is
+    /// [`crate::hud::mfd::FlightContext::airplane_flight`] — a winged craft
+    /// inside an atmosphere, i.e. the case where a pilot expects feet and
+    /// knots. A rocket in the same air keeps metres, and everything in vacuum
+    /// keeps metres.
+    ///
+    /// The whole altitude cluster (current altitude *and* apoapsis/periapsis)
+    /// resolves through this one call, so the panels sitting side by side can
+    /// never disagree about their unit.
+    pub fn shared(airplane_flight: bool) -> UnitDomain {
+        if airplane_flight {
+            UnitDomain::Aviation
+        } else {
+            UnitDomain::General
+        }
+    }
 }
 
 /// Unit convention for the aviation instruments, independent of the global
@@ -162,6 +187,35 @@ mod tests {
             assert_eq!(s.system_for(UnitDomain::General), system);
             assert_eq!(s.system_for(UnitDomain::Aviation), system);
         }
+    }
+
+    /// The shared readouts (altitude, velocity) follow the situation: feet and
+    /// knots while flying an aeroplane, metres and m/s otherwise — including
+    /// for a rocket in the very same air.
+    #[test]
+    fn shared_readouts_follow_the_situation() {
+        let s = UnitsSettings::default();
+        assert_eq!(
+            s.system_for(UnitDomain::shared(true)),
+            UnitSystem::Imperial,
+            "flying an aeroplane must read feet and knots"
+        );
+        assert_eq!(
+            s.system_for(UnitDomain::shared(false)),
+            UnitSystem::Metric,
+            "a rocket or anything in vacuum must keep the global system"
+        );
+    }
+
+    /// Turning the aviation override off must also settle the shared readouts,
+    /// or "Follow global" would still leave the altitude box in feet on final.
+    #[test]
+    fn follow_global_settles_the_shared_readouts_too() {
+        let s = UnitsSettings {
+            system: UnitSystem::Metric,
+            aviation: AviationUnits::FollowGlobal,
+        };
+        assert_eq!(s.system_for(UnitDomain::shared(true)), UnitSystem::Metric);
     }
 
     /// An imperial global must not be *undone* by the aviation override.

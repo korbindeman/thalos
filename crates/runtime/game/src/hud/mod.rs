@@ -46,6 +46,14 @@ use crate::photo_mode::not_in_photo_mode;
 
 pub use input_gate::{UiKeyboardGate, UiPointerGate};
 
+/// Density (kg/m³) above which the craft counts as "in atmosphere".
+///
+/// One definition for the whole HUD: the atmospheric readout pill's visibility,
+/// [`mfd::FlightContext::in_atmosphere`] (which drives widget auto-selection),
+/// and the display-unit situation all have to agree on where the atmosphere
+/// starts, or a panel appears in units its neighbours don't share.
+pub(crate) const IN_ATMOSPHERE_DENSITY: f64 = 1.0e-6;
+
 pub struct HudPlugin;
 
 /// Shared flex container at the top-left. `warp_time_panel` and
@@ -81,6 +89,7 @@ impl Plugin for HudPlugin {
             .init_resource::<TimeDisplayMode>()
             .init_resource::<nav_panel::ManeuverPanelState>()
             .init_resource::<orbital_panel::AltitudeDisplay>()
+            .init_resource::<orbital_panel::OrbitWidgetState>()
             .init_resource::<pfd_panel::NavDisplayMode>()
             .register_type::<pfd_panel::NavDisplayMode>()
             .add_systems(Startup, theme::init_theme.after(thalos_ui::init_ui_theme))
@@ -126,6 +135,8 @@ impl Plugin for HudPlugin {
                     view_mode_panel::update_button_visuals,
                     orbital_panel::update,
                     orbital_panel::handle_click,
+                    orbital_panel::update_orbit_widget,
+                    orbital_panel::handle_orbit_widget,
                     staging_panel::update,
                     flight_panel::update,
                     flight_panel::handle_velocity_frame_click,

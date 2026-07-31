@@ -68,9 +68,10 @@ struct GpuGrassParams {
 
 @group(3) @binding(0) var<uniform> gg: GpuGrassParams;
 @group(3) @binding(1) var<uniform> gg_shadow: ShadowCascadeBlock;
-@group(3) @binding(2) var sun_shadow_map_0: texture_depth_2d;
-@group(3) @binding(3) var sun_shadow_map_1: texture_depth_2d;
-@group(3) @binding(4) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(8) var sun_shadow_map_0: texture_depth_2d;
+@group(3) @binding(2) var sun_shadow_map_1: texture_depth_2d;
+@group(3) @binding(3) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(4) var sun_shadow_map_3: texture_depth_2d;
 // Control window: heights (R32Float, textureLoad only) + aux masks (Rgba8:
 // grass weight, terrain normal xz biased, scatter treatment).
 @group(3) @binding(5) var gg_height: texture_2d<f32>;
@@ -310,7 +311,7 @@ fn gg_emit(
     out.world_normal = world_normal;
     out.color = vec4<f32>(tint, 1.0);
     out.shadow = sun_shadow_factor_vert(
-        world_pos, gg_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+        world_pos, gg_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2, sun_shadow_map_3,
     );
     out.sky0 = vec4<f32>(sky.sun_color, sky.sun_scale);
     out.sky1 = vec4<f32>(sky.sky_radiance, 0.0);

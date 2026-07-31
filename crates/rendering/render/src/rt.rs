@@ -202,7 +202,12 @@ mod tests {
         );
         assert_eq!(
             attribute_names(&mesh),
-            ["Vertex_Position", "Vertex_Normal", "Vertex_Uv", "Vertex_Tangent"]
+            [
+                "Vertex_Position",
+                "Vertex_Normal",
+                "Vertex_Uv",
+                "Vertex_Tangent"
+            ]
         );
     }
 
@@ -243,7 +248,9 @@ mod tests {
         let mut ineligible = eligible.clone();
         ineligible.insert_attribute(Mesh::ATTRIBUTE_COLOR, vec![[1.0, 1.0, 1.0, 1.0]; 4]);
         assert!(!is_raytracing_eligible(&ineligible));
-        assert!(!thalos_shipyard::part_mesh::is_raytracing_ready(&ineligible));
+        assert!(!thalos_shipyard::part_mesh::is_raytracing_ready(
+            &ineligible
+        ));
     }
 
     /// A real craft mesh, through the real shipyard mesher, reaches the RT

@@ -28,6 +28,7 @@ Active strategy and sequencing, not implementation detail.
 - [Graphics fidelity](roadmap/graphics_fidelity.md) — one-world rendering strategy; spine-port items frozen by the keystone triage, composites continue.
 - [Ocean systems](roadmap/ocean_systems.md) — future world/gameplay program: a shared weather-driven sea, vessels, beaches, storms, and the Thalos proving slice before Pelagos.
 - [Mira learned terrain](roadmap/mira_learned_terrain.md) — L1–L6 milestones, visual gates, dataset growth, compute ledger, evidence; paused after L2 closure per the keystone.
+- [Cinematics](roadmap/cinematics.md) — one sequence document sampled as stills, keyframes, or video; in-game director/replay and scriptable craft control. Widens and supersedes `CAP-4`.
 
 ### [Gameplay systems](gameplay/)
 
@@ -52,6 +53,8 @@ Vehicle dynamics, authority, physics, and near-surface behavior.
 - [Surface-local frame](simulation/surface_local.md)
 - [Surface gameplay and impacts](simulation/surface.md)
 - [Aerodynamics](simulation/aerodynamics.md)
+- [Orbit-target autopilot / ORBIT (brief, not built)](simulation/orbit_autopilot.md)
+- [Runway destination autopilot / LAND (brief, not built)](simulation/approach_autopilot.md)
 - [Fly-by-wire control](simulation/control.md)
 - [Craft damage and destruction](simulation/damage.md)
 - [Owned physics solver](simulation/physics.md)
@@ -77,6 +80,7 @@ Atmospheric and surface-adjacent rendering systems.
 - [Clouds](rendering/clouds.md)
 - [Ocean](rendering/ocean.md)
 - [Rocket plumes](rendering/plume.md)
+- [Volumetrics foundation](roadmap/volumetrics.md) — the shared scattering model and the three kinds of volume
 - [Vehicle flow effects](rendering/flow_effects.md) — the shared aerothermal boundary and the effect taxonomy
 - [Reentry shock layer](rendering/reentry.md)
 
@@ -155,6 +159,7 @@ then findings into rows, incidents, or a stated non-action
 | `clean §N` | [architecture cleanup](roadmap/architecture_cleanup.md) |
 | `gfx §N` | [graphics fidelity](roadmap/graphics_fidelity.md) |
 | `sea §N` | [ocean systems](roadmap/ocean_systems.md) |
+| `cine §N` | [cinematics: director, replay, scripted control](roadmap/cinematics.md) |
 | `cloud §N` | [clouds](rendering/clouds.md) |
 | `giant §N` | [navigable gas giants](world/navigable_gas_giants.md) |
 | `ADR-YYYYMMDDTHHMMSSZ-slug` | [architecture decisions](adr/) |

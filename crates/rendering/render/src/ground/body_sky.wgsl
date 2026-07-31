@@ -54,7 +54,9 @@ struct SkyAtmosExtra {
     fill_cell_edge:            array<vec4<f32>, 4>,  // resolved far cell-edge LUT (cloud composite only; unused here)
     fill_cell_solid:           array<vec4<f32>, 4>,  // resolved far solid-opacity LUT (cloud composite only; unused here)
     cloud_ambient_top:         vec4<f32>,            // far-tier sky ambient (cloud composite only; unused here)
-    cloud_ambient_bottom:      vec4<f32>,            // far-tier sky ambient (cloud composite only; unused here)
+    cloud_ambient_bottom:      vec4<f32>,
+    // x = cell-scale cloud evolution, sim seconds; yzw reserved.
+    cloud_time:                vec4<f32>,            // x = cell-evolution sim time, y = cloud-target width px (cloud composite only; unused here)
 }
 @group(3) @binding(1) var<uniform> sky_atmos_extra: SkyAtmosExtra;
 

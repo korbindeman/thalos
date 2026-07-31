@@ -18,7 +18,7 @@ This replaced three disconnected paths that nothing coordinated:
 2. **Aero control surfaces** — the aero system read the raw stick
    (`GameInputIntent.attitude`) straight into `evaluate_aero`, bypassing
    the autopilot, nav modes, and locks entirely.
-3. **Throttle** — a separate setpoint path.
+3. **Throttle** — arbitrated through the same demand bus, then fuel-gated.
 
 The deadbeat damper was the SAS micro-jitter: it tried to annihilate *all*
 angular velocity every frame and limit-cycled against the continuous aero
@@ -203,16 +203,27 @@ autopilot's lead-time sizing can't drift from the controller's gains.
 
 ## Scope and extension points
 
-This pass covers **attitude** for ships — the fragmented, jittery surface.
-The remaining controls are designed-in extension points wired the same way
-later:
+The bus now covers **attitude, throttle, ground steering, and wheel braking**
+for ships. Remaining controls are designed-in extension points wired the same
+way later:
 
-- **Throttle setpoint.** Throttle currently stays on its existing path:
-  `ThrottleState::commanded` is the player's persistent setpoint, the
-  autopilot overrides it directly during a burn, and `ControlLocks::throttle`
-  gates the player. The arbiter already arbitrates a throttle demand
-  generically; folding the *setpoint* through the bus (without losing the
-  persistent-setpoint and fuel-gate semantics) is the next step.
+- **Throttle setpoint — implemented with LAND.** `ThrottleState::commanded`
+  remains the player's persistent setpoint; the bus writes `selected`, and the
+  fuel gate writes `effective`. Maneuver and LAND autoflight publish temporary
+  demands instead of mutating the pilot's setpoint. Successful LAND completion
+  holds selected idle until deliberate pilot movement, preventing a stale
+  physical lever/setpoint from surging after release.
+- **Ground steering and braking — implemented with LAND.** Nosewheel physics
+  reads `ResolvedGroundControl`; it no longer reads raw yaw input. LAND owns
+  steering/braking through rollout, then leaves the persistent parking brake
+  engaged only after stable stopped completion. See
+  [approach_autopilot.md](approach_autopilot.md) and
+  ADR-20260730T232443Z.
+- **One autoflight mode owner.** The maneuver-burn executor and LAND keep their
+  own state machines but publish through one mutually-exclusive
+  `Off / Maneuver / Land` owner. `ControlLocks`, the autopilot demand slot, and
+  the HUD annunciation derive from that owner; two equal-priority autopilots
+  never race in the bus.
 - **Warp.** Warp arbitration (player / autopilot / auto-warp) is still in
   `bridge`/`warp_to_maneuver`; it can become a `DemandSource`.
 - **EVA.** The on-foot controller owns its own kinematics and has no

@@ -359,13 +359,17 @@
             display_name: "Heavy Main Landing Gear",
             strut_mass_per_m: 130.0,
             wheel_mass: 120.0,
-            // Wide track (±1.0·host radius = the full fuselage half-width) so a
-            // broad airliner resists tipping over its main gear, with a 2-wheel
-            // tandem bogie per leg. (A belly-mounted axle much wider than the
-            // hull would float off the skin; a true wing/sponson mount comes
-            // with the morph work.)
-            track_fraction: 1.0,
-            default_strut_length: 1.9,
+            // Wheels outboard of the hull at ±2.0·host radius — the A320's
+            // actual track-to-fuselage ratio (7.59 m over a 3.95 m body) —
+            // with a 2-wheel tandem bogie per leg. gear_mesh draws the real
+            // cantilever truss: horizontal gear beam from the lower skin
+            // quadrant, vertical oleo over the wheels, diagonal side-stay.
+            // Short strut so the craft sits low like an airliner. Sized so
+            // the roll-over threshold (effective half-track at the CoM / CoM
+            // height) is ~at the tire friction limit: it skids before it
+            // tips (check: the `meridian_balance` example).
+            track_fraction: 2.0,
+            default_strut_length: 1.2,
             default_wheel_radius: 0.6,
             wheels_per_leg: 2,
         )),
@@ -374,7 +378,9 @@
             strut_mass_per_m: 110.0,
             wheel_mass: 90.0,
             track_fraction: 0.0,
-            default_strut_length: 2.0,
+            // Matched drop with gear_main_hd (1.3 + 0.5 = 1.2 + 0.6) so a
+            // common fuselage sits level with no hand-tuning.
+            default_strut_length: 1.3,
             default_wheel_radius: 0.5,
         )),
     },

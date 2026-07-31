@@ -368,9 +368,13 @@ impl ConditioningChart {
 /// rate, clip, then the sub-20 °C contrast stretch about the 20 °C pivot.
 pub fn finalize_temperature(temp_sea_level_c: f64, elevation_m: f64, precip_mm: f64) -> f64 {
     let lapse = (-6.5 + 0.0015 * precip_mm).clamp(-9.8, -4.0) / 1000.0;
-    let t = (temp_sea_level_c + lapse * elevation_m.max(0.0))
-        .clamp(prior::TEMP_MIN, prior::TEMP_MAX);
-    if t > 20.0 { t } else { (t - 20.0) * 1.25 + 20.0 }
+    let t =
+        (temp_sea_level_c + lapse * elevation_m.max(0.0)).clamp(prior::TEMP_MIN, prior::TEMP_MAX);
+    if t > 20.0 {
+        t
+    } else {
+        (t - 20.0) * 1.25 + 20.0
+    }
 }
 
 /// `finalize_synthetic_map`'s precipitation-CV damping: variability falls to
@@ -579,7 +583,10 @@ mod tests {
         assert_eq!(d[3 * w], 0.0);
         let edge = d[3 * w + 4];
         let middle = d[3 * w + 8];
-        assert!(middle > edge, "interior must be farther: {middle} vs {edge}");
+        assert!(
+            middle > edge,
+            "interior must be farther: {middle} vs {edge}"
+        );
     }
 
     #[test]
@@ -649,7 +656,10 @@ mod tests {
 
         // Province shares are a partition of the surface: they must sum to 1.
         let total: f64 = chart.province_fractions().iter().map(|(_, f)| f).sum();
-        assert!((total - 1.0).abs() < 1e-9, "provinces sum to {total}, not 1");
+        assert!(
+            (total - 1.0).abs() < 1e-9,
+            "provinces sum to {total}, not 1"
+        );
 
         // The weighted land fraction must differ from the naive cell count,
         // because this planet's land is not uniformly distributed in latitude.

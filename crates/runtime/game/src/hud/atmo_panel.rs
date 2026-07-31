@@ -14,8 +14,7 @@ use crate::hud::HudPanel;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
 use crate::units_settings::UnitDomain;
 
-/// Density (kg/m³) above which the panel is shown — i.e. "in atmosphere".
-const IN_ATMOSPHERE_DENSITY: f64 = 1.0e-6;
+use crate::hud::IN_ATMOSPHERE_DENSITY;
 
 #[derive(Component)]
 pub(super) struct AtmoPanel;

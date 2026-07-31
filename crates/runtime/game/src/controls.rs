@@ -17,7 +17,9 @@
 use bevy::prelude::*;
 
 use crate::SimStage;
-use crate::autopilot::{Autopilot, autopilot_system};
+use crate::autopilot::{AutoflightMode, Autopilot, autopilot_system};
+use crate::orbit_program::OrbitProgram;
+use crate::route_autopilot::{LandAutopilot, update_land_autopilot};
 
 /// Per-control-surface lockout flags. `true` = a programmatic system
 /// is currently driving this surface and human input should be
@@ -44,6 +46,10 @@ pub struct ControlLocks {
     /// panel is *not* gated — it's the only override path while the
     /// autopilot is engaged.
     pub navigation_mode: bool,
+    /// Nosewheel / tiller steering.
+    pub ground_steer: bool,
+    /// Wheel braking.
+    pub wheel_brake: bool,
 }
 
 pub struct ControlLocksPlugin;
@@ -60,17 +66,27 @@ impl Plugin for ControlLocksPlugin {
             // lag either way).
             update_control_locks
                 .in_set(SimStage::Physics)
-                .after(autopilot_system),
+                .after(autopilot_system)
+                .after(update_land_autopilot),
         );
     }
 }
 
-fn update_control_locks(autopilot: Res<Autopilot>, mut locks: ResMut<ControlLocks>) {
-    let active = autopilot.is_active();
+pub(crate) fn update_control_locks(
+    autopilot: Res<Autopilot>,
+    land: Res<LandAutopilot>,
+    orbit: Res<OrbitProgram>,
+    mut locks: ResMut<ControlLocks>,
+) {
+    let maneuver = autopilot.maneuver_active();
+    let landing = autopilot.mode() == AutoflightMode::Land && land.active();
+    let orbiting = autopilot.mode() == AutoflightMode::Orbit && orbit.active();
     *locks = ControlLocks {
-        throttle: active,
-        attitude: active,
-        warp: active,
-        navigation_mode: active,
+        throttle: maneuver || landing || orbiting,
+        attitude: maneuver || landing || orbiting,
+        warp: maneuver || landing || orbiting,
+        navigation_mode: maneuver || landing || orbiting,
+        ground_steer: landing,
+        wheel_brake: landing,
     };
 }

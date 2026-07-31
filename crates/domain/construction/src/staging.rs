@@ -117,6 +117,10 @@ pub struct StageSummary {
     pub delta_v_m_s: f64,
     /// Total propellant this stage burns before it separates, kg.
     pub fuel_kg: f64,
+    /// Vehicle mass at this stage's ignition, before its propellant burn.
+    pub initial_mass_kg: f64,
+    /// Vacuum thrust available from this stage's engines at full throttle.
+    pub thrust_n: f64,
     /// Per-resource totals for this stage's fuel section (mass-bearing only),
     /// for per-stage reactant bars.
     pub resources: HashMap<Resource, ResourceTotals>,
@@ -256,6 +260,8 @@ pub fn compute_stage_summaries(
             number: stage.number,
             delta_v_m_s,
             fuel_kg,
+            initial_mass_kg: m_start,
+            thrust_n,
             resources,
             has_engine,
             active: stage.number == next,

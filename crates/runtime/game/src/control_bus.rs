@@ -17,12 +17,9 @@
 //! continuous aero moments, because the two effectors were uncoordinated.
 //! Here one controller commands one torque that both effectors execute.
 //!
-//! **Scope:** attitude. Throttle remains on its existing setpoint path
-//! (`ThrottleState::commanded`, with the autopilot overriding it directly and
-//! [`crate::controls::ControlLocks`] gating the player); folding the throttle
-//! *setpoint* into the bus is the next step (see `docs/simulation/control.md`). Warp,
-//! EVA, and RCS are likewise documented extension points: a new source is a
-//! new [`DemandSource`]; a new effector is a new branch in
+//! Throttle, nosewheel steering, and wheel braking are arbitrated alongside
+//! attitude. Warp, EVA, and RCS remain documented extension points: a new
+//! source is a new [`DemandSource`]; a new effector is a new branch in
 //! [`thalos_control::allocate`].
 
 use bevy::math::DVec3;
@@ -38,11 +35,14 @@ use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody, LocalCraftKinemati
 
 use crate::SimStage;
 use crate::aero::{AeroTuning, ShipAero, resolved_aero_config};
-use crate::autopilot::{Autopilot, autopilot_system};
+use crate::autopilot::{AutoflightMode, Autopilot, autopilot_system};
 use crate::controls::ControlLocks;
+use crate::fuel::{PilotThrottleInput, ThrottleState};
 use crate::maneuver::ManeuverPlan;
 use crate::navigation::{NavigationMode, NavigationState, nav_attitude_demand};
+use crate::orbit_program::OrbitProgram;
 use crate::rendering::SimulationState;
+use crate::route_autopilot::{LandAutopilot, update_land_autopilot};
 use crate::sim_clock::SimClock;
 use crate::target::TargetBody;
 use crate::velocity_frame::VelocityFrameState;
@@ -113,6 +113,14 @@ pub struct RealizedControl {
     pub assist: AssistStatus,
 }
 
+/// Ground-control winner published by the same arbiter as flight controls.
+/// Landing-gear physics is the sole effector reader.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub struct ResolvedGroundControl {
+    pub steer: f64,
+    pub brake: f64,
+}
+
 pub struct ControlBusPlugin;
 
 impl Plugin for ControlBusPlugin {
@@ -120,6 +128,7 @@ impl Plugin for ControlBusPlugin {
         app.init_resource::<SasState>()
             .init_resource::<AttitudeControllerState>()
             .init_resource::<RealizedControl>()
+            .init_resource::<ResolvedGroundControl>()
             .add_systems(
                 Update,
                 realize_control
@@ -129,6 +138,8 @@ impl Plugin for ControlBusPlugin {
                     // command must land before the canonical step and the
                     // effector systems that read it.
                     .after(autopilot_system)
+                    .after(update_land_autopilot)
+                    .after(crate::controls::update_control_locks)
                     .after(crate::bridge::handle_warp_controls)
                     .after(crate::fuel::handle_throttle_input)
                     .before(crate::bridge::advance_simulation),
@@ -145,7 +156,12 @@ pub fn realize_control(
     target: Res<TargetBody>,
     plan: Res<ManeuverPlan>,
     velocity_frame: Res<VelocityFrameState>,
-    autopilot: Res<Autopilot>,
+    autoflight: (
+        Res<Autopilot>,
+        Res<LandAutopilot>,
+        Res<OrbitProgram>,
+        Res<PilotThrottleInput>,
+    ),
     active: Res<ActiveLocalBubble>,
     tuning: Res<AeroTuning>,
     clock: Res<SimClock>,
@@ -153,14 +169,21 @@ pub fn realize_control(
     kin_ground: (
         Res<LocalCraftKinematics>,
         Res<crate::local_physics::WeightOnWheels>,
+        Res<crate::local_physics::HullGroundContact>,
     ),
     ship_aero: ShipAeroQuery,
-    mut sim: ResMut<SimulationState>,
+    outputs: (
+        ResMut<SimulationState>,
+        ResMut<ThrottleState>,
+        ResMut<ResolvedGroundControl>,
+    ),
     mut controller: ResMut<AttitudeControllerState>,
     mut sas: ResMut<SasState>,
     mut realized: ResMut<RealizedControl>,
 ) {
-    let (kin, weight_on_wheels) = kin_ground;
+    let (autopilot, land, orbit, _pilot_throttle) = autoflight;
+    let (mut sim, mut throttle, mut ground) = outputs;
+    let (kin, weight_on_wheels, hull_ground) = kin_ground;
     // A destroyed craft accepts no attitude command: clear the hold target
     // and emit inert control so the wreck tumbles freely. `SasState` itself
     // is deliberately left alone — SAS is on by default, so the respawned
@@ -168,6 +191,8 @@ pub fn realize_control(
     if sim.simulation.is_destroyed() {
         controller.0 = AttitudeController::new();
         sim.simulation.set_control(ControlInput::default());
+        throttle.selected = 0.0;
+        *ground = ResolvedGroundControl::default();
         *realized = RealizedControl::default();
         return;
     }
@@ -198,8 +223,28 @@ pub fn realize_control(
         &sim.simulation,
     ));
 
-    // Scheduled-burn autopilot.
-    demands[2].1 = ControlDemand::attitude(autopilot.attitude_demand());
+    // Exactly one selected programmatic mode may publish this source.
+    demands[2].1 = match autopilot.mode() {
+        AutoflightMode::Maneuver => autopilot.maneuver_demand(),
+        AutoflightMode::Land => land.demand(),
+        AutoflightMode::Orbit => {
+            let maneuver_demand = autopilot.maneuver_demand();
+            let orbit_demand = orbit.demand();
+            if maneuver_demand != ControlDemand::NONE {
+                maneuver_demand
+            } else if orbit_demand != ControlDemand::NONE {
+                orbit_demand
+            } else if orbit.active() {
+                // ORBIT owns throttle throughout coast and preparation too.
+                // With no active node demand, explicit idle prevents a stale
+                // pilot setpoint from leaking through the arbiter fallback.
+                ControlDemand::throttle(0.0)
+            } else {
+                ControlDemand::NONE
+            }
+        }
+        AutoflightMode::Off => ControlDemand::NONE,
+    };
 
     // Pilot stick (highest priority) — unless a programmatic system holds the
     // attitude lock, in which case the player can't fight it (KSP behaviour).
@@ -218,12 +263,31 @@ pub fn realize_control(
             input.attitude.y as f64,
             -(input.attitude.z as f64),
         );
-        if stick.length_squared() > STICK_DEADZONE_SQ {
-            demands[3].1 = ControlDemand::attitude(AttitudeDemand::Rate(stick));
-        }
+        let attitude = if stick.length_squared() > STICK_DEADZONE_SQ {
+            AttitudeDemand::Rate(stick)
+        } else {
+            AttitudeDemand::Free
+        };
+        let pilot_throttle = (!locks.throttle).then_some(if throttle.hold_idle_until_pilot_move {
+            0.0
+        } else {
+            throttle.commanded
+        });
+        let pilot_steer =
+            (!locks.ground_steer).then_some((input.attitude.z as f64).clamp(-1.0, 1.0));
+        demands[3].1 = ControlDemand::autoflight(attitude, pilot_throttle, pilot_steer, None);
     }
 
     let arb = arbitrate(&demands);
+    throttle.selected = arb.throttle.unwrap_or_else(|| {
+        if throttle.hold_idle_until_pilot_move {
+            0.0
+        } else {
+            throttle.commanded
+        }
+    });
+    ground.steer = arb.ground_steer.unwrap_or(0.0);
+    ground.brake = arb.wheel_brake.unwrap_or(0.0);
 
     // --- One controller, one torque. ---
     // The controller normalizes its PD output by the *total* available
@@ -238,7 +302,9 @@ pub fn realize_control(
     // the plane fly-by-wire law (pitch/bank hold + auto-trim) and clamps every
     // pitch command — the pilot's included — to the AoA envelope. SAS off is
     // fully manual, KSP-style; spaceships and vacuum never get a flight state.
-    let assist_armed = sas.enabled || nav.mode == Some(NavigationMode::Stability);
+    let assist_armed = sas.enabled
+        || nav.mode == Some(NavigationMode::Stability)
+        || matches!(arb.attitude, AttitudeDemand::FlightPath(_));
     let (aero_authority, flight) =
         player_aero_environment(&sim, &active, &tuning, &kin, &ship_aero, assist_armed);
     let attitude = *sim.simulation.attitude();
@@ -246,11 +312,15 @@ pub fn realize_control(
     // Ground control regime: with weight on the wheels the reaction wheels
     // lose roll/yaw (keep pitch for takeoff rotation) — on the ground the
     // rudder + nosewheel own yaw and nothing should be able to roll the craft
-    // over its own gear at taxi speed. The controller must normalize its PD
-    // against this *masked* wheel authority, and `apply_local_forces` realizes
-    // against the same mask, so commanded torque equals realized torque.
-    params.max_torque *=
-        crate::local_physics::wheel_torque_ground_mask(weight_on_wheels.grounded);
+    // over its own gear at taxi speed; on the *hull* (tipped / belly) they
+    // lose everything, so SAS can't power-slide a tipped craft. The controller
+    // must normalize its PD against this *masked* wheel authority, and
+    // `apply_local_forces` realizes against the same mask, so commanded torque
+    // equals realized torque.
+    params.max_torque *= crate::local_physics::wheel_torque_ground_mask(
+        weight_on_wheels.grounded,
+        hull_ground.grounded,
+    );
     // Engine-gimbal authority: the full-thrust thrust-vectoring torque scaled
     // by the fraction of thrust actually firing (zero at coast). Folded into
     // the controller's non-wheel effector authority so its PD normalizes by the

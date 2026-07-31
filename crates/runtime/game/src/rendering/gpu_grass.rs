@@ -35,10 +35,10 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, GPU_GRASS_BAND_COUNT, GPU_GRASS_WINDOW_HALF_M, GPU_GRASS_WINDOW_SIZE_PX, GpuGrassAnchor,
-    GpuGrassMaterial, GpuGrassWindow, GpuGrassWindowInput, LIGHT_AT_1AU, TerrainShadingStyle,
-    build_gpu_grass_template, build_gpu_grass_window, fallback_shadow_map, gpu_grass_anchor,
-    gpu_grass_style_table,
+    AU_M, CASCADE_COUNT, GPU_GRASS_BAND_COUNT, GPU_GRASS_WINDOW_HALF_M, GPU_GRASS_WINDOW_SIZE_PX,
+    GpuGrassAnchor, GpuGrassMaterial, GpuGrassWindow, GpuGrassWindowInput, LIGHT_AT_1AU,
+    TerrainShadingStyle, build_gpu_grass_template, build_gpu_grass_window, fallback_shadow_map,
+    gpu_grass_anchor, gpu_grass_style_table,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
@@ -367,11 +367,12 @@ fn finalize_gpu_grass(
     // First window: create the material + template + entity.
     if state.material.is_none() {
         let fb = images.add(fallback_shadow_map());
-        let maps: [Handle<Image>; 3] = [fb.clone(), fb.clone(), fb];
+        let maps: [Handle<Image>; CASCADE_COUNT] = core::array::from_fn(|_| fb.clone());
         state.material = Some(materials.add(GpuGrassMaterial {
             sun_shadow_map_0: maps[0].clone(),
             sun_shadow_map_1: maps[1].clone(),
             sun_shadow_map_2: maps[2].clone(),
+            sun_shadow_map_3: maps[3].clone(),
             height_window: height_handle.clone(),
             aux_window: aux_handle.clone(),
             ..default()

@@ -161,6 +161,7 @@ pub fn update(
     velocity_frame: Res<VelocityFrameState>,
     target: Res<TargetBody>,
     units: Res<crate::units_settings::UnitsSettings>,
+    flight_ctx: Res<crate::hud::mfd::FlightContext>,
     mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
     mut vel_q: Query<&mut Text, (With<VelocityText>, Without<VelocityLabel>)>,
     mut label_q: Query<&mut Text, (With<VelocityLabel>, Without<VelocityText>)>,
@@ -177,9 +178,13 @@ pub fn update(
     let target_state = target.target.and_then(|id| states.get(id));
     let basis = nav_basis(velocity_frame.active, ship, body_state, target_state);
 
+    // Shared readout: this same box shows orbital velocity on a transfer and
+    // approach speed on final, so the situation picks the unit.
+    let system = units.system_for(UnitDomain::shared(flight_ctx.airplane_flight()));
+
     if let Ok(mut t) = vel_q.single_mut() {
         let s = match basis {
-            Some(b) => format::speed(b.speed, units.system_for(UnitDomain::General)),
+            Some(b) => format::speed(b.speed, system),
             None => "—".to_string(),
         };
         if t.0 != s {

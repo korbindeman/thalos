@@ -32,6 +32,8 @@ use crate::sim_clock::SimClock;
 
 /// Number of flap lever detents past UP (1 = TAKEOFF, 2 = LANDING).
 pub const FLAP_DETENTS: u8 = 2;
+/// Flap lever detent used for a runway-ready takeoff configuration.
+pub const TAKEOFF_FLAP_DETENT: u8 = 1;
 /// Full flap travel time (UP → LANDING), seconds.
 const FLAP_TRAVEL_S: f64 = 6.0;
 /// Spoiler travel time, seconds.
@@ -66,6 +68,20 @@ pub struct FlightConfig {
 }
 
 impl FlightConfig {
+    /// Configuration for an aircraft already parked on a runway and ready to
+    /// begin its takeoff roll.
+    ///
+    /// The actuator starts at the commanded detent rather than travelling from
+    /// UP after the loading screen clears.
+    pub fn runway_takeoff() -> Self {
+        let flap_fraction = TAKEOFF_FLAP_DETENT as f64 / FLAP_DETENTS as f64;
+        Self {
+            flap_setting: TAKEOFF_FLAP_DETENT,
+            flap_fraction,
+            spoiler_fraction: 0.0,
+        }
+    }
+
     /// HUD label for a flap lever detent (0 = UP, `FLAP_DETENTS` = LANDING).
     pub fn detent_label(detent: u8) -> &'static str {
         match detent {
@@ -86,6 +102,7 @@ impl Plugin for FlightConfigPlugin {
                 Update,
                 update_flight_config
                     .in_set(SimStage::Physics)
+                    .after(crate::control_bus::realize_control)
                     .before(crate::bridge::advance_simulation),
             );
     }
@@ -98,6 +115,7 @@ fn update_flight_config(
     clock: Res<SimClock>,
     intent: Res<GameInputIntent>,
     brake: Res<ParkingBrake>,
+    ground_control: Res<crate::control_bus::ResolvedGroundControl>,
     kin: Res<thalos_physics_local::LocalCraftKinematics>,
     mut config: ResMut<FlightConfig>,
     mut fast_enough: Local<bool>,
@@ -125,11 +143,8 @@ fn update_flight_config(
     } else if airspeed < SPOILER_STOW_AIRSPEED_M_S {
         *fast_enough = false;
     }
-    let spoiler_target = if brake.engaged && *fast_enough {
-        1.0
-    } else {
-        0.0
-    };
+    let braking = brake.engaged || ground_control.brake > 0.05;
+    let spoiler_target = if braking && *fast_enough { 1.0 } else { 0.0 };
     config.spoiler_fraction = approach(
         config.spoiler_fraction,
         spoiler_target,
@@ -140,4 +155,18 @@ fn update_flight_config(
 /// Move `current` toward `target` by at most `max_step`.
 fn approach(current: f64, target: f64, max_step: f64) -> f64 {
     current + (target - current).clamp(-max_step.abs(), max_step.abs())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runway_takeoff_starts_at_the_takeoff_detent() {
+        let config = FlightConfig::runway_takeoff();
+
+        assert_eq!(config.flap_setting, TAKEOFF_FLAP_DETENT);
+        assert_eq!(config.flap_fraction, 0.5);
+        assert_eq!(config.spoiler_fraction, 0.0);
+    }
 }

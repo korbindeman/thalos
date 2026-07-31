@@ -162,12 +162,19 @@ pub struct ShipPartExtension {
     /// binds. Plain `texture_depth_2d` (no array). Always bound to a valid texture
     /// (a 1×1 fallback where no live cascade is pushed — the standalone editor,
     /// freshly-created parts) so the depth `sample_type` slot is never empty.
-    #[texture(102, sample_type = "depth")]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(108, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(103, sample_type = "depth")]
+    #[texture(102, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(104, sample_type = "depth")]
+    #[texture(103, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(104, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
     /// Cloud sun-transmittance cascade (CLOUD-5 / W2) — the same map the tile
     /// ground and trees sample, so a parked craft dims under the deck exactly
     /// with the ground beside it. Block gate zero (no cloud body / clouds off)
@@ -209,12 +216,19 @@ pub type ShadowedStandardMaterial = ExtendedMaterial<StandardMaterial, ShadowRec
 pub struct ShadowReceiveExtension {
     #[uniform(100)]
     pub shadow: ShadowCascadeBlock,
-    #[texture(101, sample_type = "depth")]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(107, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(102, sample_type = "depth")]
+    #[texture(101, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(103, sample_type = "depth")]
+    #[texture(102, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(103, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
     /// Cloud sun-transmittance cascade — see [`ShipPartExtension`]. Structures
     /// and the runway were the visible side of the receiver seam once terrain
     /// and trees both dimmed under the deck (reviews/20260730T011353Z §4).
@@ -340,6 +354,7 @@ fn apply_craft_shadow(
         ext.sun_shadow_map_0 = maps.images[0].clone();
         ext.sun_shadow_map_1 = maps.images[1].clone();
         ext.sun_shadow_map_2 = maps.images[2].clone();
+        ext.sun_shadow_map_3 = maps.images[3].clone();
         if let Some((block, handle)) = &cloud_block {
             ext.cloud_shadow = *block;
             ext.cloud_shadow_map = handle.clone();
@@ -351,6 +366,7 @@ fn apply_craft_shadow(
         ext.sun_shadow_map_0 = maps.images[0].clone();
         ext.sun_shadow_map_1 = maps.images[1].clone();
         ext.sun_shadow_map_2 = maps.images[2].clone();
+        ext.sun_shadow_map_3 = maps.images[3].clone();
         if let Some((block, handle)) = &cloud_block {
             ext.cloud_shadow = *block;
             ext.cloud_shadow_map = handle.clone();

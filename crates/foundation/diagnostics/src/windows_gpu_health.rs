@@ -6,10 +6,22 @@
 //! Bevy gets a `DeviceLost` callback. NVML is the driver's own view of those
 //! quantities. Load it dynamically so AMD-only systems keep working and so
 //! diagnostics never make the NVIDIA driver a runtime dependency.
+//!
+//! Two readers share one NVML handle:
+//!
+//! - the **health sampler** ([`start`]) — the full one-second record, opt-in
+//!   behind [`crate::GPU_HEALTH_ENV`] because it is investigation-grade volume;
+//! - the **VRAM poller** ([`memory_snapshot`]) — memory used/total only, started
+//!   on first read and cheap enough to be always available, so a live readout
+//!   (the loading screen) can show whole-card pressure without turning the
+//!   investigation lane on.
 
 use std::{
     ffi::{CStr, c_char, c_void},
-    sync::Arc,
+    sync::{
+        Arc, Mutex, Once, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
     thread,
     time::Duration,
 };
@@ -169,15 +181,18 @@ impl Nvml {
         )
     }
 
-    fn sample(&self) -> Result<GpuSample, NvmlReturn> {
+    fn memory(&self) -> Result<NvmlMemory, NvmlReturn> {
         let mut memory = NvmlMemory::default();
-        let memory_result = unsafe { (self.memory_info)(self.device, &mut memory) };
-        if memory_result != NVML_SUCCESS {
-            return Err(memory_result);
+        let result = unsafe { (self.memory_info)(self.device, &mut memory) };
+        if result != NVML_SUCCESS {
+            return Err(result);
         }
+        Ok(memory)
+    }
 
+    fn sample(&self) -> Result<GpuSample, NvmlReturn> {
         Ok(GpuSample {
-            memory,
+            memory: self.memory()?,
             temperature_c: query_u32(|out| unsafe {
                 (self.temperature)(self.device, NVML_TEMPERATURE_GPU, out)
             }),
@@ -231,6 +246,17 @@ fn error_message(error_string: ErrorStringFn, code: NvmlReturn) -> String {
     )
 }
 
+/// Process-wide NVML handle, loaded on first use by whichever reader asks
+/// first. One DLL load and one `nvmlInit` however many readers there are.
+static NVML: OnceLock<Result<Mutex<Nvml>, String>> = OnceLock::new();
+
+fn nvml() -> Result<&'static Mutex<Nvml>, &'static str> {
+    match NVML.get_or_init(|| unsafe { Nvml::load() }.map(Mutex::new)) {
+        Ok(handle) => Ok(handle),
+        Err(error) => Err(error.as_str()),
+    }
+}
+
 pub(crate) fn start(sink: Arc<DiagnosticSink>) {
     let _ = thread::Builder::new()
         .name("thalos-gpu-health".into())
@@ -238,7 +264,7 @@ pub(crate) fn start(sink: Arc<DiagnosticSink>) {
 }
 
 fn sampler_main(sink: &DiagnosticSink) {
-    let nvml = match unsafe { Nvml::load() } {
+    let nvml = match nvml() {
         Ok(nvml) => nvml,
         Err(error) => {
             let mut fields = fields("availability");
@@ -251,26 +277,92 @@ fn sampler_main(sink: &DiagnosticSink) {
 
     let mut availability = fields("availability");
     availability.insert("available".into(), Value::from(true));
-    if let Some(version) = nvml.driver_version() {
+    if let Some(version) = nvml.lock().ok().and_then(|nvml| nvml.driver_version()) {
         availability.insert("driver_version".into(), Value::from(version));
     }
     sink.write_event(TARGET, "INFO", availability);
 
     loop {
-        match nvml.sample() {
+        let Ok(nvml) = nvml.lock() else {
+            return; // a reader panicked mid-query; the handle is no longer trustworthy
+        };
+        let sampled = nvml.sample().map_err(|code| (code, nvml.error(code)));
+        drop(nvml);
+        match sampled {
             Ok(sample) => sink.write_event(TARGET, "INFO", sample_fields(sample)),
-            Err(code) => {
+            Err((code, message)) => {
                 // Stop after the first whole-card query failure. Repeated NVML
                 // calls cannot recover a lost adapter and would obscure the
                 // first-failure timestamp or add pressure to a wedged driver.
                 let mut failure = fields("sample_error");
                 failure.insert("nvml_error_code".into(), Value::from(code));
-                failure.insert("error".into(), Value::from(nvml.error(code)));
+                failure.insert("error".into(), Value::from(message));
                 sink.write_event(TARGET, "ERROR", failure);
                 return;
             }
         }
         thread::sleep(SAMPLE_PERIOD);
+    }
+}
+
+/// How often the VRAM poller refreshes. Whole-card usage moves on the scale of
+/// a texture upload, so twice a second is live enough for a readout and far
+/// below the rate at which the driver query would cost anything.
+const MEMORY_POLL_PERIOD: Duration = Duration::from_millis(500);
+
+/// Latest whole-card VRAM, published by [`memory_poller_main`]. `TOTAL == 0`
+/// means "no reading" — not yet sampled, no NVIDIA driver, or the card stopped
+/// answering — so readers never have to consult a second flag.
+static VRAM_USED_BYTES: AtomicU64 = AtomicU64::new(0);
+static VRAM_TOTAL_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Whole-card VRAM as the driver reports it, or `None` when it cannot be read.
+///
+/// Never blocks and never queries the driver on the caller's thread: the first
+/// call starts a background poller and returns `None`, and every later call is
+/// two relaxed atomic loads. A UI may therefore call this every frame.
+pub(crate) fn memory_snapshot() -> Option<crate::GpuMemory> {
+    static POLLER: Once = Once::new();
+    POLLER.call_once(|| {
+        let _ = thread::Builder::new()
+            .name("thalos-vram".into())
+            .spawn(memory_poller_main);
+    });
+
+    let total_bytes = VRAM_TOTAL_BYTES.load(Ordering::Relaxed);
+    (total_bytes > 0).then(|| crate::GpuMemory {
+        used_bytes: VRAM_USED_BYTES.load(Ordering::Relaxed),
+        total_bytes,
+    })
+}
+
+fn memory_poller_main() {
+    let Ok(nvml) = nvml() else {
+        return; // no NVIDIA driver here; readers keep seeing `None`
+    };
+    loop {
+        let Ok(guard) = nvml.lock() else {
+            return;
+        };
+        let sampled = guard.memory();
+        drop(guard);
+        match sampled {
+            Ok(memory) => {
+                // Used before total: a reader that sees a non-zero total is
+                // then guaranteed a numerator from this same sample or newer.
+                VRAM_USED_BYTES.store(memory.used, Ordering::Relaxed);
+                VRAM_TOTAL_BYTES.store(memory.total, Ordering::Relaxed);
+            }
+            Err(_) => {
+                // Same first-failure rule as the health sampler: a lost adapter
+                // does not come back, and a wedged driver should not be poked.
+                // Zeroing the total is what turns the readout back to "no data"
+                // rather than freezing the last good number on screen.
+                VRAM_TOTAL_BYTES.store(0, Ordering::Relaxed);
+                return;
+            }
+        }
+        thread::sleep(MEMORY_POLL_PERIOD);
     }
 }
 

@@ -53,6 +53,32 @@ impl Default for SurfaceFriction {
     }
 }
 
+/// Whether the craft **hull** (any collider primitive) is at the ground: the
+/// deepest hull point within [`SurfaceFriction::contact_margin_m`] of the
+/// surface. This is the tipped-onto-a-wing / gear-up-belly ground state that
+/// the gear's [`WeightOnWheels`] cannot see (its wheels are unloaded exactly
+/// then). **Sole writer:** [`apply_surface_friction`] (cleared up front each
+/// frame, so every early-return path reads as "not on the hull"). Read — at
+/// the previous frame's value, same one-frame lag [`WeightOnWheels`]'s
+/// consumers accept — by the reaction-wheel ground mask
+/// ([`super::wheel_torque_ground_mask`]) in both the fly-by-wire controller
+/// and the force realization, so SAS cannot power-slide a tipped craft
+/// across the pavement. Reflect-registered (for a future debug UI).
+#[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
+#[reflect(Resource)]
+pub struct HullGroundContact {
+    pub grounded: bool,
+}
+
+/// Effective contact-patch arm (metres) for hull **spin** friction: a craft
+/// resting on a wing or its belly touches along a strip metres long, but the
+/// friction model resolves one support point — a pure rotation about the
+/// contact normal has ~zero velocity *at* that point while every other
+/// touching panel scrapes. The spin term opposes the normal component of ω
+/// directly, with the per-frame budget `μ·g·dt / arm` — the deceleration a
+/// patch of this radius would supply. Larger = weaker spin friction.
+const SPIN_PATCH_ARM_M: f64 = 2.0;
+
 /// Analytic ground backstop — a deterministic safety net that guarantees the
 /// craft hull can never tunnel through the terrain, independent of the collision
 /// mesh.
@@ -212,27 +238,7 @@ pub(crate) fn terrain_floor_backstop(
     let inertia_body = params.moment_of_inertia;
     let inv_mass = 1.0 / mass;
     let rot = rotation.0;
-    // World-frame inverse-inertia application, guarding degenerate axes.
-    let inv_inertia = |v: DVec3| -> DVec3 {
-        let v_body = rot.inverse() * v;
-        rot * DVec3::new(
-            if inertia_body.x > 0.0 {
-                v_body.x / inertia_body.x
-            } else {
-                0.0
-            },
-            if inertia_body.y > 0.0 {
-                v_body.y / inertia_body.y
-            } else {
-                0.0
-            },
-            if inertia_body.z > 0.0 {
-                v_body.z / inertia_body.z
-            } else {
-                0.0
-            },
-        )
-    };
+    let inv_inertia = |v: DVec3| world_inv_inertia(rot, inertia_body, v);
     // Arm from the CoM (the Avian rotation pivot, pinned to the craft's real
     // CoM at spawn) to the support point. Both are body-center-relative in SLF
     // axes; the difference is translation-invariant, so the post-lift shift is
@@ -305,13 +311,13 @@ impl Default for TerrainFloorBackstop {
 }
 
 /// Coulomb surface friction for a ship resting/sliding on its **hull** (no
-/// weight on wheels). Velocity-level stick/slip on the tangential
-/// (surface-parallel) component of the craft's body-fixed velocity, applied the
-/// same frame [`terrain_floor_backstop`] removes the into-surface component and
+/// weight on wheels), plus the sole writer of [`HullGroundContact`].
+/// Velocity-level stick/slip applied as a **contact impulse at the support
+/// point** — with the angular response a real scraping contact has — the same
+/// frame [`terrain_floor_backstop`] removes the into-surface component and
 /// just before [`readback_local_craft`] flows the corrected velocity into
-/// canonical. Brings a landed gearless craft to a true rest in finite time
-/// instead of the indefinite slide it had before — the only ground force was the
-/// backstop, which touches the normal direction only.
+/// canonical. Brings a landed gearless craft (or a tipped/belly-sliding one)
+/// to a true rest in finite time.
 ///
 /// Done at the velocity level (like the backstop), not as a force into the
 /// acceleration accumulator: a velocity-level stick/slip cancels exactly within
@@ -321,9 +327,21 @@ impl Default for TerrainFloorBackstop {
 /// component — friction only has to remove residual slip, and the normal load
 /// per unit mass is just `g = μ/r²`.
 ///
-/// Wheeled craft are skipped: when any wheel bears load the landing-gear model
-/// owns the tangential ground reaction (lateral grip + Coulomb rolling) and the
-/// suspension holds the hull clear of the surface.
+/// Two terms, both budgeted by the Coulomb limit `μ·m·g·dt`:
+/// - a **tangential impulse at the support point** (linear + angular
+///   coupling), so a dragging wingtip slows the slide *and* the rotation it
+///   feeds — the old CoM-velocity-only form removed no angular velocity at
+///   all, and a tipped craft pirouetted frictionless indefinitely;
+/// - a **spin stick/slip** on the component of ω about the contact normal
+///   (arm [`SPIN_PATCH_ARM_M`]), because a pure pivot about the support point
+///   has zero velocity *at* that point while the rest of the contact strip
+///   scrapes — the single-point model can't see that mode.
+///
+/// Friction stands down (but the contact flag still publishes) while any
+/// wheel bears load: the landing-gear model owns the tangential ground
+/// reaction then, and a hull merely *near* the pavement (tail-graze during
+/// rotation) must not brake a rolling takeoff.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_surface_friction(
     clock: Res<SimClock>,
     active: Res<ActiveLocalBubble>,
@@ -332,22 +350,24 @@ pub(crate) fn apply_surface_friction(
     weight_on_wheels: Res<WeightOnWheels>,
     tuning: Res<SurfaceFriction>,
     sim: Res<SimulationState>,
+    mut hull_contact: ResMut<HullGroundContact>,
     mut craft_q: Query<
         (
             &Position,
             &Rotation,
             &mut LinearVelocity,
+            &mut AngularVelocity,
             &LocalCraftColliderPrimitives,
         ),
         With<LocalCraftBody>,
     >,
 ) {
+    // Cleared up front so every early-return path reports "not on the hull"
+    // (mirrors `WeightOnWheels` in the gear pass).
+    hull_contact.grounded = false;
     // Destroyed craft keep hull friction (like the backstop above): a wreck
     // must grind to a stop on its belly, not slide frictionless forever.
-    if !authority.owns_translation()
-        || sim.simulation.vessel_kind() != VesselKind::Ship
-        || weight_on_wheels.grounded
-    {
+    if !authority.owns_translation() || sim.simulation.vessel_kind() != VesselKind::Ship {
         return;
     }
     let dt = clock.delta_secs_f64();
@@ -361,7 +381,7 @@ pub(crate) fn apply_surface_friction(
         return;
     };
     let body = &sim.system.bodies[bubble.body_id];
-    let Ok((position, rotation, mut linear_velocity, primitives)) =
+    let Ok((position, rotation, mut linear_velocity, mut angular_velocity, primitives)) =
         craft_q.get_mut(bubble.craft_entity)
     else {
         return;
@@ -383,28 +403,83 @@ pub(crate) fn apply_surface_friction(
 
     // In hull contact? The backstop holds the deepest hull point ~at the surface;
     // a small margin keeps a resting craft reading grounded across sample noise.
-    let (deepest, _) = deepest_hull_support(r_center, rotation.0, primitives, dir);
+    let (deepest, support) = deepest_hull_support(r_center, rotation.0, primitives, dir);
     if !deepest.is_finite() || deepest > surface_radius + tuning.contact_margin_m {
         return;
     }
-
-    let v = linear_velocity.0;
-    let v_tan = v - dir * v.dot(dir);
-    let speed = v_tan.length();
-    if speed < 1.0e-9 {
+    hull_contact.grounded = true;
+    // Wheels loaded → the gear model owns the tangential reaction; only the
+    // contact flag (for the reaction-wheel ground mask) was wanted here.
+    if weight_on_wheels.grounded {
         return;
     }
-    // Normal load per unit mass = gravity into the (near-radial) surface. Mass
-    // cancels in the velocity-level form, so it never enters.
+
+    // Normal load per frame ≈ the gravity the surface carries: `m·g·dt` of
+    // impulse, giving the Coulomb budget `μ·m·g·dt`.
     let g = body.gm / r_center.length_squared().max(1.0);
-    let static_budget = tuning.mu_static * g * dt;
-    if speed <= static_budget {
-        // Stick: remove all tangential motion, keep the radial component.
-        linear_velocity.0 = v - v_tan;
-    } else {
-        // Slip: kinetic friction opposes the slip at `μ_kinetic · g`.
-        linear_velocity.0 = v - (v_tan / speed) * (tuning.mu_kinetic * g * dt);
+    let params = sim.simulation.ship_params();
+    let mass = sim.simulation.ship_mass_kg().max(1.0);
+    let inertia_body = params.moment_of_inertia;
+    let inv_mass = 1.0 / mass;
+    let rot = rotation.0;
+    let com_center = r_center + rot * params.center_of_mass;
+    let r_arm = support - com_center;
+    let n = dir;
+
+    // Tangential stick/slip impulse at the support point.
+    let v_point = linear_velocity.0 + angular_velocity.0.cross(r_arm);
+    let v_tan = v_point - n * v_point.dot(n);
+    let tan_speed = v_tan.length();
+    if tan_speed > 1.0e-9 {
+        let t = v_tan / tan_speed;
+        let k_t =
+            inv_mass + t.dot(world_inv_inertia(rot, inertia_body, r_arm.cross(t)).cross(r_arm));
+        // Impulse that would stop the support point dead vs the Coulomb caps.
+        let j_stop = tan_speed / k_t.max(1.0e-12);
+        let j = if j_stop <= tuning.mu_static * mass * g * dt {
+            j_stop
+        } else {
+            tuning.mu_kinetic * mass * g * dt
+        };
+        linear_velocity.0 -= t * (j * inv_mass);
+        angular_velocity.0 -= world_inv_inertia(rot, inertia_body, r_arm.cross(t * j));
     }
+
+    // Spin stick/slip about the contact normal (the pivot mode the point
+    // impulse can't see). Budget = the angular deceleration a patch of
+    // [`SPIN_PATCH_ARM_M`] radius supplies at the same Coulomb limit.
+    let omega_n = angular_velocity.0.dot(n);
+    let spin_static = tuning.mu_static * g * dt / SPIN_PATCH_ARM_M;
+    if omega_n.abs() <= spin_static {
+        angular_velocity.0 -= n * omega_n;
+    } else {
+        let spin_budget = tuning.mu_kinetic * g * dt / SPIN_PATCH_ARM_M;
+        angular_velocity.0 -= n * spin_budget.copysign(omega_n);
+    }
+}
+
+/// Apply the world-frame inverse inertia (diagonal in the craft body frame,
+/// degenerate axes guarded) to a world-frame angular impulse: `I⁻¹ · v`.
+/// Shared by the backstop's contact impulse and the hull-friction impulse.
+fn world_inv_inertia(rot: DQuat, inertia_body: DVec3, v: DVec3) -> DVec3 {
+    let v_body = rot.inverse() * v;
+    rot * DVec3::new(
+        if inertia_body.x > 0.0 {
+            v_body.x / inertia_body.x
+        } else {
+            0.0
+        },
+        if inertia_body.y > 0.0 {
+            v_body.y / inertia_body.y
+        } else {
+            0.0
+        },
+        if inertia_body.z > 0.0 {
+            v_body.z / inertia_body.z
+        } else {
+            0.0
+        },
+    )
 }
 
 /// Deepest hull point along `dir` (local up) and the support point it occurs

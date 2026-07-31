@@ -166,6 +166,27 @@ impl AttitudeController {
                 self.pitch_trim = 0.0;
                 point_nose(dir, attitude, params, effector_authority)
             }
+            AttitudeDemand::FlightPath(target) => {
+                self.hold_target = None;
+                match flight {
+                    Some(flight) => self.plane_hold(
+                        flight,
+                        attitude,
+                        params,
+                        effector_authority,
+                        dt_s,
+                        Some(target),
+                    ),
+                    None => {
+                        // A flight-path target has no meaning without a local-up
+                        // and air-relative flight state. The game constructs one
+                        // for LAND independently of the player's SAS toggle.
+                        self.plane_target = None;
+                        self.pitch_trim = 0.0;
+                        DVec3::ZERO
+                    }
+                }
+            }
             AttitudeDemand::Rate(cmd) => {
                 if cmd.length_squared() <= RATE_DEADZONE * RATE_DEADZONE {
                     // Centered stick: behave as Hold (SAS recapture path).
@@ -217,7 +238,7 @@ impl AttitudeController {
         match flight {
             Some(flight) => {
                 self.hold_target = None;
-                self.plane_hold(flight, attitude, params, effector_authority, dt_s)
+                self.plane_hold(flight, attitude, params, effector_authority, dt_s, None)
             }
             None => {
                 self.plane_target = None;
@@ -239,17 +260,32 @@ impl AttitudeController {
         params: &ShipParameters,
         effector_authority: DVec3,
         dt_s: f64,
+        supplied_target: Option<PlaneHoldTarget>,
     ) -> DVec3 {
         let pitch = flight.pitch();
         let bank = flight.bank();
-        let target = *self.plane_target.get_or_insert_with(|| PlaneHoldTarget {
-            pitch_rad: pitch,
-            bank_rad: if bank.abs() < LEVEL_SNAP_RAD {
-                0.0
-            } else {
-                bank.clamp(-MAX_BANK_TARGET_RAD, MAX_BANK_TARGET_RAD)
-            },
-        });
+        let target = match supplied_target {
+            Some(target) => {
+                let target = PlaneHoldTarget {
+                    pitch_rad: target
+                        .pitch_rad
+                        .clamp(-std::f64::consts::FRAC_PI_2, std::f64::consts::FRAC_PI_2),
+                    bank_rad: target
+                        .bank_rad
+                        .clamp(-MAX_BANK_TARGET_RAD, MAX_BANK_TARGET_RAD),
+                };
+                self.plane_target = Some(target);
+                target
+            }
+            None => *self.plane_target.get_or_insert_with(|| PlaneHoldTarget {
+                pitch_rad: pitch,
+                bank_rad: if bank.abs() < LEVEL_SNAP_RAD {
+                    0.0
+                } else {
+                    bank.clamp(-MAX_BANK_TARGET_RAD, MAX_BANK_TARGET_RAD)
+                },
+            }),
+        };
 
         let pitch_err = wrap_angle(target.pitch_rad - pitch);
         let bank_err = wrap_angle(target.bank_rad - bank);
@@ -724,6 +760,28 @@ mod tests {
         assert!(c.hold_target().is_none());
         assert!(c.assist_status().fbw_active);
         assert!(!c.assist_status().protection_active);
+    }
+
+    #[test]
+    fn flight_path_demand_uses_the_supplied_pitch_and_bank() {
+        let mut c = AttitudeController::new();
+        let target = PlaneHoldTarget {
+            pitch_rad: 0.08,
+            bank_rad: -0.3,
+        };
+        let f = flight_at(0.0, 0.0);
+        let command = c.update(
+            AttitudeDemand::FlightPath(target),
+            &still_attitude(),
+            &plane_params(),
+            PLANE_AERO_AUTHORITY,
+            Some(&f),
+            1.0 / 60.0,
+        );
+        assert_eq!(c.plane_hold_target(), Some(target));
+        assert!(command.x > 0.0, "must pitch toward the supplied target");
+        assert!(command.y < 0.0, "must bank toward the supplied target");
+        assert!(c.assist_status().fbw_active);
     }
 
     #[test]

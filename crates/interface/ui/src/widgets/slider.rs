@@ -24,6 +24,18 @@ pub enum SliderFormat {
     Scale2,
     /// `420 L` (any unit suffix)
     Amount(&'static str),
+    /// A stored SI value displayed in a caller-chosen unit: the label shows
+    /// `value * factor` with `decimals` places and `suffix`.
+    ///
+    /// Exists so a consumer can honour a measurement preference without this
+    /// crate learning about one — the widget kit stays unit-agnostic, and the
+    /// slider's stored value, range, and step remain SI, so only the *reading*
+    /// changes.
+    Scaled {
+        factor: f32,
+        suffix: &'static str,
+        decimals: u8,
+    },
     /// Caller-supplied formatter, for sliders whose stored value is not what
     /// the user reads — e.g. a log-scale control that stores an exponent but
     /// reads out in metres per second.
@@ -43,6 +55,18 @@ impl PartialEq for SliderFormat {
             | (Self::Plain2, Self::Plain2)
             | (Self::Scale2, Self::Scale2) => true,
             (Self::Amount(left), Self::Amount(right)) => left == right,
+            (
+                Self::Scaled {
+                    factor: lf,
+                    suffix: ls,
+                    decimals: ld,
+                },
+                Self::Scaled {
+                    factor: rf,
+                    suffix: rs,
+                    decimals: rd,
+                },
+            ) => lf == rf && ls == rs && ld == rd,
             (Self::Custom(left), Self::Custom(right)) => std::ptr::fn_addr_eq(*left, *right),
             _ => false,
         }
@@ -57,6 +81,15 @@ impl SliderFormat {
             SliderFormat::Plain2 => format!("{value:.2}"),
             SliderFormat::Scale2 => format!("{value:.2}×"),
             SliderFormat::Amount(unit) => format!("{value:.0} {unit}"),
+            SliderFormat::Scaled {
+                factor,
+                suffix,
+                decimals,
+            } => {
+                let shown = value * factor;
+                let places = decimals as usize;
+                format!("{shown:.places$} {suffix}")
+            }
             SliderFormat::Custom(format) => format(value),
         }
     }

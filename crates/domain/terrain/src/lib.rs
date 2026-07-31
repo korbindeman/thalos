@@ -25,6 +25,7 @@ pub mod noise;
 pub mod package;
 pub mod pipeline;
 pub mod procedural;
+pub mod rivers;
 pub mod query;
 pub mod sample;
 pub mod seeding;
@@ -61,17 +62,18 @@ pub use height::{
 };
 pub use height_generator::*;
 pub use icosphere::Icosphere;
+pub use macro_conditioning::{ConditioningChart, LandformProvince};
 pub use package::{
     HeightPyramidSpec, LoadedTerrainPackage, PackageBlob, PackageBlobKind, PackageBorderRule,
     PackageCodec, PackageError, PackageNode, PackageNodeAddress, PackageProducer, PackageSurface,
     SCHEMA_VERSION as PACKAGE_SCHEMA_VERSION, TerrainPackageManifest, load_static_package,
     write_static_package,
 };
-pub use macro_conditioning::{ConditioningChart, LandformProvince};
 pub use procedural::{
     COAST_BAND_M, GENERATOR_VERSION, MacroBiome, MacroSignals, ProceduralSurface,
     climate_cold_lift_m, climate_warmth, combine_macro_and_relief,
 };
+pub use rivers::RiverField;
 pub use query::{
     BakedSurface, FlattenHandle, FlattenRegion, FlattenedSurface, MaterialBands, Region,
     SurfaceQuery, SurfaceRef, TerrainFlatten, flatten_handle, nearest_flatten, surface_height_m,

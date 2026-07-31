@@ -105,11 +105,109 @@ const CONTINENT_OCTAVES: f64 = 6.0;
 const CONTINENT_WARP_WL_M: f64 = 2_000_000.0;
 const CONTINENT_WARP_AMP_M: f64 = 320_000.0;
 
+// --- Continent size and character (NTR-X2p) ---------------------------------
+//
+// `plate_value` gives every Worley cell an independent uniform value, so every
+// plate has the same expected size and the same expected character: the planet
+// reads as a scatter of interchangeable blobs. Earth does not — one huge
+// landmass, a couple of mid ones, and Greenland/Australia-scale outliers, some
+// solid cratons and some shattered into peninsulas and island fringes.
+//
+// Two low-frequency fields buy both, without touching the plate lattice:
+//
+// * **Clustering** adds a field far coarser than the cell to the plate value, so
+//   *neighbouring* plates agree. Runs of agreeing cells merge into one large
+//   mass while isolated ones stay small — a size hierarchy emerges from the
+//   correlation rather than being authored.
+// * **Fragmentation** modulates how hard the detail overlay bites. Where it is
+//   low the mass stays a solid craton; where it is high the same mass breaks
+//   into peninsulas, gulfs and offshore fragments. That is the *character* axis,
+//   and it is independent of size, so a big continent can be either.
+
+/// Wavelength of the clustering field. Must be several plate cells
+/// ([`CONTINENT_CELL_M`] = 2 800 km) or it merely re-randomises each plate
+/// instead of correlating neighbours.
+const SUPERCONTINENT_WL_M: f64 = 11_000_000.0;
+/// How much the clustering field moves a plate's value. Large enough to flip a
+/// marginal plate, small enough that it cannot drown a strongly oceanic one.
+const SUPERCONTINENT_W: f64 = 0.24;
+
+/// Wavelength of the fragmentation field — roughly one continent across, so a
+/// landmass has a consistent character rather than changing halfway.
+const FRAGMENT_WL_M: f64 = 6_500_000.0;
+/// Detail-overlay multiplier at the two extremes: solid craton to shattered
+/// margin. The midpoint is 1.0, i.e. the previous global behaviour.
+const FRAGMENT_LO: f64 = 0.45;
+const FRAGMENT_HI: f64 = 1.75;
+
 /// Continentalness threshold for the coastline. Tuned for the authored **35 %
 /// land area** (docs/lore/solar_system.md §II — Thalos is an ocean-fed
 /// homeworld); verify with `just map` (it prints the area-weighted land
 /// fraction). Higher → less land.
-const CONTINENT_C0: f64 = 0.143;
+/// Moisture a fully-watered valley floor is pulled toward. Not 1.0: a river
+/// waters its floodplain, it does not turn the surrounding country into
+/// rainforest, and this ceiling is what stops a trunk river repainting a whole
+/// dry belt green.
+const RIVER_MOISTURE_MAX: f64 = 0.72;
+
+/// Ceiling on how far the gallery corridor pulls albedo toward closed canopy.
+/// Not 1.0: a floodplain is greener than its surroundings, not a painted stripe.
+const RIPARIAN_GALLERY_MAX: f64 = 0.80;
+
+const CONTINENT_C0: f64 = 0.150;
+
+// --- Marine incursions: embayments and inland seas (NTR-X2p) ----------------
+//
+// The plate + fBm base makes *rounded blobs*. Earth's continents read as
+// interesting because the sea reaches deep into them at every scale — Hudson
+// Bay, the Gulf of Mexico, the Baltic, the Mediterranean, the Black Sea — and
+// the base field has no mechanism that lets it.
+//
+// This is one term producing that whole family as a continuum: a sparse
+// thresholded field subtracted from continentalness, weighted so it is
+// strongest just inland of the coast and fades into the deep interior. Near the
+// threshold it opens **bays**; a little further in it closes behind itself into
+// an **inland sea**. Both are legitimate — they come from the LOD-invariant
+// macro field, so the waterline they define is stationary (INC-0003), and the
+// analytic ocean draws water from the *sign* of the field, so an enclosed basin
+// needs no renderer support at all (ADR-20260720T185954Z).
+//
+// It is deliberately **thresholded**, like the islet sprinkle: incursions are
+// distinct features in specific places, not a planet-wide dimpling of every
+// coast.
+/// Base wavelength (m) of the incursion field; 3 octaves reach ~190 km, so
+/// features run from Black-Sea scale up to Mediterranean scale.
+const INCURSION_WL_M: f64 = 1_500_000.0;
+const INCURSION_OCT: f64 = 3.0;
+/// Only noise above this opens water — the sparsity control. Higher → rarer.
+///
+/// **Set against the measured field, not by feel.** The incursion fBm runs
+/// p50 −0.00 / p90 0.21 / p99 0.35 / max 0.46, so the first value tried here
+/// (0.34) sat at the 99th percentile: 1.1 % of the sphere qualified and the
+/// largest possible subtraction was 0.12 against a median inland of 0.21 — it
+/// could not flood anything, and the land fraction did not move. 0.15 is ≈ p85.
+const INCURSION_BIAS: f64 = 0.15;
+/// Continentalness removed per unit of (thresholded) noise. With the bias above
+/// the strongest incursion removes ≈ 0.44, enough to open water through the
+/// median interior; typical ones only thin the margin into bays.
+const INCURSION_GAIN: f64 = 1.4;
+/// Where incursions are allowed, as continentalness above [`CONTINENT_C0`].
+/// They ramp in just inland of the coast and back out in the deep interior, so
+/// cratons stay dry and the sea reaches the *margins* — which is where Earth's
+/// are.
+const INCURSION_NEAR_C: f64 = 0.03;
+const INCURSION_FAR_C: f64 = 0.55;
+/// How much longer an incursion runs **along** the nearest plate boundary than
+/// across it. Earth's interesting seas are rifts and collision sutures — the
+/// Mediterranean, the Red Sea, the Baltic — so they are long, narrow, and
+/// aligned with a plate margin, not round.
+///
+/// This is applied by **stretching along the boundary, never by compressing
+/// across it**, and the direction matters more than it looks: compressing the
+/// sampling domain would push the octave past its own band limit and alias into
+/// hatching (the lesson from the cloud cell field). Stretching only ever makes
+/// features coarser, which is always safe.
+const INCURSION_ELONGATION: f64 = 3.2;
 
 // --- Coast-character refinement (BL-6) --------------------------------------
 //
@@ -655,12 +753,35 @@ const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0)
 // 26: the diffusion backing takes its waterline, shelf, foreshore and berm from
 //     the authored signed sea field (`macro_signed_height_m`) instead of a
 //     46 km-blurred landmask blend — every coastal height on that body moves.
-pub const GENERATOR_VERSION: u64 = 26;
+// 27: marine incursions in the continent field (NTR-X2p) — embayments and
+//     inland seas. The macro coastline moves everywhere, on BOTH backings,
+//     because the diffusion body takes its waterline from this field too. The
+//     diffusion chart is *conditioned* on this field, so it must be re-exported
+//     and re-generated in the same change or its continents disagree with the
+//     coast drawn around them.
+// 28: the rest of NTR-X2p, which 27 did not cover — incursions elongated along
+//     plate boundaries, then continent clustering + fragmentation. Both changed
+//     every macro height and both shipped with `CONTINENT_C0` re-tuned
+//     (0.125 -> 0.136 -> 0.150) to hold the 35 % lore land fraction.
+//
+//     **They shipped without a bump, and that is the lesson.** The diffusion
+//     body was protected by accident: its `content_fingerprint` hashes the
+//     chart, the chart was regenerated each time, so its tile namespace moved
+//     anyway. The **canonical** body has no content hash and keys on this
+//     constant alone, so its cached tiles were the only thing standing between
+//     us and silently rendering two-generations-old terrain. Bump this in the
+//     same change as any field edit — "the chart was regenerated" is not the
+//     same guarantee.
+pub const GENERATOR_VERSION: u64 = 28;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct ProceduralSurface {
     radius_m: f64,
     seed: u32,
+    /// Optional baked drainage (NTR-X2q). `None` is the default and means "no
+    /// rivers", so every existing construction site keeps working unchanged;
+    /// the body registry attaches one when the asset is installed.
+    rivers: Option<std::sync::Arc<crate::rivers::RiverField>>,
 }
 
 /// Canonical macro signals at one direction, read by
@@ -688,6 +809,7 @@ impl ProceduralSurface {
         Self {
             radius_m: radius_m.max(1.0) as f64,
             seed,
+            rivers: None,
         }
     }
 
@@ -712,8 +834,7 @@ impl ProceduralSurface {
         }
         let (height_m, orogeny, continentalness) = self.height_and_orogeny(dir, lod_m);
         let sin_lat = dir.y.abs();
-        let moisture =
-            self.macro_moisture(dir * self.radius_m, lod_m, continentalness, sin_lat);
+        let moisture = self.macro_moisture(dir * self.radius_m, lod_m, continentalness, sin_lat);
         MacroSignals {
             height_m,
             orogeny,
@@ -916,7 +1037,40 @@ impl ProceduralSurface {
         // organic fBm overlay that breaks the cell edges into real coastlines.
         let plate = plate_value(cp / CONTINENT_CELL_M, self.seed ^ 0x71A7);
         let detail = fbm(cp / CONTINENT_WL_M, self.seed ^ 0xC0FF, CONTINENT_OCTAVES);
-        PLATE_WEIGHT * plate + CONTINENT_DETAIL_WEIGHT * detail
+
+        // Size hierarchy: correlate neighbouring plates so runs of them merge.
+        let cluster = fbm(cp / SUPERCONTINENT_WL_M, self.seed ^ 0x5C0F, 2.0);
+        // Character: how hard the detail overlay bites this landmass.
+        let frag = smoothstep(
+            -0.30,
+            0.35,
+            fbm(cp / FRAGMENT_WL_M, self.seed ^ 0xF2A6, 2.0),
+        );
+        let detail_w = CONTINENT_DETAIL_WEIGHT * (FRAGMENT_LO + (FRAGMENT_HI - FRAGMENT_LO) * frag);
+
+        let base = PLATE_WEIGHT * (plate + SUPERCONTINENT_W * cluster) + detail_w * detail;
+
+        // Marine incursions — bays near the margin, inland seas behind it.
+        // Weighted by how far inland we already are, so this cannot nibble the
+        // open coastline into fringe noise (that is the crenulation warp's job,
+        // at its own much finer scale) and cannot flood a craton.
+        let inland = base - CONTINENT_C0;
+        if inland <= 0.0 {
+            return base;
+        }
+        let reach = smoothstep(0.0, INCURSION_NEAR_C, inland)
+            * (1.0 - smoothstep(INCURSION_NEAR_C, INCURSION_FAR_C, inland));
+        if reach <= 0.0 {
+            return base;
+        }
+        // Elongate along the nearest plate boundary. Only paid inside the reach
+        // window, which is where an incursion can open at all.
+        let across = plate_boundary_normal(cp / CONTINENT_CELL_M, self.seed ^ 0x71A7);
+        let q = cp / INCURSION_WL_M;
+        let along = q - across * q.dot(across);
+        let q = q - along * (1.0 - 1.0 / INCURSION_ELONGATION);
+        let n = fbm(q, self.seed ^ 0x5EA5_1DE5, INCURSION_OCT);
+        base - (n - INCURSION_BIAS).max(0.0) * INCURSION_GAIN * reach
     }
 
     /// Broad gentle continentalness bump centred on the runway site so the
@@ -1218,6 +1372,60 @@ impl ProceduralSurface {
     /// canonical fields; the caller's `height_m` drives the altitude bands.
     /// (Coherent by construction when the external geometry was conditioned
     /// on this surface's macro band — the continents match.)
+    /// Attach a baked drainage raster. Additive: without one the landcover is
+    /// exactly what it was before NTR-X2q.
+    #[must_use]
+    pub fn with_rivers(mut self, rivers: std::sync::Arc<crate::rivers::RiverField>) -> Self {
+        self.rivers = Some(rivers);
+        self
+    }
+
+    /// Landcover wetness contributed by the drainage network, `[0, 1]`.
+    pub fn river_wetness(&self, dir: DVec3) -> f64 {
+        self.rivers.as_ref().map_or(0.0, |r| r.wetness(dir))
+    }
+
+    /// Lay the riparian band over a computed albedo (NTR-X2q).
+    ///
+    /// Two nested strengths, applied darkest last: a broad **gallery** corridor
+    /// of moisture-fed vegetation, then a narrow **wet channel** on trunk rivers
+    /// only. Applied to albedo *directly* rather than only through moisture,
+    /// because the moisture route is a no-op wherever climate moisture already
+    /// exceeds the river's ceiling — i.e. everywhere humid, which is where half
+    /// the rivers are.
+    fn riparian_albedo(&self, dir: DVec3, albedo: Vec3) -> Vec3 {
+        let Some(r) = self.rivers.as_ref() else {
+            return albedo;
+        };
+        let corridor = r.corridor(dir);
+        if corridor <= 0.0 {
+            return albedo;
+        }
+        let gallery = Vec3::new(0.035, 0.082, 0.030);
+        let channel = Vec3::new(0.022, 0.038, 0.048);
+        let a = albedo.lerp(gallery, (corridor * RIPARIAN_GALLERY_MAX) as f32);
+        a.lerp(channel, r.channel(dir) as f32)
+    }
+
+    /// Macro moisture with the drainage network folded in — the **landcover**
+    /// moisture.
+    ///
+    /// Deliberately *not* inside [`Self::macro_moisture`], which also feeds
+    /// [`Self::macro_signals`] and therefore the diffusion conditioning. The
+    /// river raster is baked **from** terrain that conditioning generated, so
+    /// feeding it back would close a loop — and ADR-20260725T004758Z part 4 says
+    /// macro signals feed generation and nothing downstream feeds back. Rivers
+    /// are a consequence of the terrain, so they may colour it but may not help
+    /// author it.
+    fn landcover_moisture_at(&self, dir: DVec3, p: DVec3, lod_m: f32, c: f64, sin_lat: f64) -> f64 {
+        let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
+        let wet = self.river_wetness(dir);
+        if wet <= 0.0 {
+            return moisture;
+        }
+        moisture + (RIVER_MOISTURE_MAX - moisture).max(0.0) * wet
+    }
+
     pub fn macro_albedo_for(
         &self,
         dir: DVec3,
@@ -1246,12 +1454,12 @@ impl ProceduralSurface {
         let (_own_h, orogeny, c) = self.height_and_orogeny(dir, lod_m.max(1_500.0));
         let p = dir * self.radius_m;
         let sin_lat = dir.y.abs();
-        let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
+        let moisture = self.landcover_moisture_at(dir, p, lod_m, c, sin_lat);
         let cold_lift = climate_cold_lift_m(sin_lat);
         let warmth = climate_warmth(cold_lift);
         let bands = macro_band_ts(dir, height_m, orogeny, moisture, cold_lift, warmth);
         (
-            self.albedo_from_bands(&bands, self.macro_tone(p)),
+            self.riparian_albedo(dir, self.albedo_from_bands(&bands, self.macro_tone(p))),
             moisture,
             classify_macro(&bands, height_m),
             bands.material_bands(),
@@ -1269,14 +1477,14 @@ impl ProceduralSurface {
         let (height_m, orogeny, c) = self.height_and_orogeny(dir, lod_m);
         let p = dir * self.radius_m;
         let sin_lat = dir.y.abs();
-        let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
+        let moisture = self.landcover_moisture_at(dir, p, lod_m, c, sin_lat);
         let tone = self.macro_tone(p);
         let cold_lift = climate_cold_lift_m(sin_lat);
         let warmth = climate_warmth(cold_lift);
         let bands = macro_band_ts(dir, height_m, orogeny, moisture, cold_lift, warmth);
         let sample = SurfaceSample {
             height_m: height_m as f32,
-            albedo_linear: self.albedo_from_bands(&bands, tone),
+            albedo_linear: self.riparian_albedo(dir, self.albedo_from_bands(&bands, tone)),
             roughness: 0.92,
             moisture: moisture as f32,
         };
@@ -1499,14 +1707,14 @@ impl SurfaceQuery for ProceduralSurface {
         let (height_m, orogeny, c) = self.height_and_orogeny(dir, lod_m);
         let p = dir * self.radius_m;
         let sin_lat = dir.y.abs();
-        let moisture = self.macro_moisture(p, lod_m, c, sin_lat);
+        let moisture = self.landcover_moisture_at(dir, p, lod_m, c, sin_lat);
         let cold_lift = climate_cold_lift_m(sin_lat);
         let warmth = climate_warmth(cold_lift);
         let bands = macro_band_ts(dir, height_m, orogeny, moisture, cold_lift, warmth);
         (
             SurfaceSample {
                 height_m: height_m as f32,
-                albedo_linear: self.albedo_from_bands(&bands, self.macro_tone(p)),
+                albedo_linear: self.riparian_albedo(dir, self.albedo_from_bands(&bands, self.macro_tone(p))),
                 roughness: 0.92,
                 moisture: moisture as f32,
             },
@@ -1793,6 +2001,46 @@ fn hash3(x: i64, y: i64, z: i64, seed: u32) -> u32 {
 /// the 27 nearest cells' values, so cell interiors read as distinct plateaus
 /// (continents / ocean basins) while boundaries blend into smooth coastlines.
 /// [`PLATE_SHARPNESS`] sets how plateau-like vs blended the field is.
+/// Direction **across** the nearest plate boundary at `p` (same cell lattice and
+/// jitter as [`plate_value`], so the two agree about where boundaries are).
+///
+/// A Worley boundary is the perpendicular bisector between the two closest
+/// feature points, so the vector between them is its normal — no finite
+/// differences and no second field, one pass over the same 27 cells. The plane
+/// perpendicular to the result runs **along** the boundary, which is the
+/// direction marine incursions elongate in (NTR-X2p).
+fn plate_boundary_normal(p: DVec3, seed: u32) -> DVec3 {
+    let pi = DVec3::new(p.x.floor(), p.y.floor(), p.z.floor());
+    let (mut d1, mut d2) = (f64::INFINITY, f64::INFINITY);
+    let (mut f1, mut f2) = (DVec3::ZERO, DVec3::ZERO);
+    for dz in -1..=1 {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let cell = pi + DVec3::new(dx as f64, dy as f64, dz as f64);
+                let hp = hash3(cell.x as i64, cell.y as i64, cell.z as i64, seed);
+                let jitter = DVec3::new(
+                    (hp & 0xff) as f64 / 255.0,
+                    ((hp >> 8) & 0xff) as f64 / 255.0,
+                    ((hp >> 16) & 0xff) as f64 / 255.0,
+                );
+                let fp = cell + jitter;
+                let d = (fp - p).length_squared();
+                if d < d1 {
+                    (d2, f2) = (d1, f1);
+                    (d1, f1) = (d, fp);
+                } else if d < d2 {
+                    (d2, f2) = (d, fp);
+                }
+            }
+        }
+    }
+    if d2.is_finite() {
+        (f2 - f1).normalize_or_zero()
+    } else {
+        DVec3::ZERO
+    }
+}
+
 fn plate_value(p: DVec3, seed: u32) -> f64 {
     let pi = DVec3::new(p.x.floor(), p.y.floor(), p.z.floor());
     let mut wsum = 0.0_f64;
@@ -1908,3 +2156,4 @@ fn massif_erosion_offset(seed: u32) -> Vec2 {
     let h = hash3(seed as i64, 0x517E, 0x4D54, seed ^ 0xA53F);
     Vec2::new((h & 0xffff) as f32 * 13.0, (h >> 16) as f32 * 13.0)
 }
+

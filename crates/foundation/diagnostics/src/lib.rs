@@ -92,6 +92,49 @@ pub fn runtime_layer() -> io::Result<JsonlDiagnosticLayer> {
     Ok(JsonlDiagnosticLayer::new(Arc::clone(sink)))
 }
 
+/// Whole-card VRAM, as the graphics driver reports it.
+///
+/// Whole-*card*, not whole-process: it counts every process on the adapter,
+/// which is exactly why it is the number a readout wants. Thalos is routinely
+/// run two instances at a time, and per-process accounting cannot see the peer
+/// that is actually eating the headroom
+/// (INC-20260725T012104Z-tile-residency-had-no-budget).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuMemory {
+    pub used_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl GpuMemory {
+    /// Share of the card in use, 0..1. Carries its own denominator so callers
+    /// never divide by a total they didn't check.
+    pub fn used_frac(self) -> f64 {
+        if self.total_bytes == 0 {
+            return 0.0;
+        }
+        self.used_bytes as f64 / self.total_bytes as f64
+    }
+}
+
+/// Latest whole-card VRAM reading, or `None` where it cannot be obtained
+/// (non-Windows, no NVIDIA driver, the first call, or a card that stopped
+/// answering).
+///
+/// Cheap enough to call every frame: the driver query happens on a background
+/// poller and this is two atomic loads. Independent of
+/// [`GPU_HEALTH_ENV`] — that gate covers the full one-second forensic record,
+/// which is a different cost and a different question.
+pub fn gpu_memory() -> Option<GpuMemory> {
+    #[cfg(windows)]
+    {
+        windows_gpu_health::memory_snapshot()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
 #[cfg(windows)]
 fn env_truthy(name: &str) -> bool {
     std::env::var(name).is_ok_and(|value| {

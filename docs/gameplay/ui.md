@@ -71,7 +71,18 @@ runs all widget interaction/visual systems globally.
   `docs/gameplay/input.md`). New editable fields must be `UiTextField`s, not
   bespoke key readers.
 - **The loading screen depends on token consts only** (no `UiTheme`
-  resource) so it renders on frame 1.
+  resource) so it renders on frame 1. Under the progress bar it carries the
+  shared **VRAM bar** (`vram_bar.rs`) and nothing else — a load is a moment the
+  player is *waiting through*, so it gets a glance, not a report; the numbers
+  that only answer follow-up questions live in the F3 view. Look at the screen
+  with `just loading-preview`, which is the only way to see it at all — see
+  `docs/development/tooling.md`.
+- **`vram_bar::spawn_vram_bar` is the one VRAM widget**, used by both the
+  loading screen and the F3 panel. It takes its palette and type scale as a
+  `VramBarStyle` rather than reading a theme, because the loading screen may not
+  touch `HudTheme`. Its segments are `terrain` / `meshes` / `other`, and
+  `meshes` is deliberately `slabs − terrain`: the mesh-allocator slabs *contain*
+  the tile meshes, so showing both raw would draw the ground twice.
 
 ## In-game wiring
 

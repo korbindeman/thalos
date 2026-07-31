@@ -1,10 +1,10 @@
 {
   "width": 869,
   "height": 434,
-  "sha256_le_f32": "0e02294c87d90427735f16bf47b61b303f3e710733418d747ceb7f590b068348",
+  "sha256_le_f32": "0173af63b1eab572958bac90d66adf29961bbbc96ddfdfdb6b5bbab09fd7a5f1",
   "min": -0.0,
-  "max": 8297.5615234375,
-  "mean": 289.3479309082031,
+  "max": 7303.01123046875,
+  "mean": 352.8817443847656,
   "source": "xandergos/terrain-diffusion-90m coarse band, seed 1337, window off=(0,0)",
   "mapping": "equirect",
   "planet_radius_m": 3186000.0,

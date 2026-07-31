@@ -87,12 +87,14 @@ var<uniform> part: ShipPartParams;
 // `ShipPartExtension` in `body_render::craft` (uniform 101, depth maps 102–104).
 @group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var<uniform> craft_shadow: ShadowCascadeBlock;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+@group(#{MATERIAL_BIND_GROUP}) @binding(108)
 var craft_shadow_map_0: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
 var craft_shadow_map_1: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
 var craft_shadow_map_2: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(104)
+var craft_shadow_map_3: texture_depth_2d;
 // Cloud sun-transmittance cascade — same block/texture the tile ground and
 // trees sample (fanned by `apply_craft_shadow`), so a parked craft dims under
 // the deck with the taxiway beside it. Block gate zero reads fully lit.
@@ -374,6 +376,7 @@ fn fragment(
         craft_shadow_map_0,
         craft_shadow_map_1,
         craft_shadow_map_2,
+        craft_shadow_map_3,
     );
     // × the cloud deck's sun transmittance — one gate for the whole direct
     // beam, exactly as the tile ground and trees compose it.

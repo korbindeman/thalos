@@ -122,12 +122,14 @@ struct TileShadingParams {
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100)
 var<uniform> recv_shadow: ShadowCascadeBlock;
-@group(#{MATERIAL_BIND_GROUP}) @binding(101)
+@group(#{MATERIAL_BIND_GROUP}) @binding(110)
 var recv_shadow_map_0: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(102)
+@group(#{MATERIAL_BIND_GROUP}) @binding(101)
 var recv_shadow_map_1: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+@group(#{MATERIAL_BIND_GROUP}) @binding(102)
 var recv_shadow_map_2: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(103)
+var recv_shadow_map_3: texture_depth_2d;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104)
 var<uniform> tile_params: TileShadingParams;
 // Cloud sun-transmittance cascade (CLOUD-5 / W2) — the deck's own shadow,
@@ -1031,6 +1033,7 @@ fn fragment(
         recv_shadow_map_0,
         recv_shadow_map_1,
         recv_shadow_map_2,
+        recv_shadow_map_3,
     );
     let contact_shadow = contact_shadow_factor(
         recv_shadow,

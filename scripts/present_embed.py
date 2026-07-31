@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Inline local images into a presentation page as data URIs.
 
-A published Artifact page is fetched under a strict CSP: it cannot load
-anything from another host, and it certainly cannot read
-`artifacts/visual/latest/*.png` off the developer's disk. So every capture
-shown in a presentation has to be embedded in the HTML itself — which is not
-something an agent should be pasting by hand.
+Reports live in `artifacts/reports/` and open in the user's browser, but the
+captures they show must still be embedded: `artifacts/visual/latest/` and the
+comparison dirs are overwritten on every rerun, so a page referencing them
+live silently changes under the reader. Embedding freezes the evidence, and
+keeps the page publishable as a claude.ai Artifact (whose CSP blocks every
+external load) when it needs to travel — neither is something an agent should
+be pasting by hand.
 
 Workflow: write the page with `{{img:<path>}}` tokens where the captures go,
 then run this script. It downscales each image, encodes it, and writes a

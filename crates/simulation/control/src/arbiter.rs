@@ -21,6 +21,12 @@ pub struct Arbitration {
     pub throttle: Option<f64>,
     /// Which source owns throttle this frame, if any did.
     pub throttle_owner: Option<DemandSource>,
+    /// Winning normalized ground-steering command.
+    pub ground_steer: Option<f64>,
+    pub ground_steer_owner: Option<DemandSource>,
+    /// Winning normalized wheel-brake command.
+    pub wheel_brake: Option<f64>,
+    pub wheel_brake_owner: Option<DemandSource>,
 }
 
 impl Arbitration {
@@ -29,6 +35,10 @@ impl Arbitration {
         attitude_owner: None,
         throttle: None,
         throttle_owner: None,
+        ground_steer: None,
+        ground_steer_owner: None,
+        wheel_brake: None,
+        wheel_brake_owner: None,
     };
 }
 
@@ -46,8 +56,22 @@ pub fn arbitrate(demands: &[(DemandSource, ControlDemand)]) -> Arbitration {
         if let Some(throttle) = demand.throttle
             && result.throttle_owner.is_none_or(|owner| source >= owner)
         {
-            result.throttle = Some(throttle);
+            result.throttle = Some(throttle.clamp(0.0, 1.0));
             result.throttle_owner = Some(source);
+        }
+        if let Some(steer) = demand.ground_steer
+            && result
+                .ground_steer_owner
+                .is_none_or(|owner| source >= owner)
+        {
+            result.ground_steer = Some(steer.clamp(-1.0, 1.0));
+            result.ground_steer_owner = Some(source);
+        }
+        if let Some(brake) = demand.wheel_brake
+            && result.wheel_brake_owner.is_none_or(|owner| source >= owner)
+        {
+            result.wheel_brake = Some(brake.clamp(0.0, 1.0));
+            result.wheel_brake_owner = Some(source);
         }
     }
 
@@ -113,5 +137,21 @@ mod tests {
     #[test]
     fn empty_is_none() {
         assert_eq!(arbitrate(&[]), Arbitration::NONE);
+    }
+
+    #[test]
+    fn ground_channels_are_independent_and_clamped() {
+        let demands = [
+            (DemandSource::Autopilot, ControlDemand::ground(-2.0, 2.0)),
+            (
+                DemandSource::Pilot,
+                ControlDemand::autoflight(AttitudeDemand::Free, None, Some(0.25), None),
+            ),
+        ];
+        let out = arbitrate(&demands);
+        assert_eq!(out.ground_steer, Some(0.25));
+        assert_eq!(out.ground_steer_owner, Some(DemandSource::Pilot));
+        assert_eq!(out.wheel_brake, Some(1.0));
+        assert_eq!(out.wheel_brake_owner, Some(DemandSource::Autopilot));
     }
 }

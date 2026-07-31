@@ -33,6 +33,7 @@
 //! (`cargo run -p thalos_runtime --example nav_preview`) can render states that
 //! are hard to fly to.
 
+use bevy::ecs::system::SystemParam;
 use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
@@ -48,7 +49,7 @@ use thalos_physics_canonical::body_fixed::inertial_to_body_fixed;
 use thalos_world::BodyId;
 
 use crate::hud::format;
-use crate::hud::theme::{HudTheme, label};
+use crate::hud::theme::HudTheme;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::route::{RouteRequest, RouteState, RouteStatus};
 use crate::units_settings::{UnitDomain, UnitSystem};
@@ -59,13 +60,15 @@ use super::super::{ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind};
 const BODY_NOSE: DVec3 = DVec3::Y;
 
 /// Side length of the square plot, in logical px.
-const MAP_SIZE_PX: f32 = 200.0;
+const MAP_SIZE_PX: f32 = 240.0;
 /// Max runways drawn. Mirror in the shader.
 pub(crate) const MAX_RUNWAYS: usize = 8;
 /// Max route polyline points. Mirror in the shader (packed two per `vec4`).
 pub(crate) const MAX_ROUTE_POINTS: usize = 48;
 /// Max waypoint symbols. Mirror in the shader.
 pub(crate) const MAX_WAYPOINTS: usize = 4;
+/// Max rejoin polyline points. Mirror in the shader (packed two per `vec4`).
+pub(crate) const MAX_REJOIN_POINTS: usize = 24;
 /// Sentinel for an absent angular marker. Mirror in the shader.
 const NO_ANGLE: f32 = 1.0e8;
 
@@ -93,13 +96,26 @@ const PICK_TOLERANCE: f32 = 0.08;
 /// the track marker is hidden rather than pointing somewhere arbitrary.
 const MIN_TRACK_SPEED_M_S: f64 = 2.0;
 
-/// View-radius ladder (metres). The plot snaps to the smallest level that
-/// comfortably contains what matters (the armed route, else the nearest
-/// runway), with hysteresis so the scale holds steady on approach.
-const RANGE_LEVELS_M: [f64; 8] = [
-    2.0e3, 5.0e3, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 1.5e5, 3.0e5,
+/// View-radius ladder (metres). In `AUTO` the plot snaps to the smallest level
+/// that contains what is still ahead; the zoom controls step through the same
+/// ladder, so manual and automatic ranges are always the same set of scales.
+///
+/// The bottom two rungs exist for the last mile: at 500 m the 5 km strip runs
+/// well off the plot, which is exactly what you want when you are looking at
+/// where you will touch down rather than where the airfield is.
+const RANGE_LEVELS_M: [f64; 10] = [
+    500.0, 1.0e3, 2.0e3, 5.0e3, 1.0e4, 2.0e4, 5.0e4, 1.0e5, 1.5e5, 3.0e5,
 ];
 const RANGE_DOWN_HYSTERESIS: f64 = 0.8;
+/// Default AUTO level before anything is armed (index into [`RANGE_LEVELS_M`]).
+const DEFAULT_RANGE_INDEX: usize = 5;
+
+/// Side of the square deviation indicator, in logical px.
+const DEV_BOX_PX: f32 = 78.0;
+/// Diameter of the moving deviation dot (px).
+const DEV_DOT_PX: f32 = 9.0;
+/// Distance from the box centre to a full-scale deflection (px).
+const DEV_HALF_PX: f32 = 30.0;
 
 /// Uniform mirror of the WGSL `NavDisplayData`.
 #[derive(Clone, ShaderType)]
@@ -115,7 +131,7 @@ pub struct NavDisplayData {
     /// w = bearing-to-destination marker (heading-up rad, or [`NO_ANGLE`]).
     nav: Vec4,
     /// x = range-ring radius, y = ground-track marker (heading-up rad, or
-    /// [`NO_ANGLE`]), z/w reserved.
+    /// [`NO_ANGLE`]), z = rejoin point count, w reserved.
     extra: Vec4,
     col_ring: Vec4,
     col_tick: Vec4,
@@ -126,6 +142,7 @@ pub struct NavDisplayData {
     col_route: Vec4,
     col_route_final: Vec4,
     col_waypoint: Vec4,
+    col_rejoin: Vec4,
     /// per runway: xy = centre (plot), zw = along-strip unit direction.
     runways: [Vec4; MAX_RUNWAYS],
     /// per runway: x = half-length, y = half-width (plot), z = armed,
@@ -133,6 +150,8 @@ pub struct NavDisplayData {
     runway_ext: [Vec4; MAX_RUNWAYS],
     /// Route polyline, two points per element.
     route: [Vec4; MAX_ROUTE_POINTS / 2],
+    /// Rejoin polyline, same packing.
+    rejoin: [Vec4; MAX_REJOIN_POINTS / 2],
     /// per waypoint: xy = position (plot), z = kind.
     waypoints: [Vec4; MAX_WAYPOINTS],
 }
@@ -154,9 +173,11 @@ impl Default for NavDisplayData {
             col_route: lin(Color::srgba(0.42, 0.74, 0.88, 0.85)),
             col_route_final: lin(Color::srgba(0.99, 0.75, 0.37, 0.95)),
             col_waypoint: lin(Color::srgba(0.80, 0.86, 0.92, 0.90)),
+            col_rejoin: lin(Color::srgba(0.55, 0.90, 0.62, 0.85)),
             runways: [Vec4::ZERO; MAX_RUNWAYS],
             runway_ext: [Vec4::ZERO; MAX_RUNWAYS],
             route: [Vec4::ZERO; MAX_ROUTE_POINTS / 2],
+            rejoin: [Vec4::ZERO; MAX_REJOIN_POINTS / 2],
             waypoints: [Vec4::ZERO; MAX_WAYPOINTS],
         }
     }
@@ -183,11 +204,54 @@ impl UiMaterial for NavDisplayMaterial {
 #[derive(Component)]
 pub(crate) struct NavCanvas;
 
+/// The armed runway designator in the header (the panel's primary readout).
 #[derive(Component)]
-pub(crate) struct NavInfo;
+pub(crate) struct NavHeaderRunway;
 
+/// The approach-phase chip beside it (`INTC` / `FNL` / `TDZ`).
 #[derive(Component)]
-pub(crate) struct NavApproachLine;
+pub(crate) struct NavHeaderPhase;
+
+/// Distance-to-go, right-aligned in the header.
+#[derive(Component)]
+pub(crate) struct NavHeaderDistance;
+
+/// The current plot range, between the zoom controls.
+#[derive(Component)]
+pub(crate) struct NavRangeLabel;
+
+/// The moving dot in the deviation indicator.
+#[derive(Component)]
+pub(crate) struct NavDeviationDot;
+
+/// The deviation indicator's frame — hidden when no approach is armed, since a
+/// centring dot with nothing to centre on is worse than no dot.
+#[derive(Component)]
+pub(crate) struct NavDeviationBox;
+
+/// One secondary readout in the data column.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NavDatum {
+    Heading,
+    Track,
+    CrossTrack,
+    Glideslope,
+}
+
+/// The value half of a [`NavDatum`] row.
+#[derive(Component)]
+pub(crate) struct NavDatumValue(NavDatum);
+
+/// Zoom controls under the plot.
+#[derive(Component, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NavZoomButton {
+    /// Tighter range (fewer metres across the plot).
+    In,
+    /// Wider range.
+    Out,
+    /// Hand the range back to AUTO.
+    Auto,
+}
 
 /// A runway designator label pinned over the plot.
 #[derive(Component)]
@@ -202,12 +266,51 @@ pub(crate) enum NavSelectButton {
     Clear,
 }
 
-/// Persistent range selection (hysteresis), reset when the dominant body
-/// changes.
-#[derive(Default)]
-pub(crate) struct RangeState {
+/// The automatic range selection: which rung of [`RANGE_LEVELS_M`] AUTO has
+/// settled on, plus the body it was settled for (so it resets on a body change).
+///
+/// A **resource**, not a `Local`, because two systems need the same value:
+/// [`update`] computes it, and [`handle_zoom`] seeds the first manual step from
+/// it so zooming out of AUTO starts where the plot already is instead of jumping
+/// to the end of the ladder. As a `Local` each system would have kept its own
+/// copy and the zoom would have stepped from a rung the plot was never on.
+///
+/// **Sole writer:** [`update`].
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NavRangeState {
     idx: usize,
     dominant: Option<BodyId>,
+}
+
+impl Default for NavRangeState {
+    fn default() -> Self {
+        Self {
+            idx: DEFAULT_RANGE_INDEX,
+            dominant: None,
+        }
+    }
+}
+
+/// The pilot's zoom override. `None` = AUTO (the plot frames what is still
+/// ahead); `Some(i)` pins a rung of [`RANGE_LEVELS_M`].
+///
+/// **Sole writer:** [`handle_zoom`]. A resource rather than a `Local` because
+/// three inputs drive it — the two buttons, the AUTO button, and the scroll
+/// wheel — and because the selection must survive the widget being swapped out
+/// and back.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct NavZoom {
+    pub manual: Option<usize>,
+}
+
+impl NavZoom {
+    /// Step the manual range, seeding from `auto_index` on the first step so
+    /// zooming from AUTO starts where the plot already is instead of jumping.
+    fn step(&mut self, delta: i32, auto_index: usize) {
+        let current = self.manual.unwrap_or(auto_index) as i32;
+        let next = (current + delta).clamp(0, RANGE_LEVELS_M.len() as i32 - 1);
+        self.manual = Some(next as usize);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +356,9 @@ pub struct NavScene {
     /// Index of the first route point on the final approach segment.
     pub route_final_index: usize,
     pub waypoints_m: Vec<(DVec2, WaypointKind)>,
+    /// The flyable rejoin in local metres, in fly order. Empty when the craft is
+    /// close enough to the route that drawing it says nothing.
+    pub rejoin_m: Vec<DVec2>,
     /// Bearing to the armed threshold (compass rad).
     pub bearing_to_dest_rad: Option<f64>,
     /// Plot half-extent in metres.
@@ -330,6 +436,20 @@ pub fn nav_display_data(scene: &NavScene) -> NavDisplayData {
             slot.w = plot.y as f32;
         }
     }
+
+    let rejoin = decimate_route(&scene.rejoin_m, 0, MAX_REJOIN_POINTS);
+    for (i, p) in rejoin.points.iter().enumerate() {
+        let plot = heading_up_point(*p, scene.heading_rad, range);
+        let slot = &mut data.rejoin[i / 2];
+        if i % 2 == 0 {
+            slot.x = plot.x as f32;
+            slot.y = plot.y as f32;
+        } else {
+            slot.z = plot.x as f32;
+            slot.w = plot.y as f32;
+        }
+    }
+    data.extra.z = rejoin.points.len() as f32;
 
     let mut waypoint_count = 0;
     for (p, kind) in &scene.waypoints_m {
@@ -423,6 +543,69 @@ pub(crate) fn relevance(ctx: &FlightContext) -> Option<i32> {
     }
 }
 
+/// Small helper for a readout label (dim, uppercase, small).
+fn datum_label(theme: &HudTheme, text: &str) -> impl Bundle {
+    (
+        Text::new(text.to_string()),
+        TextFont {
+            font: theme.font.clone(),
+            font_size: FontSize::Px(9.0),
+            ..default()
+        },
+        TextColor(theme.text_dim),
+    )
+}
+
+/// A 1 px separator, which is what gives the stacked blocks their edges.
+fn separator(theme: &HudTheme) -> impl Bundle {
+    (
+        Node {
+            width: Val::Px(MAP_SIZE_PX),
+            height: Val::Px(1.0),
+            ..default()
+        },
+        BackgroundColor(theme.panel_border),
+    )
+}
+
+/// A small control button used by the zoom and selector rows.
+fn control_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    label_text: &str,
+    marker: impl Bundle,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                min_width: Val::Px(22.0),
+                padding: UiRect::axes(Val::Px(6.0), Val::Px(2.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                ..default()
+            },
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            Interaction::None,
+            marker,
+            Name::new(format!("MfdNavBtn{label_text}")),
+        ))
+        .with_children(|b| {
+            b.spawn((
+                Text::new(label_text.to_string()),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(9.0),
+                    ..default()
+                },
+                TextColor(theme.text_dim),
+            ));
+        });
+}
+
 pub(crate) fn build(
     area: &mut ChildSpawnerCommands<'_>,
     theme: &HudTheme,
@@ -435,7 +618,7 @@ pub(crate) fn build(
         Node {
             flex_direction: FlexDirection::Column,
             align_items: AlignItems::Center,
-            row_gap: Val::Px(4.0),
+            row_gap: Val::Px(6.0),
             ..default()
         },
         Visibility::Hidden,
@@ -445,7 +628,74 @@ pub(crate) fn build(
         Name::new("MfdNavDisplay"),
     ))
     .with_children(|p| {
-        p.spawn(label(theme, "NAV"));
+        // --- Header: the one line a pilot should be able to read at a glance —
+        // what is armed, what phase it is in, and how far. Everything below it
+        // is deliberately smaller and dimmer.
+        p.spawn((
+            Node {
+                width: Val::Px(MAP_SIZE_PX),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(6.0),
+                ..default()
+            },
+            Name::new("MfdNavHeader"),
+        ))
+        .with_children(|header| {
+            header.spawn((
+                Text::new("SELECT RWY"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(15.0),
+                    ..default()
+                },
+                TextColor(theme.text_dim),
+                NavHeaderRunway,
+                Name::new("MfdNavHeaderRunway"),
+            ));
+            header
+                .spawn((
+                    Node {
+                        padding: UiRect::axes(Val::Px(4.0), Val::Px(1.0)),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(2.0)),
+                        ..default()
+                    },
+                    BorderColor::all(theme.panel_border),
+                    Visibility::Hidden,
+                    NavHeaderPhase,
+                    Name::new("MfdNavHeaderPhase"),
+                ))
+                .with_children(|chip| {
+                    chip.spawn((
+                        Text::new(""),
+                        TextFont {
+                            font: theme.font.clone(),
+                            font_size: FontSize::Px(9.0),
+                            ..default()
+                        },
+                        TextColor(theme.text_accent),
+                    ));
+                });
+            // Spacer pushes the distance to the right edge.
+            header.spawn(Node {
+                flex_grow: 1.0,
+                ..default()
+            });
+            header.spawn((
+                Text::new(""),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(14.0),
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+                NavHeaderDistance,
+                Name::new("MfdNavHeaderDistance"),
+            ));
+        });
+
+        // --- The plot.
         p.spawn((
             Node {
                 width: Val::Px(MAP_SIZE_PX),
@@ -455,7 +705,8 @@ pub(crate) fn build(
             MaterialNode(material),
             NavCanvas,
             // Clicking the plot arms an approach; the relative position is what
-            // turns a click into plot coordinates.
+            // turns a click into plot coordinates. Hover also gates the scroll
+            // wheel, so the wheel only zooms the plot the cursor is over.
             Interaction::None,
             RelativeCursorPosition::default(),
             Name::new("MfdNavCanvas"),
@@ -482,73 +733,198 @@ pub(crate) fn build(
                 ));
             }
         });
-        // Approach line: what is armed and how it is going.
-        p.spawn((
-            Text::new("—"),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(11.0),
-                ..default()
-            },
-            TextColor(theme.text_accent),
-            NavApproachLine,
-            Name::new("MfdNavApproach"),
-        ));
-        p.spawn((
-            Text::new("—"),
-            TextFont {
-                font: theme.font.clone(),
-                font_size: FontSize::Px(11.0),
-                ..default()
-            },
-            TextColor(theme.text_dim),
-            NavInfo,
-            Name::new("MfdNavInfo"),
-        ));
-        // Runway selector: works even when the strip is off the plot.
+
+        // --- Zoom row.
         p.spawn((
             Node {
+                width: Val::Px(MAP_SIZE_PX),
                 flex_direction: FlexDirection::Row,
-                column_gap: Val::Px(4.0),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(5.0),
+                ..default()
+            },
+            Name::new("MfdNavZoomRow"),
+        ))
+        .with_children(|row| {
+            control_button(row, theme, "-", NavZoomButton::Out);
+            row.spawn((
+                Node {
+                    min_width: Val::Px(64.0),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+                Text::new("--"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(11.0),
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+                NavRangeLabel,
+                Name::new("MfdNavRangeLabel"),
+            ));
+            control_button(row, theme, "+", NavZoomButton::In);
+            control_button(row, theme, "AUTO", NavZoomButton::Auto);
+        });
+
+        p.spawn(separator(theme));
+
+        // --- Guidance block: the centring dot beside the secondary readouts.
+        p.spawn((
+            Node {
+                width: Val::Px(MAP_SIZE_PX),
+                flex_direction: FlexDirection::Row,
+                align_items: AlignItems::Center,
+                column_gap: Val::Px(10.0),
+                ..default()
+            },
+            Name::new("MfdNavGuidance"),
+        ))
+        .with_children(|block| {
+            // The deviation indicator: keep the dot in the middle and you are on
+            // the centreline and on the glideslope.
+            block
+                .spawn((
+                    Node {
+                        width: Val::Px(DEV_BOX_PX),
+                        height: Val::Px(DEV_BOX_PX),
+                        border: UiRect::all(Val::Px(1.0)),
+                        border_radius: BorderRadius::all(Val::Px(3.0)),
+                        ..default()
+                    },
+                    BorderColor::all(theme.panel_border),
+                    BackgroundColor(theme.panel_bg),
+                    Visibility::Hidden,
+                    NavDeviationBox,
+                    Name::new("MfdNavDeviation"),
+                ))
+                .with_children(|box_node| {
+                    let centre = DEV_BOX_PX * 0.5 - 1.0;
+                    // Cross hairs through the centre: the target the dot is
+                    // flown onto.
+                    box_node.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(centre - 9.0),
+                            top: Val::Px(centre),
+                            width: Val::Px(18.0),
+                            height: Val::Px(1.0),
+                            ..default()
+                        },
+                        BackgroundColor(theme.text_dim),
+                    ));
+                    box_node.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(centre),
+                            top: Val::Px(centre - 9.0),
+                            width: Val::Px(1.0),
+                            height: Val::Px(18.0),
+                            ..default()
+                        },
+                        BackgroundColor(theme.text_dim),
+                    ));
+                    // Full-scale ticks on both axes, so the dot's travel has a
+                    // readable scale rather than being a free-floating blob.
+                    for (dx, dy) in [(-1.0, 0.0), (1.0, 0.0), (0.0, -1.0), (0.0, 1.0)] {
+                        box_node.spawn((
+                            Node {
+                                position_type: PositionType::Absolute,
+                                left: Val::Px(centre + dx * DEV_HALF_PX - 1.0),
+                                top: Val::Px(centre + dy * DEV_HALF_PX - 1.0),
+                                width: Val::Px(3.0),
+                                height: Val::Px(3.0),
+                                border_radius: BorderRadius::all(Val::Px(1.5)),
+                                ..default()
+                            },
+                            BackgroundColor(theme.panel_border),
+                        ));
+                    }
+                    // The dot itself.
+                    box_node.spawn((
+                        Node {
+                            position_type: PositionType::Absolute,
+                            left: Val::Px(centre - DEV_DOT_PX * 0.5),
+                            top: Val::Px(centre - DEV_DOT_PX * 0.5),
+                            width: Val::Px(DEV_DOT_PX),
+                            height: Val::Px(DEV_DOT_PX),
+                            border_radius: BorderRadius::all(Val::Px(DEV_DOT_PX * 0.5)),
+                            ..default()
+                        },
+                        BackgroundColor(theme.text_accent),
+                        NavDeviationDot,
+                        Name::new("MfdNavDeviationDot"),
+                    ));
+                });
+
+            // Secondary readouts, in a fixed order so the eye learns the rows.
+            block
+                .spawn((
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        flex_grow: 1.0,
+                        row_gap: Val::Px(1.0),
+                        ..default()
+                    },
+                    Name::new("MfdNavData"),
+                ))
+                .with_children(|column| {
+                    for (datum, label_text) in [
+                        (NavDatum::Heading, "HDG"),
+                        (NavDatum::Track, "TRK"),
+                        (NavDatum::CrossTrack, "XTK"),
+                        (NavDatum::Glideslope, "G/S"),
+                    ] {
+                        column
+                            .spawn((
+                                Node {
+                                    flex_direction: FlexDirection::Row,
+                                    align_items: AlignItems::Center,
+                                    column_gap: Val::Px(6.0),
+                                    ..default()
+                                },
+                                Name::new(format!("MfdNavRow{label_text}")),
+                            ))
+                            .with_children(|row| {
+                                row.spawn((
+                                    Node {
+                                        min_width: Val::Px(24.0),
+                                        ..default()
+                                    },
+                                    datum_label(theme, label_text),
+                                ));
+                                row.spawn((
+                                    Text::new("---"),
+                                    TextFont {
+                                        font: theme.font.clone(),
+                                        font_size: FontSize::Px(11.0),
+                                        ..default()
+                                    },
+                                    TextColor(theme.text_primary),
+                                    NavDatumValue(datum),
+                                ));
+                            });
+                    }
+                });
+        });
+
+        // --- Runway selector, for a strip that is off the plot.
+        p.spawn((
+            Node {
+                width: Val::Px(MAP_SIZE_PX),
+                flex_direction: FlexDirection::Row,
+                justify_content: JustifyContent::Center,
+                column_gap: Val::Px(5.0),
                 ..default()
             },
             Name::new("MfdNavSelector"),
         ))
         .with_children(|row| {
-            for (action, text) in [
-                (NavSelectButton::Prev, "<"),
-                (NavSelectButton::Next, ">"),
-                (NavSelectButton::Flip, "FLIP"),
-                (NavSelectButton::Clear, "CLR"),
-            ] {
-                row.spawn((
-                    Button,
-                    Node {
-                        padding: UiRect::axes(Val::Px(5.0), Val::Px(2.0)),
-                        border: UiRect::all(Val::Px(1.0)),
-                        border_radius: BorderRadius::all(Val::Px(3.0)),
-                        justify_content: JustifyContent::Center,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    },
-                    BackgroundColor(theme.panel_bg),
-                    BorderColor::all(theme.panel_border),
-                    Interaction::None,
-                    action,
-                    Name::new(format!("MfdNavSelect{text}")),
-                ))
-                .with_children(|b| {
-                    b.spawn((
-                        Text::new(text),
-                        TextFont {
-                            font: theme.font.clone(),
-                            font_size: FontSize::Px(9.0),
-                            ..default()
-                        },
-                        TextColor(theme.text_dim),
-                    ));
-                });
-            }
+            control_button(row, theme, "<", NavSelectButton::Prev);
+            control_button(row, theme, ">", NavSelectButton::Next);
+            control_button(row, theme, "FLIP", NavSelectButton::Flip);
+            control_button(row, theme, "CLR", NavSelectButton::Clear);
         });
     });
 }
@@ -573,6 +949,8 @@ pub struct NavSceneInputs<'a> {
     pub armed: Option<RunwayEnd>,
     /// Planned route in body-fixed metres.
     pub route_points: &'a [DVec3],
+    /// Rejoin path in body-fixed metres (empty when there is nothing to show).
+    pub rejoin_points: &'a [DVec3],
     /// Index into `route_points` of the first point on the final approach leg.
     /// An index, not a distance — see `RouteDisplay::final_start_index` for why
     /// deriving it from along-path distances is wrong.
@@ -593,9 +971,7 @@ pub fn build_nav_scene(inputs: &NavSceneInputs<'_>) -> Option<NavScene> {
         inputs.craft_body_fixed.length() - inputs.body_radius_m,
     )?;
 
-    let heading_rad = theta_to_heading(theta_of(
-        frame.direction_to_local(inputs.nose_body_fixed),
-    ));
+    let heading_rad = theta_to_heading(theta_of(frame.direction_to_local(inputs.nose_body_fixed)));
 
     let up = frame.origin_dir;
     let velocity = inputs.velocity_body_fixed;
@@ -636,7 +1012,8 @@ pub fn build_nav_scene(inputs: &NavSceneInputs<'_>) -> Option<NavScene> {
             .ends()
             .iter()
             .find(|end| {
-                (end.reciprocal && threshold_sign > 0.0) || (!end.reciprocal && threshold_sign < 0.0)
+                (end.reciprocal && threshold_sign > 0.0)
+                    || (!end.reciprocal && threshold_sign < 0.0)
             })
             .and_then(|end| end.route_frame().map(|f| end.designator(&f)));
         strips.push(NavStrip {
@@ -655,6 +1032,11 @@ pub fn build_nav_scene(inputs: &NavSceneInputs<'_>) -> Option<NavScene> {
 
     let route_m: Vec<DVec2> = inputs
         .route_points
+        .iter()
+        .map(|p| frame.to_local(*p))
+        .collect();
+    let rejoin_m: Vec<DVec2> = inputs
+        .rejoin_points
         .iter()
         .map(|p| frame.to_local(*p))
         .collect();
@@ -677,6 +1059,7 @@ pub fn build_nav_scene(inputs: &NavSceneInputs<'_>) -> Option<NavScene> {
         route_m,
         route_final_index,
         waypoints_m,
+        rejoin_m,
         bearing_to_dest_rad,
         range_m: inputs.range_m,
     })
@@ -688,7 +1071,8 @@ fn scene_from_world(
     sim: &SimulationState,
     solar: &SolarSystemState,
     route: &RouteState,
-    range_state: &mut RangeState,
+    zoom: &NavZoom,
+    range_state: &mut NavRangeState,
 ) -> Option<NavScene> {
     let s = &sim.simulation;
     let dominant = s.dominant_body();
@@ -709,23 +1093,39 @@ fn scene_from_world(
     }
 
     // Range is picked from body-fixed distances, before projecting: what has to
-    // fit is "how far away the route reaches", which does not depend on the plot.
-    let content_m = if route.display.path_points.is_empty() {
-        route
+    // fit does not depend on the plot.
+    //
+    // It must be framed on what is **still ahead**, not on the whole plan. The
+    // plan freezes once established on final (re-planning from there would fly
+    // you away from the runway), so its points still include the original
+    // intercept from tens of km out — framing all of them keeps the plot at
+    // 50 km while the threshold is 700 m away, which is exactly the "small and
+    // zoomed out" the display was reported as.
+    let along_now = route.guidance.map(|g| g.along_m).unwrap_or(0.0);
+    let ahead_m = route
+        .display
+        .path_points
+        .iter()
+        .zip(route.display.path_along_m.iter())
+        .filter(|(_, along)| **along >= along_now)
+        .map(|(p, _)| position_bf.distance(*p))
+        .fold(0.0_f64, f64::max);
+    let armed_range_m = route
+        .plan
+        .as_ref()
+        .map(|plan| position_bf.distance(plan.end.threshold_point()));
+    let content_m = match (armed_range_m, ahead_m) {
+        // Armed: frame the rest of the route and the runway itself.
+        (Some(threshold), ahead) => threshold.max(ahead),
+        // Idle: frame the nearest runway so there is something to click.
+        (None, _) => route
             .ends
             .first()
             .map(|e| e.threshold_range_m)
-            .unwrap_or(2.0e4)
-    } else {
-        route
-            .display
-            .path_points
-            .iter()
-            .map(|p| position_bf.distance(*p))
-            .fold(0.0_f64, f64::max)
-            .max(2_000.0)
-    };
-    let range_m = select_range(range_state, dominant, content_m);
+            .unwrap_or(2.0e4),
+    }
+    .max(RANGE_LEVELS_M[0]);
+    let range_m = select_range(range_state, dominant, content_m, zoom.manual);
 
     build_nav_scene(&NavSceneInputs {
         craft_body_fixed: position_bf,
@@ -735,10 +1135,114 @@ fn scene_from_world(
         strips: &strips,
         armed: route.plan.as_ref().map(|p| p.end),
         route_points: &route.display.path_points,
+        rejoin_points: &route.display.rejoin_points,
         final_start_index: route.display.final_start_index,
         waypoints: &route.display.waypoints,
         range_m,
     })
+}
+
+/// Queries the ND update writes into, bundled to stay inside Bevy's system
+/// parameter limit. Each is disjoint by marker component.
+#[derive(SystemParam)]
+pub(crate) struct NavWidgets<'w, 's> {
+    header_runway: Query<
+        'w,
+        's,
+        (&'static mut Text, &'static mut TextColor),
+        (
+            With<NavHeaderRunway>,
+            Without<NavHeaderPhase>,
+            Without<NavHeaderDistance>,
+            Without<NavRangeLabel>,
+            Without<NavDatumValue>,
+            Without<NavRunwayLabel>,
+        ),
+    >,
+    header_phase: Query<
+        'w,
+        's,
+        (&'static Children, &'static mut Visibility),
+        (With<NavHeaderPhase>, Without<NavRunwayLabel>),
+    >,
+    header_distance: Query<
+        'w,
+        's,
+        &'static mut Text,
+        (
+            With<NavHeaderDistance>,
+            Without<NavHeaderRunway>,
+            Without<NavRangeLabel>,
+            Without<NavDatumValue>,
+            Without<NavRunwayLabel>,
+        ),
+    >,
+    range_label: Query<
+        'w,
+        's,
+        (&'static mut Text, &'static mut TextColor),
+        (
+            With<NavRangeLabel>,
+            Without<NavHeaderRunway>,
+            Without<NavHeaderDistance>,
+            Without<NavDatumValue>,
+            Without<NavRunwayLabel>,
+        ),
+    >,
+    data: Query<
+        'w,
+        's,
+        (
+            &'static NavDatumValue,
+            &'static mut Text,
+            &'static mut TextColor,
+        ),
+        (
+            Without<NavHeaderRunway>,
+            Without<NavHeaderDistance>,
+            Without<NavRangeLabel>,
+            Without<NavRunwayLabel>,
+        ),
+    >,
+    deviation_box: Query<
+        'w,
+        's,
+        &'static mut Visibility,
+        (
+            With<NavDeviationBox>,
+            Without<NavHeaderPhase>,
+            Without<NavRunwayLabel>,
+        ),
+    >,
+    deviation_dot: Query<
+        'w,
+        's,
+        (&'static mut Node, &'static mut BackgroundColor),
+        (With<NavDeviationDot>, Without<NavRunwayLabel>),
+    >,
+    /// Chip text lives on a child of the phase node.
+    chip_text: Query<
+        'w,
+        's,
+        &'static mut Text,
+        (
+            Without<NavHeaderRunway>,
+            Without<NavHeaderDistance>,
+            Without<NavRangeLabel>,
+            Without<NavDatumValue>,
+            Without<NavRunwayLabel>,
+        ),
+    >,
+    labels: Query<
+        'w,
+        's,
+        (
+            &'static NavRunwayLabel,
+            &'static mut Node,
+            &'static mut Text,
+            &'static mut Visibility,
+        ),
+    >,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -747,24 +1251,13 @@ pub(crate) fn update(
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     route: Res<RouteState>,
+    zoom: Res<NavZoom>,
     theme: Res<HudTheme>,
     units: Res<crate::units_settings::UnitsSettings>,
     mut materials: ResMut<Assets<NavDisplayMaterial>>,
     canvas_q: Query<&MaterialNode<NavDisplayMaterial>, With<NavCanvas>>,
-    mut text_q: ParamSet<(
-        Query<&mut Text, With<NavInfo>>,
-        Query<(&mut Text, &mut TextColor), With<NavApproachLine>>,
-    )>,
-    // Runway labels are their own entities (spawned alongside `NavInfo` /
-    // `NavApproachLine`, never on them), but `&NavRunwayLabel` in the fetch is
-    // not a disjointness proof — Bevy still sees two mutable `Text` borrows and
-    // panics with B0001. The `Without` pair is what makes them provably
-    // disjoint from the `text_q` ParamSet.
-    mut label_q: Query<
-        (&NavRunwayLabel, &mut Node, &mut Text, &mut Visibility),
-        (Without<NavInfo>, Without<NavApproachLine>),
-    >,
-    mut range_state: Local<RangeState>,
+    mut widgets: NavWidgets,
+    mut range_state: ResMut<NavRangeState>,
 ) {
     if active.0 != Some(WidgetKind::NavDisplay) {
         return;
@@ -776,14 +1269,19 @@ pub(crate) fn update(
         return;
     };
 
-    let Some(scene) = scene_from_world(&sim, &solar, &route, &mut range_state) else {
+    let Some(scene) = scene_from_world(&sim, &solar, &route, &zoom, &mut range_state) else {
         material.data = NavDisplayData::default();
         return;
     };
     material.data = nav_display_data(&scene);
 
-    // Designator labels, pinned just off each strip's threshold end.
-    for (slot, mut node, mut text, mut visibility) in &mut label_q {
+    // The ND is an airliner navigation display, so its distances read in
+    // nautical miles and its altitude deviations in feet unless the player has
+    // asked the flight instruments to follow the global system.
+    let system = units.system_for(UnitDomain::Aviation);
+
+    // --- Runway designator labels, pinned just off each strip's threshold end.
+    for (slot, mut node, mut text, mut visibility) in &mut widgets.labels {
         let entry = scene.strips.get(slot.0).and_then(|strip| {
             let designator = strip.designator?;
             let centre = heading_up_point(strip.center_m, scene.heading_rad, scene.range_m);
@@ -814,77 +1312,235 @@ pub(crate) fn update(
         }
     }
 
-    // The ND is an airliner navigation display, so its distances read in
-    // nautical miles and its altitude deviations in feet unless the player has
-    // asked the flight instruments to follow the global system.
-    let system = units.system_for(UnitDomain::Aviation);
+    let guidance = route.guidance.as_ref();
+    let plan = route.plan.as_ref();
 
-    // Line 1: what is armed, and the live deviation.
-    {
-        let mut q = text_q.p1();
-        if let Ok((mut text, mut color)) = q.single_mut() {
-            let (line, tint) = approach_line(&route, &theme, system);
-            if text.0 != line {
-                text.0 = line;
-            }
-            if color.0 != tint {
-                color.0 = tint;
-            }
+    // --- Header.
+    if let Ok((mut text, mut color)) = widgets.header_runway.single_mut() {
+        let (line, tint) = match (route.status, plan) {
+            (RouteStatus::NoRunways, _) => ("NO RUNWAY".to_string(), theme.text_dim),
+            (RouteStatus::Unavailable, _) => ("NAV UNAVAIL".to_string(), theme.text_dim),
+            (_, Some(plan)) => (format!("RWY {:02}", plan.designator), theme.text_accent),
+            _ => ("SELECT RWY".to_string(), theme.text_dim),
+        };
+        if text.0 != line {
+            text.0 = line;
+        }
+        if color.0 != tint {
+            color.0 = tint;
         }
     }
-    // Line 2: heading / track / range.
+
+    let phase_text = guidance.map(|g| match g.phase {
+        ApproachPhase::Transition => "INTC",
+        ApproachPhase::Final => "FNL",
+        ApproachPhase::Touchdown => "TDZ",
+    });
+    if let Ok((children, mut visibility)) = widgets.header_phase.single_mut() {
+        let target = if phase_text.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != target {
+            *visibility = target;
+        }
+        if let Some(phase) = phase_text
+            && let Some(&child) = children.first()
+            && let Ok(mut text) = widgets.chip_text.get_mut(child)
+            && text.0 != phase
+        {
+            text.0 = phase.to_string();
+        }
+    }
+
+    if let Ok(mut text) = widgets.header_distance.single_mut() {
+        let line = guidance
+            .map(|g| format::ground_distance(g.dtg_m, system))
+            .unwrap_or_default();
+        if text.0 != line {
+            text.0 = line;
+        }
+    }
+
+    // --- Range readout: AUTO is the default, so a manual range says so.
+    if let Ok((mut text, mut color)) = widgets.range_label.single_mut() {
+        let line = if zoom.manual.is_some() {
+            format::ground_range(scene.range_m, system)
+        } else {
+            format!("{} AUTO", format::ground_range(scene.range_m, system))
+        };
+        let tint = if zoom.manual.is_some() {
+            theme.text_accent
+        } else {
+            theme.text_dim
+        };
+        if text.0 != line {
+            text.0 = line;
+        }
+        if color.0 != tint {
+            color.0 = tint;
+        }
+    }
+
+    // --- The centring dot. Its two axes carry opposite screen signs on purpose:
+    // see `deviation_offsets_px`.
+    if let Ok(mut visibility) = widgets.deviation_box.single_mut() {
+        let target = if guidance.is_some() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != target {
+            *visibility = target;
+        }
+    }
+    if let Ok((mut node, mut color)) = widgets.deviation_dot.single_mut()
+        && let Some(g) = guidance
     {
-        let mut q = text_q.p0();
-        if let Ok(mut text) = q.single_mut() {
-            let hdg = scene.heading_rad.to_degrees().rem_euclid(360.0).round() as i32;
-            let track = match scene.track_rad {
-                Some(t) => format!("TRK {:03}", t.to_degrees().rem_euclid(360.0).round() as i32),
-                None => "TRK ---".to_string(),
-            };
-            let line = format!(
-                "HDG {:03}  {}  R {}",
-                hdg,
-                track,
-                format::ground_range(scene.range_m, system)
-            );
-            if text.0 != line {
-                text.0 = line;
-            }
+        let (dx, dy) = deviation_offsets_px(g);
+        let centre = DEV_BOX_PX * 0.5 - 1.0;
+        node.left = Val::Px(centre + dx - DEV_DOT_PX * 0.5);
+        node.top = Val::Px(centre + dy - DEV_DOT_PX * 0.5);
+        // Amber while centred, warning colour once either axis pegs — the dot
+        // should not look the same when it has run out of scale.
+        let pegged = g.director_lateral().abs() >= 1.0 || g.director_vertical().abs() >= 1.0;
+        let tint = if pegged {
+            theme.text_warn
+        } else {
+            theme.text_accent
+        };
+        if color.0 != tint {
+            color.0 = tint;
+        }
+    }
+
+    // --- Secondary readouts.
+    for (datum, mut text, mut color) in &mut widgets.data {
+        let (value, tint) = match datum.0 {
+            NavDatum::Heading => (
+                format!(
+                    "{:03}",
+                    scene.heading_rad.to_degrees().rem_euclid(360.0).round() as i32
+                ),
+                theme.text_primary,
+            ),
+            NavDatum::Track => (
+                scene
+                    .track_rad
+                    .map(|t| format!("{:03}", t.to_degrees().rem_euclid(360.0).round() as i32))
+                    .unwrap_or_else(|| "---".to_string()),
+                theme.text_primary,
+            ),
+            NavDatum::CrossTrack => match guidance {
+                Some(g) => {
+                    let side = if g.cross_track_m >= 0.0 { 'R' } else { 'L' };
+                    (
+                        format!(
+                            "{} {}",
+                            side,
+                            format::ground_distance(g.cross_track_m.abs(), system)
+                        ),
+                        if g.loc_deflection().abs() >= 1.0 {
+                            theme.text_warn
+                        } else {
+                            theme.text_primary
+                        },
+                    )
+                }
+                None => ("---".to_string(), theme.text_dim),
+            },
+            NavDatum::Glideslope => match guidance {
+                Some(g) => (
+                    fmt_altitude_error(g, system),
+                    if g.gs_deflection().abs() >= 1.0 {
+                        theme.text_warn
+                    } else {
+                        theme.text_primary
+                    },
+                ),
+                None => ("---".to_string(), theme.text_dim),
+            },
+        };
+        if text.0 != value {
+            text.0 = value;
+        }
+        if color.0 != tint {
+            color.0 = tint;
         }
     }
 }
 
-/// The armed-approach readout line, and the colour that carries its urgency.
-fn approach_line(route: &RouteState, theme: &HudTheme, system: UnitSystem) -> (String, Color) {
-    match (route.status, route.plan.as_ref(), route.guidance.as_ref()) {
-        (RouteStatus::NoRunways, ..) => ("NO RUNWAY".to_string(), theme.text_dim),
-        (RouteStatus::Unavailable, ..) => ("NAV UNAVAIL".to_string(), theme.text_dim),
-        (_, Some(plan), Some(guidance)) => {
-            let side = if guidance.cross_track_m >= 0.0 { 'R' } else { 'L' };
-            let phase = match guidance.phase {
-                ApproachPhase::Transition => "INTC",
-                ApproachPhase::Final => "FNL",
-                ApproachPhase::Touchdown => "TDZ",
-            };
-            // Side before the magnitude, so the distance can carry its own unit
-            // without `XTK 1.2 nmi R` reading as one run-on token.
-            let line = format!(
-                "RWY {:02} {}  {}  XTK {} {}  {}",
-                plan.designator,
-                phase,
-                format::ground_distance(guidance.dtg_m, system),
-                side,
-                format::ground_distance(guidance.cross_track_m.abs(), system),
-                fmt_altitude_error(guidance, system),
-            );
-            let tint = if guidance.established {
-                theme.text_accent
-            } else {
-                theme.text_primary
-            };
-            (line, tint)
+/// Screen offsets (px) of the steering dot, from the box centre.
+///
+/// **The dot is where to point the aircraft, and it follows the route — not the
+/// runway.** It reads the route-relative director
+/// ([`Guidance::director_lateral`] / [`Guidance::director_vertical`]), which
+/// steers along the planned *path* on whatever leg the craft is on, and along a
+/// flyable rejoin when the craft is off course. The runway is only where today's
+/// route happens to end; the identical cue will fly a waypoint route.
+///
+/// This is deliberately **not** the ILS localizer/glideslope pair. Those are
+/// beam deviations measured against the final approach centreline: correct for
+/// the PFD's needles, meaningless on a base leg, and silent about *how* to get
+/// back — which is the question a steering cue exists to answer.
+///
+/// Screen signs: `x` is positive right, so a right turn puts the dot right.
+/// Screen `y` grows **downward**, so a climb command is a *negative* offset —
+/// the axes carry opposite signs and that is not a bug. Pinned by
+/// `the_dot_leads_where_the_craft_should_steer`.
+fn deviation_offsets_px(guidance: &Guidance) -> (f32, f32) {
+    let x = (guidance.director_lateral() as f32) * DEV_HALF_PX;
+    let y = -(guidance.director_vertical() as f32) * DEV_HALF_PX;
+    (x, y)
+}
+
+/// Zoom controls and the scroll wheel. **Sole writer** of [`NavZoom`].
+pub(crate) fn handle_zoom(
+    active: Res<ActiveWidget>,
+    buttons: Query<(&Interaction, &NavZoomButton), Changed<Interaction>>,
+    canvas_q: Query<&Interaction, With<NavCanvas>>,
+    mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
+    mut zoom: ResMut<NavZoom>,
+    range_state: Res<NavRangeState>,
+) {
+    if active.0 != Some(WidgetKind::NavDisplay) {
+        // Drain the wheel so a scroll made elsewhere does not apply late.
+        wheel.clear();
+        return;
+    }
+    let auto_index = range_state.idx;
+
+    for (interaction, button) in &buttons {
+        if !matches!(interaction, Interaction::Pressed) {
+            continue;
         }
-        _ => ("SELECT RWY".to_string(), theme.text_dim),
+        match button {
+            // Zooming *in* means a smaller range, i.e. a lower rung.
+            NavZoomButton::In => zoom.step(-1, auto_index),
+            NavZoomButton::Out => zoom.step(1, auto_index),
+            NavZoomButton::Auto => zoom.manual = None,
+        }
+    }
+
+    // The wheel only zooms while the cursor is over the plot, so scrolling past
+    // the HUD does not silently rescale it.
+    let over_plot = canvas_q
+        .iter()
+        .any(|i| matches!(i, Interaction::Hovered | Interaction::Pressed));
+    let mut steps = 0i32;
+    for event in wheel.read() {
+        if !over_plot {
+            continue;
+        }
+        if event.y > 0.0 {
+            steps -= 1;
+        } else if event.y < 0.0 {
+            steps += 1;
+        }
+    }
+    if steps != 0 {
+        zoom.step(steps, auto_index);
     }
 }
 
@@ -908,9 +1564,13 @@ pub(crate) fn handle_canvas_click(
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     route: Res<RouteState>,
-    canvas_q: Query<(&Interaction, &RelativeCursorPosition), (With<NavCanvas>, Changed<Interaction>)>,
+    zoom: Res<NavZoom>,
+    canvas_q: Query<
+        (&Interaction, &RelativeCursorPosition),
+        (With<NavCanvas>, Changed<Interaction>),
+    >,
     mut requests: MessageWriter<RouteRequest>,
-    mut range_state: Local<RangeState>,
+    range_state: Res<NavRangeState>,
 ) {
     if active.0 != Some(WidgetKind::NavDisplay) {
         return;
@@ -927,7 +1587,10 @@ pub(crate) fn handle_canvas_click(
             (normalized.x as f64 - 0.5) * 2.0,
             (normalized.y as f64 - 0.5) * 2.0,
         );
-        let Some(scene) = scene_from_world(&sim, &solar, &route, &mut range_state) else {
+        // A copy: hit-testing must not nudge the hysteresis state that `update`
+        // owns, or clicking the plot could change its scale.
+        let mut range_snapshot = *range_state;
+        let Some(scene) = scene_from_world(&sim, &solar, &route, &zoom, &mut range_snapshot) else {
             continue;
         };
         // Nearest strip whose drawn rectangle is within tolerance of the click.
@@ -994,9 +1657,19 @@ fn heading_up_angle(compass_rad: f64, heading_rad: f64) -> f64 {
     compass_rad - heading_rad
 }
 
-/// Smallest range level that contains `1.2 ×` the content, with step-down
-/// hysteresis so the scale does not flap on approach.
-fn select_range(state: &mut RangeState, dominant: BodyId, content_m: f64) -> f64 {
+/// The plot's half-extent in metres.
+///
+/// `manual` pins a rung of [`RANGE_LEVELS_M`]; otherwise the smallest rung that
+/// contains `1.2 ×` the content wins, with step-down hysteresis so the scale
+/// does not flap on approach. The automatic state keeps tracking even while a
+/// manual range is pinned, so releasing back to AUTO lands on the right rung
+/// instead of wherever the pilot last left it.
+fn select_range(
+    state: &mut NavRangeState,
+    dominant: BodyId,
+    content_m: f64,
+    manual: Option<usize>,
+) -> f64 {
     let content = content_m * 1.2;
     let smallest_fit = RANGE_LEVELS_M
         .iter()
@@ -1010,7 +1683,10 @@ fn select_range(state: &mut RangeState, dominant: BodyId, content_m: f64) -> f64
     {
         state.idx = smallest_fit;
     }
-    RANGE_LEVELS_M[state.idx]
+    match manual {
+        Some(index) => RANGE_LEVELS_M[index.min(RANGE_LEVELS_M.len() - 1)],
+        None => RANGE_LEVELS_M[state.idx],
+    }
 }
 
 fn lin(color: Color) -> Vec4 {
@@ -1041,7 +1717,11 @@ mod tests {
         // the old fixed 0.06 symbol got wrong by 20x.
         let scene = NavScene {
             heading_rad: 0.0,
-            strips: vec![strip(DVec2::new(0.0, 3_000.0), DVec2::new(0.0, 1.0), 2_500.0)],
+            strips: vec![strip(
+                DVec2::new(0.0, 3_000.0),
+                DVec2::new(0.0, 1.0),
+                2_500.0,
+            )],
             range_m: 10_000.0,
             ..Default::default()
         };
@@ -1059,7 +1739,11 @@ mod tests {
         // At 2 km range a 5 km strip overflows the plot entirely. It must be
         // kept (the near half is visible), not culled on its centre.
         let scene = NavScene {
-            strips: vec![strip(DVec2::new(0.0, 2_400.0), DVec2::new(0.0, 1.0), 2_500.0)],
+            strips: vec![strip(
+                DVec2::new(0.0, 2_400.0),
+                DVec2::new(0.0, 1.0),
+                2_500.0,
+            )],
             range_m: 2_000.0,
             ..Default::default()
         };
@@ -1103,9 +1787,7 @@ mod tests {
 
     #[test]
     fn route_is_decimated_without_losing_the_final_boundary() {
-        let points: Vec<DVec2> = (0..200)
-            .map(|i| DVec2::new(i as f64 * 10.0, 0.0))
-            .collect();
+        let points: Vec<DVec2> = (0..200).map(|i| DVec2::new(i as f64 * 10.0, 0.0)).collect();
         let route = decimate_route(&points, 150, MAX_ROUTE_POINTS);
         assert!(route.points.len() <= MAX_ROUTE_POINTS);
         assert!(route.final_index < route.points.len());
@@ -1159,16 +1841,148 @@ mod tests {
     }
 
     #[test]
+    fn the_dot_leads_where_the_craft_should_steer() {
+        // Steer right: the dot goes right. This is the *route* director, so it
+        // reads the same on a base leg as on final — unlike a localizer needle,
+        // which has no opinion off the centreline.
+        let turn_right = guidance_steering(0.5, 0.0);
+        let (x, _) = deviation_offsets_px(&turn_right);
+        assert!(x > 0.0, "dot should lead right, got x = {x}");
+        let turn_left = guidance_steering(-0.5, 0.0);
+        assert!(deviation_offsets_px(&turn_left).0 < 0.0);
+
+        // Climb command: the dot goes UP, and screen y grows downward, so that
+        // is a NEGATIVE offset. The axes carry opposite signs on purpose.
+        let climb = guidance_steering(0.0, 0.5);
+        let (_, y) = deviation_offsets_px(&climb);
+        assert!(y < 0.0, "a climb cue should sit above centre, got y = {y}");
+        let descend = guidance_steering(0.0, -0.5);
+        assert!(deviation_offsets_px(&descend).1 > 0.0);
+
+        // On the path, on the profile: centred.
+        let (x, y) = deviation_offsets_px(&guidance_steering(0.0, 0.0));
+        assert!(x.abs() < 1e-6 && y.abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_dot_stays_inside_its_box_at_any_deviation() {
+        // Full scale is a clamp, so a wildly off-course craft parks the dot on
+        // the edge instead of drawing it outside the frame.
+        for (lat, vert) in [(9.0, 0.0), (-9.0, 0.0), (0.0, 12.0), (-12.0, -12.0)] {
+            let (x, y) = deviation_offsets_px(&guidance_steering(lat, vert));
+            assert!(x.abs() <= DEV_HALF_PX + 1e-6, "x {x} escaped the box");
+            assert!(y.abs() <= DEV_HALF_PX + 1e-6, "y {y} escaped the box");
+        }
+    }
+
+    #[test]
+    fn the_dot_ignores_the_ils_beams() {
+        // Pegged localizer and glideslope with the steering answer centred: the
+        // dot must stay centred, because it follows the route, not the runway.
+        let mut g = guidance_steering(0.0, 0.0);
+        g.loc_deviation_rad = 10.0 * thalos_navigation::guidance::LOC_FULL_SCALE_RAD;
+        g.gs_deviation_rad = 10.0 * thalos_navigation::guidance::GS_FULL_SCALE_RAD;
+        let (x, y) = deviation_offsets_px(&g);
+        assert!(
+            x.abs() < 1e-6 && y.abs() < 1e-6,
+            "the beams must not move the steering dot: ({x}, {y})"
+        );
+    }
+
+    #[test]
+    fn zoom_steps_from_where_the_plot_already_is() {
+        let mut zoom = NavZoom::default();
+        // First step seeds from the automatic rung rather than jumping to 0.
+        zoom.step(-1, 5);
+        assert_eq!(zoom.manual, Some(4));
+        zoom.step(-1, 5);
+        assert_eq!(zoom.manual, Some(3));
+        zoom.step(1, 5);
+        assert_eq!(zoom.manual, Some(4));
+    }
+
+    #[test]
+    fn zoom_clamps_to_the_ladder() {
+        let mut zoom = NavZoom::default();
+        for _ in 0..40 {
+            zoom.step(-1, 5);
+        }
+        assert_eq!(zoom.manual, Some(0));
+        for _ in 0..40 {
+            zoom.step(1, 5);
+        }
+        assert_eq!(zoom.manual, Some(RANGE_LEVELS_M.len() - 1));
+    }
+
+    #[test]
+    fn a_manual_range_wins_but_auto_keeps_tracking() {
+        let mut state = NavRangeState::default();
+        let body: BodyId = 0;
+        // Pinned to the tightest rung while the content wants a wide one.
+        let range = select_range(&mut state, body, 40_000.0, Some(0));
+        assert_eq!(range, RANGE_LEVELS_M[0]);
+        // Releasing to AUTO lands on the rung the content needs — not on
+        // whatever the manual pin left behind.
+        let range = select_range(&mut state, body, 40_000.0, None);
+        assert!(
+            range >= 40_000.0,
+            "auto should contain the content, got {range}"
+        );
+    }
+
+    /// A `Guidance` carrying a steering answer: `lateral` in units of full-scale
+    /// heading error (+ = turn right), `vertical` in units of full-scale
+    /// flight-path-angle error (+ = climb).
+    fn guidance_steering(lateral: f64, vertical: f64) -> Guidance {
+        let track = 1.0_f64;
+        Guidance {
+            desired_heading_rad: track
+                + lateral * thalos_navigation::guidance::DIRECTOR_HEADING_FULL_SCALE_RAD,
+            track_heading_rad: track,
+            fpa_rad: 0.0,
+            fpa_command_rad: vertical * thalos_navigation::guidance::DIRECTOR_FPA_FULL_SCALE_RAD,
+            ..guidance_with(0.0, 0.0)
+        }
+    }
+
+    /// A `Guidance` carrying only the ILS beam deviations.
+    fn guidance_with(loc_scale: f64, gs_scale: f64) -> Guidance {
+        Guidance {
+            phase: ApproachPhase::Final,
+            cross_track_m: 0.0,
+            course_heading_rad: 0.0,
+            track_heading_rad: 0.0,
+            desired_heading_rad: 0.0,
+            fpa_rad: 0.0,
+            fpa_command_rad: 0.0,
+            dtg_m: 5_000.0,
+            along_m: 0.0,
+            threshold_range_m: 5_000.0,
+            altitude_m: 0.0,
+            target_altitude_m: 0.0,
+            altitude_error_m: 0.0,
+            target_speed_m_s: None,
+            next_gate: None,
+            loc_deviation_rad: loc_scale * thalos_navigation::guidance::LOC_FULL_SCALE_RAD,
+            gs_deviation_rad: gs_scale * thalos_navigation::guidance::GS_FULL_SCALE_RAD,
+            bank_command_rad: 0.0,
+            vertical_speed_command_m_s: 0.0,
+            established: true,
+        }
+    }
+
+    #[test]
     fn range_ladder_snaps_up_and_holds_with_hysteresis() {
-        let mut state = RangeState::default();
+        let mut state = NavRangeState::default();
         let body: BodyId = 0;
         // 8 km of content needs the 10 km level.
-        assert_eq!(select_range(&mut state, body, 8_000.0), 1.0e4);
+        assert_eq!(select_range(&mut state, body, 8_000.0, None), 1.0e4);
         // Closing slightly must NOT drop a level (hysteresis).
-        assert_eq!(select_range(&mut state, body, 7_000.0), 1.0e4);
-        // Closing a lot does.
-        assert_eq!(select_range(&mut state, body, 1_000.0), 2.0e3);
+        assert_eq!(select_range(&mut state, body, 7_000.0, None), 1.0e4);
+        // Closing a lot does — and now reaches the short-final rungs the old
+        // ladder did not have.
+        assert_eq!(select_range(&mut state, body, 300.0, None), 500.0);
         // Growing past the level steps up.
-        assert_eq!(select_range(&mut state, body, 40_000.0), 5.0e4);
+        assert_eq!(select_range(&mut state, body, 40_000.0, None), 5.0e4);
     }
 }

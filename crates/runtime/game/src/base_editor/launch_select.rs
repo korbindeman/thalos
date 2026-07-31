@@ -522,6 +522,7 @@ fn apply_launch_placement(
                 radius_m,
                 half_length_m as f64,
                 clearance_m,
+                &mut commands,
             );
             // The placement just teleported the canonical craft. The live
             // bubble was seeded from the *pre-placement* orbit hold, and the

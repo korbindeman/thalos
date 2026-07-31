@@ -108,6 +108,15 @@ rule and naga_oil's capabilities happen to agree. A shared *palette anchor*
 therefore needs an accessor, not a `const`. Hit July 2026 giving the tile
 renderer udlod's substrate palette.
 
+Hit again July 2026 extracting the cloud radiance model into
+`thalos::volumetrics`: the constants moved verbatim from a module where they were
+local (and therefore legal untyped) into a library, and every importer died at
+pipeline creation. Adding an explicit type (`const X: f32 = 0.8;`) does **not**
+help — it is not a typing problem, naga_oil simply never emits the const. The
+accessor (`fn water_cloud_albedo() -> f32`) is the fix. Watch for this whenever a
+constant is *promoted* into a shared library; it is invisible until then.
+
+
 ### A struct *field* name that matches a naga_oil `#import`ed global breaks field access
 
 Symptom: `error: invalid field accessor 'config'` pointing at a perfectly

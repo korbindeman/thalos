@@ -123,11 +123,29 @@ const RADIANCE_GAIN: f32 = 2.0;
 const STANDOFF_GROWTH: f32 = 3.0;
 
 /// Stagnation standoff as a fraction of the body surface, in the shader's
-/// normalized space. Bounds a *thin* layer: a real bow shock stands off a few
-/// percent of the windward radius at hypersonic speed, and anything much thicker
-/// stops reading as a shock and starts reading as a halo.
+/// normalized space. A real bow shock stands off a few percent of the windward
+/// radius at hypersonic speed, and this is that number — the **shock position**,
+/// not the size of the glow.
 const STANDOFF_FRAC_MIN: f32 = 0.04;
 const STANDOFF_FRAC_MAX: f32 = 0.18;
+
+/// How much thicker the *luminous* envelope is than the shock standoff.
+///
+/// **The standoff is not the glow.** The shock sits a few percent of the nose
+/// radius ahead of the body, and modelling only that gap renders an 8 cm sheath
+/// on a 4 m craft — physically the right number, visually invisible, which is
+/// exactly what the first version did. What entry footage actually shows is the
+/// whole radiating region: the compressed shock layer *plus* the thermal boundary
+/// layer over the hull and the hot afterbody gas trailing off it. That envelope
+/// is several times the standoff, so the two are separate quantities here.
+/// `standoff` keeps its job — it sets the shape, the Mach response and where the
+/// layer is brightest — and this sets how far the glow reaches.
+const GLOW_THICKNESS_FACTOR: f32 = 6.0;
+
+/// Floor on the luminous envelope, as a fraction of the body surface. Keeps the
+/// glow readable on a large vehicle, where the standoff scales with nose radius
+/// but the envelope is dominated by the boundary layer.
+const GLOW_FRAC_MIN: f32 = 0.35;
 
 /// Plasma shimmer amplitude. Deliberately small: a shock layer is a smooth
 /// continuum, and heavy noise reads as fire rather than as compressed air.
@@ -149,6 +167,12 @@ pub struct ReentryShell {
     /// Last published visibility, so the diagnostic below fires on the
     /// *transition* rather than every frame.
     lit: bool,
+    /// Body extents at the last diagnostic. The record must also re-fire when the
+    /// resolved geometry changes, not only when the shell first lights: the craft
+    /// bounds settle over the first frames, so a transition-only event reports
+    /// what the shell looked like when it lit, never what it actually rendered
+    /// with — which cost two wrong diagnoses before it was noticed.
+    logged_body: Vec3,
 }
 
 pub struct ReentryPlugin;
@@ -181,9 +205,12 @@ pub struct ReentryParams {
     pub mid_color: Vec4,
     /// rgb = coolest stop, a = normalized stagnation temperature.
     pub cool_color: Vec4,
-    /// xyz = craft-local body half-extents (m), w = stagnation standoff as a
-    /// fraction of the body surface.
+    /// xyz = craft-local body half-extents (m), w = UNUSED (reserved).
     pub body: Vec4,
+    /// x = luminous envelope thickness, y = shock standoff — both as fractions of
+    /// the body surface in normalized space. The envelope is what is drawn; the
+    /// standoff is where inside it the layer peaks.
+    pub envelope: Vec4,
     /// xyz = freestream arrival direction in craft-local axes, w = standoff growth.
     pub flow: Vec4,
     /// x = time (s), y = seed, z = shimmer amplitude, w = supersonic ramp 0..1.
@@ -196,7 +223,8 @@ impl Default for ReentryParams {
             hot_color: HOT_COLOR.extend(RADIANCE_GAIN),
             mid_color: MID_COLOR.extend(1.0),
             cool_color: COOL_COLOR.extend(0.0),
-            body: Vec3::ONE.extend(STANDOFF_FRAC_MIN),
+            body: Vec3::ONE.extend(0.0),
+            envelope: Vec4::new(GLOW_FRAC_MIN, STANDOFF_FRAC_MIN, 0.0, 0.0),
             flow: Vec3::Z.extend(STANDOFF_GROWTH),
             anim: Vec4::ZERO,
         }
@@ -269,6 +297,7 @@ fn spawn_reentry_shell(
                 ReentryShell {
                     material,
                     lit: false,
+                    logged_body: Vec3::ZERO,
                 },
             ))
             .id();
@@ -281,11 +310,11 @@ fn update_reentry_shell(
     time: Res<Time>,
     flow: Res<FlowSignals>,
     mut materials: ResMut<Assets<ReentryMaterial>>,
-    mut shells: Query<(&mut ReentryShell, &mut Visibility)>,
+    mut shells: Query<(&mut ReentryShell, &mut Transform, &mut Visibility)>,
 ) {
     let profile = resolve_params(&flow, time.elapsed_secs());
 
-    for (mut shell, mut visibility) in shells.iter_mut() {
+    for (mut shell, mut transform, mut visibility) in shells.iter_mut() {
         let Some(params) = profile else {
             if shell.lit {
                 shell.lit = false;
@@ -300,13 +329,20 @@ fn update_reentry_shell(
             *visibility = Visibility::Hidden;
             continue;
         };
-        // No transform to touch: the shell is hull-fitted and identity-parented,
-        // and the freestream direction rides in the uniform instead.
+        // The only transform term: sit on the hull's bounding-box CENTRE, which is
+        // not the craft origin. Rotation stays identity — the shell works in the
+        // craft's own axes and the freestream rides in the uniform.
+        transform.translation = flow.craft_bounds_centre_m;
         if let Some(material) = materials.get_mut(&shell.material).as_mut() {
             material.params = params;
         }
-        if !shell.lit {
+        // Re-log on first light OR when the resolved body has moved materially.
+        let body = params.body.truncate();
+        let moved = (body - shell.logged_body).abs().max_element()
+            > shell.logged_body.max_element().max(0.1) * 0.05;
+        if !shell.lit || moved {
             shell.lit = true;
+            shell.logged_body = body;
             // Fires on the transition, not per frame: the resolved geometry is the
             // one thing a still cannot show, and every wrong-looking shell so far
             // has been a geometry-resolution bug (a bounding sphere standing in for
@@ -324,7 +360,8 @@ fn update_reentry_shell(
                 temp_norm = params.cool_color.w,
                 kappa = params.mid_color.w,
                 gain = params.hot_color.w,
-                standoff_frac = params.body.w,
+                glow_frac = params.envelope.x,
+                standoff_frac = params.envelope.y,
                 body_half_x_m = params.body.x,
                 body_half_y_m = params.body.y,
                 body_half_z_m = params.body.z,
@@ -369,15 +406,19 @@ fn resolve_params(flow: &FlowSignals, elapsed_s: f32) -> Option<ReentryParams> {
 
     let temp_norm = (flow.stagnation_temp_k.min(REAL_GAS_TEMP_CAP_K) / TEMP_REF_K).clamp(0.0, 1.0);
 
+    // What is drawn is the radiating envelope, not the standoff gap.
+    let glow_frac = (standoff_frac * GLOW_THICKNESS_FACTOR).max(GLOW_FRAC_MIN);
+
     Some(ReentryParams {
         hot_color: HOT_COLOR.extend(RADIANCE_GAIN * intensity),
         mid_color: MID_COLOR.extend(kappa),
         cool_color: COOL_COLOR.extend(temp_norm),
-        body: flow
-            .craft_half_extents_m
-            .max(Vec3::splat(0.05))
-            .extend(standoff_frac),
-        flow: flow.flow_from_local.normalize_or(Vec3::Z).extend(STANDOFF_GROWTH),
+        body: flow.craft_half_extents_m.max(Vec3::splat(0.05)).extend(0.0),
+        envelope: Vec4::new(glow_frac, standoff_frac, 0.0, 0.0),
+        flow: flow
+            .flow_from_local
+            .normalize_or(Vec3::Z)
+            .extend(STANDOFF_GROWTH),
         anim: Vec4::new(elapsed_s, 0.37, SHIMMER_AMPLITUDE, ramp),
     })
 }
@@ -522,20 +563,24 @@ mod tests {
                 0.0,
             )
             .unwrap_or_else(|| panic!("mach {mach} should be past the ramp"));
-            let standoff_frac = params.body.w;
+            // The hull must bound the ENVELOPE, which is what is drawn — bounding
+            // only the standoff would clip the glow it was sized against.
+            let glow_frac = params.envelope.x;
             let growth = params.flow.w;
-            let standoff = |cos_t: f32| standoff_frac * (1.0 + growth * (1.0 - cos_t));
+            let envelope = |cos_t: f32| glow_frac * (1.0 + growth * (1.0 - cos_t));
 
             // Both in normalized units, where the body surface is 1.
-            let hull = 1.0 + standoff(HULL_WORST_COS);
-            let outermost_emitting = 1.0 + standoff(WRAP_LO);
+            let hull = 1.0 + envelope(HULL_WORST_COS);
+            let outermost_emitting = 1.0 + envelope(WRAP_LO);
             assert!(
                 hull >= outermost_emitting,
                 "mach {mach}: hull {hull} clips the emitting layer at {outermost_emitting}"
             );
             assert!(
-                standoff_frac > 0.0 && standoff_frac < 0.5,
-                "mach {mach}: standoff {standoff_frac} is not a thin layer on the body"
+                params.envelope.y > 0.0 && params.envelope.y < params.envelope.x,
+                "mach {mach}: the shock ({}) must sit inside the envelope ({})",
+                params.envelope.y,
+                params.envelope.x
             );
         }
     }
@@ -546,10 +591,16 @@ mod tests {
     #[test]
     fn standoff_shrinks_with_mach() {
         let at = |mach: f32| {
-            resolve_params(&FlowSignals { mach, ..entry_flow() }, 0.0)
-                .unwrap()
-                .body
-                .w
+            resolve_params(
+                &FlowSignals {
+                    mach,
+                    ..entry_flow()
+                },
+                0.0,
+            )
+            .unwrap()
+            .envelope
+            .y
         };
         assert!(at(25.0) < at(3.0));
     }
@@ -571,12 +622,38 @@ mod tests {
         );
     }
 
+    /// The luminous envelope must stay visible on a real vehicle. Modelling only
+    /// the shock standoff put an 8 cm sheath on a 4 m craft — the correct physical
+    /// number for a shock position, and invisible.
+    #[test]
+    fn glow_envelope_is_visible_on_a_real_craft() {
+        let flow = entry_flow();
+        let params = resolve_params(&flow, 0.0).unwrap();
+        let thinnest_axis_m = params.body.truncate().min_element();
+        let glow_m = params.envelope.x * thinnest_axis_m;
+        assert!(
+            glow_m > 0.5,
+            "envelope is {glow_m} m on a {thinnest_axis_m} m half-extent — too thin to read"
+        );
+        assert!(
+            params.envelope.x > params.envelope.y * 2.0,
+            "the envelope must be materially thicker than the standoff"
+        );
+    }
+
     /// Emission must never exceed the Wien reference, or the colour ramp stops
     /// carrying temperature information and every entry blows out to flat white.
     #[test]
     fn normalized_temperature_never_exceeds_one() {
         for mach in [2.0f32, 10.0, 25.0, 60.0] {
-            let params = resolve_params(&FlowSignals { mach, ..entry_flow() }, 0.0).unwrap();
+            let params = resolve_params(
+                &FlowSignals {
+                    mach,
+                    ..entry_flow()
+                },
+                0.0,
+            )
+            .unwrap();
             assert!(
                 params.cool_color.w <= 1.0,
                 "mach {mach}: normalized temperature {} exceeds the reference",

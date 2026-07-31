@@ -155,47 +155,89 @@ const fn gcd(mut a: u32, mut b: u32) -> u32 {
     a
 }
 
-/// Compiled procedural driver capabilities available to catalog entries.
+/// **The one declaration of the capture preset catalog** — variant name and
+/// wire name, in canonical order.
 ///
-/// Keep this list aligned with the runtime's `ScreenshotPreset` enum. The
-/// developer-facing registry is `assets/viewpoints.json`; this list validates
-/// that its scripted entries name real executors and supports internal boot
-/// compatibility scheduling.
-pub const CAPTURE_PRESETS: &[&str] = &[
-    "latest-perspective",
-    "spaceport-aerial",
-    "runway-atmosphere",
-    "paved-ground",
-    "hub",
-    "dry-belt",
-    "forest-stand",
-    "earth-reference",
-    "ocean",
-    "ocean-slopes",
-    "coastline",
-    "mira-orbit",
-    "mira-surface",
-    "mira-eva",
-    "mira-disc",
-    "mira-approach",
-    "mira-rim",
-    "cloud-runway",
-    "cloud-motion",
-    "cloud-cruise",
-    "cloud-interior",
-    "cloud-limb",
-    "cloud-planet",
-    "cloud-sunset",
-    "cloud-godray",
-    "plume",
-    "plume-skyline",
-    "reentry",
-    "interstage",
-    "orbit-hull",
-    "massif-aerial",
-    "massif-ridge",
-    "massif-valley",
-];
+/// This used to be a hand-maintained twin of the runtime's `ScreenshotPreset`
+/// enum, reconciled only by a `debug_assert_eq!` inside the *booted capture
+/// host*. A divergence therefore cost a full host boot per shot to discover
+/// while `just check` and `just clippy` stayed green — on 2026-07-30 it burned
+/// 6 of 37 shots in one evening while a new preset was landing.
+///
+/// So the twin is gone: this macro is a callback that hands the list to a
+/// caller-supplied macro, and everything downstream *expands from it*. The
+/// protocol's [`CAPTURE_PRESETS`] name table and the runtime's
+/// `ScreenshotPreset::{ALL, name, from_canonical_name}` are all expansions, so
+/// they cannot disagree — and because the runtime's generated `name()` is a
+/// `match` over the real enum, a variant present in only one of the two places
+/// is a **compile error** in either direction:
+///
+/// * an entry with no matching variant fails to resolve `Self::$variant`;
+/// * a variant missing from this list makes the generated `match` non-exhaustive.
+///
+/// Adding a preset means adding the enum variant (with its framing docs, which
+/// belong on the variant) and one line here. Nothing else needs to be kept in
+/// sync.
+///
+/// The developer-facing registry remains `assets/viewpoints.json`; this list is
+/// what validates that its scripted entries name real executors, and what backs
+/// boot-compatibility scheduling.
+#[macro_export]
+macro_rules! capture_preset_catalog {
+    ($receiver:ident) => {
+        $receiver! {
+            LatestPerspective => "latest-perspective",
+            SpaceportAerial => "spaceport-aerial",
+            RunwayAtmosphere => "runway-atmosphere",
+            CraftStance => "craft-stance",
+            PavedGround => "paved-ground",
+            Hub => "hub",
+            DryBelt => "dry-belt",
+            ForestStand => "forest-stand",
+            EarthReference => "earth-reference",
+            Ocean => "ocean",
+            OceanSlopes => "ocean-slopes",
+            Coastline => "coastline",
+            MiraOrbit => "mira-orbit",
+            MiraSurface => "mira-surface",
+            MiraEva => "mira-eva",
+            MiraDisc => "mira-disc",
+            MiraApproach => "mira-approach",
+            MiraRim => "mira-rim",
+            CloudRunway => "cloud-runway",
+            CloudMotion => "cloud-motion",
+            CloudCruise => "cloud-cruise",
+            CloudInterior => "cloud-interior",
+            CloudLimb => "cloud-limb",
+            CloudLeo => "cloud-leo",
+            CloudPlanet => "cloud-planet",
+            CloudSunset => "cloud-sunset",
+            CloudGodray => "cloud-godray",
+            Plume => "plume",
+            PlumeSkyline => "plume-skyline",
+            Reentry => "reentry",
+            VaporCone => "vapor-cone",
+            Interstage => "interstage",
+            OrbitHull => "orbit-hull",
+            MassifAerial => "massif-aerial",
+            MassifRidge => "massif-ridge",
+            MassifValley => "massif-valley",
+        }
+    };
+}
+
+macro_rules! capture_preset_names {
+    ($($variant:ident => $name:literal,)*) => {
+        /// Compiled procedural driver capabilities available to catalog entries,
+        /// in canonical order.
+        ///
+        /// Expanded from [`capture_preset_catalog!`] — do not edit this list;
+        /// edit the catalog.
+        pub const CAPTURE_PRESETS: &[&str] = &[$($name),*];
+    };
+}
+
+capture_preset_catalog!(capture_preset_names);
 
 /// Canonical scene builder behind an authored viewpoint.
 ///
@@ -640,6 +682,84 @@ pub struct CaptureGraphicsSettings {
     pub grass: bool,
 }
 
+/// Tile-terrain residency at the moment the image was read back.
+///
+/// A capture can render the ground **coarser than the preset authored** and
+/// still exit zero with a plausible PNG: the tile memory brake coarsens
+/// selection when residency runs over this process's VRAM share, and headless
+/// capture deliberately runs a smaller allowance than an interactive session.
+/// Before this existed, `just diag` could report that a session braked but no
+/// reader could map that onto a *file* — so this rides in the receipt beside
+/// the image, the same way source provenance does.
+///
+/// `split_scale` is 1.0 when the brake is not holding anything back;
+/// `MIN_SPLIT_SCALE` (≈ 0.333) is the floor. `worst_split_scale` covers the
+/// whole request — settle included — because a brake that bit during warmup and
+/// released before readback did not affect the image but does explain a slow
+/// shot.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+pub struct CaptureTerrainResidency {
+    /// Split scale at readback. Below 1.0 means this image is coarser than the
+    /// preset authored.
+    pub split_scale: f64,
+    /// Worst split scale seen between arming the request and reading it back.
+    pub worst_split_scale: f64,
+    /// Landed tiles at readback, and what the selector wanted before the brake.
+    pub resident_tiles: usize,
+    pub desired_tiles: usize,
+    pub resident_mib: f64,
+    /// This process's share of the machine-wide tile budget, MiB. `None` when
+    /// the budget is disabled (`THALOS_TILE_BUDGET_MB=0`).
+    pub budget_mib: Option<f64>,
+    /// Live renderer instances the share was divided across. More than one
+    /// means a peer halved this host's allowance — read it before blaming the
+    /// preset (INC-20260725T012104Z).
+    pub instances: usize,
+    /// Seconds the readback waited for the brake to release. Non-zero with
+    /// `split_scale` back at 1.0 is the gate working; non-zero with
+    /// `split_scale` below 1.0 means the wait timed out.
+    pub brake_wait_s: f64,
+}
+
+impl CaptureTerrainResidency {
+    /// Did this image render coarser than the preset authored?
+    pub fn braked(&self) -> bool {
+        self.split_scale < 1.0
+    }
+}
+
+/// The clock the renderer produced this image under.
+///
+/// A **wall** clock advances the world by however long each frame took, so the
+/// same preset settles to a *different* world state on a busy machine than on
+/// an idle one — visible wherever anything is time-dependent (cloud advection,
+/// plumes, the settle gate). A **driven** clock advances every frame by exactly
+/// `driven_dt_s` regardless of render cost, which is what makes a rerun
+/// comparable and what lets frame *n* of a sequence land at *n · dt*.
+///
+/// `None` means the wall clock. That is also what a host predating the driven
+/// mode reports, and it is the truth for it — so an absent block is never
+/// ambiguous.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
+pub struct CaptureClock {
+    #[serde(default)]
+    pub driven_dt_s: Option<f64>,
+}
+
+impl CaptureClock {
+    pub const WALL: Self = Self { driven_dt_s: None };
+
+    pub fn driven(dt_s: f64) -> Self {
+        Self {
+            driven_dt_s: Some(dt_s),
+        }
+    }
+
+    pub fn is_driven(&self) -> bool {
+        self.driven_dt_s.is_some()
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct CaptureRequest {
     pub schema_version: u32,
@@ -672,6 +792,14 @@ pub struct CaptureResponse {
     pub camera: Option<CapturedCameraState>,
     #[serde(default)]
     pub graphics: Option<CaptureGraphicsSettings>,
+    /// Ground residency at readback. `None` on the legacy udlod path or a body
+    /// the tile renderer has not installed on — "not applicable", not "fine".
+    #[serde(default)]
+    pub terrain: Option<CaptureTerrainResidency>,
+    /// Wall or driven clock. Defaults to wall, which is what a host predating
+    /// the mode ran on — so the field needs no schema bump to stay truthful.
+    #[serde(default)]
+    pub clock: CaptureClock,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -724,6 +852,26 @@ mod tests {
         assert!(CaptureGraphicsOverrides::parse("clouds=maybe").is_err());
         assert!(CaptureGraphicsOverrides::parse("trees=off").is_err());
         assert!(CaptureGraphicsOverrides::parse("grass=on,grass=off").is_err());
+    }
+
+    /// A receipt written before the driven clock existed must still read as
+    /// "wall", not as an unknown. That is what lets the field ship without a
+    /// schema bump.
+    #[test]
+    fn a_receipt_without_a_clock_block_reads_as_wall() {
+        let response: CaptureResponse = serde_json::from_str(
+            r#"{"schema_version":5,"id":"abc","ok":true,"message":"",
+                "output":null,"completed_unix_ms":1}"#,
+        )
+        .expect("legacy response deserializes");
+        assert_eq!(response.clock, CaptureClock::WALL);
+        assert!(!response.clock.is_driven());
+
+        let driven = CaptureClock::driven(1.0 / 60.0);
+        let round_trip: CaptureClock =
+            serde_json::from_str(&serde_json::to_string(&driven).unwrap()).unwrap();
+        assert_eq!(round_trip, driven);
+        assert!(round_trip.is_driven());
     }
 
     #[test]

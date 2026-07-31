@@ -1,10 +1,20 @@
-//! Display-string helpers shared by editor front-ends: unit formatting and
-//! the parts-palette category/ordering/summary scheme. Pure functions — no
-//! ECS access — so both the egui binary and the in-game Bevy UI render the
-//! same catalog the same way.
+//! Display-string helpers for the editor: the parts-palette
+//! category/ordering/summary scheme. Pure functions — no ECS access — so both
+//! the egui binary and the in-game Bevy UI render the same catalog the same
+//! way.
+//!
+//! **Unit conversion is not done here.** Every quantity routes through
+//! [`crate::hud::format`], the one place SI becomes a display string, so the
+//! shipyard obeys the same measurement preference as the HUD instead of being
+//! hardcoded metric. The editor is not a flight instrument, so it resolves at
+//! [`crate::units_settings::UnitDomain::General`] — it follows the global switch and never the
+//! aeronautical override.
 
 use thalos_shipyard::blueprint::default_params_for;
 use thalos_shipyard::{CatalogEntry, PartParams};
+
+use crate::hud::format;
+use crate::units_settings::UnitSystem;
 
 /// Stable ordering inside each palette category. Within each kind, callers
 /// sort by display name.
@@ -49,40 +59,44 @@ pub fn palette_category_label(entry: &CatalogEntry) -> &'static str {
     }
 }
 
-pub fn meters_label(value: f32) -> String {
-    format!("{value:.1} m")
+/// A part dimension at palette precision (one decimal).
+pub fn meters_label(value: f32, system: UnitSystem) -> String {
+    format::length(value as f64, 1, system)
 }
 
 /// One-line spec summary under each palette entry's name.
-pub fn palette_part_summary(entry: &CatalogEntry) -> String {
+pub fn palette_part_summary(entry: &CatalogEntry, system: UnitSystem) -> String {
+    let m = |v: f32| meters_label(v, system);
     match entry {
         CatalogEntry::Pod(p) => {
             format!(
-                "{} · Diameter {} · {:.1} t dry",
+                "{} · Diameter {} · {} dry",
                 p.geometry.label(),
-                meters_label(p.diameter),
-                p.dry_mass / 1000.0
+                m(p.diameter),
+                format::mass_large(p.dry_mass as f64, system)
             )
         }
         CatalogEntry::Engine(e) => {
+            // Specific impulse is seconds in both systems — the one figure here
+            // that must NOT be converted.
             format!(
-                "{} · {} · Diameter {} · {:.0} kN · {:.0} s",
+                "{} · {} · Diameter {} · {} · {:.0} s",
                 e.optimized_for.label(),
                 e.geometry.label(),
-                meters_label(e.diameter),
-                e.thrust / 1000.0,
+                m(e.diameter),
+                format::thrust(e.thrust as f64, system),
                 e.isp
             )
         }
         CatalogEntry::Intake(i) => format!(
-            "Diameter {} · area {:.2} m² · {}",
-            meters_label(i.diameter),
-            i.capture.area_m2 * i.capture.efficiency,
+            "Diameter {} · area {} · {}",
+            m(i.diameter),
+            format::area((i.capture.area_m2 * i.capture.efficiency) as f64, system),
             i.capture.kind.label()
         ),
         CatalogEntry::Decoupler(_) => match default_params_for(entry) {
             PartParams::Decoupler { diameter } => {
-                format!("Default diameter {} · staging", meters_label(diameter))
+                format!("Default diameter {} · staging", m(diameter))
             }
             _ => "Parametric diameter".into(),
         },
@@ -90,19 +104,13 @@ pub fn palette_part_summary(entry: &CatalogEntry) -> String {
             PartParams::Adapter {
                 diameter,
                 target_diameter,
-            } => format!(
-                "Default {} to {} diameter",
-                meters_label(diameter),
-                meters_label(target_diameter)
-            ),
+            } => format!("Default {} to {} diameter", m(diameter), m(target_diameter)),
             _ => "Parametric diameter".into(),
         },
         CatalogEntry::Tank(_) => match default_params_for(entry) {
-            PartParams::Tank { diameter, length } => format!(
-                "Default diameter {} · length {}",
-                meters_label(diameter),
-                meters_label(length)
-            ),
+            PartParams::Tank { diameter, length } => {
+                format!("Default diameter {} · length {}", m(diameter), m(length))
+            }
             _ => "Parametric diameter".into(),
         },
         CatalogEntry::Fuselage(_) => match default_params_for(entry) {
@@ -110,8 +118,8 @@ pub fn palette_part_summary(entry: &CatalogEntry) -> String {
                 length, max_width, ..
             } => format!(
                 "Loft body · default Ø{} · length {} · upswept tail",
-                meters_label(max_width),
-                meters_label(length)
+                m(max_width),
+                m(length)
             ),
             _ => "Stationed-loft fuselage".into(),
         },
@@ -123,9 +131,9 @@ pub fn palette_part_summary(entry: &CatalogEntry) -> String {
                 ..
             } => format!(
                 "Span {} · chord {}→{} · click a hull to mount",
-                meters_label(span),
-                meters_label(root_chord),
-                meters_label(tip_chord)
+                m(span),
+                m(root_chord),
+                m(tip_chord)
             ),
             _ => "Parametric wing".into(),
         },
@@ -140,28 +148,10 @@ pub fn palette_part_summary(entry: &CatalogEntry) -> String {
                 } else {
                     "Nose"
                 },
-                meters_label(strut_length),
-                meters_label(wheel_radius * 2.0)
+                m(strut_length),
+                m(wheel_radius * 2.0)
             ),
             _ => "Parametric gear".into(),
         },
-    }
-}
-
-pub fn format_delta_v(meters_per_second: f64) -> String {
-    if meters_per_second.abs() >= 9_999.5 {
-        format!("{:.2} km/s", meters_per_second / 1_000.0)
-    } else {
-        format!("{:.0} m/s", meters_per_second)
-    }
-}
-
-pub fn format_mass_kg(kg: f64) -> String {
-    if kg.abs() >= 999_500.0 {
-        format!("{:.2} kt", kg / 1_000_000.0)
-    } else if kg.abs() >= 9_999.5 {
-        format!("{:.1} t", kg / 1_000.0)
-    } else {
-        format!("{:.0} kg", kg)
     }
 }

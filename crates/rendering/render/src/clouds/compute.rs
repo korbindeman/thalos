@@ -110,6 +110,7 @@ fn prepare_uniforms_bind_group(
     buffer.inverse_camera_view = camera.inverse_camera_view;
     buffer.inverse_camera_projection = camera.inverse_camera_projection;
     buffer.wind_displacement += time.delta_secs() * clouds_config.wind_velocity;
+    buffer.cell_evolution_s = clouds_config.cell_evolution_s;
     buffer.fill_threshold0 = clouds_config.fill_threshold_nodes[0];
     buffer.fill_threshold1 = clouds_config.fill_threshold_nodes[1];
     let shadow = clouds_config.shadow_frame;

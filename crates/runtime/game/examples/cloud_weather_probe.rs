@@ -177,6 +177,7 @@ fn main() {
     let mut impostor_opacity = Vec::with_capacity((W * H) as usize);
     let mut strata_all: Vec<[f32; 4]> = Vec::with_capacity((W * H) as usize);
     let mut base_frac = Vec::with_capacity((W * H) as usize);
+    let mut top_frac = Vec::with_capacity((W * H) as usize);
     for py in 0..H {
         for px in 0..W {
             let dir = equirect_dir(px, py);
@@ -193,6 +194,7 @@ fn main() {
             strata_mean.push(strata.iter().sum::<f32>() / 4.0);
             strata_all.push(strata);
             base_frac.push(f32::from(w[2]) / 255.0);
+            top_frac.push(f32::from(w[3]) / 255.0);
             // `solid_planet.wgsl`'s `surface_opacity`, verbatim.
             let od = optical_depth(w);
             impostor_opacity.push(
@@ -411,6 +413,70 @@ fn main() {
     println!(
         "\n  DERIVED LINE  threshold = {a:.3} + ({:.3}) * coverage    [shipped: 1.030 + (-0.700) * coverage]",
         b
+    );
+
+    // ── Column height ────────────────────────────────────────────────────
+    // "The clouds look flat" has two possible causes with OPPOSITE fixes, and
+    // a screenshot cannot separate them: either the vertical ENVELOPE the
+    // producer authors (`base`..`top`) is too shallow, or the dome term is
+    // carving the tops off columns that do have room. This measures both.
+    //
+    // `envelope` is what the producer allows; `rendered` is how much of it
+    // survives the formation threshold + dome. `reach_top` is the share of
+    // cloudy columns whose highest stratum still has density — the direct
+    // tower-vs-squat contrast number that round 7's dome exists to control.
+    const SHELL_M: f32 = 10_500.0;
+    const BASE_M: f32 = 900.0;
+    let mut env_m: Vec<f32> = Vec::new();
+    let mut top_m: Vec<f32> = Vec::new();
+    let mut reach_top = 0usize;
+    for i in 0..coverage.len() {
+        let st = strata_all[i];
+        if st.iter().copied().fold(0.0f32, f32::max) < 0.05 {
+            continue;
+        }
+        let b = base_frac[i];
+        let t = top_frac[i].max(b + 0.02);
+        env_m.push((t - b) * SHELL_M);
+        // Highest stratum carrying density, mapped back to absolute altitude.
+        let q = [0.125f32, 0.375, 0.625, 0.875];
+        let mut hi = 0.0f32;
+        for k in 0..4 {
+            if st[k] >= 0.05 {
+                hi = q[k];
+            }
+        }
+        if st[3] >= 0.05 {
+            reach_top += 1;
+        }
+        top_m.push(BASE_M + (b + hi * (t - b)) * SHELL_M);
+    }
+    let pct = |v: &mut Vec<f32>, q: f32| {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[((q * v.len() as f32) as usize).min(v.len() - 1)]
+    };
+    let n_cloudy = env_m.len();
+    let mut e = env_m.clone();
+    let mut t = top_m.clone();
+    println!(
+        "
+HEIGHT  over {n_cloudy} cloudy columns"
+    );
+    println!(
+        "  authored envelope (top-base), m:  p50 {:.0}  p90 {:.0}  p99 {:.0}",
+        pct(&mut e, 0.50),
+        pct(&mut e, 0.90),
+        pct(&mut e, 0.99)
+    );
+    println!(
+        "  RENDERED cloud top, m amsl:       p50 {:.0}  p90 {:.0}  p99 {:.0}",
+        pct(&mut t, 0.50),
+        pct(&mut t, 0.90),
+        pct(&mut t, 0.99)
+    );
+    println!(
+        "  columns reaching their own top:   {:.1}%  (tower-vs-squat contrast;          ~0% = dome cuts every top, ~100% = flat slab deck, no contrast)",
+        reach_top as f32 / n_cloudy as f32 * 100.0
     );
 
     let fm = opacity.iter().sum::<f32>() / opacity.len() as f32;

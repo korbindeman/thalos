@@ -8,6 +8,7 @@ use crate::shipyard_editor::core::{
     EditorState, PendingPart, kind_order, palette_category_label, palette_category_order,
     palette_part_summary,
 };
+use crate::units_settings::{UnitDomain, UnitSystem, UnitsSettings};
 use thalos_shipyard::blueprint::default_params_for;
 use thalos_shipyard::{CatalogEntry, CatalogId, PartCatalog};
 
@@ -21,7 +22,21 @@ pub(super) struct PalettePartButton {
     catalog_id: CatalogId,
 }
 
-pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, catalog: &PartCatalog) {
+/// The summary line under a part's name. Carries its catalog id so
+/// [`refresh_summaries`] can re-render it when the measurement preference
+/// changes — the palette is built once at startup and never otherwise rebuilt,
+/// so without this it would keep whatever units it was born with.
+#[derive(Component)]
+pub(super) struct PalettePartSummary {
+    catalog_id: CatalogId,
+}
+
+pub(super) fn spawn(
+    root: &mut ChildSpawnerCommands<'_>,
+    theme: &UiTheme,
+    catalog: &PartCatalog,
+    system: UnitSystem,
+) {
     root.spawn((
         Node {
             left: Val::Px(12.0),
@@ -74,7 +89,7 @@ pub(super) fn spawn(root: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, catalo
                         );
                         current_category = Some(category);
                     }
-                    spawn_part_button(list, theme, id, entry);
+                    spawn_part_button(list, theme, id, entry, system);
                 }
             });
     });
@@ -86,6 +101,7 @@ fn spawn_part_button(
     theme: &UiTheme,
     id: &CatalogId,
     entry: &CatalogEntry,
+    system: UnitSystem,
 ) {
     list.spawn((
         Button,
@@ -108,9 +124,15 @@ fn spawn_part_button(
     ))
     .with_children(|button| {
         button.spawn((theme.body_strong(entry.display_name()), ButtonLabel));
-        let mut summary = theme.faint(palette_part_summary(entry));
+        let mut summary = theme.faint(palette_part_summary(entry, system));
         summary.1.font_size = FontSize::Px(10.0);
-        button.spawn((summary, ButtonDesc));
+        button.spawn((
+            summary,
+            ButtonDesc,
+            PalettePartSummary {
+                catalog_id: id.clone(),
+            },
+        ));
     });
 }
 
@@ -131,5 +153,30 @@ pub(super) fn handle_part_clicks(
             params: default_params_for(entry),
         });
         state.status = format!("{} armed", entry.display_name());
+    }
+}
+
+/// Re-render the part summaries when the measurement preference changes.
+///
+/// The palette is spawned once at startup, so a units change made in the
+/// settings menu would otherwise leave every part card stating the old unit
+/// until the next launch.
+pub(super) fn refresh_summaries(
+    units: Res<UnitsSettings>,
+    catalog: Res<PartCatalog>,
+    mut summaries: Query<(&PalettePartSummary, &mut Text)>,
+) {
+    if !units.is_changed() {
+        return;
+    }
+    let system = units.system_for(UnitDomain::General);
+    for (summary, mut text) in &mut summaries {
+        let Some(entry) = catalog.parts.get(&summary.catalog_id) else {
+            continue;
+        };
+        let line = palette_part_summary(entry, system);
+        if text.0 != line {
+            text.0 = line;
+        }
     }
 }

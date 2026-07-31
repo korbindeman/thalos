@@ -15,6 +15,7 @@ pub mod blueprint;
 pub mod catalog;
 pub mod cockpit_mesh;
 pub mod engine_mesh;
+pub mod fairing_mesh;
 pub mod fuselage_mesh;
 pub mod gear_mesh;
 pub mod part;
@@ -47,18 +48,21 @@ pub use engine_mesh::{
     JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
     jet_nacelle_centers, jet_nacelle_length,
 };
+pub use fairing_mesh::{build_wing_fairing_mesh, wants_wing_fairing};
 pub use fuselage_mesh::{
     build_fuselage_mesh, host_mount_geometry, skin_radius as fuselage_skin_radius,
     v_offset_at as fuselage_v_offset_at,
 };
-pub use gear_mesh::{GearLegFrame, build_gear_bay_mesh, build_gear_mesh, gear_leg_frames};
-pub use part_mesh::add_raytracing_tangents;
+pub use gear_mesh::{
+    GearLegFrame, build_gear_bay_mesh, build_gear_mesh, build_gear_struct_mesh, gear_leg_frames,
+};
 pub use part::{
     Adapter, AirIntake, CommandPod, ControlSurface, ControlSurfaceRole, Decoupler, Engine,
     EngineActivation, EngineThrust, EngineValidationError, FuelCrossfeed, FuelTank, Fuselage, Gear,
     MaterialKind, Part, PartMaterial, ReactantRatio, ReactionWheel, ShroudProvider, Shroudable,
     Wing,
 };
+pub use part_mesh::add_raytracing_tangents;
 pub use resource::{PartResources, Resource, ResourcePool};
 pub use staging::{
     PartRole, StageIndices, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,
@@ -67,8 +71,8 @@ pub use staging::{
 pub use stats::{
     AeroSurfaceWindow, DeltaVEnvironment, DeltaVEstimate, DeltaVInputs, G0, ResourceTotals,
     ShipStats, WingAeroPanel, aggregate_resource_totals, cylinder_principal_inertia,
-    estimate_delta_v, live_part_dry_mass_kg, live_part_self_inertia, live_part_total_mass_kg,
-    parallel_axis_inertia,
+    estimate_delta_v, live_part_centroid_offset, live_part_dry_mass_kg, live_part_self_inertia,
+    live_part_total_mass_kg, parallel_axis_inertia,
 };
 pub use wing_mesh::{
     BuiltControlSurface, ControlSurfaceGeometry, WingPanelFrame, build_control_surface_mesh,

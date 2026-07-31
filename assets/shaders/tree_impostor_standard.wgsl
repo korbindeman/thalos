@@ -79,12 +79,14 @@ var cloud_shadow_samp: sampler;
 // Cascaded sun-shadow receive — see `TreeImpostorExtension::shadow`.
 @group(#{MATERIAL_BIND_GROUP}) @binding(109)
 var<uniform> imp_shadow: ShadowCascadeBlock;
-@group(#{MATERIAL_BIND_GROUP}) @binding(110)
+@group(#{MATERIAL_BIND_GROUP}) @binding(113)
 var imp_shadow_map_0: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(111)
+@group(#{MATERIAL_BIND_GROUP}) @binding(110)
 var imp_shadow_map_1: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(112)
+@group(#{MATERIAL_BIND_GROUP}) @binding(111)
 var imp_shadow_map_2: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(112)
+var imp_shadow_map_3: texture_depth_2d;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108)
 var<uniform> cloud_shadow: CloudShadowBlock;
 
@@ -328,6 +330,7 @@ fn fragment(
         imp_shadow_map_0,
         imp_shadow_map_1,
         imp_shadow_map_2,
+        imp_shadow_map_3,
     );
     let cloud_t = cloud_sun_transmittance(
         cloud_shadow,

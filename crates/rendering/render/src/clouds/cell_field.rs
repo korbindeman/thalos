@@ -217,9 +217,32 @@ fn cell_arrangement(
     0.5 + (blended - 0.5) / shrink.max(1.0e-3)
 }
 
+/// Per-octave evolution, mirroring `CLOUD_CELL_EVOLVE_*` in the WGSL:
+/// 4 / 12 / 48 decorrelations per sim-day (6 h / 2 h / 30 min). `evolution_s`
+/// is raw sim time — see the WGSL note on why wrapping it is impossible for an
+/// aperiodic hash-keyed value noise, and why sim-epoch magnitudes make that
+/// safe in f32.
+const CELL_EVOLVE_PERIOD_S: f32 = 86_400.0;
+const CELL_EVOLVE_CYCLES: [f32; 3] = [4.0, 12.0, 48.0];
+const CELL_DRIFT: [Vec3; 3] = [
+    Vec3::new(0.7071, 0.3162, -0.6325),
+    Vec3::new(-0.4364, 0.7857, 0.4364),
+    Vec3::new(0.5774, -0.5148, 0.6337),
+];
+
+fn cell_drift(index: usize, evolution_s: f32) -> Vec3 {
+    CELL_DRIFT[index] * (evolution_s * CELL_EVOLVE_CYCLES[index] / CELL_EVOLVE_PERIOD_S)
+}
+
 /// `cloud_cell_field` mirror at full detail. Octave periods are global
 /// constants; only the weights vary per place.
-pub fn cell_field(dir: Vec3, radius: f32, style: &CellStyle) -> f32 {
+///
+/// `evolution_s` advances each octave along its own fixed direction (cells
+/// growing and dissolving). It is a pure TRANSLATION, so the field is
+/// stationary in time — mean and σ do not move. That is what lets
+/// [`super::fill_lut`] derive its calibration once at spawn and stay correct
+/// for every later instant; see `cell_field_distribution_is_time_invariant`.
+pub fn cell_field(dir: Vec3, radius: f32, style: &CellStyle, evolution_s: f32) -> f32 {
     let p0 = CELL_PERIOD_M;
     let p1 = p0 / CELL_LACUNARITY;
     let p2 = p1 / CELL_LACUNARITY;
@@ -232,12 +255,24 @@ pub fn cell_field(dir: Vec3, radius: f32, style: &CellStyle) -> f32 {
         dir,
         radius,
         p0,
-        Vec3::new(11.3, -4.1, 27.9),
+        Vec3::new(11.3, -4.1, 27.9) + cell_drift(0, evolution_s),
         b[0],
         style.roll,
     );
-    let o1 = cell_octave(dir, radius, p1, Vec3::new(-23.7, 8.4, 3.2), b[1]);
-    let o2 = cell_octave(dir, radius, p2, Vec3::new(5.9, 31.2, -17.6), b[2]);
+    let o1 = cell_octave(
+        dir,
+        radius,
+        p1,
+        Vec3::new(-23.7, 8.4, 3.2) + cell_drift(1, evolution_s),
+        b[1],
+    );
+    let o2 = cell_octave(
+        dir,
+        radius,
+        p2,
+        Vec3::new(5.9, 31.2, -17.6) + cell_drift(2, evolution_s),
+        b[2],
+    );
     let raw = style.weights[0] * o0 + style.weights[1] * o1 + style.weights[2] * o2;
     let x = (raw - 0.5) * style.spread_norm * CELL_GAIN;
     0.5 + 0.5 * x / (CELL_KNEE + x.abs())
@@ -257,12 +292,16 @@ mod tests {
     }
 
     fn field_stats(style_of: impl Fn(Vec3) -> CellStyle) -> (f32, f32) {
+        field_stats_at(style_of, 0.0)
+    }
+
+    fn field_stats_at(style_of: impl Fn(Vec3) -> CellStyle, evolution_s: f32) -> (f32, f32) {
         const N: u32 = 200_000;
         let mut mean = 0.0f64;
         let mut m2 = 0.0f64;
         for i in 0..N {
             let dir = dir_at(i, N);
-            let v = cell_field(dir, 3_186_000.0, &style_of(dir)) as f64;
+            let v = cell_field(dir, 3_186_000.0, &style_of(dir), evolution_s) as f64;
             let d = v - mean;
             mean += d / (i + 1) as f64;
             m2 += d * (v - mean);
@@ -302,6 +341,67 @@ mod tests {
             assert!(
                 (std - 0.2036).abs() < 0.012,
                 "{name}: std {std} drifted off the calibrated 0.2036"
+            );
+        }
+    }
+
+    /// **The invariant cell-scale evolution rests on.**
+    ///
+    /// `fill_lut` derives the near threshold curve and the far opacity LUT ONCE
+    /// at body spawn, at evolution phase 0. That calibration stays correct at
+    /// every later instant only because the time axis is a pure TRANSLATION of
+    /// a stationary field: mean and σ must not move as the clouds evolve. If
+    /// they did, the planet would slowly drift cloudier or clearer over a sim
+    /// day with nothing in the weather field changing — and, being gradual and
+    /// planet-wide, it is exactly the kind of drift a screenshot cannot catch.
+    ///
+    /// Phases span a full sim-day, including the 86400 s wrap point.
+    #[test]
+    fn cell_field_distribution_is_time_invariant() {
+        let style = |dir: Vec3| cell_style(dir, 0.45);
+        let (mean0, std0) = field_stats_at(style, 0.0);
+        for phase in [900.0f32, 1800.0, 7200.0, 21600.0, 43200.0, 86_400.0] {
+            let (mean, std) = field_stats_at(style, phase);
+            assert!(
+                (mean - mean0).abs() < 0.006,
+                "phase {phase}s: mean {mean} drifted off the phase-0 mean {mean0}"
+            );
+            assert!(
+                (std - std0).abs() < 0.006,
+                "phase {phase}s: std {std} drifted off the phase-0 std {std0}"
+            );
+        }
+    }
+
+    /// `evolution_s` is raw sim time, never wrapped — the field is aperiodic
+    /// (hash-keyed lattice noise), so no wrap period exists that would not show
+    /// as a discontinuity. The un-wrapped form is only safe while f32 still
+    /// resolves the FASTEST octave's motion at the sim epochs scenarios boot
+    /// at. Thalos scenarios use time-of-day epochs (the runway boots at
+    /// 59,100 s); this pins the headroom well past that.
+    #[test]
+    fn evolution_phase_resolves_at_sim_epochs() {
+        let style = CellStyle {
+            weights: [0.62, 0.26, 0.12],
+            roll: 0.0,
+            billow: 1.0,
+            spread_norm: cell_spread_norm([0.62, 0.26, 0.12], 1.0),
+        };
+        // One minute of sim time must still move the 30-minute octave
+        // measurably at each epoch — i.e. f32 has not quantized it away.
+        for epoch in [0.0f32, 59_100.0, 1.0e6, 1.0e7] {
+            let mut moved = 0u32;
+            for i in 0..500u32 {
+                let dir = dir_at(i, 500);
+                let a = cell_field(dir, 3_186_000.0, &style, epoch);
+                let b = cell_field(dir, 3_186_000.0, &style, epoch + 60.0);
+                if (a - b).abs() > 1.0e-4 {
+                    moved += 1;
+                }
+            }
+            assert!(
+                moved > 400,
+                "at sim epoch {epoch}s only {moved}/500 samples moved over a minute — f32 has                  quantized the fast octave, so clouds would visibly freeze"
             );
         }
     }
@@ -371,10 +471,11 @@ mod tests {
                 billow: 1.0,
                 spread_norm: cell_spread_norm([0.62, 0.26, 0.12], 1.0),
             };
-            cell_field(dir, RADIUS, &style) as f64
+            cell_field(dir, RADIUS, &style, 0.0) as f64
         });
         let live =
-            local_gradient(|dir| cell_field(dir, RADIUS, &cell_style(dir, 0.45)) as f64) / baseline;
+            local_gradient(|dir| cell_field(dir, RADIUS, &cell_style(dir, 0.45), 0.0) as f64)
+                / baseline;
 
         // The metric has to be able to FAIL, or it guards nothing. This is the
         // defect as it actually shipped: the same field with the period scaled

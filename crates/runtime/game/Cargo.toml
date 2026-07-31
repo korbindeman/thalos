@@ -13,6 +13,7 @@ thalos_input = { path = "../../interface/input" }
 thalos_ui = { path = "../../interface/ui" }
 thalos_body_render = { path = "../../rendering/render" }
 thalos_terrain = { path = "../../domain/terrain" }
+thalos_weather = { path = "../../domain/weather" }
 thalos_physics_local = { path = "../../simulation/physics_local" }
 thalos_celestial = { path = "../../domain/celestial" }
 thalos_shipyard = { path = "../../domain/construction" }

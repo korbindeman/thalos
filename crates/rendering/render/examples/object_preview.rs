@@ -842,6 +842,7 @@ fn setup_scene(
         sun_shadow_map_0: fallback.clone(),
         sun_shadow_map_1: fallback.clone(),
         sun_shadow_map_2: fallback.clone(),
+        sun_shadow_map_3: fallback.clone(),
         ..default()
     }));
     // One shared grass material (vertex-coloured blades, same sky model). It
@@ -852,6 +853,7 @@ fn setup_scene(
         sun_shadow_map_0: fallback.clone(),
         sun_shadow_map_1: fallback.clone(),
         sun_shadow_map_2: fallback.clone(),
+        sun_shadow_map_3: fallback.clone(),
         card_atlas: images.add(build_grass_card_atlas()),
         ..default()
     });
@@ -861,6 +863,7 @@ fn setup_scene(
         sun_shadow_map_0: fallback.clone(),
         sun_shadow_map_1: fallback.clone(),
         sun_shadow_map_2: fallback.clone(),
+        sun_shadow_map_3: fallback.clone(),
         ..default()
     });
     // One shared rock material (vertex-coloured stone, same sky model). Casts
@@ -870,6 +873,7 @@ fn setup_scene(
         sun_shadow_map_0: fallback.clone(),
         sun_shadow_map_1: fallback.clone(),
         sun_shadow_map_2: fallback.clone(),
+        sun_shadow_map_3: fallback.clone(),
         ..default()
     });
 
@@ -1033,6 +1037,7 @@ fn setup_scene(
                     sun_shadow_map_0: fallback.clone(),
                     sun_shadow_map_1: fallback.clone(),
                     sun_shadow_map_2: fallback.clone(),
+                    sun_shadow_map_3: fallback.clone(),
                     height_window,
                     aux_window,
                     ..default()
@@ -1747,16 +1752,21 @@ fn update_preview_shadow(
     // x = clip units per metre of light-space depth, y = texel size (m) —
     // the shared sampler derives its capped texel-proportional bias/offset
     // from these (see `shadow.wgsl`); `sun_dir` feeds the slope term.
+    // The preview rig's box is square in the light plane, so both axes share one
+    // texel size (`z` == `y`); the game's cascades are square on the ground and
+    // publish two. See `ShadowCascadeBlock::params`.
+    let preview_texel_m = (2.0 * SHADOW_HALF_EXTENT_M) / SHADOW_MAP_SIZE as f32;
     block.params[0] = Vec4::new(
         1.0 / (SHADOW_FAR_M - SHADOW_NEAR_M),
-        (2.0 * SHADOW_HALF_EXTENT_M) / SHADOW_MAP_SIZE as f32,
-        0.0,
+        preview_texel_m,
+        preview_texel_m,
         0.0,
     );
     // Park the unused cascades: a zero view-proj makes `clip.w <= 0`, so the
     // shader's `cascade_factor` returns its skip sentinel and never samples them.
     block.view_proj[1] = Mat4::ZERO;
     block.view_proj[2] = Mat4::ZERO;
+    block.view_proj[3] = Mat4::ZERO;
     block.gate = Vec4::new(SHADOW_STRENGTH, 1.0, 0.0, 0.0);
     block.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
     rig.block = block;
@@ -1767,23 +1777,27 @@ fn update_preview_shadow(
         m.sun_shadow_map_0 = image.clone();
         m.sun_shadow_map_1 = fallback.clone();
         m.sun_shadow_map_2 = fallback.clone();
+        m.sun_shadow_map_3 = fallback.clone();
     }
     if let Some(mut m) = grass_materials.get_mut(&mats.grass) {
         m.shadow = block;
         m.sun_shadow_map_0 = image.clone();
         m.sun_shadow_map_1 = fallback.clone();
         m.sun_shadow_map_2 = fallback.clone();
+        m.sun_shadow_map_3 = fallback.clone();
     }
     if let Some(mut m) = tree_materials.get_mut(&mats.tree) {
         m.extension.shadow = block;
         m.extension.sun_shadow_map_0 = image.clone();
         m.extension.sun_shadow_map_1 = fallback.clone();
         m.extension.sun_shadow_map_2 = fallback.clone();
+        m.extension.sun_shadow_map_3 = fallback.clone();
     }
     if let Some(mut m) = rock_materials.get_mut(&mats.rock) {
         m.shadow = block;
         m.sun_shadow_map_0 = image;
         m.sun_shadow_map_1 = fallback.clone();
-        m.sun_shadow_map_2 = fallback;
+        m.sun_shadow_map_2 = fallback.clone();
+        m.sun_shadow_map_3 = fallback;
     }
 }

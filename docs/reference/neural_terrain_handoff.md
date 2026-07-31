@@ -115,14 +115,44 @@ conditioning-coupling amplifier; the surface-scale loss is the macro band itself
   The 3-channel one is **not reproducible** — it needs the pre-`NTR-X2d` generator
   and its conditioning rasters were overwritten. That directory is the only copy;
   it is not scratch.
-- **The re-ship gate is a hypothesis, and it is not level.** The `temp_sd` sweep
-  recovered only 29 %, so the cause is not how strong the channels are. Best
-  remaining candidate: **the authored channels are spatially smooth** — a latitude
-  ramp plus one moisture field — where the Perlin fallback carried multi-scale
-  structure. If the producer responds to *variety* in the conditioning rather than
-  its level, correctness and relief are both available. The bench can test it with
-  no bake: same province, same level, authored-smooth vs authored-with-structure.
-  **That test is the real gate on step 1 below.**
+- **The re-ship gate is ANSWERED — and there is a shippable middle path.**
+  Three arms, seed 1337, one typed axis each, measured against the 3-channel
+  original's 451.0 m relief p50 (gap to close 188.9 m):
+
+  | arm | relief p50 | recovers |
+  |---|---:|---:|
+  | 5 channels authored (rejected by the user) | 262.1 m | — |
+  | `temp_sd` **level** swept to the prior floor | 317.4 m | 29 % |
+  | `temp_sd` **restructured**, histogram identical, 3.3× spatial variation | 286.7 m | **13 %** |
+  | **channels 2+4 left to the producer's own prior** | **394.3 m** | **70 %** |
+
+  So the **spatial-variety hypothesis is refuted as the primary cause** — it is
+  the smallest of the three effects. The ranking is **channel-presence 70 % >
+  level 29 % > structure 13 %**: simply *authoring* BIO4/BIO15 at all is what
+  costs the relief, and the residual ~30 % is the other conditioning corrections
+  (temp curve, post-`finalize` transforms), which are worth keeping.
+
+  **Arm B — the corrected generator with seasonality left to the prior — is the
+  recommended chart.** Per-band relief kept vs the original is 0.92 / 0.90 / 0.89
+  / 0.89 / 0.96 / 1.00 / 1.01 across the seven relief bands: a near-flat curve,
+  i.e. a mild uniform reduction rather than the **variety collapse** that got the
+  5-channel chart rejected (0.60–0.65 through the middle, where 48 % of the land
+  lives). It keeps every correctness fix except authored seasonality.
+  Run it with `thalos_export.py --omit-channels 2,4` — an explicit, logged flag;
+  the missing-file case stays fatal, because a silently-3-channel chart looks
+  exactly like a 5-channel one until the terrain comes out wrong.
+
+  *Design note that shaped the test, worth keeping:* mean `abs(d/dx)` over the
+  chart is `temp_sd` **0.97** vs `precip_cv` **2.75**, so only `temp_sd` is
+  actually the smooth channel — restructuring `precip_cv` would have made it
+  *smoother* (0.28) and confounded the axis. Probe: `ntr_structure_probe.py`.
+
+  **What is still unexplained, and is the open question:** neither level (29 %)
+  nor structure (13 %) accounts for the 70 %. Something about the producer's own
+  seasonality prior — plausibly its *joint* correlation with elevation and the
+  other channels, which neither a histogram nor a 1-D roughness statistic
+  captures — carries relief that our authored field does not. Worth knowing
+  before anyone tries to author seasonality again.
 - No `GENERATOR_VERSION` bump was needed for the revert: `content_fingerprint` is
   content-hashed since `NTR-X2i`, so swapping the chart re-namespaces the tile
   cache automatically. The length-only hash it replaced would have served

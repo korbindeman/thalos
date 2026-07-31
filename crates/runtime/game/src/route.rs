@@ -39,12 +39,16 @@ use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 
 use thalos_navigation::{
-    ApproachParams, ApproachPhase, ApproachPlan, Guidance, GuidanceInput, LateralPath, RouteFrame,
-    RunwayEnd, RunwayStrip, VnavParams, WaypointKind, compute_guidance, plan_approach,
+    ApproachParams, ApproachPhase, ApproachPlan, DestinationGuidance, DestinationInput,
+    DestinationParams, Guidance, GuidanceInput, LateralPath, Pose2, RejoinParams, RouteFrame,
+    RunwayEnd, RunwayStrip, VnavParams, WaypointKind, angular_distance_rad,
+    compute_destination_guidance, compute_guidance, plan_approach, plan_rejoin, theta_of,
 };
 use thalos_physics_canonical::body_fixed::inertial_to_body_fixed;
+use thalos_physics_canonical::terrain_provider::TerrainProvider;
 use thalos_world::BodyId;
 
+use crate::GameTerrainRegistry;
 use crate::aero::ShipAero;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::structures::{StructureId, StructureKind, StructureRegistry};
@@ -67,6 +71,16 @@ const AIM_INSET_M: f64 = 300.0;
 /// when the craft is already inside the final corridor (m) — see
 /// `ApproachParams::min_capture_run_m`.
 const MIN_CAPTURE_RUN_M: f64 = 1_200.0;
+/// LAND hands its spherical ingress to the local terminal planner inside this
+/// surface distance from the arrival fix.
+const TERMINAL_CAPTURE_RANGE_M: f64 = 60_000.0;
+/// Arrival fix behind the threshold. This gives the local planner room to make
+/// a bank-limited join before the 9 km straight final.
+const ARRIVAL_FIX_BEHIND_THRESHOLD_M: f64 = 35_000.0;
+/// Conservative clearance over the body's published maximum elevation.
+const DESTINATION_TERRAIN_CLEARANCE_M: f64 = 2_500.0;
+const DESTINATION_DESCENT_DISTANCE_M: f64 = 180_000.0;
+const DESTINATION_MAX_VS_M_S: f64 = 15.0;
 /// Approach speed used when the craft's own stall speed cannot be derived (no
 /// atmosphere sample, or a craft with no lift curve). Matches the short-final
 /// spawn speed in [`crate::runway`].
@@ -76,6 +90,9 @@ const APPROACH_STALL_MARGIN: f64 = 1.3;
 
 /// Cross-track drift (m) that triggers a re-plan while still maneuvering.
 const REPLAN_CROSS_TRACK_M: f64 = 2_000.0;
+/// Cross-track offset (m) beyond which the rejoin is worth *drawing*. Below it
+/// the rejoin sits on top of the route and only thickens the line.
+const REJOIN_DRAW_CROSS_TRACK_M: f64 = 150.0;
 /// Minimum wall-clock gap between automatic re-plans (s).
 const REPLAN_MIN_INTERVAL_S: f32 = 2.0;
 
@@ -163,6 +180,13 @@ pub struct RunwayEndEntry {
 pub struct RouteDisplay {
     /// The planned lateral path, tessellated (arcs included).
     pub path_points: Vec<DVec3>,
+    /// Along-path distance of each point (m), same length as `path_points`.
+    ///
+    /// Earns its place by answering "which of these points are still ahead of
+    /// me": the plan freezes once established on final, so the points behind the
+    /// craft would otherwise keep the ND framed on an intercept that was flown
+    /// twenty kilometres ago.
+    pub path_along_m: Vec<f64>,
     /// Named waypoints with their kind, in fly order.
     pub waypoints: Vec<(DVec3, WaypointKind)>,
     /// Index into `path_points` of the first point on the final approach leg.
@@ -174,6 +198,13 @@ pub struct RouteDisplay {
     /// That silently dropped the final-approach highlight on straight-in
     /// approaches, where the boundary is an exact tie.
     pub final_start_index: usize,
+    /// The flyable path back onto the route from where the craft actually is,
+    /// tessellated like `path_points`. Empty while the craft tracks the route
+    /// closely enough that drawing it would only thicken the line.
+    ///
+    /// This is **guidance, not a re-plan** — the route itself is untouched. See
+    /// `thalos_navigation::rejoin`.
+    pub rejoin_points: Vec<DVec3>,
 }
 
 /// Everything downstream reads: the plan, the live guidance, the selectable
@@ -187,6 +218,11 @@ pub struct RouteState {
     pub plan: Option<ApproachPlan>,
     /// Live guidance against that plan.
     pub guidance: Option<Guidance>,
+    /// Spherical guidance while the selected runway is outside the terminal
+    /// approach region. Exactly one of this and `guidance` is populated.
+    pub destination_guidance: Option<DestinationGuidance>,
+    /// Body-fixed arrival fix for the destination leg.
+    pub destination_arrival_dir: Option<DVec3>,
     /// Every landable end on the dominant body, **nearest threshold first**.
     pub ends: Vec<RunwayEndEntry>,
     pub display: RouteDisplay,
@@ -200,6 +236,28 @@ pub struct RouteState {
     /// Latched once the craft reaches the final segment: freezes the plan (see
     /// the module docs — re-planning on final flies you away from the runway).
     established: bool,
+    /// Where along the route the rejoin captured last frame. Fed back as a hint
+    /// so the capture point holds still while the craft flies toward it —
+    /// `plan_rejoin` is pure, so this frame-to-frame memory lives here
+    /// (ADR-20260730T005746Z).
+    rejoin_hint_along_m: Option<f64>,
+    /// Recovery asks the destination leg to carry the craft back behind the
+    /// runway even when that arrival fix is already inside the ordinary
+    /// terminal-capture radius.
+    force_destination_ingress: bool,
+}
+
+impl RouteState {
+    /// Invalidate a frozen final after a go-around and require a fresh ingress
+    /// to the selected runway's arrival fix.
+    pub(crate) fn recover_to_destination_ingress(&mut self) {
+        self.plan = None;
+        self.guidance = None;
+        self.established = false;
+        self.rejoin_hint_along_m = None;
+        self.display = RouteDisplay::default();
+        self.force_destination_ingress = true;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -283,6 +341,7 @@ fn apply_route_requests(
 fn update_route_state(
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
+    terrain: Res<GameTerrainRegistry>,
     structures: Res<StructureRegistry>,
     ship_aero_q: Query<&ShipAero, With<thalos_physics_local::LocalCraftBody>>,
     time: Res<Time<Real>>,
@@ -409,12 +468,85 @@ fn update_route_state(
         },
     };
 
-    // --- Re-plan policy (see the module docs).
-    let now = time.elapsed_secs();
+    // The local approach frame is intentionally not global. Outside the
+    // terminal region publish spherical same-body destination guidance to an
+    // arrival fix behind the runway, then build the precise local plan only
+    // after the craft reaches it.
+    let Some(runway_frame) = entry.end.route_frame() else {
+        clear_plan(&mut state, RouteStatus::Unavailable);
+        return;
+    };
+    let landing_dir_local = runway_frame
+        .direction_to_local(entry.end.landing_dir())
+        .normalize_or_zero();
+    let arrival_dir = runway_frame
+        .to_body_fixed(
+            -landing_dir_local * ARRIVAL_FIX_BEHIND_THRESHOLD_M,
+            entry.end.strip.elevation_m,
+        )
+        .normalize_or_zero();
+    let arrival_range_m = angular_distance_rad(up, arrival_dir) * body_radius_m;
     let selection_changed = state.planned_for != Some(armed);
     if selection_changed {
         state.established = false;
+        state.plan = None;
+        state.guidance = None;
+        state.display = RouteDisplay::default();
+        state.rejoin_hint_along_m = None;
     }
+    let recovery_ingress = state.force_destination_ingress && arrival_range_m > 5_000.0;
+    if !state.established && (arrival_range_m > TERMINAL_CAPTURE_RANGE_M || recovery_ingress) {
+        let altitude_m = position_bf.length() - body_radius_m;
+        let arrival_altitude_m =
+            entry.end.strip.elevation_m + FINAL_LENGTH_M * 3.0_f64.to_radians().tan();
+        let cruise_altitude_m = (terrain.0.max_elevation_m(dominant)
+            + DESTINATION_TERRAIN_CLEARANCE_M)
+            .max(arrival_altitude_m + 1_500.0);
+        state.destination_guidance = compute_destination_guidance(
+            arrival_dir,
+            &DestinationParams {
+                body_radius_m,
+                gravity_m_s2: params.gravity_m_s2,
+                bank_limit_rad: BANK_LIMIT_RAD,
+                cruise_altitude_m,
+                arrival_altitude_m,
+                descent_distance_m: DESTINATION_DESCENT_DISTANCE_M,
+                cruise_speed_m_s: (approach_speed_m_s * 1.8).max(130.0),
+                max_vertical_speed_m_s: DESTINATION_MAX_VS_M_S,
+            },
+            &DestinationInput {
+                position_body_fixed: position_bf,
+                track_dir_body_fixed: track_dir_bf,
+                ground_speed_m_s,
+                altitude_m,
+            },
+        );
+        state.destination_arrival_dir = Some(arrival_dir);
+        state.plan = None;
+        state.guidance = None;
+        state.planned_for = Some(armed);
+        state.rejoin_hint_along_m = None;
+        state.display = RouteDisplay::default();
+        state.status = if state.destination_guidance.is_some() {
+            RouteStatus::Armed
+        } else {
+            RouteStatus::Unavailable
+        };
+        if selection_changed {
+            info!(
+                "route: destination RWY {:02} — spherical ingress {:.1} km",
+                entry.designator,
+                arrival_range_m / 1000.0
+            );
+        }
+        return;
+    }
+    state.force_destination_ingress = false;
+    state.destination_guidance = None;
+    state.destination_arrival_dir = Some(arrival_dir);
+
+    // --- Re-plan policy (see the module docs).
+    let now = time.elapsed_secs();
     let drifted = !state.established
         && state
             .guidance
@@ -447,20 +579,71 @@ fn update_route_state(
         }
     }
 
-    let Some(plan) = state.plan.as_ref() else {
+    if state.plan.is_none() {
         clear_plan(&mut state, RouteStatus::Idle);
         return;
+    }
+
+    // The plan borrow is scoped: everything derived from it is produced here and
+    // written back afterwards, so this block can read the plan while the writes
+    // below can own `state`.
+    let vertical_speed_m_s = velocity_bf.dot(up);
+    let (guidance, rejoin_hint, rejoin_points) = {
+        let plan = state.plan.as_ref().expect("checked above");
+
+        // --- The rejoin: how to get back onto the route from where we actually
+        // are. Planned before guidance, because guidance steers along it.
+        let frame = plan.frame;
+        let local = frame.to_local(position_bf);
+        let closest = plan.path.closest(local);
+        let rejoin = frame
+            .direction_to_local(track_dir_bf)
+            .try_normalize()
+            .zip(closest)
+            .and_then(|(track, closest)| {
+                plan_rejoin(
+                    &plan.path,
+                    Pose2::new(local, theta_of(track)),
+                    closest.along_m,
+                    &RejoinParams::for_radius(plan.turn_radius_m),
+                    state.rejoin_hint_along_m,
+                )
+            });
+
+        // Draw it only when it is telling the pilot something: while hugging the
+        // route the rejoin lies on top of it and would only thicken the line.
+        let mut points = Vec::new();
+        if let Some(r) = rejoin.as_ref()
+            && r.path.length() > 1.0
+            && closest.is_some_and(|c| c.cross_track_m.abs() > REJOIN_DRAW_CROSS_TRACK_M)
+        {
+            let elevation = frame.origin_altitude_m;
+            let sag_m = (r.path.length() * 0.002).clamp(2.0, 60.0);
+            points.extend(
+                r.path
+                    .polyline(sag_m)
+                    .into_iter()
+                    .map(|point| frame.to_body_fixed(point, elevation)),
+            );
+        }
+
+        let guidance = compute_guidance(
+            plan,
+            &GuidanceInput {
+                position_body_fixed: position_bf,
+                track_dir_body_fixed: track_dir_bf,
+                ground_speed_m_s,
+                vertical_speed_m_s,
+                gravity_m_s2: params.gravity_m_s2,
+                bank_limit_rad: BANK_LIMIT_RAD,
+            },
+            rejoin.as_ref(),
+        );
+        (guidance, rejoin.as_ref().map(|r| r.capture_along_m), points)
     };
-    let guidance = compute_guidance(
-        plan,
-        &GuidanceInput {
-            position_body_fixed: position_bf,
-            track_dir_body_fixed: track_dir_bf,
-            ground_speed_m_s,
-            gravity_m_s2: params.gravity_m_s2,
-            bank_limit_rad: BANK_LIMIT_RAD,
-        },
-    );
+
+    state.rejoin_hint_along_m = rejoin_hint;
+    state.display.rejoin_points = rejoin_points;
     if let Some(g) = guidance
         && g.phase != ApproachPhase::Transition
     {
@@ -479,8 +662,12 @@ fn clear_plan(state: &mut RouteState, status: RouteStatus) {
     }
     state.plan = None;
     state.guidance = None;
+    state.destination_guidance = None;
+    state.destination_arrival_dir = None;
     state.planned_for = None;
     state.established = false;
+    state.rejoin_hint_along_m = None;
+    state.force_destination_ingress = false;
     state.display = RouteDisplay::default();
     state.status = status;
 }
@@ -504,6 +691,7 @@ pub fn plan_display(plan: &ApproachPlan) -> RouteDisplay {
     // than the result of a float comparison (see `final_start_index`). The final
     // is always the last leg — `plan_approach` pushes it after the transition.
     let final_leg = plan.path.legs.len().saturating_sub(1);
+    let mut along = 0.0;
     let mut prev: Option<DVec2> = None;
     for (leg_index, leg) in plan.path.legs.iter().enumerate() {
         if leg_index == final_leg {
@@ -517,9 +705,11 @@ pub fn plan_display(plan: &ApproachPlan) -> RouteDisplay {
                 if step < 1e-6 {
                     continue;
                 }
+                along += step;
             }
             prev = Some(p);
             display.path_points.push(frame.to_body_fixed(p, elevation));
+            display.path_along_m.push(along);
         }
     }
     display.waypoints = plan

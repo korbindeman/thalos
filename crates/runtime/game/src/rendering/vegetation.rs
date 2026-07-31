@@ -561,6 +561,7 @@ fn setup_species_library(
         sun_shadow_map_0: images.add(fallback_shadow_map()),
         sun_shadow_map_1: images.add(fallback_shadow_map()),
         sun_shadow_map_2: images.add(fallback_shadow_map()),
+        sun_shadow_map_3: images.add(fallback_shadow_map()),
         ..default()
     }));
 

@@ -46,9 +46,11 @@ struct ReentryParams {
     mid_color: vec4<f32>,
     // rgb = coolest stop (deep orange), a = normalized stagnation temperature.
     cool_color: vec4<f32>,
-    // xyz = craft-local body half-extents (m), w = stagnation standoff as a
-    // fraction of the body surface in normalized space.
+    // xyz = craft-local body half-extents (m), w = unused.
     body: vec4<f32>,
+    // x = luminous envelope thickness, y = shock standoff — both as fractions of
+    // the body surface in normalized space.
+    envelope: vec4<f32>,
     // xyz = freestream arrival direction in craft-local axes (unit),
     // w = standoff growth with obliqueness.
     flow: vec4<f32>,
@@ -98,11 +100,26 @@ fn band_emission(temp_norm: f32) -> f32 {
     return exp(-WIEN * (1.0 / max(temp_norm, 1e-3) - 1.0));
 }
 
-// Standoff at obliqueness `cos_t`, in normalized (body-surface) units. Smallest at
-// the stagnation point and growing as the shock lies over, which is what gives
-// the layer a swept teardrop rather than a concentric bubble.
-fn standoff(cos_t: f32) -> f32 {
-    return params.body.w * (1.0 + params.flow.w * (1.0 - cos_t));
+// Thickness of the LUMINOUS envelope at obliqueness `cos_t`, in normalized
+// (body-surface) units. Smallest at the stagnation point and growing as the layer
+// lies over, which is what gives it a swept teardrop rather than a concentric
+// bubble.
+//
+// This is deliberately NOT the shock standoff. The shock sits a few percent of the
+// nose radius out; the radiating region is the compressed layer plus the thermal
+// boundary layer and the hot afterbody gas, several times thicker. Drawing only
+// the standoff renders a centimetres-thin sheath that is invisible on a real
+// vehicle — measured.
+fn envelope_thickness(cos_t: f32) -> f32 {
+    return params.envelope.x * (1.0 + params.flow.w * (1.0 - cos_t));
+}
+
+// Where the shock front sits across the envelope, 0 at the wall and 1 at the
+// outer edge. The layer is brightest here — a bow shock has a sharply defined
+// luminous leading edge, and a profile that peaks mid-envelope instead reads as a
+// soft halo.
+fn shock_station() -> f32 {
+    return clamp(params.envelope.y / max(params.envelope.x, 1e-5), 0.05, 0.95);
 }
 
 // Scale from the body surface out to the proxy hull. Taken at the worst case
@@ -110,7 +127,7 @@ fn standoff(cos_t: f32) -> f32 {
 // over-estimate, or the bound clips a still-emitting shell, the defect class of
 // INC-20260724T235437Z-plume-ended-on-a-lit-rim.
 fn hull_scale() -> f32 {
-    return 1.0 + standoff(-1.0);
+    return 1.0 + envelope_thickness(-1.0);
 }
 
 struct VertexInput {
@@ -233,7 +250,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // normalised by the *local* thickness inside the loop, which is a different
     // quantity on an elongated body.
     let thinnest_shell_m = min(half_extents.x, min(half_extents.y, half_extents.z))
-        * max(params.body.w, 1e-4);
+        * max(params.envelope.x, 1e-4);
     let span = t_end - t_start;
     let steps = i32(clamp(
         ceil(span / (STEP_PER_SHELL * thinnest_shell_m)),
@@ -268,16 +285,17 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             continue;
         }
 
-        let across = (dist - 1.0) / max(standoff(cos_t), 1e-5);
+        let across = (dist - 1.0) / max(envelope_thickness(cos_t), 1e-5);
         if (across <= 0.0 || across >= 1.0) {
             continue;
         }
 
-        // Compact support at the wall AND at the shock front. A top-hat across the
-        // shell shows a hard bright line on both surfaces; this reaches exactly
-        // zero on each, so the layer feathers into the hull and into the
-        // freestream on its own.
-        var rho = 4.0 * across * (1.0 - across);
+        // Peaks AT THE SHOCK and reaches exactly zero at both the wall and the
+        // outer edge, so the layer feathers into the hull and into the freestream
+        // with no mask. A symmetric bump would put the brightest gas halfway out
+        // and lose the sharp luminous leading edge entry footage shows.
+        let peak = shock_station();
+        var rho = smoothstep(0.0, peak, across) * (1.0 - smoothstep(peak, 1.0, across));
 
         // Plasma shimmer. Deliberately small: a shock layer is a smooth continuum,
         // and heavy noise reads as fire rather than as compressed air.
@@ -290,7 +308,9 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // Hottest at the stagnation point (the shock is normal there, so the air
         // is brought fully to rest) and just behind the shock front; coolest on the
         // swept flanks and in the wall boundary layer.
-        let temp = temp_stag * mix(0.30, 1.0, w) * mix(0.72, 1.0, across);
+        // Hottest at the stagnation point and at the shock front, cooling inward
+        // through the boundary layer and outward into the wake.
+        let temp = temp_stag * mix(0.30, 1.0, w) * mix(0.72, 1.0, rho);
         let src = band_emission(temp);
 
         var col = mix(params.cool_color.rgb, params.mid_color.rgb, smoothstep(0.18, 0.55, temp));
@@ -312,7 +332,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         // is `standoff * |normalize(q) * half_extents|`, so kappa means "optical
         // depth across the shell" uniformly (the rho profile integrates to 2/3 of
         // the span).
-        let local_shell_m = standoff(cos_t) * length(normalize(q) * half_extents);
+        let local_shell_m = envelope_thickness(cos_t) * length(normalize(q) * half_extents);
         let dtau = kappa * rho * (ds / max(local_shell_m, 1e-5));
         let a = 1.0 - exp(-dtau);
         radiance += trans * col * src * a;

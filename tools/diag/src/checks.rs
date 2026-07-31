@@ -54,12 +54,161 @@ pub fn run(stream: &Stream) -> Vec<Finding> {
     findings.extend(shadow_health(stream));
     findings.extend(planet_reflection_health(stream));
     findings.extend(gear_ground_health(stream));
+    findings.extend(approach_autopilot_health(stream));
+    findings.extend(orbit_autoflight_health(stream));
     findings.extend(gpu_health(stream));
     findings.extend(memory_health(stream));
     findings.extend(silent_sessions(stream));
     findings.extend(flow_effect_health(stream));
     findings.extend(lane_noise(stream));
     findings.sort_by_key(|finding| finding.severity);
+    findings
+}
+
+// ── runway-destination autoflight ──────────────────────────────────────────
+
+/// LAND must release only after a stable stop. Pilot takeover is an expected
+/// disengagement; every autonomous failure reason is actionable, as is a
+/// completion event whose recorded speed says the aircraft was still rolling.
+fn approach_autopilot_health(stream: &Stream) -> Vec<Finding> {
+    let mut autonomous_failures = Vec::new();
+    for record in stream
+        .events("land_disengaged")
+        .filter(|record| record.target.ends_with("::approach_ap"))
+    {
+        let reason = record.str("reason").unwrap_or("unknown");
+        if reason != "pilot_override" {
+            autonomous_failures.push((record.session.as_str(), reason));
+        }
+    }
+
+    let rolling_completions: Vec<_> = stream
+        .events("land_completed")
+        .filter(|record| record.target.ends_with("::approach_ap"))
+        .filter_map(|record| {
+            let speed = record.f64("speed_m_s")?;
+            (speed > LAND_COMPLETION_SPEED_M_S_ATTENTION)
+                .then_some((record.session.as_str(), speed))
+        })
+        .collect();
+
+    let mut findings = Vec::new();
+    if !autonomous_failures.is_empty() {
+        let (session, reason) = autonomous_failures[0];
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "land_autonomous_disengage",
+                format!(
+                    "{} LAND disengagement{} did not come from the pilot (first reason: {reason})",
+                    autonomous_failures.len(),
+                    if autonomous_failures.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
+                format!(
+                    "runtime.jsonl session={session} event=land_disengaged · inspect preceding appr_frame records"
+                ),
+            )
+            .with_detail("LAND should recover with a go-around or finish stopped; it must not silently yield early"),
+        );
+    }
+    if !rolling_completions.is_empty() {
+        let (session, worst) = rolling_completions
+            .iter()
+            .copied()
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .expect("not empty");
+        findings.push(Finding::new(
+            Severity::Attention,
+            "land_completed_while_rolling",
+            format!(
+                "{} LAND completion{} exceeded {:.2} m/s (worst {worst:.2} m/s)",
+                rolling_completions.len(),
+                if rolling_completions.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+                LAND_COMPLETION_SPEED_M_S_ATTENTION,
+            ),
+            format!("runtime.jsonl session={session} event=land_completed"),
+        ));
+    }
+    findings
+}
+
+// ── target-orbit autoflight ────────────────────────────────────────────────
+
+/// ORBIT must never announce completion outside its live element tolerances,
+/// and its max-Q limiter must recover rather than sit above the limit.
+fn orbit_autoflight_health(stream: &Stream) -> Vec<Finding> {
+    let false_completions: Vec<_> = stream
+        .events("orbit_autoflight_complete")
+        .filter(|record| record.target.ends_with("::orbit_autoflight"))
+        .filter_map(|record| {
+            let pe = record.f64("periapsis_error_m")?;
+            let ap = record.f64("apoapsis_error_m")?;
+            let inclination = record.f64("inclination_error_rad")?;
+            (pe > ORBIT_APSIS_ERROR_M_ATTENTION
+                || ap > ORBIT_APSIS_ERROR_M_ATTENTION
+                || inclination > ORBIT_INCLINATION_ERROR_RAD_ATTENTION)
+                .then_some((record.session.as_str(), pe, ap, inclination))
+        })
+        .collect();
+
+    let mut max_q_by_session: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for record in stream
+        .events("orbit_autoflight_guidance")
+        .filter(|record| record.target.ends_with("::orbit_autoflight"))
+    {
+        let Some(q) = record.f64("dynamic_pressure_pa") else {
+            continue;
+        };
+        if q > ORBIT_DYNAMIC_PRESSURE_PA_ATTENTION {
+            max_q_by_session
+                .entry(record.session.as_str())
+                .or_default()
+                .push(q);
+        }
+    }
+
+    let mut findings = Vec::new();
+    if let Some((session, pe, ap, inclination)) = false_completions.first().copied() {
+        findings.push(Finding::new(
+            Severity::Attention,
+            "orbit_false_completion",
+            format!(
+                "{} ORBIT completion{} violated achieved-orbit tolerance (first: PE {pe:.0} m, AP {ap:.0} m, inclination {inclination:.4} rad)",
+                false_completions.len(),
+                if false_completions.len() == 1 { "" } else { "s" },
+            ),
+            format!("runtime.jsonl session={session} event=orbit_autoflight_complete"),
+        ));
+    }
+    if let Some((session, samples)) = max_q_by_session
+        .iter()
+        .filter(|(_, samples)| samples.len() >= ORBIT_MAX_Q_SAMPLES_ATTENTION)
+        .max_by_key(|(_, samples)| samples.len())
+    {
+        let worst = samples
+            .iter()
+            .copied()
+            .max_by(f64::total_cmp)
+            .expect("threshold guarantees a sample");
+        findings.push(Finding::new(
+            Severity::Attention,
+            "orbit_sustained_max_q_overshoot",
+            format!(
+                "{} ORBIT guidance samples exceeded {:.0} Pa (worst {worst:.0} Pa)",
+                samples.len(),
+                ORBIT_DYNAMIC_PRESSURE_PA_ATTENTION,
+            ),
+            format!("runtime.jsonl session={session} event=orbit_autoflight_guidance"),
+        ));
+    }
     findings
 }
 
@@ -86,23 +235,154 @@ fn shadow_health(stream: &Stream) -> Vec<Finding> {
             }
         }
     }
-    if bad == 0 {
-        return Vec::new();
-    }
-    vec![
-        Finding::new(
-            Severity::Attention,
-            "shadow_frame_desync",
-            format!(
-                "{bad} of {} shadow gauges used the wrong render origin (worst {worst:.2} m)",
-                samples.len()
+    let mut findings = Vec::new();
+    if bad > 0 {
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "shadow_frame_desync",
+                format!(
+                    "{bad} of {} shadow gauges used the wrong render origin (worst {worst:.2} m)",
+                    samples.len()
+                ),
+                format!("runtime.jsonl session={session} event=stability_gauge"),
+            )
+            .with_detail(
+                "a cell crossing must not move cascade cameras and receivers in different frames",
             ),
-            format!("runtime.jsonl session={session} event=stability_gauge"),
-        )
-        .with_detail(
-            "a cell crossing must not move cascade cameras and receivers in different frames",
-        ),
-    ]
+        );
+    }
+    findings.extend(shadow_mode_strobe(&samples));
+    findings.extend(shadow_craft_local_at_surface(stream, &samples));
+    findings
+}
+
+/// Craft-local mode while the view is at the surface — the silent
+/// INC-20260731T004704Z class. Craft-local (`active_cascades = 2`) parks every
+/// ground cascade, which is correct in orbit and catastrophic at a god view;
+/// the frame still renders, so nothing else reports it. Each craft-local gauge
+/// is paired with the nearest same-session sky `environment_paint` sample (an
+/// independent, view-anchored altitude); sustained pairs below
+/// [`SHADOW_CRAFT_LOCAL_SURFACE_ALT_M`] mean the gate is not reading the view.
+fn shadow_craft_local_at_surface(
+    stream: &Stream,
+    samples: &[&thalos_diagnostics::Record],
+) -> Vec<Finding> {
+    let mut paints: BTreeMap<&str, Vec<(u128, f64)>> = BTreeMap::new();
+    for record in stream.events("environment_paint") {
+        if !record.target.ends_with("::sky") {
+            continue;
+        }
+        if let Some(alt) = record.f64("altitude_m") {
+            paints
+                .entry(record.session.as_str())
+                .or_default()
+                .push((record.ts_unix_ms, alt));
+        }
+    }
+
+    // session → (surface-paired craft-local gauges, all paired craft-local gauges)
+    let mut per_session: BTreeMap<&str, (usize, usize)> = BTreeMap::new();
+    for record in samples {
+        if record.f64("active_cascades") != Some(2.0) {
+            continue;
+        }
+        let Some(paint) = paints.get(record.session.as_str()) else {
+            continue;
+        };
+        let nearest = paint
+            .iter()
+            .filter(|(ts, _)| ts.abs_diff(record.ts_unix_ms) <= SHADOW_VIEW_ALT_PAIR_WINDOW_MS)
+            .min_by_key(|(ts, _)| ts.abs_diff(record.ts_unix_ms));
+        if let Some((_, alt)) = nearest {
+            let entry = per_session.entry(record.session.as_str()).or_default();
+            entry.1 += 1;
+            if *alt < SHADOW_CRAFT_LOCAL_SURFACE_ALT_M {
+                entry.0 += 1;
+            }
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (session, (surface, total)) in per_session {
+        if surface < SHADOW_CRAFT_LOCAL_SURFACE_SAMPLES_ATTENTION {
+            continue;
+        }
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "shadow_craft_local_at_surface",
+                format!(
+                    "{surface} of {total} craft-local shadow gauges paired with a \
+                     surface-level view (paint altitude < {:.0} km)",
+                    SHADOW_CRAFT_LOCAL_SURFACE_ALT_M / 1_000.0
+                ),
+                format!("runtime.jsonl session={session} event=stability_gauge"),
+            )
+            .with_detail(
+                "craft-local mode parks every ground cascade: at a surface view this \
+                 erases all structure/tree shadows while the craft keeps its own — the \
+                 gate is resolving the view from the wrong entity \
+                 (INC-20260731T004704Z)",
+            ),
+        );
+    }
+    findings
+}
+
+/// Cascade-mode strobe: `active_cascades` flipping back and forth between the
+/// near-surface set (4) and craft-local (2). See
+/// [`SHADOW_MODE_REVERSALS_ATTENTION`] for why a reversal — not a transition —
+/// is the signal. Counted per session, since two sessions' samples are
+/// unrelated and concatenating them would invent a reversal at the seam.
+fn shadow_mode_strobe(samples: &[&thalos_diagnostics::Record]) -> Vec<Finding> {
+    let mut per_session: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
+    for record in samples {
+        if let Some(count) = record.f64("active_cascades") {
+            per_session
+                .entry(record.session.as_str())
+                .or_default()
+                .push(count);
+        }
+    }
+
+    let mut findings = Vec::new();
+    for (session, modes) in per_session {
+        // A reversal is a change of direction in the mode sequence: the run
+        // 3,3,1,1,3 has two changes but only the second reverses the first.
+        let mut reversals = 0usize;
+        let mut previous_change: Option<bool> = None;
+        for pair in modes.windows(2) {
+            if pair[0] == pair[1] {
+                continue;
+            }
+            let rising = pair[1] > pair[0];
+            if previous_change == Some(!rising) {
+                reversals += 1;
+            }
+            previous_change = Some(rising);
+        }
+        if reversals <= SHADOW_MODE_REVERSALS_ATTENTION {
+            continue;
+        }
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "shadow_mode_strobe",
+                format!(
+                    "cascade mode reversed {reversals}× in one session \
+                     (craft-local ⇄ ground shadows)",
+                ),
+                format!("runtime.jsonl session={session} event=stability_gauge"),
+            )
+            .with_detail(
+                "camera altitude is sitting on the craft-local threshold; \
+                 entering that mode parks cascades 2-3, so every ground shadow \
+                 blinks with it",
+            ),
+        );
+    }
+    findings
 }
 
 // ── orbital reflection of the planet ────────────────────────────────────────
@@ -695,12 +975,61 @@ fn capture_health(stream: &Stream) -> Vec<Finding> {
 
 // ── frame health ────────────────────────────────────────────────────────────
 
+/// Per-session `render_active` transitions, oldest first.
+///
+/// A persistent capture host deactivates its camera between requests and ticks
+/// at `IDLE_CAPTURE_POLL_INTERVAL` (100 ms) instead — so it reports ~10 fps and
+/// a ~100 ms p95 while doing *nothing*, which is not a stutter. Only sessions
+/// that emit `persistent_render_activity` appear here; an ordinary game session
+/// has no entry and is judged on every frame it reports.
+fn render_activity_transitions(stream: &Stream) -> BTreeMap<&str, Vec<(u128, bool)>> {
+    let mut spans: BTreeMap<&str, Vec<(u128, bool)>> = BTreeMap::new();
+    for record in &stream.records {
+        if record.event() == "persistent_render_activity" {
+            spans
+                .entry(record.session.as_str())
+                .or_default()
+                .push((record.ts_unix_ms, record.bool("active").unwrap_or(false)));
+        }
+    }
+    spans
+}
+
+/// Was this session actually rendering at `ts`?
+///
+/// True for any session that never declared itself a capture host. For a host,
+/// true only inside a request: frames before its first request are the world
+/// boot, which the tool lane already measures as `phase_host_start_ms` and
+/// which is not a stutter either.
+fn was_rendering(spans: &BTreeMap<&str, Vec<(u128, bool)>>, session: &str, ts: u128) -> bool {
+    let Some(transitions) = spans.get(session) else {
+        return true;
+    };
+    transitions
+        .partition_point(|(at, _)| *at <= ts)
+        .checked_sub(1)
+        .is_some_and(|index| transitions[index].1)
+}
+
 fn frame_health(stream: &Stream) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut spikes: BTreeMap<&str, (usize, f64)> = BTreeMap::new();
     let mut slow: BTreeMap<&str, (usize, f64)> = BTreeMap::new();
+    // Counted only so the finding can carry its denominator: a host that idled
+    // through 90 windows and stuttered in 3 is a different report from one that
+    // stuttered in 3 of 3.
+    let mut idle_gauges = 0usize;
+    let spans = render_activity_transitions(stream);
     for record in &stream.records {
-        match record.event() {
+        let event = record.event();
+        if !matches!(event, "spike" | "frame_gauge") {
+            continue;
+        }
+        if !was_rendering(&spans, &record.session, record.ts_unix_ms) {
+            idle_gauges += usize::from(event == "frame_gauge");
+            continue;
+        }
+        match event {
             "spike" => {
                 let entry = spikes.entry(record.session.as_str()).or_insert((0, 0.0));
                 entry.0 += 1;
@@ -751,7 +1080,15 @@ fn frame_health(stream: &Stream) -> Vec<Finding> {
             "slow_frames",
             format!("{count} × 2 s windows below 30 fps in one session (worst p95 {worst:.0} ms)",),
             format!("just perf-report {session}"),
-        ));
+        )
+        .with_detail(if idle_gauges > 0 {
+            format!(
+                "{idle_gauges} idle capture-host window{} excluded — these are frames that rendered",
+                plural(idle_gauges)
+            )
+        } else {
+            "sustained sub-30 fps while actually rendering".to_owned()
+        }));
     }
     findings
 }
@@ -789,6 +1126,36 @@ fn memory_health(stream: &Stream) -> Vec<Finding> {
             )
             .with_detail("captures taken while braked may show coarser terrain than authored"),
         );
+    }
+
+    // The session gauge above can only say *a* session braked. This says which
+    // PNG is coarser than authored — the gap that made the 2026-07-30 finding
+    // unactionable, closed by the readback verdict in the capture receipt.
+    let braked_shots: Vec<_> = stream
+        .events("tool_run")
+        .filter(|record| record.u64("terrain_braked_count").unwrap_or(0) > 0)
+        .collect();
+    if !braked_shots.is_empty() {
+        let mut finding = Finding::new(
+            Severity::Attention,
+            "capture_terrain_braked",
+            format!(
+                "{} capture{} read back with the ground coarser than authored",
+                braked_shots.len(),
+                plural(braked_shots.len())
+            ),
+            "tools.jsonl · event=tool_run tile_split_scale · and the `terrain` block in each .capture.json",
+        )
+        .with_detail("do not use these images as terrain evidence — recapture, or raise THALOS_TILE_BUDGET_MB for the framing");
+        for record in braked_shots.iter().take(3) {
+            finding = finding.with_detail(format!(
+                "{} → split scale {:.2} after waiting {:.0} s",
+                record.str("preset").unwrap_or("?"),
+                record.f64("tile_split_scale").unwrap_or_default(),
+                record.f64("brake_wait_s").unwrap_or_default(),
+            ));
+        }
+        findings.push(finding);
     }
 
     // Growth across a session, the open question behind the tile OOM: tiles can
@@ -1049,6 +1416,116 @@ mod tests {
         }
     }
 
+    fn finding_ids(records: Vec<Record>) -> Vec<&'static str> {
+        run(&stream(records))
+            .into_iter()
+            .map(|finding| finding.id)
+            .collect()
+    }
+
+    #[test]
+    fn land_pilot_override_is_quiet_but_autonomous_disengage_fires() {
+        let pilot = record(
+            "land-pilot",
+            1_000,
+            "INFO",
+            "thalos::diagnostic::approach_ap",
+            json!({"event": "land_disengaged", "reason": "pilot_override"}),
+        );
+        assert!(!finding_ids(vec![pilot]).contains(&"land_autonomous_disengage"));
+
+        let failed = record(
+            "land-failed",
+            2_000,
+            "INFO",
+            "thalos::diagnostic::approach_ap",
+            json!({"event": "land_disengaged", "reason": "go_around_limit"}),
+        );
+        assert!(finding_ids(vec![failed]).contains(&"land_autonomous_disengage"));
+    }
+
+    #[test]
+    fn land_completion_must_be_at_stopping_speed() {
+        let stopped = record(
+            "land-stopped",
+            1_000,
+            "INFO",
+            "thalos::diagnostic::approach_ap",
+            json!({"event": "land_completed", "speed_m_s": 0.3}),
+        );
+        assert!(!finding_ids(vec![stopped]).contains(&"land_completed_while_rolling"));
+
+        let rolling = record(
+            "land-rolling",
+            2_000,
+            "INFO",
+            "thalos::diagnostic::approach_ap",
+            json!({"event": "land_completed", "speed_m_s": 2.0}),
+        );
+        assert!(finding_ids(vec![rolling]).contains(&"land_completed_while_rolling"));
+    }
+
+    #[test]
+    fn orbit_completion_repeats_live_element_tolerances() {
+        let valid = record(
+            "orbit-valid",
+            1_000,
+            "INFO",
+            "thalos::diagnostic::orbit_autoflight",
+            json!({
+                "event": "orbit_autoflight_complete",
+                "periapsis_error_m": 500.0,
+                "apoapsis_error_m": 750.0,
+                "inclination_error_rad": 0.002
+            }),
+        );
+        assert!(!finding_ids(vec![valid]).contains(&"orbit_false_completion"));
+
+        let invalid = record(
+            "orbit-invalid",
+            2_000,
+            "INFO",
+            "thalos::diagnostic::orbit_autoflight",
+            json!({
+                "event": "orbit_autoflight_complete",
+                "periapsis_error_m": 2_500.0,
+                "apoapsis_error_m": 750.0,
+                "inclination_error_rad": 0.002
+            }),
+        );
+        assert!(finding_ids(vec![invalid]).contains(&"orbit_false_completion"));
+    }
+
+    #[test]
+    fn orbit_max_q_requires_sustained_same_session_overshoot() {
+        let sample = |session: &str, ts: u128, q: f64| {
+            record(
+                session,
+                ts,
+                "INFO",
+                "thalos::diagnostic::orbit_autoflight",
+                json!({
+                    "event": "orbit_autoflight_guidance",
+                    "dynamic_pressure_pa": q
+                }),
+            )
+        };
+        let transient = vec![
+            sample("orbit-a", 1_000, 45_000.0),
+            sample("orbit-a", 2_000, 41_000.0),
+            sample("orbit-b", 3_000, 45_000.0),
+            sample("orbit-b", 4_000, 45_000.0),
+        ];
+        assert!(!finding_ids(transient).contains(&"orbit_sustained_max_q_overshoot"));
+
+        let sustained = vec![
+            sample("orbit-a", 1_000, 45_000.0),
+            sample("orbit-a", 2_000, 46_000.0),
+            sample("orbit-a", 3_000, 47_000.0),
+        ];
+        assert!(finding_ids(sustained).contains(&"orbit_sustained_max_q_overshoot"));
+    }
+
     fn shot(session: &str, ts: u128, outcome: &str, extra: serde_json::Value) -> Record {
         let mut fields = json!({
             "event": "tool_run",
@@ -1155,6 +1632,102 @@ mod tests {
         assert!(
             run(&stream(records)).is_empty(),
             "a clean window must stay silent"
+        );
+    }
+
+    /// The cascade-mode switch parks cascades 2–3, so a mode that oscillates
+    /// blinks every ground shadow in the world. The check must separate that
+    /// from the one-way transitions an honest climb produces — otherwise it
+    /// fires on every flight to orbit and gets dismissed daily.
+    #[test]
+    fn shadow_mode_strobe_fires_on_oscillation_not_on_a_climb() {
+        let modes = |session: &'static str, values: &[f64]| -> Vec<Record> {
+            values
+                .iter()
+                .enumerate()
+                .map(|(index, count)| {
+                    record(
+                        session,
+                        1_000 + index as u128,
+                        "INFO",
+                        "thalos::diagnostic::shadow",
+                        json!({
+                            "event": "stability_gauge",
+                            "origin_frame_error_m": 0.0,
+                            "active_cascades": count,
+                        }),
+                    )
+                })
+                .collect()
+        };
+
+        // A climb to orbit: ground cascades hand over to craft-local once, and
+        // stay. Zero reversals.
+        assert!(
+            !finding_ids(modes("climb", &[4.0, 4.0, 4.0, 2.0, 2.0, 2.0]))
+                .contains(&"shadow_mode_strobe"),
+            "a one-way climb must not fire"
+        );
+        // Up and back down inside one session — one honest reversal, tolerated.
+        assert!(
+            !finding_ids(modes("round-trip", &[4.0, 4.0, 2.0, 2.0, 4.0, 4.0]))
+                .contains(&"shadow_mode_strobe"),
+            "a single climb-and-descend round trip must not fire"
+        );
+        // Loitering on the threshold: the defect this exists for.
+        assert!(
+            finding_ids(modes("strobe", &[4.0, 2.0, 4.0, 2.0, 4.0, 2.0, 4.0, 2.0]))
+                .contains(&"shadow_mode_strobe"),
+            "an oscillating cascade mode must fire"
+        );
+    }
+
+    /// INC-20260731T004704Z: craft-local mode latched at a 600 m god view.
+    /// The check must fire on that pairing and stay silent when craft-local is
+    /// what orbit legitimately looks like.
+    #[test]
+    fn shadow_craft_local_fires_at_the_surface_not_in_orbit() {
+        let scene = |session: &'static str, cascades: f64, paint_alt: f64| -> Vec<Record> {
+            (0..4u128)
+                .flat_map(|second| {
+                    vec![
+                        record(
+                            session,
+                            1_000 * (second + 1),
+                            "INFO",
+                            "thalos::diagnostic::shadow",
+                            json!({
+                                "event": "stability_gauge",
+                                "origin_frame_error_m": 0.0,
+                                "active_cascades": cascades,
+                            }),
+                        ),
+                        record(
+                            session,
+                            1_000 * (second + 1) + 400,
+                            "INFO",
+                            "thalos::diagnostic::sky",
+                            json!({"event": "environment_paint", "altitude_m": paint_alt}),
+                        ),
+                    ]
+                })
+                .collect()
+        };
+
+        assert!(
+            finding_ids(scene("hub-god-view", 2.0, 636.0))
+                .contains(&"shadow_craft_local_at_surface"),
+            "craft-local sustained at a surface view must fire"
+        );
+        assert!(
+            !finding_ids(scene("parking-orbit", 2.0, 200_000.0))
+                .contains(&"shadow_craft_local_at_surface"),
+            "craft-local in orbit is the designed behaviour"
+        );
+        assert!(
+            !finding_ids(scene("surface-flight", 4.0, 636.0))
+                .contains(&"shadow_craft_local_at_surface"),
+            "ground-cascade mode at the surface is healthy"
         );
     }
 
@@ -1453,6 +2026,110 @@ mod tests {
         assert!(ids(Vec::new()).contains(&"empty_window"));
     }
 
+    fn activity(session: &str, ts: u128, active: bool) -> Record {
+        record(
+            session,
+            ts,
+            "INFO",
+            "thalos::diagnostic::capture",
+            json!({"event": "persistent_render_activity", "active": active}),
+        )
+    }
+
+    fn gauge(session: &str, ts: u128, p95: f64) -> Record {
+        record(
+            session,
+            ts,
+            "INFO",
+            "thalos::diagnostic::perf",
+            json!({"event": "frame_gauge", "cpu_ms_p95": p95}),
+        )
+    }
+
+    /// The defect this gate exists for: a persistent capture host idles at
+    /// `IDLE_CAPTURE_POLL_INTERVAL` (100 ms → ~10 fps, ~100 ms p95) between
+    /// requests. Before 2026-07-30 that read as a 90-window sub-30 fps stutter
+    /// and made ATTENTION on every triage pass.
+    #[test]
+    fn an_idle_capture_host_is_not_a_stutter() {
+        let mut records = vec![activity("host", 0, true)];
+        // One request rendering healthily, then a long idle stretch.
+        records.extend((1..4).map(|index| gauge("host", index, 17.0)));
+        records.push(activity("host", 10, false));
+        records.extend((11..101).map(|index| gauge("host", index, 109.0)));
+        assert!(!finding_ids(records).contains(&"slow_frames"));
+    }
+
+    /// …and the other half: the same host genuinely stuttering *while
+    /// rendering* must still be caught, or the exclusion has blinded the check
+    /// to the capture latency it exists to protect.
+    #[test]
+    fn a_capture_host_that_stutters_while_rendering_still_reports() {
+        let mut records = vec![activity("host", 0, true)];
+        records.extend((1..12).map(|index| gauge("host", index, 120.0)));
+        records.push(activity("host", 20, false));
+        records.extend((21..111).map(|index| gauge("host", index, 109.0)));
+        let findings = finding_ids(records);
+        assert!(findings.contains(&"slow_frames"));
+    }
+
+    /// The defect: a shot whose ground rendered coarser than the preset
+    /// authored must name the *file*, not just the session.
+    #[test]
+    fn a_braked_capture_is_named_with_its_preset() {
+        let findings = run(&stream(vec![shot(
+            "s",
+            1,
+            "ok",
+            json!({
+                "preset": "cloud-godray",
+                "terrain_braked_count": 1,
+                "tile_split_scale": 0.333,
+                "brake_wait_s": 45.0,
+            }),
+        )]));
+        let braked = findings
+            .iter()
+            .find(|finding| finding.id == "capture_terrain_braked")
+            .expect("a braked capture must be reported");
+        assert!(
+            braked
+                .detail
+                .iter()
+                .any(|line| line.contains("cloud-godray"))
+        );
+    }
+
+    /// …and stays silent on the healthy case, including a shot that waited for
+    /// the brake and then rendered at full detail — that is the gate working.
+    #[test]
+    fn a_capture_that_waited_out_the_brake_is_not_reported() {
+        let findings = finding_ids(vec![shot(
+            "s",
+            1,
+            "ok",
+            json!({"preset": "cloud-godray", "tile_split_scale": 1.0, "brake_wait_s": 12.0}),
+        )]);
+        assert!(!findings.contains(&"capture_terrain_braked"));
+    }
+
+    /// A session that never declared itself a host is judged on every frame:
+    /// an ordinary game session has no activity markers at all.
+    #[test]
+    fn a_plain_game_session_is_judged_on_every_frame() {
+        let records: Vec<Record> = (0..11).map(|index| gauge("game", index, 120.0)).collect();
+        assert!(finding_ids(records).contains(&"slow_frames"));
+    }
+
+    /// Frames before a host's first request are its world boot, already
+    /// measured as `phase_host_start_ms` in the tool lane.
+    #[test]
+    fn host_boot_frames_are_not_counted_as_stutter() {
+        let mut records: Vec<Record> = (0..40).map(|index| gauge("host", index, 109.0)).collect();
+        records.push(activity("host", 50, true));
+        assert!(!finding_ids(records).contains(&"slow_frames"));
+    }
+
     /// Capture failures are WARN-level on the tool target; counting them as
     /// generic warnings too would double every capture report.
     #[test]
@@ -1510,20 +2187,32 @@ mod tests {
     #[test]
     fn gear_backstop_check_stays_silent_off_signature() {
         // Wheels carrying alongside the backstop.
-        let wheels_loaded = stream(vec![backstop_event(1_000, 1, 1), backstop_event(2_000, 1, 1)]);
-        assert!(!run(&wheels_loaded)
-            .iter()
-            .any(|finding| finding.id == "gear_carried_by_backstop"));
+        let wheels_loaded = stream(vec![
+            backstop_event(1_000, 1, 1),
+            backstop_event(2_000, 1, 1),
+        ]);
+        assert!(
+            !run(&wheels_loaded)
+                .iter()
+                .any(|finding| finding.id == "gear_carried_by_backstop")
+        );
         // Gear up: hull-on-backstop is the crash/belly path, not this defect.
-        let gear_up = stream(vec![backstop_event(1_000, 0, 0), backstop_event(2_000, 0, 0)]);
-        assert!(!run(&gear_up)
-            .iter()
-            .any(|finding| finding.id == "gear_carried_by_backstop"));
+        let gear_up = stream(vec![
+            backstop_event(1_000, 0, 0),
+            backstop_event(2_000, 0, 0),
+        ]);
+        assert!(
+            !run(&gear_up)
+                .iter()
+                .any(|finding| finding.id == "gear_carried_by_backstop")
+        );
         // One tick = a touchdown transient.
         let transient = stream(vec![backstop_event(1_000, 1, 0)]);
-        assert!(!run(&transient)
-            .iter()
-            .any(|finding| finding.id == "gear_carried_by_backstop"));
+        assert!(
+            !run(&transient)
+                .iter()
+                .any(|finding| finding.id == "gear_carried_by_backstop")
+        );
     }
 }
 
@@ -1537,6 +2226,8 @@ mod tests {
 /// and resolved a small cube on a long vehicle.
 fn flow_effect_health(stream: &Stream) -> Vec<Finding> {
     let mut findings = Vec::new();
+    findings.extend(vapor_cone_probe_health(stream));
+
     let Some(record) = stream
         .records
         .iter()
@@ -1588,4 +2279,115 @@ fn flow_effect_health(stream: &Stream) -> Vec<Finding> {
         );
     }
     findings
+}
+
+/// A configured vapor-cone capture must finish with every gate open.
+///
+/// Ordinary play is correctly hidden almost all the time, so only sessions that
+/// explicitly emitted `vapor_cone_probe_configuration` participate. The
+/// transition event names the exact gate that closed, replacing visual guesswork
+/// with a falsifiable signal.
+fn vapor_cone_probe_health(stream: &Stream) -> Vec<Finding> {
+    let probes: Vec<_> = stream.events("vapor_cone_probe_configuration").collect();
+    if probes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut failed = Vec::new();
+    for probe in &probes {
+        let state =
+            stream.records.iter().rev().find(|record| {
+                record.session == probe.session && record.event() == "vapor_cone_state"
+            });
+        match state {
+            Some(record) if record.str("state") == Some("visible") => {}
+            Some(record) => failed.push((
+                probe.session.as_str(),
+                record.str("state").unwrap_or("unknown"),
+            )),
+            None => failed.push((probe.session.as_str(), "state_not_recorded")),
+        }
+    }
+
+    let Some((session, gate)) = failed.last().copied() else {
+        return Vec::new();
+    };
+    vec![
+        Finding::new(
+            Severity::Attention,
+            "vapor_cone_probe_hidden",
+            format!(
+                "{} of {} configured vapor-cone probe{} ended hidden (latest gate: {gate})",
+                failed.len(),
+                probes.len(),
+                if probes.len() == 1 { "" } else { "s" }
+            ),
+            format!(
+                "runtime.jsonl session={session} · compare event=vapor_cone_probe_configuration with event=vapor_cone_state"
+            ),
+        )
+        .with_detail(
+            "the probe is invalid visual evidence until its real atmosphere, flow direction, Mach, humidity and dynamic-pressure gates all open",
+        ),
+    ]
+}
+
+#[cfg(test)]
+mod vapor_cone_probe_tests {
+    use super::*;
+    use serde_json::json;
+    use thalos_diagnostics::Record;
+
+    fn record(session: &str, ts: u128, event: &str, fields: serde_json::Value) -> Record {
+        let mut fields = fields;
+        fields["event"] = json!(event);
+        Record {
+            session: session.to_owned(),
+            pid: 1,
+            ts_unix_ms: ts,
+            level: "INFO".to_owned(),
+            target: "thalos::diagnostic::vapor_cone".to_owned(),
+            fields: fields.as_object().expect("object").clone(),
+        }
+    }
+
+    fn stream(records: Vec<Record>) -> Stream {
+        Stream {
+            sessions: vec!["probe".to_owned()],
+            records,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn configured_hidden_vapor_probe_is_actionable() {
+        let stream = stream(vec![
+            record("probe", 1_000, "vapor_cone_probe_configuration", json!({})),
+            record(
+                "probe",
+                2_000,
+                "vapor_cone_state",
+                json!({"state": "outside_atmosphere", "visible": false}),
+            ),
+        ]);
+        assert!(
+            vapor_cone_probe_health(&stream)
+                .iter()
+                .any(|finding| finding.id == "vapor_cone_probe_hidden")
+        );
+    }
+
+    #[test]
+    fn configured_visible_vapor_probe_is_healthy() {
+        let stream = stream(vec![
+            record("probe", 1_000, "vapor_cone_probe_configuration", json!({})),
+            record(
+                "probe",
+                2_000,
+                "vapor_cone_state",
+                json!({"state": "visible", "visible": true}),
+            ),
+        ]);
+        assert!(vapor_cone_probe_health(&stream).is_empty());
+    }
 }

@@ -56,6 +56,7 @@ pub(in crate::maneuver) fn handle_maneuver_events(
                     delta_v: DVec3::ZERO,
                     reference_body,
                     phase: NodeBurnPhase::default(),
+                    source: crate::maneuver::NodeSource::Manual,
                 });
                 selected.id = Some(id);
                 plan.dirty = true;

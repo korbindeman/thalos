@@ -66,6 +66,17 @@ pub enum NodeBurnPhase {
     Executed,
 }
 
+/// Provenance for a maneuver node.
+///
+/// Generated programs replace only their own unexecuted nodes. Manual nodes
+/// remain untouched when an ORBIT target is replanned or cleared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NodeSource {
+    #[default]
+    Manual,
+    OrbitProgram(u64),
+}
+
 /// Game-side representation of a maneuver node (owned by the UI, synced to physics).
 #[derive(Clone, Debug)]
 pub struct GameNode {
@@ -78,6 +89,7 @@ pub struct GameNode {
     pub reference_body: usize,
     /// Where this node sits in its burn lifecycle.
     pub phase: NodeBurnPhase,
+    pub source: NodeSource,
 }
 
 impl GameNode {

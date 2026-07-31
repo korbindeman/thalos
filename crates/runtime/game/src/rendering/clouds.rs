@@ -616,6 +616,16 @@ pub(super) fn drive_clouds(
         config.history_epoch = config.history_epoch.wrapping_add(1).max(1);
     }
     *history_continuity = Some((body_id, weather_version, sim_time));
+    // Cell-scale cloud evolution phase. SIM time, so captures stay
+    // reproducible and time warp accelerates the weather like everything else.
+    //
+    // Deliberately NOT wrapped. A modulo was tried and removed: the cell field
+    // is hash-keyed lattice value noise and therefore aperiodic, so no wrap
+    // period returns it to itself and every candidate one is a visible jump in
+    // the sky. Raw sim time is safe here because Thalos scenarios boot at
+    // time-of-day epochs (~1e4–1e6 s), where f32 still resolves ~0.1 s;
+    // `evolution_phase_resolves_at_sim_epochs` pins that headroom.
+    config.cell_evolution_s = sim_time as f32;
     active.0 = Some(body_id);
     let atmosphere = sim.system.bodies[body_id]
         .terrestrial_atmosphere

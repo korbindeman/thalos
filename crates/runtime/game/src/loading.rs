@@ -346,6 +346,26 @@ impl Plugin for LoadingScreenPlugin {
     }
 }
 
+/// The loading screen without its gate, for the headless preview
+/// (`examples/loading_preview.rs`, `just loading-preview`).
+///
+/// This screen is the one UI in the game no capture preset can reach: it
+/// despawns the instant loading completes, which is strictly before the capture
+/// host takes its shot, and holding a real load still would mean screenshotting
+/// a race. So the preview drives the *real* [`spawn_loading_screen`],
+/// [`update_loading_progress_ui`] and the shared VRAM bar against
+/// seeded state — genuine evidence about layout, alignment, and formatting,
+/// and none about whether the steps themselves complete.
+pub struct LoadingScreenPreviewPlugin;
+
+impl Plugin for LoadingScreenPreviewPlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<LoadingTracker>()
+            .add_systems(Startup, spawn_loading_screen)
+            .add_systems(Update, update_loading_progress_ui);
+    }
+}
+
 /// Register the boot load's steps from the startup [`SpawnSituation`].
 ///
 /// A bare menu boot ([`LoadDestination`] = [`AppState::MainMenu`]) defers the
@@ -395,6 +415,9 @@ fn spawn_loading_screen(
     }
     let display_font = FontSource::Handle(asset_server.load::<Font>("fonts/Inter-Light.ttf"));
     let font = FontSource::Handle(asset_server.load::<Font>("fonts/Inter-Regular.ttf"));
+    // The diagnostics block is numbers in columns; a proportional face would
+    // make the digits jitter as they change.
+    let mono_font = FontSource::Handle(asset_server.load::<Font>("fonts/FiraCode-Regular.ttf"));
 
     commands
         .spawn((
@@ -492,6 +515,26 @@ fn spawn_loading_screen(
                 TextLayout::justify(Justify::Center),
                 Name::new("LoadingStepCounter"),
             ));
+
+            // VRAM, and only VRAM. A load is the one moment where the card's
+            // state is both interesting and unobstructed, but it is also a
+            // moment the player is *waiting through* — so this is a glance, not
+            // a report. What is going wrong with memory is legible from a bar
+            // (how full, and which band grew); the numbers that only answer
+            // follow-up questions live in the F3 view, where someone has
+            // actually asked.
+            crate::vram_bar::spawn_vram_bar(
+                root,
+                &crate::vram_bar::VramBarStyle {
+                    width: Val::Px(PROGRESS_BAR_WIDTH),
+                    bar_height: 6.0,
+                    font: mono_font,
+                    font_size: 10.0,
+                    label_color: TEXT_FAINT,
+                    value_color: TEXT_DIM,
+                    caption: "VRAM",
+                },
+            );
         });
 }
 

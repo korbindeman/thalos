@@ -14,6 +14,7 @@
 //! always-available tier that tells you when to reach for those. Offline
 //! rendering of the recorded lane: `just perf-report` (tools/perfreport).
 
+pub mod gpu_images;
 pub mod overlay;
 
 use std::time::Instant;
@@ -67,6 +68,10 @@ pub struct PerfSamples {
     pub main_images: u32,
     pub tile_resident: u32,
     pub tile_mib: f32,
+    /// Estimated GPU bytes of all `GpuImage` asset textures
+    /// ([`gpu_images::GpuImageBytesDiagnosticPlugin`]). Asset textures only —
+    /// render targets and pass-owned textures are not render assets.
+    pub texture_mib: f32,
     /// Whole-process resident set. The total the GPU-side gauges must be read
     /// against: a host was killed at 8.1 GiB RSS while tile + slab summed to
     /// ~2 GiB, and nothing measured the other six (2026-07-29, massif-aerial).
@@ -100,6 +105,7 @@ impl Default for PerfSamples {
             main_images: 0,
             tile_resident: 0,
             tile_mib: 0.0,
+            texture_mib: 0.0,
             rss_mib: 0.0,
             mesh_cpu_mib: 0.0,
             image_cpu_mib: 0.0,
@@ -148,6 +154,35 @@ impl PerfSamples {
             let idx = (self.mem_head + MEM_RING_LEN - n + i) % MEM_RING_LEN;
             (self.tile_mib_ring[idx], self.slab_mib_ring[idx])
         })
+    }
+
+    /// Seed the slow gauges with representative values.
+    ///
+    /// **Preview and test use only** — it is not a second writer of the live
+    /// resource ([`sample_gauges`] remains the sole one). It exists so a
+    /// headless preview can render a readout against plausible numbers instead
+    /// of a screen full of zeros, which would be evidence about nothing.
+    pub fn seed_gauges(
+        &mut self,
+        main_meshes: u32,
+        main_images: u32,
+        tile_resident: u32,
+        tile_mib: f32,
+        slab_mib: f32,
+        texture_mib: f32,
+        rss_mib: f32,
+        mesh_cpu_mib: f32,
+        image_cpu_mib: f32,
+    ) {
+        self.main_meshes = main_meshes;
+        self.main_images = main_images;
+        self.tile_resident = tile_resident;
+        self.tile_mib = tile_mib;
+        self.texture_mib = texture_mib;
+        self.rss_mib = rss_mib;
+        self.mesh_cpu_mib = mesh_cpu_mib;
+        self.image_cpu_mib = image_cpu_mib;
+        self.push_mem(tile_mib, slab_mib);
     }
 
     /// Latest slab size gauge (mirrors the last memory-ring sample).
@@ -204,6 +239,7 @@ impl Plugin for PerfPlugin {
             .init_resource::<PerfRecorder>()
             .add_plugins(EntityCountDiagnosticsPlugin::default())
             .add_plugins(MeshAllocatorDiagnosticPlugin)
+            .add_plugins(gpu_images::GpuImageBytesDiagnosticPlugin)
             // GPU pass timings (`render/<pass>/elapsed_gpu` in the
             // DiagnosticsStore). Cheap timestamp queries; previously only the
             // headless capture app added this.
@@ -269,14 +305,23 @@ pub fn gpu_frame_ms(store: &DiagnosticsStore) -> f32 {
     total as f32
 }
 
+/// Frame cost is a **wall-clock** quantity, so it is measured with `Instant`
+/// like the stage marks above — never from `Time<Real>`, which the offline
+/// render drives to a fixed step (`sim_clock::SimClockDrive`). Under a driven
+/// clock this gauge would otherwise report a flat 16.67 ms while frames
+/// genuinely took 300 ms, and the perf lane would be confidently wrong.
 fn collect_frame(
-    time: Res<Time<Real>>,
     store: Res<DiagnosticsStore>,
+    mut previous: Local<Option<Instant>>,
     mut samples: ResMut<PerfSamples>,
 ) {
-    let cpu_ms = time.delta_secs() * 1000.0;
-    if cpu_ms <= 0.0 {
+    let now = Instant::now();
+    let Some(last) = previous.replace(now) else {
         return; // first frame
+    };
+    let cpu_ms = (now - last).as_secs_f32() * 1000.0;
+    if cpu_ms <= 0.0 {
+        return;
     }
     let gpu_ms = gpu_frame_ms(&store);
     samples.push_frame(cpu_ms, gpu_ms);
@@ -299,6 +344,11 @@ fn sample_gauges(
     let tile_mib =
         tile_roots.iter().map(|r| r.resident_bytes()).sum::<usize>() as f32 / (1024.0 * 1024.0);
     samples.tile_mib = tile_mib;
+    samples.texture_mib = store
+        .get(gpu_images::GpuImageBytesDiagnosticPlugin::diagnostic_path())
+        .and_then(|d| d.value())
+        .unwrap_or(0.0) as f32
+        / (1024.0 * 1024.0);
     // CPU-side accounting, so `rss_mib` growth can be attributed rather than
     // guessed at. Byte sums over borrowed buffers — no allocation.
     let mib = |bytes: usize| bytes as f32 / (1024.0 * 1024.0);
@@ -337,6 +387,24 @@ fn sample_gauges(
         .unwrap_or(0.0) as f32
         / (1024.0 * 1024.0);
     samples.push_mem(tile_mib, slab_mib);
+}
+
+/// `"820 MiB"` / `"3.2 GiB"` — one unit switch so a five-digit MiB figure never
+/// pushes a readout column out of line.
+///
+/// Shared by the F3 debug view and the loading screen so the same quantity is
+/// never spelled two ways on two screens.
+pub fn fmt_mib(mib: f32) -> String {
+    if mib >= 1024.0 {
+        format!("{:.1} GiB", mib / 1024.0)
+    } else {
+        format!("{mib:.0} MiB")
+    }
+}
+
+/// [`fmt_mib`] for a byte count.
+pub fn fmt_bytes(bytes: u64) -> String {
+    fmt_mib(bytes as f32 / (1024.0 * 1024.0))
 }
 
 /// Read the entity-count diagnostic (registered by
@@ -403,6 +471,7 @@ fn record(
             tile_resident = u64::from(samples.tile_resident),
             tile_mib = f64::from(samples.tile_mib),
             slab_mib = f64::from(samples.slab_mib()),
+            texture_mib = f64::from(samples.texture_mib),
             rss_mib = f64::from(samples.rss_mib),
             mesh_cpu_mib = f64::from(samples.mesh_cpu_mib),
             image_cpu_mib = f64::from(samples.image_cpu_mib),

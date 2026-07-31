@@ -113,6 +113,14 @@ Game:
 - `GameManeuverPrecisionContext` for Shift/Ctrl precision while a
   maneuver drag is active
 
+Priority matters here, and one pair of keys is shared: Shift/Ctrl are the
+throttle ramp in `GameFlightContext` (priority 20) *and* the precision
+modifiers in `GameManeuverPrecisionContext` (90, consuming). The precision
+context therefore has to be genuinely off outside a drag, or the throttle ramp
+goes dead with no error anywhere — **a mode resource that gates an input
+context must be released by a system that cannot decline to run**
+(`end_drag_on_release`, INC-20260730T222419Z).
+
 Applying any saved or agent-scripted entry from the F8 viewpoint manager
 activates freecam at that body-fixed camera pose. Closing the manager therefore
 leaves the developer in freecam at the selected view instead of handing the
@@ -139,13 +147,26 @@ or the keyboard:
   vertical, pitch stops short of the poles, roll is zero. The constraint
   is re-derived every frame against the up direction *where the camera
   now is*, so the horizon stays level while flying across a body instead
-  of tipping over as the vertical rotates underneath. The effective
-  surface-flight envelope ends at the authored Kármán line on atmospheric
-  bodies. Airless bodies use `min(5% of body radius, 100 km)`, so moons
-  retain plane-like surface flying while tiny asteroids release the lock
-  close to their surface. Crossing the ceiling releases into 6-DOF;
-  descending below 95% of it re-engages the lock, preventing chatter at
-  the boundary. The checkbox remains remembered throughout.
+  of tipping over as the vertical rotates underneath.
+
+  Its strength is an **authority** in `0..=1` set by how large the body
+  *looks* from the camera — the angular diameter `2·asin(R/r)` it
+  subtends — smoothstepped from rigid at 120° down to fully 6-DOF at 45°.
+  Apparent size, not altitude: the rule is independent of where the camera
+  points and of the lens (panning or zooming must never change the flight
+  model), and being a pure function of `r/R` it fits a 190 km moonlet and
+  a 3186 km planet with one constant. Full authority reaches ~493 km over
+  Thalos and ~134 km over Mira, against the 80 km Kármán line and 43 km
+  airless ceiling the old rule released at.
+
+  Nothing switches at a boundary. Authority is smoothstepped, so it has
+  zero slope at both ends of the band; the pose *eases* toward level at a
+  rate of `2 Hz · a/(1−a)`, which diverges at full authority (rigid, as
+  before) and vanishes at zero; and mouse-look's yaw axis and R/F's climb
+  axis interpolate between the camera's own up and the local vertical by
+  the same authority, so the control feel crosses the band as continuously
+  as the pose does. Q/E roll stands down above half authority and returns
+  below it. The checkbox remains remembered throughout.
 - **Stop at the ground** (`C`) — the camera's radius is clamped to the
   terrain height beneath it plus a small clearance. A *floor*, not a
   swept collision: it stops the camera sinking through the surface it is

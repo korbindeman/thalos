@@ -37,8 +37,8 @@ use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_shipyard::{
     Attachment, CommandPod, Decoupler, Engine, EngineActivation, Part, PartResources, PartRole,
     Resource, ResourceTotals, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,
-    SurfaceMount, compute_stage_summaries, derive_stages, live_part_dry_mass_kg,
-    live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
+    SurfaceMount, compute_stage_summaries, derive_stages, live_part_centroid_offset,
+    live_part_dry_mass_kg, live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
 };
 use thalos_world::StateVector;
 
@@ -53,6 +53,7 @@ pub struct StagingPlugin;
 impl Plugin for StagingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StagingSummaries>()
+            .init_resource::<StageDemand>()
             .init_resource::<SeparationVisualAudits>()
             .add_systems(
                 Update,
@@ -115,6 +116,48 @@ impl StagingPlan {
     /// True once every stage has been activated.
     fn is_spent(&self) -> bool {
         self.next >= self.stages.len()
+    }
+}
+
+/// Typed request/acknowledgement seam for automatic staging.
+///
+/// Flight programs request a stage through this resource instead of mutating
+/// engine or decoupler state. [`activate_stage`] remains the one canonical
+/// staging operation for both the space-bar and automation.
+#[derive(Resource, Debug, Default)]
+pub(crate) struct StageDemand {
+    next_id: u64,
+    pending: Option<u64>,
+    completed: Option<(u64, bool)>,
+}
+
+impl StageDemand {
+    pub(crate) fn request(&mut self) -> u64 {
+        if let Some(id) = self.pending {
+            return id;
+        }
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        self.pending = Some(self.next_id);
+        self.next_id
+    }
+
+    pub(crate) fn outcome(&self, id: u64) -> Option<bool> {
+        self.completed
+            .filter(|(completed_id, _)| *completed_id == id)
+            .map(|(_, ok)| ok)
+    }
+
+    pub(crate) fn cancel(&mut self, id: u64) {
+        if self.pending == Some(id) {
+            self.pending = None;
+            self.completed = Some((id, false));
+        }
+    }
+
+    fn complete(&mut self, ok: bool) {
+        if let Some(id) = self.pending.take() {
+            self.completed = Some((id, ok));
+        }
     }
 }
 
@@ -220,16 +263,17 @@ fn build_staging_plan(
 /// unaffected. The clean fix is bubble teardown-and-respawn, but doing it
 /// without a one-frame duplicate-craft window needs the launchpad ascent
 /// scenario to validate against — left as a follow-up (see staging task).
-fn activate_stage(
+pub(crate) fn activate_stage(
     mut commands: Commands,
     intent: Res<GameInputIntent>,
+    mut automatic: ResMut<StageDemand>,
     sim: Res<SimulationState>,
     mut plans: Query<(Entity, &mut StagingPlan), With<PlayerShip>>,
     mut engine_activations: Query<(&CraftPart, &mut EngineActivation)>,
     attachments: Query<(Entity, &Attachment, &CraftPart), Without<EditorPart>>,
     surface_mounts: Query<(Entity, &SurfaceMount, &CraftPart), Without<EditorPart>>,
 ) {
-    if !intent.stage {
+    if !intent.stage && automatic.pending.is_none() {
         return;
     }
     // Staging only acts at 1× live time — the same rule throttle follows in
@@ -244,6 +288,7 @@ fn activate_stage(
         return;
     };
     if plan.is_spent() {
+        automatic.complete(false);
         return;
     }
 
@@ -285,6 +330,7 @@ fn activate_stage(
     }
 
     plan.next += 1;
+    automatic.complete(true);
     info!(
         "staged: activated stage {next} ({}/{} fired)",
         plan.next,
@@ -363,9 +409,14 @@ fn aggregate_world_parts(world: &World, entities: &[Entity]) -> Option<PartAggre
         let Ok(part) = world.get_entity(entity) else {
             continue;
         };
+        // Mass acts at the part's centroid, not its transform origin (the top
+        // mating node) — see `live_part_centroid_offset`.
         let position = part
             .get::<Transform>()
-            .map(|transform| transform.translation.as_dvec3())
+            .map(|transform| {
+                transform.translation.as_dvec3()
+                    + transform.rotation.as_dquat() * live_part_centroid_offset(part)
+            })
             .unwrap_or(DVec3::ZERO);
         let wet_mass = live_part_total_mass_kg(part);
         let dry_mass = live_part_dry_mass_kg(part) as f64;
@@ -914,9 +965,13 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
         if mass <= 0.0 {
             continue;
         }
+        // Mass acts at the part's centroid, not its transform origin (the top
+        // mating node) — see `live_part_centroid_offset`.
         let position = part
             .get::<Transform>()
-            .map(|t| t.translation.as_dvec3())
+            .map(|t| {
+                t.translation.as_dvec3() + t.rotation.as_dquat() * live_part_centroid_offset(part)
+            })
             .unwrap_or(DVec3::ZERO);
         if let Some(engine) = part.get::<Engine>() {
             if engine.gimbal_range_deg > 0.0 {
@@ -1083,6 +1138,21 @@ fn part_resource_totals(resources: &PartResources) -> HashMap<Resource, Resource
 mod tests {
     use super::*;
     use thalos_shipyard::{CatalogEntry, PartCatalog};
+
+    #[test]
+    fn automatic_stage_demand_is_edge_triggered_and_acknowledged() {
+        let mut demand = StageDemand::default();
+        let first = demand.request();
+        assert_eq!(demand.request(), first);
+        assert_eq!(demand.outcome(first), None);
+        demand.complete(true);
+        assert_eq!(demand.outcome(first), Some(true));
+
+        let second = demand.request();
+        assert_ne!(second, first);
+        demand.cancel(second);
+        assert_eq!(demand.outcome(second), Some(false));
+    }
 
     #[test]
     fn separation_impulse_conserves_linear_momentum() {

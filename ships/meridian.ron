@@ -22,7 +22,7 @@
         (
             catalog_id: "gear_nose_hd",
             params: Gear(
-                strut_length: 1.7,
+                strut_length: 1.2,
                 wheel_radius: 0.5,
             ),
             resources: {},
@@ -30,7 +30,7 @@
         (
             catalog_id: "gear_main_hd",
             params: Gear(
-                strut_length: 1.6,
+                strut_length: 1.1,
                 wheel_radius: 0.6,
             ),
             resources: {},
@@ -42,7 +42,7 @@
                 root_chord: 5.2,
                 tip_chord: 1.5,
                 sweep: 0.52,
-                dihedral: 0.07,
+                dihedral: 0.365,
                 thickness: 0.11,
                 incidence: 0.0,
                 control_surfaces: [
@@ -80,7 +80,7 @@
                 root_chord: 5.2,
                 tip_chord: 1.5,
                 sweep: 0.52,
-                dihedral: 0.07,
+                dihedral: 0.365,
                 thickness: 0.11,
                 incidence: 0.0,
                 control_surfaces: [
@@ -218,7 +218,7 @@
             parent: 0,
             child: 2,
             kind: BodySkin,
-            station: 0.55,
+            station: 0.51,
             angle: 3.14159,
         ),
         (
@@ -258,7 +258,7 @@
             child: 3,
             kind: BodySkin,
             station: 0.44,
-            angle: 1.5708,
+            angle: 1.85,
             symmetry_group: Some(0),
         ),
         (
@@ -266,7 +266,7 @@
             child: 4,
             kind: BodySkin,
             station: 0.44,
-            angle: -1.5708,
+            angle: -1.85,
             symmetry_group: Some(0),
         ),
         (

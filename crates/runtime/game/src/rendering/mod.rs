@@ -37,6 +37,7 @@ pub(crate) mod tile_terrain;
 mod trails;
 pub(crate) mod transforms;
 mod types;
+mod vapor_cone;
 mod vegetation;
 pub(crate) mod view_anchor;
 
@@ -139,6 +140,7 @@ impl Plugin for RenderingPlugin {
             .add_plugins(flow::FlowSignalsPlugin)
             .add_plugins(plume::PlumePlugin)
             .add_plugins(reentry::ReentryPlugin)
+            .add_plugins(vapor_cone::VaporConePlugin)
             // Rocks/pebbles disabled — see `mod rocks` above.
             // .add_plugins(rocks::RockScatterPlugin)
             .insert_resource(LastClick::default())

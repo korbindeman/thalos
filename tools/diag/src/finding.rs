@@ -104,6 +104,22 @@ impl Finding {
 /// Evidence lines kept per finding.
 pub const MAX_DETAIL_LINES: usize = 4;
 
+/// LAND completion is only valid at a near-zero wheel speed. The controller's
+/// own threshold is 0.5 m/s; 0.75 leaves room for the diagnostic sample and
+/// physics step to straddle the boundary without hiding a rolling disengage.
+pub const LAND_COMPLETION_SPEED_M_S_ATTENTION: f64 = 0.75;
+
+/// ORBIT promises these live achieved-element tolerances before publishing
+/// completion. The reader repeats the contract so a future executor regression
+/// cannot emit a plausible-looking false success.
+pub const ORBIT_APSIS_ERROR_M_ATTENTION: f64 = 2_000.0;
+pub const ORBIT_INCLINATION_ERROR_RAD_ATTENTION: f64 = 0.01;
+/// The ascent controller begins throttling at 35 kPa. Three one-second samples
+/// above 120% of that limit distinguish a transient crossing from a sustained
+/// max-Q guidance failure.
+pub const ORBIT_DYNAMIC_PRESSURE_PA_ATTENTION: f64 = 42_000.0;
+pub const ORBIT_MAX_Q_SAMPLES_ATTENTION: usize = 3;
+
 // ── Capture-lane thresholds ─────────────────────────────────────────────────
 //
 // The capture lane is the throughput floor for agent work, so its bar is the
@@ -155,6 +171,34 @@ pub const MEMORY_GROWTH_MIB_ATTENTION: f64 = 1024.0;
 /// not floating-point noise; it is a scheduling/frame mismatch and can move
 /// every shadow edge at once.
 pub const SHADOW_ORIGIN_ERROR_M_ATTENTION: f64 = 0.01;
+/// Reversals of the cascade-mode switch (`active_cascades`, 4 near-surface vs 2
+/// craft-local) within one session. Entering craft-local mode parks cascades 2–3
+/// and turns every ground shadow off in one frame, so the switch is only ever
+/// correct as a one-way consequence of a real climb or descent: a genuine ascent
+/// reads 4 → 2 and STAYS, contributing zero reversals. A reversal (4 → 2 → 4)
+/// means the altitude sat on the threshold and the mode strobed, which the
+/// player sees as the whole world's shadows blinking. Two tolerates one honest
+/// round trip — a climb and a descent inside the same session; beyond that the
+/// hysteresis band (`SHADOW_CRAFT_LOCAL_EXIT_M`) is not doing its job.
+pub const SHADOW_MODE_REVERSALS_ATTENTION: usize = 2;
+/// Craft-local shadow mode is legitimate only when the VIEW is high. The sky
+/// lane's `environment_paint.altitude_m` is an independent, view-anchored
+/// record of where the view actually was, so a craft-local gauge bracketed by
+/// paint samples below this altitude means the gate resolved the view from the
+/// wrong thing — the INC-20260731T004704Z class (the gate read the orbiting
+/// craft at a 600 m god view), which renders a plausible frame with every
+/// non-craft shadow missing and no error anywhere. Set below the mode's own
+/// 40 km exit threshold so a genuine descent that is one frame from unlatching
+/// does not fire, and far above any god view or surface flight.
+pub const SHADOW_CRAFT_LOCAL_SURFACE_ALT_M: f64 = 35_000.0;
+/// Sustained samples (~1 Hz gauge) of craft-local-at-surface before it is a
+/// finding. Three tolerates the seam frames of an honest teleport from orbit
+/// down to a pad, where one or two gauges can straddle the transition.
+pub const SHADOW_CRAFT_LOCAL_SURFACE_SAMPLES_ATTENTION: usize = 3;
+/// Pairing window between a shadow gauge and the nearest sky paint sample.
+/// Paint publishes at roughly 0.5 Hz, so 3 s always brackets one sample while
+/// staying too short to pair across a real climb through the threshold.
+pub const SHADOW_VIEW_ALT_PAIR_WINDOW_MS: u128 = 3_000;
 /// Below this, the planet painted into the reflection cubemap is effectively a
 /// flat tint — the impostor bake is bound but is not varying, which is how a
 /// broken body-fixed rotation or a blank bake presents. Set well under the

@@ -35,6 +35,11 @@
 //! - [`approach`] — runway descriptors and the approach planner: a straight
 //!   final aligned with the landing heading, plus the Dubins transition that
 //!   joins the craft's current pose to it.
+//! - [`rejoin`] — the flyable way *back* onto a route after drifting off it: a
+//!   bank-limited path to the earliest point on the route the craft can meet
+//!   tangentially. Guidance steers along this, so being off course produces a
+//!   real intercept rather than a heuristic nudge — and it is route-relative, so
+//!   it works identically on any leg and on any future waypoint route.
 //! - [`vnav`] — the vertical profile over distance-to-go: level at the capture
 //!   altitude, then the glideslope to the threshold, with speed gates.
 //! - [`guidance`] — the per-frame deviations and commands the displays and the
@@ -49,18 +54,27 @@
 //! implemented; see `docs/gameplay/navigation.md`.
 
 pub mod approach;
+pub mod destination;
 pub mod dubins;
 pub mod guidance;
 pub mod path;
+pub mod rejoin;
 pub mod vnav;
 pub mod waypoint;
 
 pub use approach::{
-    ApproachParams, ApproachPlan, ApproachPhase, RunwayEnd, RunwayStrip, plan_approach,
+    ApproachParams, ApproachPhase, ApproachPlan, RunwayEnd, RunwayStrip, plan_approach,
+};
+pub use destination::{
+    DestinationGuidance, DestinationInput, DestinationParams, angular_distance_rad,
+    compute_destination_guidance, great_circle_tangent,
 };
 pub use dubins::{DubinsPath, DubinsWord, Pose2, plan_dubins};
-pub use guidance::{Guidance, GuidanceInput, compute_guidance};
+pub use guidance::{
+    GS_FULL_SCALE_RAD, Guidance, GuidanceInput, LOC_FULL_SCALE_RAD, compute_guidance,
+};
 pub use path::{Arc2, LateralPath, Leg, PathPoint};
+pub use rejoin::{Rejoin, RejoinParams, plan_rejoin};
 pub use vnav::{SpeedGate, VerticalProfile, VnavParams};
 pub use waypoint::{
     RouteFrame, VerticalConstraint, Waypoint, WaypointKind, dir_from_theta, heading_to_theta,
@@ -81,8 +95,8 @@ pub const EARTH_G_M_S2: f64 = 9.80665;
 /// Shared by every module here: a guidance loop that wraps inconsistently
 /// commands a 350° turn to fix a 10° error.
 pub fn wrap_angle(angle: f64) -> f64 {
-    let wrapped =
-        (angle + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI) - std::f64::consts::PI;
+    let wrapped = (angle + std::f64::consts::PI).rem_euclid(2.0 * std::f64::consts::PI)
+        - std::f64::consts::PI;
     if wrapped == -std::f64::consts::PI {
         std::f64::consts::PI
     } else {

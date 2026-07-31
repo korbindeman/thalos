@@ -12,9 +12,10 @@ use std::{
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use thalos_capture_protocol::{
-    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureCameraOverride,
+    CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureCameraOverride, CaptureClock,
     CaptureGraphicsOverrides, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
-    CaptureServerState, CaptureSourceSnapshot, CapturedCameraState, ViewpointCatalog,
+    CaptureServerState, CaptureSourceSnapshot, CaptureTerrainResidency, CapturedCameraState,
+    ViewpointCatalog,
 };
 use uuid::Uuid;
 
@@ -82,6 +83,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",
+    "THALOS_CAPTURE_CLOCK",
 ];
 
 /// Request inputs that shape boot-time world or renderer construction rather
@@ -96,6 +98,11 @@ const STARTUP_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",
+    // Wall vs. driven simulation clock (`sim_clock::SimClockDrive`). A boot
+    // property: it changes how Avian steps and how every warmup frame advances
+    // the world, so switching it must restart the host rather than reuse one
+    // that booted on the other clock.
+    "THALOS_CAPTURE_CLOCK",
 ];
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -128,6 +135,18 @@ struct CaptureReceipt<'a> {
     workspace_relation: &'static str,
     camera: Option<CapturedCameraState>,
     graphics: CaptureGraphicsSettings,
+    /// Ground residency at readback — whether this image is the detail the
+    /// preset authored, or the tile memory brake's coarser stand-in. Absent on
+    /// the legacy udlod path, where there is no such thing to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    terrain: Option<CaptureTerrainResidency>,
+    /// Wall or driven simulation clock (`sim_clock::SimClockDrive`). Under the
+    /// wall clock every warmup frame advances the world by however long it
+    /// took, so the same preset settles differently on a busy machine than an
+    /// idle one; under a driven clock it advances by a fixed step and a rerun
+    /// is comparable. Always written — "which clock produced this image" is
+    /// never "not applicable".
+    clock: CaptureClock,
     /// Compatibility field for existing receipt readers. `false` now means
     /// the workspace advanced after the source floor; it is not a capture
     /// failure and must not trigger a rebuild loop.
@@ -766,8 +785,16 @@ fn capture_once(
     graphics: CaptureGraphicsOverrides,
 ) -> Result<PathBuf, CaptureFailure> {
     let log_start = if state.completed_captures == 0 {
-        read_json::<LauncherState>(&diagnostic_path(LAUNCHER_FILE))
-            .map_or(0, |launcher| launcher.log_start_bytes)
+        // If the launcher state is unreadable, fall back to the CURRENT end of
+        // the log — losing this boot's text from the fault scan — never to 0:
+        // the log is append-accumulated across boots, and a whole-file scan
+        // once matched a six-day-old "Device is lost" line as a fresh fatal
+        // fault, quarantining a healthy lane until the next OS reboot
+        // (2026-07-31).
+        read_json::<LauncherState>(&diagnostic_path(LAUNCHER_FILE)).map_or_else(
+            || file_len(&diagnostic_path(LOG_FILE)),
+            |launcher| launcher.log_start_bytes,
+        )
     } else {
         file_len(&diagnostic_path(LOG_FILE))
     };
@@ -845,6 +872,7 @@ fn capture_once(
                 message: "capture succeeded without effective graphics settings".into(),
                 recoverable: true,
             })?;
+            let terrain = response.terrain;
             write_capture_receipt(
                 &path,
                 CaptureReceipt {
@@ -862,6 +890,8 @@ fn capture_once(
                     workspace_matches,
                     camera: response.camera,
                     graphics: effective_graphics,
+                    terrain,
+                    clock: response.clock,
                 },
             )
             .map_err(|message| CaptureFailure {
@@ -870,6 +900,37 @@ fn capture_once(
             })?;
             runlog::phase("validate", validating.elapsed());
             runlog::field("workspace_relation", workspace_relation);
+            if let Some(terrain) = terrain {
+                // Always recorded, not only on the error path: a shot that
+                // waited for the brake and then rendered clean is the gate
+                // working, and that is worth seeing in the lane too.
+                runlog::field("tile_split_scale", terrain.split_scale);
+                if terrain.brake_wait_s > 0.0 {
+                    runlog::field("brake_wait_s", terrain.brake_wait_s);
+                }
+                if terrain.braked() {
+                    runlog::count("terrain_braked");
+                    eprintln!(
+                        "WARNING: the ground in this capture is COARSER THAN AUTHORED — the tile \
+                         memory brake was still holding at readback (split scale {:.2} after \
+                         waiting {:.0} s; {} tiles resident of {} wanted, {:.0} MiB{}). Do not \
+                         treat this image as terrain evidence.",
+                        terrain.split_scale,
+                        terrain.brake_wait_s,
+                        terrain.resident_tiles,
+                        terrain.desired_tiles,
+                        terrain.resident_mib,
+                        match (terrain.budget_mib, terrain.instances) {
+                            (Some(budget), 1) => format!(" against a {budget:.0} MiB share"),
+                            (Some(budget), instances) => format!(
+                                " against a {budget:.0} MiB share — {instances} renderers are \
+                                 live, so a peer halved it"
+                            ),
+                            (None, _) => String::new(),
+                        }
+                    );
+                }
+            }
             println!(
                 "captured {} [source {} · {}{}]",
                 path.display(),
@@ -1452,6 +1513,7 @@ fn canonical_preset(raw: &str) -> Result<String, String> {
         "clouds-sunset" => "cloud-sunset",
         "engine" | "exhaust" | "rocket" => "plume",
         "re-entry" | "entry" | "shock" | "plasma" => "reentry",
+        "vapour-cone" | "vapor" | "sonic-cone" | "mach-cone" => "vapor-cone",
         "massif" | "mountains" => "massif-aerial",
         "ridge" => "massif-ridge",
         "valley" => "massif-valley",

@@ -261,16 +261,28 @@ pub(super) struct PfdDirectorPitch;
 #[derive(Component)]
 pub(super) struct PfdApproachLabel;
 
-/// Screen offset (px) of a deviation index for a deflection in `[-1, 1]`.
+/// Horizontal (localizer) index offset in px for a deflection in `[-1, 1]`.
 ///
-/// **The index moves opposite the error**, which is the universal
-/// "fly toward the needle" convention: being right of course puts the course to
-/// your left, so the localizer index sits left of centre and you steer to it.
-/// Being high puts the glideslope below you, so the index sits low. Inverting
-/// this reads as a perfectly plausible instrument that flies you into the
-/// ground, so it is pinned by `deviation_index_offset_flies_toward_the_needle`.
-fn deviation_index_offset_px(deflection: f64) -> f32 {
+/// **The index moves toward where the course is**, which is the universal
+/// "fly toward the needle" convention: being right of course (positive
+/// deflection) puts the course to your *left*, so the index sits left of centre
+/// and you steer to it.
+fn loc_index_offset_px(deflection: f64) -> f32 {
     -(deflection.clamp(-1.0, 1.0) as f32) * DEV_SCALE_HALF_PX
+}
+
+/// Vertical (glideslope) index offset in **screen** px for a deflection in
+/// `[-1, 1]`.
+///
+/// Same "fly toward the needle" rule, but the two axes end up with *opposite*
+/// signs and that is not a mistake: being high (positive deflection) puts the
+/// glideslope **below** you, and screen `y` grows downward, so the index takes a
+/// *positive* offset. Negating this instead — the natural thing to do if you
+/// copy the lateral case — yields a perfectly plausible instrument that tells a
+/// high aircraft to descend by pointing up. Pinned by
+/// `deviation_indices_point_toward_the_course_and_the_slope`.
+fn gs_index_offset_px(deflection: f64) -> f32 {
+    (deflection.clamp(-1.0, 1.0) as f32) * DEV_SCALE_HALF_PX
 }
 
 // ---------------------------------------------------------------------------
@@ -1931,8 +1943,7 @@ pub fn update_approach_guidance(
     )>,
     mut label_q: Query<&mut Text, With<PfdApproachLabel>>,
 ) {
-    let armed =
-        *mode == NavDisplayMode::Hud && route.plan.is_some() && route.guidance.is_some();
+    let armed = *mode == NavDisplayMode::Hud && route.plan.is_some() && route.guidance.is_some();
     let target = if armed {
         Visibility::Inherited
     } else {
@@ -1959,43 +1970,43 @@ pub fn update_approach_guidance(
         .filter(|_| armed);
 
     if let Some((plan, guidance)) = plan_and_guidance {
-    // --- Deviation indices.
-    let loc_px = deviation_index_offset_px(guidance.loc_deflection());
-    for mut node in &mut loc_index {
-        node.left = Val::Px(loc_px - DEV_INDEX_PX * 0.5);
-    }
-    let gs_px = deviation_index_offset_px(guidance.gs_deflection());
-    for mut node in &mut gs_index {
-        node.top = Val::Px(gs_px - DEV_INDEX_PX * 0.5);
-    }
+        // --- Deviation indices.
+        let loc_px = loc_index_offset_px(guidance.loc_deflection());
+        for mut node in &mut loc_index {
+            node.left = Val::Px(loc_px - DEV_INDEX_PX * 0.5);
+        }
+        let gs_px = gs_index_offset_px(guidance.gs_deflection());
+        for mut node in &mut gs_index {
+            node.top = Val::Px(gs_px - DEV_INDEX_PX * 0.5);
+        }
 
-    // --- Flight director. The roll cue is bank error; the pitch cue is
-    // flight-path-angle error at the ladder's own px/degree, so the two read
-    // consistently against the pitch ladder behind them.
-    let sim = &sim_state.simulation;
-    let craft = sim.craft_state();
-    let angles = solar_system
-        .states
-        .as_deref()
-        .and_then(|st| st.get(sim.dominant_body()))
-        .and_then(|bs| {
-            attitude_angles(
-                craft.attitude.orientation,
-                craft.translation.position,
-                bs.position,
-            )
-        });
+        // --- Flight director. The roll cue is bank error; the pitch cue is
+        // flight-path-angle error at the ladder's own px/degree, so the two read
+        // consistently against the pitch ladder behind them.
+        let sim = &sim_state.simulation;
+        let craft = sim.craft_state();
+        let angles = solar_system
+            .states
+            .as_deref()
+            .and_then(|st| st.get(sim.dominant_body()))
+            .and_then(|bs| {
+                attitude_angles(
+                    craft.attitude.orientation,
+                    craft.translation.position,
+                    bs.position,
+                )
+            });
 
-    let speed = craft.translation.velocity.length();
-    let gamma_command = if speed > 1.0 {
-        (guidance.vertical_speed_command_m_s / speed)
-            .clamp(-1.0, 1.0)
-            .asin()
-    } else {
-        0.0
-    };
+        let speed = craft.translation.velocity.length();
+        let gamma_command = if speed > 1.0 {
+            (guidance.vertical_speed_command_m_s / speed)
+                .clamp(-1.0, 1.0)
+                .asin()
+        } else {
+            0.0
+        };
 
-    if let Some(angles) = angles {
+        if let Some(angles) = angles {
             let roll_px = ((guidance.bank_command_rad - angles.bank_rad).to_degrees() as f32
                 * FD_PX_PER_BANK_DEG)
                 .clamp(-FD_LIMIT_PX, FD_LIMIT_PX);
@@ -2003,8 +2014,7 @@ pub fn update_approach_guidance(
             // carry AoA and on a stabilised approach the difference is small and
             // near-constant, so the cue is driven against pitch attitude and
             // reads as a trim target rather than an exact path angle.
-            let pitch_px = (-(gamma_command - angles.pitch_rad).to_degrees() as f32
-                * PX_PER_DEG)
+            let pitch_px = (-(gamma_command - angles.pitch_rad).to_degrees() as f32 * PX_PER_DEG)
                 .clamp(-FD_LIMIT_PX, FD_LIMIT_PX);
             cue = Some((roll_px, pitch_px));
         }
@@ -2014,10 +2024,8 @@ pub fn update_approach_guidance(
         if let Ok(mut text) = label_q.single_mut() {
             // Distance-to-go was hardcoded in km while the tapes right next to
             // it were unit-aware; it is part of the same instrument.
-            let dtg = format::ground_distance(
-                guidance.dtg_m,
-                units.system_for(UnitDomain::Aviation),
-            );
+            let dtg =
+                format::ground_distance(guidance.dtg_m, units.system_for(UnitDomain::Aviation));
             let line = format!(
                 "APPR RWY {:02}  {}{}",
                 plan.designator,
@@ -2059,21 +2067,25 @@ mod approach_guidance_tests {
     use super::*;
 
     #[test]
-    fn deviation_index_offset_flies_toward_the_needle() {
-        // Right of course (positive deflection) must put the index LEFT of
-        // centre, so steering toward it corrects the error. The inverse reads as
-        // a plausible instrument that flies you off the side of the runway.
-        assert!(deviation_index_offset_px(1.0) < 0.0);
-        assert!(deviation_index_offset_px(-1.0) > 0.0);
-        // High on the glideslope (positive) puts the index BELOW centre (screen
-        // y grows downward, so a positive offset is down).
-        assert!(deviation_index_offset_px(0.5) < 0.0);
-        assert_eq!(deviation_index_offset_px(0.0), 0.0);
+    fn deviation_indices_point_toward_the_course_and_the_slope() {
+        // Right of course (positive) → the course is to the LEFT → index left.
+        assert!(loc_index_offset_px(1.0) < 0.0);
+        assert!(loc_index_offset_px(-1.0) > 0.0);
+        // High (positive) → the slope is BELOW → index down, and screen y grows
+        // downward, so that is a POSITIVE offset. The opposite sign to the
+        // lateral case, deliberately: an instrument that points a high aircraft
+        // upward is exactly as readable and exactly wrong.
+        assert!(gs_index_offset_px(1.0) > 0.0);
+        assert!(gs_index_offset_px(-1.0) < 0.0);
+        assert_eq!(loc_index_offset_px(0.0), 0.0);
+        assert_eq!(gs_index_offset_px(0.0), 0.0);
     }
 
     #[test]
-    fn deviation_index_saturates_at_full_scale() {
-        assert_eq!(deviation_index_offset_px(4.0), -DEV_SCALE_HALF_PX);
-        assert_eq!(deviation_index_offset_px(-4.0), DEV_SCALE_HALF_PX);
+    fn deviation_indices_saturate_at_full_scale() {
+        assert_eq!(loc_index_offset_px(4.0), -DEV_SCALE_HALF_PX);
+        assert_eq!(loc_index_offset_px(-4.0), DEV_SCALE_HALF_PX);
+        assert_eq!(gs_index_offset_px(4.0), DEV_SCALE_HALF_PX);
+        assert_eq!(gs_index_offset_px(-4.0), -DEV_SCALE_HALF_PX);
     }
 }

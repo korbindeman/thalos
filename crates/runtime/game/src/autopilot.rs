@@ -85,7 +85,7 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use crate::SimStage;
-use crate::fuel::{ThrottleState, gate_throttle_on_fuel_availability, handle_throttle_input};
+use crate::fuel::{PilotThrottleInput, gate_throttle_on_fuel_availability, handle_throttle_input};
 use crate::maneuver::{InteractionMode, ManeuverPlan, NodeBurnPhase};
 use crate::navigation::{AUTOPILOT_SETTLE_S, SHIP_NOSE_BODY, maneuver_node_burn_direction};
 use crate::rendering::SimulationState;
@@ -172,22 +172,54 @@ impl AutopilotBurnSchedule {
     }
 }
 
+/// The one selected programmatic flight mode. Executors keep separate internal
+/// state, but only this owner may publish the autopilot demand and locks.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AutoflightMode {
+    Off,
+    #[default]
+    Maneuver,
+    Land,
+    Orbit,
+}
+
 #[derive(Resource, Debug)]
 pub struct Autopilot {
-    pub enabled: bool,
+    mode: AutoflightMode,
     pub(crate) state: AutopilotState,
 }
 
 impl Default for Autopilot {
     fn default() -> Self {
         Self {
-            enabled: true,
+            mode: AutoflightMode::Maneuver,
             state: AutopilotState::Idle,
         }
     }
 }
 
 impl Autopilot {
+    pub fn mode(&self) -> AutoflightMode {
+        self.mode
+    }
+
+    pub fn select_mode(&mut self, mode: AutoflightMode) {
+        if self.mode != mode {
+            self.mode = mode;
+            if !matches!(mode, AutoflightMode::Maneuver | AutoflightMode::Orbit) {
+                self.state = AutopilotState::Idle;
+            }
+        }
+    }
+
+    pub fn toggle_mode(&mut self, mode: AutoflightMode) {
+        if self.mode == mode {
+            self.select_mode(AutoflightMode::Off);
+        } else {
+            self.select_mode(mode);
+        }
+    }
+
     /// Snapshot of the current executor state for UI/read-only systems.
     pub(crate) fn state(&self) -> AutopilotState {
         self.state
@@ -197,11 +229,12 @@ impl Autopilot {
     /// state is `Engaging` or `Burn`. Consumed by
     /// [`crate::controls::update_control_locks`] which translates it
     /// into the per-surface flags that input handlers actually read.
-    pub(crate) fn is_active(&self) -> bool {
-        matches!(
-            self.state,
-            AutopilotState::Engaging { .. } | AutopilotState::Burn { .. }
-        )
+    pub(crate) fn maneuver_active(&self) -> bool {
+        matches!(self.mode, AutoflightMode::Maneuver | AutoflightMode::Orbit)
+            && matches!(
+                self.state,
+                AutopilotState::Engaging { .. } | AutopilotState::Burn { .. }
+            )
     }
 
     /// Direct world-frame attitude target while the autopilot owns
@@ -221,10 +254,28 @@ impl Autopilot {
     /// engaging/burning, otherwise `Free` (it yields attitude to lower-
     /// priority sources). The arbiter ranks this above nav modes and the SAS
     /// hold but below an unlocked pilot stick.
-    pub(crate) fn attitude_demand(&self) -> thalos_control::AttitudeDemand {
-        match self.attitude_target() {
-            Some(direction) => thalos_control::AttitudeDemand::PointNose(direction),
-            None => thalos_control::AttitudeDemand::Free,
+    pub(crate) fn maneuver_demand(&self) -> thalos_control::ControlDemand {
+        if !matches!(self.mode, AutoflightMode::Maneuver | AutoflightMode::Orbit) {
+            return thalos_control::ControlDemand::NONE;
+        }
+        match self.state {
+            AutopilotState::Engaging { direction, .. } => {
+                thalos_control::ControlDemand::autoflight(
+                    thalos_control::AttitudeDemand::PointNose(direction),
+                    Some(0.0),
+                    None,
+                    None,
+                )
+            }
+            AutopilotState::Burn { direction, .. } => thalos_control::ControlDemand::autoflight(
+                thalos_control::AttitudeDemand::PointNose(direction),
+                Some(1.0),
+                None,
+                None,
+            ),
+            AutopilotState::Idle | AutopilotState::Armed { .. } => {
+                thalos_control::ControlDemand::NONE
+            }
         }
     }
 }
@@ -538,16 +589,20 @@ fn edit_blocks_maneuver_directive(
 pub(crate) fn autopilot_system(
     mut autopilot: ResMut<Autopilot>,
     mut sim: ResMut<SimulationState>,
-    mut throttle: ResMut<ThrottleState>,
+    pilot_throttle: Res<PilotThrottleInput>,
     schedule: Res<AutopilotBurnSchedule>,
     mut started: MessageWriter<AutopilotBurnStarted>,
     mut completed: MessageWriter<AutopilotBurnCompleted>,
 ) {
-    if !autopilot.enabled {
-        if matches!(autopilot.state, AutopilotState::Burn { .. }) {
-            throttle.commanded = 0.0;
-        }
+    if !matches!(
+        autopilot.mode,
+        AutoflightMode::Maneuver | AutoflightMode::Orbit
+    ) {
         autopilot.state = AutopilotState::Idle;
+        return;
+    }
+    if pilot_throttle.moved && autopilot.maneuver_active() {
+        autopilot.select_mode(AutoflightMode::Off);
         return;
     }
 
@@ -605,7 +660,6 @@ pub(crate) fn autopilot_system(
 
         AutopilotState::Engaging { directive_id, .. } => {
             let Some(directive) = schedule.get(directive_id) else {
-                throttle.commanded = 0.0;
                 autopilot.state = AutopilotState::Idle;
                 return;
             };
@@ -616,10 +670,6 @@ pub(crate) fn autopilot_system(
                 directive_id,
                 direction: directive.direction,
             };
-
-            // Hold throttle at zero while we wait for warp to drop and
-            // attitude to settle.
-            throttle.commanded = 0.0;
 
             let now = sim.simulation.sim_time();
 
@@ -650,7 +700,6 @@ pub(crate) fn autopilot_system(
                 planned_dv: directive.delta_v_magnitude,
                 anchor_delivered_dv: sim.simulation.delivered_dv(),
             };
-            throttle.commanded = 1.0;
         }
 
         AutopilotState::Burn {
@@ -661,11 +710,8 @@ pub(crate) fn autopilot_system(
         } => {
             let delivered = sim.simulation.delivered_dv() - anchor_delivered_dv;
             if delivered >= planned_dv {
-                throttle.commanded = 0.0;
                 completed.write(AutopilotBurnCompleted { id: directive_id });
                 autopilot.state = AutopilotState::Idle;
-            } else {
-                throttle.commanded = 1.0;
             }
         }
     }

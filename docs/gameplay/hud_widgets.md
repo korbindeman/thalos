@@ -107,8 +107,15 @@ projected onto the tangent plane with an X-axis fallback at the poles,
   (clicking the armed one again lands the other way); the `< > FLIP CLR` row does
   the same for an off-plot strip. Both send a `RouteRequest` — `crate::route`
   stays the sole writer of the selection.
-- Range snaps to a 2 km – 300 km ladder containing the armed route (or the nearest
-  runway when nothing is armed), with step-down hysteresis.
+- Range is a 500 m – 300 km ladder. AUTO frames **what is still ahead** (the
+  remaining route plus the armed threshold) with step-down hysteresis; `−` / `+`
+  / the scroll wheel pin a rung and `AUTO` releases it (`NavZoom`, sole writer
+  `handle_zoom`).
+- The panel is laid out in blocks so it has a reading order: a header carrying
+  the armed runway, phase, and distance-to-go; the plot; the zoom row; a
+  guidance block pairing a **centring dot** (keep it in the middle: it carries
+  localizer left/right and glideslope up/down in one glyph) with the secondary
+  HDG / TRK / XTK / G-S readouts; then the runway selector.
 
 Assembly is the pure `nav_display_data(&NavScene)` over a scene built by the pure
 `build_nav_scene(&NavSceneInputs)`, which is what lets **`just nd-preview`**
@@ -117,6 +124,34 @@ render the real pipeline headlessly (see navigation.md § Verification).
 `nav_display.wgsl` mirrors `NavDisplayData` field-for-field and draws everything
 as signed-distance shapes in the normalised `[-1, 1]` plot space. Route points are
 packed two per `vec4`; the `MAX_*` counts must match on both sides.
+
+## Orbit-target control surface
+
+The top-centre orbital widget (`hud/orbital_panel.rs`) is separate from the MFD
+slot and remains the owner-facing surface for ORBIT configuration. Its compact
+form continues to show live AP/PE. Clicking the orbital half expands an editor
+in place for circular/elliptical altitude, inclination, direction, plane policy,
+plan/execute, and cancel.
+
+The default plane policy is `AUTO`: a ground launch selects the lowest
+inclination directly reachable from the current inertial site and launches
+prograde; an in-space retarget preserves the current plane. Pressing an
+inclination or direction control makes that choice explicit and switches the
+policy to `NEAREST`. The plane selector cycles `AUTO` → `NEAREST` → `PRESERVE`.
+
+It follows the ND selection architecture rather than copying its state:
+
+- widget interactions emit `OrbitTargetRequest`;
+- the orbit-program system is the sole writer of target and plan state;
+- the widget projects target/phase state, while the `Trajectory` MFD and map
+  project the ordinary generated maneuver nodes;
+- generated in-space burns are ordinary maneuver nodes owned and executed by
+  the existing maneuver path.
+
+The expanded editor is anchored below the compact panel and does not participate
+in the balancing row's width, so opening it cannot shift the central altitude
+readout. Full behavior and ground/ascent semantics:
+[orbit_autopilot.md](../simulation/orbit_autopilot.md) §5.
 
 ## Verification
 
@@ -130,6 +165,9 @@ packed two per `vec4`; the `MAX_*` counts must match on both sides.
   maneuvers.
 - A vacuum burn / pending node (`just game orbit`) → the slot shows
   **Trajectory**.
+- Orbit widget preview states are included in `just ui-preview`: compact,
+  expanded on the ground, expanded in space, planned, executing, infeasible,
+  and aborted.
 - Selector: pin each tab, confirm it stays regardless of context (DOCK/IPL show
   "NO DATA"); OFF blanks the slot; AUTO resumes context picking. `MfdSelection`
   is Reflect-registered.

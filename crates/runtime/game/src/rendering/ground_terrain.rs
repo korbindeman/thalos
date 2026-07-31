@@ -727,6 +727,7 @@ pub(crate) fn spawn_body_terrain(
         sun_shadow_map_0: sun_shadow_maps[0].clone(),
         sun_shadow_map_1: sun_shadow_maps[1].clone(),
         sun_shadow_map_2: sun_shadow_maps[2].clone(),
+        sun_shadow_map_3: sun_shadow_maps[3].clone(),
         // White fallback until the terrain loop patches the live AO image.
         ao: Handle::default(),
         // Likewise for the contact-shadow term (W18a); the gate lives in
@@ -1487,6 +1488,21 @@ pub(super) fn update_body_terrain_atmosphere(
                     .as_ref()
                     .map(|config| config.clouds_ambient_color_bottom)
                     .unwrap_or(Vec4::ZERO),
+                // Read from the SAME CloudsConfig the near marcher's uniform
+                // is written from, so the two tiers cannot drift apart in
+                // cloud-cell phase and render different shapes at one instant.
+                // y carries the marcher's target width for the same reason:
+                // the composite's ownership partition must reproduce the
+                // marcher's budget frontier with the MARCHER's pixel angle
+                // (the cloud target renders at `resolution_scale`, not full
+                // viewport resolution).
+                cloud_time: cloud_io
+                    .0
+                    .as_ref()
+                    .map(|config| {
+                        Vec4::new(config.cell_evolution_s, config.render_resolution.x, 0.0, 0.0)
+                    })
+                    .unwrap_or(Vec4::ZERO),
             },
         );
     }
@@ -1519,6 +1535,7 @@ pub(super) fn update_body_terrain_atmosphere(
         mat.sun_shadow_map_0 = sun_shadow.images[0].clone();
         mat.sun_shadow_map_1 = sun_shadow.images[1].clone();
         mat.sun_shadow_map_2 = sun_shadow.images[2].clone();
+        mat.sun_shadow_map_3 = sun_shadow.images[3].clone();
         mat.extras.shadow = sun_shadow.block;
         // Screen-space AO (F5): bind the live half-res AO image so the shader can
         // multiply it into the ambient occlusion. The gate/debug flag rides

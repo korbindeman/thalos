@@ -101,9 +101,10 @@ struct BodyTerrainExtras {
 @group(3) @binding(2) var<uniform> terrain_extras: BodyTerrainExtras;
 // Per-cascade sun-shadow depth maps (near→far), rendered by the game's
 // `rendering::sun_shadow` rig. Each a plain `texture_depth_2d` (no depth array).
-@group(3) @binding(3) var sun_shadow_map_0: texture_depth_2d;
-@group(3) @binding(4) var sun_shadow_map_1: texture_depth_2d;
-@group(3) @binding(5) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(10) var sun_shadow_map_0: texture_depth_2d;
+@group(3) @binding(3) var sun_shadow_map_1: texture_depth_2d;
+@group(3) @binding(4) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(5) var sun_shadow_map_3: texture_depth_2d;
 // Half-res screen-space AO (`rendering::ssao`), multiplied into the AMBIENT
 // occlusion only (graphics F5). Bound to the white fallback when unset (no AO);
 // `terrain_extras.inspection.w == 0` skips sampling entirely (map terrain / airless).
@@ -1526,7 +1527,7 @@ fn fragment(input: FragmentInput) -> FragmentOutput {
     // slope-scaled bias; the detail-mapped normal would wobble the offset.
     let tree_shadow = sun_shadow_factor_nrm(
         hit_ws, height_n, terrain_extras.shadow,
-        sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+        sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2, sun_shadow_map_3,
     );
     // Contact tier (W18a): the near-field occlusion cascade 0 is too coarse to
     // resolve — a gear strut, a trunk base, a building's ground seam. Folds into

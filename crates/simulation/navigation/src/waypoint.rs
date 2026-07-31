@@ -173,7 +173,10 @@ impl RouteFrame {
     /// vector. The vertical component is dropped, which is what "ground track"
     /// means.
     pub fn direction_to_local(&self, body_fixed_dir: DVec3) -> DVec2 {
-        DVec2::new(body_fixed_dir.dot(self.east), body_fixed_dir.dot(self.north))
+        DVec2::new(
+            body_fixed_dir.dot(self.east),
+            body_fixed_dir.dot(self.north),
+        )
     }
 }
 
@@ -291,7 +294,7 @@ mod tests {
         assert_abs_diff_eq!(heading_to_theta(0.0), std::f64::consts::FRAC_PI_2);
         // East compass → 0 rad math.
         assert_abs_diff_eq!(heading_to_theta(std::f64::consts::FRAC_PI_2), 0.0);
-        for h_deg in [0.0, 30.0, 143.0, 270.0, 359.0] {
+        for h_deg in [0.0_f64, 30.0, 143.0, 270.0, 359.0] {
             let h = h_deg.to_radians();
             assert_abs_diff_eq!(theta_to_heading(heading_to_theta(h)), h, epsilon = 1e-12);
         }
@@ -405,6 +408,10 @@ mod tests {
     fn a_ground_waypoint_has_no_vertical_constraint() {
         let w = Waypoint::fix(DVec3::X);
         assert!(w.vertical.is_none(), "rover/ship routes are lateral-only");
-        assert!(w.with_vertical(VerticalConstraint::At(10.0)).vertical.is_some());
+        assert!(
+            w.with_vertical(VerticalConstraint::At(10.0))
+                .vertical
+                .is_some()
+        );
     }
 }

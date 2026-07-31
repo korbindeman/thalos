@@ -50,13 +50,59 @@ aggregates live *down* in `world`; `Simulation`, the propagators,
 as `world` never references a physics runtime type, the dependency points one
 way.
 
+## Crate granularity (ADR-20260731T024003Z)
+
+A crate is three things at once: **a compile unit, an ownership boundary, and
+an iteration harness**. Split whenever a boundary buys at least one of four
+payoffs:
+
+1. **A cheaper edit loop** — edits to X stop rebuilding Y (the capture-host
+   restart compile is the most-multiplied cost in the repo).
+2. **A compiler-enforced dependency guarantee** — no-Bevy, no-renderer,
+   state-in/pixels-out. Guarantees in `Cargo.toml` don't decay.
+3. **A standalone harness** — the crate carries its own preview/example binary
+   that compiles without the runtime (`object_preview`, `just ui-preview`).
+4. **Agent isolation** — concurrent agents own disjoint crates: fewer merge
+   conflicts, no shared incremental-artifact invalidation.
+
+Guardrails: modules still handle ordinary feature size (the bar is a payoff,
+not taxonomy — in practice anything feature-shaped ≥ ~3–5 kLOC with a clean
+state seam clears it); **feature crates never depend on each other**, only
+downward on domain crates and `thalos_game_state` — cross-feature talk goes
+through the blackboard, and two feature crates wanting each other means the
+shared thing belongs a layer down; the game-state crate is **types-only and
+append-biased** (no systems — churn there rebuilds the world); and **don't
+split what's scheduled for demolition** (`thalos_udlod`, the procedural
+terrain generation chain).
+
+The dependency layers:
+
+```text
+L0  foundation    diagnostics, big_space
+L1  pure domain   world, terrain, celestial, physics_canonical, control,
+                  navigation, texgen            (no Bevy — CI-guarded)
+L2  Bevy leaves   input, ui, body_shading, physics_local, shipyard,
+                  capture/*, + feature crates (hud, map, shipyard_editor,
+                  structures, clouds, …)
+L2.5 game state   thalos_game_state — the blackboard L2 reads/writes
+L3  composition   thalos_runtime — schedule ordering, plugin graph,
+                  sim-coupled drivers, glue; target ~25–35 kLOC
+L4  shells        apps/game, tools/capture_host
+```
+
+New feature work goes in a feature crate whenever it clears the bar;
+`thalos_runtime` accepts only composition, sim-coupled drivers, and glue.
+The migration that dismantles the current 93 kLOC runtime is **Phase 5**
+below.
+
 ## Target workspace
 
 The hierarchy separates the player-facing application, reusable libraries,
 developer/offline executables, authored/runtime assets, and generated evidence.
 Within `crates/`, folders express responsibility and intended dependency
 direction; ordinary feature size is handled with Rust modules rather than a
-crate per feature.
+crate per feature — with the granularity bar above deciding when a feature
+*does* earn a crate.
 
 ```text
 apps/
@@ -81,10 +127,21 @@ crates/
   rendering/
     render/                     # current body_render; state-in/pixels-out
                                 #   tiles/ = the default ground renderer
+    shading/                    # thalos_body_shading: shared shading model
+    clouds/                     # (planned, Phase 5c) volumetric-cloud composite
     udlod/                      # LEGACY terrain-render backend (EOL)
   interface/
     input/
     ui/
+  gameplay/
+    state/                      # (planned, Phase 5a) thalos_game_state: the
+                                #   types-only blackboard feature crates share
+    hud/                        # (planned, Phase 5b) flight HUD + navball + MFD
+    map/                        # (planned, Phase 5b) map view, maneuver
+                                #   planning, flight-plan display
+    shipyard_editor/            # (planned, Phase 5b) the in-game VAB editor
+    structures/                 # (planned, Phase 5b w/ cleanup pkg D) terrain-
+                                #   anchored structures, runway geometry, bases
   runtime/
     game/                       # lib: thalos_runtime, sole app composition
   capture/
@@ -232,6 +289,47 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
     `thalos_body_render → thalos_shipyard`. Material types, registration, and the
     construction-dimensions→material projection live in rendering; the
     construction crate contains no renderer dependency or material re-export.
+- **Phase 5** — dismantle the runtime monolith (ADR-20260731T024003Z;
+  sequenced as backlog Track 1 rows). Measured baseline 2026-07-31:
+  `thalos_runtime` is ~93 kLOC, ~43% of workspace Rust; the blocker is that
+  the shared game-state resources are defined inside runtime modules.
+  - **5a — the state seam (prerequisite).** Extract **`thalos_game_state`**
+    (`crates/gameplay/state`): `SolarSystemState`/`SimulationState`,
+    `CraftStateMirror`, `ViewAnchor`, `GameContext` + `ContextHistory`,
+    `SimClock`, `MapSnapshot`, `UnitsSettings`, `ActiveCraft`,
+    regime/authority resources, and the small shared component vocabulary
+    (`PlayerShip`/`CraftRoot`, `CelestialBody`, …). Types, accessors, and
+    single-writer doc comments only — no systems. Pure move, compile-neutral.
+    Single-writer invariants move with their doc comments; the sole writers
+    stay in runtime (or in the feature crate that owns them after a peel).
+  - **5b — peel the leaves** (each independent once 5a lands; runtime lands at
+    ~50 kLOC of drivers, spawn/scenario machinery, and glue):
+    - `thalos_shipyard_editor` (~6 kLOC) — cheapest, most self-contained;
+      partner of `thalos_shipyard`.
+    - `thalos_hud` (hud/ + navball + velocity_frame + units display,
+      ~12 kLOC) — biggest single win; also the natural home for the
+      nav-display preview harness.
+    - `thalos_map` (maneuver/, flight_plan_view/, map_view,
+      body_tree_panel, trails, ~8 kLOC) — already hard-bounded by the
+      `MapSnapshot` invariant.
+    - `thalos_structures` (base_editor/ + structures + runway geometry,
+      ~7 kLOC) — this is cleanup package D wearing a crate boundary; do D as
+      an extraction and get both for one price.
+    - Capture presets (`screenshot.rs` + viewpoints, ~7 kLOC) — wants to move
+      toward `capture/`, but is scenario-coupled; last in line, possibly
+      staying in runtime.
+  - **5c — split `body_render` along composite lines** (opportunistic):
+    `thalos_clouds` first (self-contained: own shaders, uniforms, compute —
+    the clearest "one thing" in the repo); `tiles` possibly becomes its own
+    crate when the NTR M5 extraction lands (it is the landing pad anyway).
+    This *composes with* Phase 4, it does not contradict it: Phase 4 moves
+    render mechanisms out of runtime into the rendering layer; 5c organizes
+    the rendering layer into focused composite crates. `thalos_udlod` is
+    never split — it is deleted.
+  - **Deliberately untouched:** `physics_canonical` (cohesive math),
+    `thalos_terrain` (until diffusion replaces the generator — that rework is
+    the natural split moment), the runtime `rendering/` drivers (the Phase-4
+    state-in/pixels-out boundary governs them).
 
 ---
 
@@ -297,6 +395,7 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 - **`thalos_game`** — the player-facing binary under `apps/game`; a thin wrapper
   that launches `thalos_runtime::AppBuilder`.
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
+- **`thalos_weather`** — planetary weather simulation (no Bevy dependency, `crates/domain/weather`): a seeded reduced-gravity shallow-water layer + advected moisture tracer on a lat-lon grid, supplying the **synoptic organization** of the cloud weather cube — jets, Rossby-wave cyclone trains with fronts and dry slots, ITCZ convergence rain, subsidence-carved clear belts. Deterministic per seed (bit-for-bit, unit-tested); consumed by `thalos_runtime::solar_system_state::CloudWeatherField::from_climate`, which spins it up ~24 model days (~4 s) at body spawn and samples its cloud + rain fields as the occupancy driver under the authored zonal climatology and the existing mesoscale/cellular texture layers. It replaced the painted synoptic layer (curl-warped noise, analytic vortex rotations, ridged-noise fronts), which plateaued at a marbled/spirograph look no tuning escaped (2026-07-31). Iterate via `cargo run --release -p thalos_weather --example sim_probe [days] [seed]` → PNGs in `artifacts/diagnostics/weather_sim/` — the crate compiles in seconds, which is the point.
 - **`thalos_celestial`** — procedural sky model: stars, galaxies, nebulae as physical flux sources (no Bevy dependency)
 - **`thalos_texgen`** — procedural texture generation (no Bevy): CPU-rasterizes
   `TextureData` (sRGBA8), today the **foliage atlas** (small multi-toned leaf
@@ -932,26 +1031,49 @@ Key modules:
   `show_graphics_tab`.
 - `units_settings` — display-unit preference (the `units` section), edited from
   the settings menu's Units tab. **SI is always the internal/simulation unit;**
-  this only changes how the HUD formats what it shows. Two fields, because one
+  this only changes how a value is formatted for display. Two fields, because one
   global switch is the wrong model: `system` (`Metric` | `Imperial`) and
   `aviation` (`Aeronautical` | `FollowGlobal`). Aviation is unit-conservative in
   a way the rest of the world is not — feet, knots, ft/min, and nautical miles
   are the instrument units in metric countries too — so the preference is
   resolved **per `UnitDomain`** via `UnitsSettings::system_for(domain)`, which is
-  the only supported way to reach a display unit. `UnitDomain::Aviation` covers
-  the PFD tapes/readouts (`hud::pfd_panel`), the atmospheric TAS/q/Mach pill
-  (`hud::atmo_panel`), and the MFD navigation display
-  (`hud::mfd::widgets::nav_display`); `UnitDomain::General` (orbital altitude and
-  apsides, Δv, staging masses, map scales) follows `system` exactly. **An
-  instrument picks its own domain — never the craft or the flight regime**, so a
-  tape's unit cannot change mid-climb. All conversion lives in `hud::format`
-  (one function per quantity, each taking a resolved `UnitSystem`); a panel that
-  hardcodes `"{:.0} m/s"` or reads `UnitsSettings::system` directly is a defect.
+  the only supported way to reach a display unit. All conversion lives in
+  `hud::format` (one function per quantity, each taking a resolved
+  `UnitSystem`); a surface that hardcodes `"{:.0} m/s"` or reads
+  `UnitsSettings::system` directly is a defect.
+
+  Three kinds of caller, and the distinction is the whole design:
+
+  1. **Instruments that state their own domain.** `UnitDomain::Aviation` — the
+     PFD tapes/readouts (`hud::pfd_panel`), the atmospheric TAS/q/Mach pill
+     (`hud::atmo_panel`), the MFD navigation display
+     (`hud::mfd::widgets::nav_display`). A PFD tape is an aviation instrument in
+     orbit too, so it never switches. `UnitDomain::General` — Δv, staging
+     masses, map scales, and the whole shipyard editor, which follow `system`
+     exactly.
+  2. **Readouts shared between spaceflight and aviation**, via
+     `UnitDomain::shared(airplane_flight)`. The altitude cluster
+     (`hud::orbital_panel`: current altitude *and* apoapsis/periapsis) and the
+     velocity readout (`hud::flight_panel`) show approach height and airspeed on
+     final but orbital height and velocity on a transfer — the *same widget*, so
+     there is no static answer and the situation has to pick. The whole altitude
+     cluster resolves through one call, so the panels sitting side by side can
+     never disagree about their unit.
+  3. **The situation itself** is `hud::mfd::FlightContext::airplane_flight()` =
+     `in_atmosphere && winged` — the "type of thing **and** situation" test.
+     `winged` comes from the live `AeroConfig::lift_slope > 0`, which the
+     blueprint's lifting panels already produce; there is no craft class in the
+     model and this is the honest proxy for one. A rocket climbing through the
+     same air is *not* flying: it keeps metres, because knots are meaningless on
+     an ascent profile. `hud::IN_ATMOSPHERE_DENSITY` is the single threshold
+     behind `in_atmosphere`, shared by the atmo pill's visibility, MFD widget
+     auto-selection, and this test — they must agree on where the atmosphere
+     starts or a panel appears in units its neighbours don't share.
+
   A `Marine` domain (knots + nautical miles) is the obvious next one and is
   deliberately absent until there is a ship instrument to attach it to.
   Deliberately metric regardless: the EVA walking-speed pill, base-editor
-  building dimensions, the MFD trajectory-plot scale bar, freecam, and the
-  shipyard editor (which has its own metric-only `core::format`).
+  building dimensions, the MFD trajectory-plot scale bar, and freecam.
 
 Systems run in `SimStage` order: `Physics → Sync → Camera`
 (configured in `crates/runtime/game/src/lib.rs`), ensuring deterministic state flow each

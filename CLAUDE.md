@@ -151,6 +151,10 @@ just preview            # headless procedural-object gallery → artifacts/visua
 just nd-preview           # headless navigation-display preview (8 approach
                         #   situations, real plans + real shader)
 just ui-preview         # headless UI kitchen sink → artifacts/visual/latest/
+just loading-preview    # headless loading-screen preview (bar, status line,
+                        #   GPU/VRAM/residency readout). The ONLY way to see
+                        #   that screen — it despawns before any capture
+                        #   preset can shoot it.
 just bake Mira          # rebuild assets/terrain_packages/Mira.bin offline
 just validate-bake Mira # validate package schema/index/checksums/payload
 just texgen             # rebuild versioned vegetation atlases offline
@@ -181,7 +185,7 @@ specific in-flight moment, or temporal feel.
 
 **Headless capture is yours to run, and you are expected to use it.**
 `just screenshot` / `just capture` / `just compare` / `just preview` /
-`just ui-preview` / `just map` are agent-runnable, render on the real GPU
+`just ui-preview` / `just loading-preview` / `just map` are agent-runnable, render on the real GPU
 off-screen, and write PNGs you **Read directly**. Framing knobs without a
 recompile: `THALOS_SCREENSHOT_{AZIMUTH,ELEVATION,DISTANCE,SIZE,OUT,WARMUP,HUD}`.
 `artifacts/visual/latest/` is the curated one-image-per-preset surface;
@@ -276,17 +280,26 @@ evidence (you ran `just screenshot` / `capture` / `compare` / `preview` /
 spans enough subsystems that a diagram beats a list, or when asked. Judge it
 yourself — this is not a step to perform on every run.
 
-**Build it with the Artifact tool**, a self-contained HTML page the user can
-open and share:
+**Build it as a local page in `artifacts/reports/`** (`<date>-<slug>.html`,
+gitignored like all evidence) and open it in the user's own browser:
 
-- **Captures must be embedded.** The page is served under a CSP that blocks
-  every external host and cannot read the developer's disk, so a `file://` or
-  `artifacts/…` `src` renders as a broken image. Write the page with
+- **Start from `scripts/present_template.html`** and keep its stylesheet. The
+  design language is fixed (defined in `docs/development/visual_testing.md` ·
+  *Presenting results*): a research-paper page — white in light theme, black in
+  dark, one serif column, numbered figure captions, hairlines as the only
+  decoration. Never uppercase styling, never em-dashes in page copy. Page text
+  stays at slide-deck volume — a few bullets and one-sentence captions; the
+  full write-up belongs in the chat reply, which the user reads regardless.
+- **Captures must be embedded.** `artifacts/visual/latest/` and the comparison
+  dirs are overwritten on every rerun, so a page that references them live
+  silently changes under the reader. Write the page with
   `{{img:artifacts/visual/latest/<name>.png}}` tokens (optionally
   `{{img:<path>|caption text}}`), then run
   `python3 scripts/present_embed.py <page>.html` — it downscales, inlines, and
-  writes `<page>.embedded.html`. Publish *that* file; keep the token source so
-  the page can be regenerated after a recapture.
+  writes `<page>.embedded.html`. Present *that* file by navigating the agent
+  browser pane to its `file://` path (`force: true` if the pane shows a stale
+  snapshot); keep the token source so the page can be regenerated after a
+  recapture.
 - **Before/after beats after.** Show the matched pair from the comparison run,
   same preset and framing, labelled — never two differently-framed stills.
 - **Diagrams are mermaid**, rendered natively (```mermaid fence or
@@ -294,8 +307,11 @@ open and share:
 - **Plain language, same as a visual report**: what you see, what changed, what
   you deliberately left alone, and what is still unverified. Name the presets
   and files so the user can rerun them.
-- With no artifact surface available, fall back to a short markdown summary with
-  the PNG paths — do not describe pixels you could have shown.
+- The claude.ai Artifact tool is the secondary route, for a page that must
+  travel off this machine — publish the same `.embedded.html` (its CSP blocks
+  external loads, which the embedding already satisfies). With no way to open
+  a page at all, fall back to a short markdown summary with the PNG paths — do
+  not describe pixels you could have shown.
 
 The presentation is for the user, not for the repo: it replaces neither the
 backlog row, the ADR, nor the `.capture.json` evidence beside each PNG, and
@@ -473,7 +489,9 @@ LLVM backend. Full policy and machine-specific recipes:
 Pure-Rust libraries (no Bevy) — `thalos_world` (authored body/system truth),
 `thalos_physics_canonical` (orbital mechanics, aero, surface-local frame),
 `thalos_control` (fly-by-wire), `thalos_terrain` (`SurfaceQuery` + generation),
-`thalos_celestial` (sky model), `thalos_texgen` (offline textures).
+`thalos_celestial` (sky model), `thalos_texgen` (offline textures),
+`thalos_weather` (seeded shallow-water weather sim; the synoptic layer of the
+cloud weather cube — iterate via its `sim_probe` example, seconds per round).
 
 Bevy consumers — `thalos_runtime` (`crates/runtime/game`, the sole app
 composition: gameplay, rendering integration, UI, scenarios, capture presets),

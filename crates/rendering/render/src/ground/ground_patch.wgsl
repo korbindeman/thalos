@@ -44,9 +44,10 @@ struct GroundParams {
 // Standard MaterialPlugin bind group in Bevy 0.18: group 3.
 @group(3) @binding(0) var<uniform> ground: GroundParams;
 @group(3) @binding(1) var<uniform> ground_shadow: ShadowCascadeBlock;
-@group(3) @binding(2) var sun_shadow_map_0: texture_depth_2d;
-@group(3) @binding(3) var sun_shadow_map_1: texture_depth_2d;
-@group(3) @binding(4) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(5) var sun_shadow_map_0: texture_depth_2d;
+@group(3) @binding(2) var sun_shadow_map_1: texture_depth_2d;
+@group(3) @binding(3) var sun_shadow_map_2: texture_depth_2d;
+@group(3) @binding(4) var sun_shadow_map_3: texture_depth_2d;
 
 // Ecological ground anchors, matching `body_terrain.wgsl`'s palette so the patch
 // reads as the same ground the in-game terrain shades.
@@ -110,7 +111,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let sky = compute_surface_sky(ground.sky_tau.xyz, ground.sky_tau.w, up, sun_dir, sun_flux);
     // Tree-cast (and self-) sun shadows.
     let shadow = sun_shadow_factor(
-        in.world_position, ground_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2,
+        in.world_position, ground_shadow, sun_shadow_map_0, sun_shadow_map_1, sun_shadow_map_2, sun_shadow_map_3,
     );
 
     // Low-frequency ecological breakup so the gaps between grass blades don't

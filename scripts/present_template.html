@@ -1,0 +1,97 @@
+<!--
+Canonical presentation page for Thalos visual reports.
+Copy this file, keep the stylesheet untouched, replace the content.
+Design language: docs/development/visual_testing.md · Presenting results.
+
+Rules the stylesheet enforces or assumes:
+  - white page in light theme, black page in dark theme, nothing else
+  - one centered serif column, hairline rules, no decoration
+  - sentence case everywhere; never text-transform, never letter-spacing
+  - no em-dashes in copy; use commas, colons, or the middle dot in meta lines
+  - text volume of a slide deck: bullets and captions here, prose in the chat reply
+
+Hand-back flow (docs/development/visual_testing.md):
+  copy this to artifacts/reports/<date>-<slug>.html and fill it in, then
+    python3 scripts/present_embed.py artifacts/reports/<page>.html
+  and navigate the agent browser pane to the .embedded.html's file:// path.
+-->
+<title>Short title of the change</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1b1b1b;
+    --muted: #6a6a6a;
+    --rule: #d9d9d9;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #000000; --fg: #d9d9d9; --muted: #8c8c8c; --rule: #2a2a2a; }
+  }
+  :root[data-theme="light"] { --bg: #ffffff; --fg: #1b1b1b; --muted: #6a6a6a; --rule: #d9d9d9; }
+  :root[data-theme="dark"]  { --bg: #000000; --fg: #d9d9d9; --muted: #8c8c8c; --rule: #2a2a2a; }
+
+  html { background: var(--bg); }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 17px/1.55 Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, serif;
+    max-width: 46rem;
+    margin: 0 auto;
+    padding: 3.5rem 1.25rem 5rem;
+  }
+
+  header { border-bottom: 1px solid var(--rule); padding-bottom: 1.3rem; margin-bottom: 2rem; }
+  h1 { font-size: 1.55rem; font-weight: 600; line-height: 1.25; margin: 0 0 0.4rem; text-wrap: balance; }
+  .meta { color: var(--muted); font-size: 0.9rem; margin: 0; }
+
+  h2 { font-size: 1.1rem; font-weight: 600; margin: 2.4rem 0 0.6rem; }
+  p { margin: 0.5rem 0 0.9rem; }
+  ul { margin: 0.4rem 0 1rem; padding-left: 1.3rem; }
+  li { margin: 0.3rem 0; }
+  li::marker { color: var(--muted); }
+
+  a { color: inherit; text-underline-offset: 2px; text-decoration-color: var(--muted); }
+  code { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 0.85em; }
+  hr { border: 0; border-top: 1px solid var(--rule); margin: 2.5rem 0; }
+
+  figure { margin: 1.8rem 0; }
+  figure img { display: block; width: 100%; height: auto; border: 1px solid var(--rule); }
+  figcaption { color: var(--muted); font-size: 0.85rem; line-height: 1.45; margin-top: 0.5rem; }
+
+  .pair { display: grid; grid-template-columns: 1fr 1fr; gap: 0.4rem 0.8rem; }
+  .pair .label { color: var(--muted); font-size: 0.85rem; text-align: center; margin: 0; }
+  .pair figcaption { grid-column: 1 / -1; }
+  @media (max-width: 34rem) { .pair { grid-template-columns: 1fr; } }
+
+  table { border-collapse: collapse; font-size: 0.9rem; font-variant-numeric: tabular-nums; margin: 1rem 0; }
+  th, td { text-align: left; padding: 0.3rem 1.2rem 0.3rem 0; border-bottom: 1px solid var(--rule); font-weight: 400; }
+  th { color: var(--muted); }
+
+  pre.mermaid { background: none; }
+</style>
+
+<header>
+  <h1>Short title of the change</h1>
+  <p class="meta">2026-07-31 · preset <code>cloud-cruise</code> · axis <code>cloud-shadow</code></p>
+</header>
+
+<h2>What changed</h2>
+<ul>
+  <li>One bullet per fact the reader needs before the figures.</li>
+  <li>What was deliberately left alone.</li>
+  <li>What is still unverified, if anything.</li>
+</ul>
+
+<!-- Each {{img:…}} token becomes a complete <img> tag when present_embed.py runs;
+     write the token on its own, never inside a src attribute. -->
+<figure class="pair">
+  {{img:artifacts/visual/runs/comparisons/preset/axis/01_off.png|off}}
+  {{img:artifacts/visual/runs/comparisons/preset/axis/02_on.png|on}}
+  <p class="label">off</p>
+  <p class="label">on</p>
+  <figcaption>Figure 1. One sentence: what to look at, and where. Matched framing from one comparison run.</figcaption>
+</figure>
+
+<figure>
+  {{img:artifacts/visual/latest/preset_name.png|preset name}}
+  <figcaption>Figure 2. Single captures get the same treatment.</figcaption>
+</figure>

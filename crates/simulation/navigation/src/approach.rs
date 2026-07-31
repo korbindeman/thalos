@@ -119,7 +119,10 @@ impl RunwayEnd {
     /// Runway designator, `1..=36` — the landing heading in tens of degrees,
     /// the number painted on the threshold.
     pub fn designator(&self, frame: &RouteFrame) -> u8 {
-        let deg = self.landing_heading_rad(frame).to_degrees().rem_euclid(360.0);
+        let deg = self
+            .landing_heading_rad(frame)
+            .to_degrees()
+            .rem_euclid(360.0);
         let mut n = (deg / 10.0).round() as i32;
         if n <= 0 {
             n += 36;
@@ -267,7 +270,9 @@ pub fn plan_approach(
     params: &ApproachParams,
 ) -> Option<ApproachPlan> {
     let frame = end.route_frame()?;
-    let landing_dir_local = frame.direction_to_local(end.landing_dir()).try_normalize()?;
+    let landing_dir_local = frame
+        .direction_to_local(end.landing_dir())
+        .try_normalize()?;
     let landing_theta = theta_of(landing_dir_local);
 
     // Aim point: `aim_inset` down the strip from the threshold (which is the
@@ -279,7 +284,10 @@ pub fn plan_approach(
     // How much centreline is left between the craft and the aim point (positive
     // when the aim point is still ahead along the landing direction).
     let run_to_aim_m = (aim_local - craft_local).dot(landing_dir_local);
-    let craft_theta = match frame.direction_to_local(track_dir_body_fixed).try_normalize() {
+    let craft_theta = match frame
+        .direction_to_local(track_dir_body_fixed)
+        .try_normalize()
+    {
         Some(d) => theta_of(d),
         // A craft with no usable ground track (straight up, or stationary with a
         // vertical nose) gets the landing heading as its assumed track: the
@@ -296,10 +304,8 @@ pub fn plan_approach(
     // forward along the centreline, leaving a stabilised run onto the aim point.
     let joining_late = run_to_aim_m > 0.0 && run_to_aim_m < params.final_length_m;
     let join_local = if joining_late {
-        let run = (run_to_aim_m * 0.5).clamp(
-            params.min_capture_run_m.min(run_to_aim_m),
-            run_to_aim_m,
-        );
+        let run =
+            (run_to_aim_m * 0.5).clamp(params.min_capture_run_m.min(run_to_aim_m), run_to_aim_m);
         aim_local - landing_dir_local * run
     } else {
         fap_local
@@ -468,7 +474,8 @@ mod tests {
         assert_abs_diff_eq!(end.length_m(), 5_000.0, epsilon = 1e-9);
         // Flipping swaps them.
         assert_abs_diff_eq!(
-            end.threshold_point().distance(end.flipped().stop_end_point()),
+            end.threshold_point()
+                .distance(end.flipped().stop_end_point()),
             0.0,
             epsilon = 1e-6
         );
@@ -481,9 +488,7 @@ mod tests {
         let frame = end.route_frame().expect("valid");
         let params = ApproachParams::default();
         // Put the craft 25 km out on the extended centerline, on heading.
-        let landing_local = frame
-            .direction_to_local(end.landing_dir())
-            .normalize();
+        let landing_local = frame.direction_to_local(end.landing_dir()).normalize();
         let craft_local = -landing_local * 25_000.0;
         let craft = frame.to_body_fixed(craft_local, 3_000.0);
         let plan = plan_approach(end, craft, end.landing_dir(), &params).expect("plannable");
@@ -521,7 +526,10 @@ mod tests {
         let craft = frame.to_body_fixed(craft_local, 1_500.0);
         let plan = plan_approach(end, craft, end.landing_dir(), &ApproachParams::default())
             .expect("plannable");
-        assert!(plan.transition_word.is_some(), "must maneuver, not straight-in");
+        assert!(
+            plan.transition_word.is_some(),
+            "must maneuver, not straight-in"
+        );
         // The route must be long enough to contain a reversal, and must still
         // finish exactly on the aim point pointing down the runway.
         assert!(
@@ -546,9 +554,8 @@ mod tests {
             // Approach from well off to one side.
             let craft_local = DVec2::new(-14_000.0, 9_000.0);
             let craft = frame.to_body_fixed(craft_local, 2_500.0);
-            let plan =
-                plan_approach(end, craft, end.landing_dir(), &ApproachParams::default())
-                    .expect("plannable");
+            let plan = plan_approach(end, craft, end.landing_dir(), &ApproachParams::default())
+                .expect("plannable");
             // The last leg is the final: sample just before the end.
             let p = plan
                 .path
@@ -595,8 +602,7 @@ mod tests {
         let right = DVec2::new(landing_local.y, -landing_local.x);
         let craft_local = landing_local * (params.aim_inset_m - 3_000.0) - right * 150.0;
         let craft = frame.to_body_fixed(craft_local, 850.0);
-        let plan =
-            plan_approach(end, craft, end.landing_dir(), &params).expect("plannable");
+        let plan = plan_approach(end, craft, end.landing_dir(), &params).expect("plannable");
         // The whole route must be about as long as the distance left to fly, not
         // twice a 9 km final plus a reversal.
         assert!(

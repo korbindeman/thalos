@@ -550,6 +550,7 @@ fn finish_runway_spawn(
                 body_radius_m,
                 RUNWAY_HALF_LENGTH_M,
                 park_clearance_m,
+                &mut commands,
             );
             // Hold the freshly-parked craft on the strip. The brakes latch
             // defaults off (airborne spawns must not start with the spoilers
@@ -2034,6 +2035,7 @@ pub(crate) fn place_on_runway(
     body_radius_m: f64,
     half_length_m: f64,
     clearance_m: f64,
+    commands: &mut Commands,
 ) {
     let surface_radius = body_radius_m + site.elevation_m;
     let center_surface = site.center_dir * surface_radius;
@@ -2080,6 +2082,11 @@ pub(crate) fn place_on_runway(
     // sets the final level once on `Loading → Running` per `AutoRun`.
     sim.simulation.set_throttle(0.0);
     sim.simulation.set_target_body(Some(site.body_id));
+    // A craft already parked at the threshold is ready to roll: command the
+    // takeoff detent and start the actuator there, rather than animating from
+    // clean after the loading screen clears. Keeping this in the shared runway
+    // placement core covers both the dev scenario and launch-select runways.
+    commands.insert_resource(crate::flight_config::FlightConfig::runway_takeoff());
 }
 
 /// Put the aircraft on short final, lined up with the centreline and sinking,

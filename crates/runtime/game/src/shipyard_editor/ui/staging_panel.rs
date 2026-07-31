@@ -5,7 +5,7 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use crate::shipyard_editor::core::{format_delta_v, format_mass_kg};
+use crate::hud::format;
 use thalos_shipyard::Resource;
 
 use thalos_ui::{self as ui, SPACE_XS, ScrollableColumn, UiTheme, spawn_heading, tokens};
@@ -52,9 +52,15 @@ pub(super) fn rebuild_staging(
     mut commands: Commands,
     cache: Res<EditorStatsCache>,
     theme: Res<UiTheme>,
+    units: Res<crate::units_settings::UnitsSettings>,
     content: Query<(Entity, Option<&Children>), With<StagingContent>>,
     mut shown_digest: Local<String>,
 ) {
+    // The editor is not a flight instrument: it follows the global switch.
+    // No extra change detection is needed — `shown_digest` is built from the
+    // formatted strings, so a units change flips the digest and forces a
+    // rebuild by itself.
+    let system = units.system_for(crate::units_settings::UnitDomain::General);
     // (stage label, Δv label, fuel label, resource bars (name, fraction))
     let mut rows: Vec<(String, String, Vec<(String, f32)>)> = Vec::new();
     let header;
@@ -65,10 +71,10 @@ pub(super) fn rebuild_staging(
                 .map(|s| s.delta_v_m_s)
                 .sum::<f64>()
                 .max(0.0);
-            header = format!("TOTAL Δv {}", format_delta_v(total_dv));
+            header = format!("TOTAL Δv {}", format::delta_v(total_dv, system));
             for s in summaries {
                 let dv = if s.has_engine {
-                    format_delta_v(s.delta_v_m_s)
+                    format::delta_v(s.delta_v_m_s, system)
                 } else {
                     "drop only".into()
                 };
@@ -86,7 +92,11 @@ pub(super) fn rebuild_staging(
                         0.0
                     };
                     bars.push((
-                        format!("{} {}", res.display_name(), format_mass_kg(totals.mass_kg)),
+                        format!(
+                            "{} {}",
+                            res.display_name(),
+                            format::mass_large(totals.mass_kg, system)
+                        ),
                         frac,
                     ));
                 }

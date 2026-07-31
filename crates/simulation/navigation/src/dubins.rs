@@ -102,7 +102,10 @@ pub fn plan_dubins(start: Pose2, goal: Pose2, radius_m: f64) -> Option<DubinsPat
     let mut cursor = start;
     if t > 1e-9 {
         let arc = arc_from(cursor, radius_m, s1, t);
-        cursor = Pose2::new(arc.point_at_t(1.0), crate::wrap_angle(cursor.theta + s1 * t));
+        cursor = Pose2::new(
+            arc.point_at_t(1.0),
+            crate::wrap_angle(cursor.theta + s1 * t),
+        );
         legs.push(Leg::Arc(arc));
     }
     let straight = p * radius_m;
@@ -315,10 +318,7 @@ mod tests {
                 for gh_deg in [0, 37, 90, 143, 200, 270, 315] {
                     for sh_deg in [0, 90, 210] {
                         let start = Pose2::new(DVec2::ZERO, (sh_deg as f64).to_radians());
-                        let goal = Pose2::new(
-                            DVec2::new(gx, gy),
-                            (gh_deg as f64).to_radians(),
-                        );
+                        let goal = Pose2::new(DVec2::new(gx, gy), (gh_deg as f64).to_radians());
                         assert_reaches(start, goal, radius);
                     }
                 }
@@ -422,4 +422,3 @@ mod tests {
         );
     }
 }
-

@@ -59,6 +59,14 @@ ui-preview:
 nd-preview:
     cargo run -p thalos_runtime --features bevy/dynamic_linking --example nav_preview
 
+# Loading-screen preview: renders the real loading screen — bar, status line,
+# and the GPU/VRAM/residency readout — to
+# artifacts/visual/latest/loading_preview.png headlessly, then exits. This is the
+# ONLY way to look at that screen: it despawns before any capture preset can
+# shoot it. See crates/runtime/game/examples/loading_preview.rs.
+loading-preview:
+    cargo run -p thalos_runtime --features bevy/dynamic_linking --example loading_preview
+
 # Interactive window variant of `just ui-preview` (hover/press/typing feel;
 # S saves the same screenshot). User-run (opens a window).
 ui-preview-window:

@@ -442,9 +442,7 @@ fn update_plume_signals(
     // (`rendering::flow`), not from a private atmosphere lookup. The per-engine
     // authoring override still wins, because `THALOS_PLUME_PRESSURE` scrubs a
     // single engine's back-pressure without pretending the vehicle moved.
-    let ambient = over
-        .ambient_pressure_pa
-        .unwrap_or(flow.ambient_pressure_pa);
+    let ambient = over.ambient_pressure_pa.unwrap_or(flow.ambient_pressure_pa);
 
     for (engine, activation, thrust, mut sig) in engines.iter_mut() {
         let enabled = activation.map(|a| a.enabled).unwrap_or(true);

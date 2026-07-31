@@ -1087,10 +1087,12 @@ fn planet_albedo(env: &EnvParams, dir: Vec3, planet_dot: f32) -> Vec3 {
 
 fn planet_albedo_for_normal(env: &EnvParams, normal: Vec3) -> Vec3 {
     match &env.planet_surface {
-        Some(surface) => surface
-            .albedo
-            .sample(surface.world_to_body * normal)
-            .albedo_linear,
+        Some(surface) => {
+            surface
+                .albedo
+                .sample(surface.world_to_body * normal)
+                .albedo_linear
+        }
         None => env.planet_color,
     }
 }

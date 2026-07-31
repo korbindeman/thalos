@@ -16,6 +16,7 @@ const PI: f32 = 3.14159265;
 const MAX_RUNWAYS: u32 = 8u;
 // Route polyline points, packed two per vec4 (xy, zw).
 const MAX_ROUTE_POINTS: u32 = 48u;
+const MAX_REJOIN_POINTS: u32 = 24u;
 const MAX_WAYPOINTS: u32 = 4u;
 // Sentinel for "this angular marker is not present".
 const NO_ANGLE: f32 = 1.0e8;
@@ -32,7 +33,7 @@ struct NavDisplayData {
     // w = bearing-to-destination marker (heading-up rad, or NO_ANGLE)
     nav: vec4<f32>,
     // x = range-ring radius (0 = none), y = ground-track marker (heading-up rad,
-    // or NO_ANGLE), z = unused, w = unused
+    // or NO_ANGLE), z = rejoin point count, w = unused
     extra: vec4<f32>,
     col_ring: vec4<f32>,
     col_tick: vec4<f32>,
@@ -43,6 +44,7 @@ struct NavDisplayData {
     col_route: vec4<f32>,
     col_route_final: vec4<f32>,
     col_waypoint: vec4<f32>,
+    col_rejoin: vec4<f32>,
     // per runway: xy = centre (plot), zw = along-strip unit direction (heading-up)
     runways: array<vec4<f32>, 8>,
     // per runway: x = half-length, y = half-width (both plot units),
@@ -50,6 +52,8 @@ struct NavDisplayData {
     runway_ext: array<vec4<f32>, 8>,
     // route polyline, two points per element
     route: array<vec4<f32>, 24>,
+    // rejoin polyline (the flyable way back onto the route), same packing
+    rejoin: array<vec4<f32>, 12>,
     // per waypoint: xy = position (plot), z = kind (0 fix, 1 FAP, 2 threshold, 3 aim)
     waypoints: array<vec4<f32>, 4>,
 }
@@ -97,6 +101,14 @@ fn route_point(i: u32) -> vec2<f32> {
     return v.zw;
 }
 
+fn rejoin_point(i: u32) -> vec2<f32> {
+    let v = data.rejoin[i / 2u];
+    if (i % 2u == 0u) {
+        return v.xy;
+    }
+    return v.zw;
+}
+
 @fragment
 fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     // Centred coords: [-1, 1] across the square node, y points down.
@@ -122,6 +134,7 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
     let bearing_marker = data.nav.w;
     let range_ring_r = data.extra.x;
     let track_marker = data.extra.y;
+    let rejoin_count = u32(data.extra.z + 0.5);
 
     let radial = length(c);
 
@@ -184,9 +197,13 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
         // direction reads without any text. It must be clearly wider than the
         // strip and clearly thinner along it — sized symmetrically it just reads
         // as a box stuck on the end.
+        // Both extents are capped in plot units, not just scaled from the
+        // strip: at close range the strip's true width is large, and a bar
+        // proportional to it grows into a cross that dominates the display
+        // instead of marking an end.
         let thr = centre + along * (half_len * threshold_sign);
-        let bar_half_across = half_wid * 3.0;
-        let bar_half_along = min(half_wid * 0.9, half_len * 0.25);
+        let bar_half_across = min(half_wid * 1.8, 0.05);
+        let bar_half_along = min(half_wid * 0.8, 0.02);
         let brel = c - thr;
         let bl = bar_half_along - abs(dot(brel, along));
         let bw = bar_half_across - abs(dot(brel, across));
@@ -208,6 +225,21 @@ fn fragment(in: UiVertexOutput) -> @location(0) vec4<f32> {
                 hw = route_hw * 1.35;
             }
             col = over(col, route_col.rgb, stroke(r.x, hw) * route_col.a);
+        }
+    }
+
+    // --- The rejoin: the flyable way back onto the route. Dashed and drawn
+    // beneath the route, because it is advice about how to return to the plan,
+    // not a change to the plan.
+    if (rejoin_count >= 2u) {
+        for (var i: u32 = 0u; i + 1u < rejoin_count && i + 1u < MAX_REJOIN_POINTS; i = i + 1u) {
+            let a = rejoin_point(i);
+            let b = rejoin_point(i + 1u);
+            let r = seg_dist(c, a, b);
+            let arc_len = length(b - a) * r.y;
+            let ph = fract(arc_len / dash_period);
+            let dash = 1.0 - smoothstep(dash_duty - 0.12, dash_duty + 0.12, ph);
+            col = over(col, data.col_rejoin.rgb, stroke(r.x, route_hw * 0.8) * dash * data.col_rejoin.a);
         }
     }
 

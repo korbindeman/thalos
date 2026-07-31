@@ -214,8 +214,44 @@ per-frame CPU/GPU ms rings + memory/count gauges) feeds three consumers:
   the physics-hitbox + aero-gizmo overlays together (single toggle in
   `perf::overlay::toggle_debug_view`; the per-module F3 readers are gone).
   Graphs render as `UiMaterial` quads (`assets/shaders/perf_graph.wgsl`, so
-  they hot-reload). `THALOS_DEBUG_VIEW=1` starts the view visible, which is
-  how a headless capture can screenshot it.
+  they hot-reload). To screenshot it headlessly, `THALOS_DEBUG_VIEW=1` starts
+  it visible and `THALOS_SCREENSHOT_HUD=1` is also required — the default
+  capture path enters photo mode, which hides the view:
+
+  ```bash
+  THALOS_DEBUG_VIEW=1 THALOS_SCREENSHOT_HUD=1 just screenshot forest-stand
+  ```
+
+  `THALOS_DEBUG_VIEW` is read at host boot **and** per capture request
+  (`perf::overlay::apply_debug_view_override`). The per-request path is the
+  load-bearing one: the host is machine-wide and shared, so a boot-time-only
+  flag silently returned a normal-looking PNG with the view off whenever
+  another agent had already started the host (BL-20260730T184038Z). Prefer
+  `just screenshot` over a cold `cargo run -p thalos_capture_host` — the client
+  queues behind a peer's shot, while a cold host fails outright on the lease.
+
+  Beyond the perf block it answers the *machine* and *place* questions a
+  Minecraft-style F3 is for, so a screenshot of it is a self-contained bug
+  report. It is laid out as captioned sections with one fps headline, not as a
+  flat list — an earlier revision put the fps you watch constantly and the
+  session id you read once a month in the same size and colour, which is
+  unreadable at a glance:
+
+  - **headline** — fps, with frame/gpu/stage timings and the top GPU passes
+    beneath it in small dim type;
+  - **DEVICE** — the adapter actually in use (name, backend, driver — not
+    always the one the machine advertises), window size, renderer instances;
+  - **MEMORY** — the shared **VRAM bar** (see `vram_bar.rs`), then the two
+    things a bar cannot express: terrain residency against the budget that
+    coarsens the ground, and the *host* side (RSS, mesh/image CPU bytes);
+  - **SCENE** — object counts and the tile driver's `split_scale`
+    (< 1 = the residency budget is actively coarsening the ground);
+  - **POSITION** — body, latitude/longitude, altitude/AGL/ground, view speed,
+    and the landcover moisture + canopy the generator reports at that exact
+    direction — the same fields the ground shader and scatter placer read, so a
+    disagreement between the image and this readout is itself the bug.
+
+  Each source degrades to a stated gap, never a zero.
 - **`frame_gauge`** every ~2 s: fps, cpu ms mean/p50/p95/max, gpu ms, SimStage
   wall times, entities, mesh/image counts, tile-resident MiB, mesh-slab MiB,
   plus the CPU side: `rss_mib` (whole-process working set) with
@@ -249,6 +285,24 @@ floor backstop carried the hull. The load-bearing combination —
 the buried-suspension-ray signature (belly slide, no brakes), reported by
 `just diag` as `gear_carried_by_backstop`.
 
+The runway-destination autopilot emits lifecycle records on
+`thalos::diagnostic::approach_ap`: `land_engaged`, `land_phase`,
+`land_disengaged`, and `land_completed`, plus the 1 Hz `appr_frame` gauge
+(`dtg_m`, lateral/vertical errors, actual/target speed, selected throttle,
+steering and braking, weight-on-wheels). `just diag` treats an autonomous
+disengagement as `land_autonomous_disengage` and any completion above
+0.75 m/s as `land_completed_while_rolling`; deliberate `pilot_override`
+disengagements stay quiet.
+
+The target-orbit autopilot emits `orbit_plan_result`,
+`orbit_autoflight_transition`, one-second `orbit_autoflight_guidance` samples,
+and terminal `orbit_autoflight_complete` / `orbit_autoflight_abort` records on
+`thalos::diagnostic::orbit_autoflight`. Guidance samples carry phase, altitude,
+predicted apoapsis, dynamic pressure, selected throttle, and TWR. `just diag`
+repeats the executor's achieved-element completion tolerances as
+`orbit_false_completion`, and reports three or more same-session guidance
+samples above 42 kPa as `orbit_sustained_max_q_overshoot`.
+
 On Windows, `THALOS_GPU_HEALTH=1` makes `thalos_diagnostics` load NVIDIA's NVML
 dynamically and emit `thalos::diagnostic::gpu_health` / `sample` once per
 second. This is an investigation mode, not an ordinary-play default. It reports
@@ -264,6 +318,21 @@ pressure, thermal/power instability, and a driver/PCIe disappearance
 software thermal slowdown as either the GPU or memory exceeding its maximum
 operating temperature, which still detects a hidden memory hotspot when the
 card exposes only its core-temperature sensor.
+
+Independently of that gate, `thalos_diagnostics::gpu_memory()` answers
+**whole-card VRAM used/total** for any in-process reader (the F3 debug view and
+the loading screen both show it). It shares the same NVML handle, but its own
+poller samples only memory, twice a second, on a background thread — so the
+caller never blocks and never queries the driver itself, and the reading is
+available without turning the investigation lane on. `None` means no reading:
+non-Windows, no NVIDIA driver, before the first sample, or a card that stopped
+answering. Readers must show that as a stated gap, never as a zero.
+
+Whole-card is the point. Thalos is routinely run two instances at a time, and
+per-process accounting cannot see the peer that is eating the headroom — the
+mechanism behind INC-20260725T012104Z. Both readouts therefore print the live
+instance count (`tiles::vram_share::live_instances`) beside the capacity, since
+it is also the divisor of `tiles::residency_budget_bytes`.
 
 **`just perf-report [session|latest|--list]`** (tools/perfreport) renders one
 session of that lane to `artifacts/diagnostics/reports/<session>/report.html`
@@ -331,6 +400,8 @@ evidence lines, and where to look next. Current checks: `error_events`,
 `warn_events`, `capture_failures`, `capture_retries`, `capture_boot_rate`,
 `capture_latency`, `capture_lock_contention`, `frame_spikes`, `slow_frames`,
 `memory_growth`, `tile_budget_brake`, `shadow_frame_desync`, `silent_sessions`, `lane_noise`,
+`land_autonomous_disengage`, `land_completed_while_rolling`,
+`orbit_false_completion`, `orbit_sustained_max_q_overshoot`,
 `gpu_adapter_lost`, `gpu_memory_pressure`, `gpu_thermal_pressure`,
 `gpu_thermal_throttle`,
 `empty_window`.
@@ -455,6 +526,29 @@ it turned up three real defects on its first two runs (a threshold bar that
 read as a box, sub-pixel strip widths, and a final-approach highlight that
 never drew). Source: `crates/runtime/game/examples/nav_preview.rs`. Spec:
 `docs/gameplay/navigation.md`.
+
+### `just loading-preview` — loading-screen preview
+
+Renders the loading screen (`loading.rs`) to
+`artifacts/visual/latest/loading_preview.png` and exits. Agent-runnable, one
+process, no game boot.
+
+It exists because that screen is **unreachable by every capture preset**: it
+despawns the instant the last load step completes, which is strictly before the
+capture host takes its shot, and holding a real load open long enough to shoot
+would mean screenshotting a race. Until this preview it was the one surface in
+the game changed blind.
+
+`loading_preview::LoadingScreenPreviewPlugin` runs the real
+`spawn_loading_screen` and the real `update_loading_progress_ui` /
+`update_loading_diagnostics` against a seeded `LoadingTracker` and seeded
+`PerfSamples`, so the image is evidence about layout, column alignment, and
+number formatting. It is **not** evidence about the load: no step is driven by
+a real producer, so step ordering, weights, and the `Loading → next` transition
+still need an in-game check. The GPU and VRAM rows read the host machine live,
+so they differ between runs by design.
+
+Source: `crates/runtime/game/examples/loading_preview.rs`.
 
 ### Generated artifact layout
 

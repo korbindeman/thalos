@@ -553,6 +553,16 @@ impl DiffusionSurface {
         })
     }
 
+    /// Attach a baked drainage raster to the inner landcover authority
+    /// (NTR-X2q). Geometry is unaffected — rivers are a landcover channel — but
+    /// this body's landcover *is* that inner `ProceduralSurface`, so the
+    /// forwarding is what makes rivers visible on the diffusion backing at all.
+    #[must_use]
+    pub fn with_rivers(mut self, rivers: std::sync::Arc<crate::rivers::RiverField>) -> Self {
+        self.landcover = self.landcover.clone().with_rivers(rivers);
+        self
+    }
+
     fn chart_px(&self, dir: DVec3) -> (f64, f64) {
         let lat = dir.y.clamp(-1.0, 1.0).asin();
         let lon = dir.z.atan2(dir.x).rem_euclid(core::f64::consts::TAU);

@@ -25,6 +25,7 @@ use thalos_world::StateVector;
 use crate::hud::HudPanel;
 use crate::hud::format;
 use crate::hud::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
+use crate::orbit_program::{OrbitPlaneChoice, OrbitProgram, OrbitShape, OrbitTargetRequest};
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::units_settings::UnitDomain;
 
@@ -68,6 +69,36 @@ pub(super) struct PeriapsisAltText;
 
 #[derive(Component)]
 pub(super) struct PeriapsisTimeText;
+
+#[derive(Component)]
+pub(super) struct OrbitPanel;
+
+#[derive(Component)]
+pub(super) struct OrbitEditor;
+
+#[derive(Resource, Default)]
+pub(super) struct OrbitWidgetState {
+    expanded: bool,
+}
+
+#[derive(Component, Clone, Copy)]
+pub(super) struct OrbitControl(OrbitTargetRequest);
+
+#[derive(Component, Clone, Copy)]
+enum OrbitField {
+    CompactStatus,
+    Shape,
+    Apoapsis,
+    Periapsis,
+    Inclination,
+    Direction,
+    Plane,
+    Summary,
+    CancelAction,
+}
+
+#[derive(Component)]
+pub(super) struct OrbitFieldText(OrbitField);
 
 /// Width of the orbital-info panel. The left balancer matches this so
 /// the row is symmetric around the altitude panel.
@@ -152,35 +183,275 @@ fn spawn_orbital_info(p: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
 
     p.spawn((root, bg, border, HudPanel, Name::new("HudOrbitalInfo")))
         .with_children(|c| {
-            // AP row.
-            c.spawn(row_node()).with_children(|row| {
-                row.spawn(label_cell(theme, "AP"));
-                row.spawn((value_cell(theme), ApoapsisAltText));
-                row.spawn((countdown_cell(theme), ApoapsisTimeText));
-            });
-            // PE row.
-            c.spawn(row_node()).with_children(|row| {
-                row.spawn(label_cell(theme, "PE"));
-                row.spawn((value_cell(theme), PeriapsisAltText));
-                row.spawn((countdown_cell(theme), PeriapsisTimeText));
-            });
-            c.spawn(Node {
-                height: Val::Px(2.0),
-                ..default()
-            });
             c.spawn((
-                Text::new("ORBITAL"),
-                TextFont {
-                    font: theme.font.clone(),
-                    font_size: FontSize::Px(11.0),
+                Button,
+                Node {
+                    width: Val::Percent(100.0),
+                    flex_direction: FlexDirection::Column,
                     ..default()
                 },
-                TextColor(theme.text_subtitle),
+                Interaction::None,
+                OrbitPanel,
+                Name::new("HudOrbitCompact"),
+            ))
+            .with_children(|compact| {
+                compact.spawn(row_node()).with_children(|row| {
+                    row.spawn(label_cell(theme, "AP"));
+                    row.spawn((value_cell(theme), ApoapsisAltText));
+                    row.spawn((countdown_cell(theme), ApoapsisTimeText));
+                });
+                compact.spawn(row_node()).with_children(|row| {
+                    row.spawn(label_cell(theme, "PE"));
+                    row.spawn((value_cell(theme), PeriapsisAltText));
+                    row.spawn((countdown_cell(theme), PeriapsisTimeText));
+                });
+                compact.spawn(Node {
+                    height: Val::Px(2.0),
+                    ..default()
+                });
+                compact.spawn((
+                    Text::new("ORBITAL"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: FontSize::Px(11.0),
+                        ..default()
+                    },
+                    TextColor(theme.text_subtitle),
+                    Node {
+                        align_self: AlignSelf::Center,
+                        ..default()
+                    },
+                ));
+                compact.spawn((
+                    Text::new("CLICK TO CONFIGURE"),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: FontSize::Px(9.0),
+                        ..default()
+                    },
+                    TextColor(theme.text_dim),
+                    OrbitFieldText(OrbitField::CompactStatus),
+                    Node {
+                        align_self: AlignSelf::Center,
+                        ..default()
+                    },
+                ));
+            });
+            spawn_orbit_editor(c, theme);
+        });
+}
+
+fn spawn_orbit_editor(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    let (background, border) = panel_frame(theme);
+    c.spawn((
+        Node {
+            position_type: PositionType::Absolute,
+            top: Val::Percent(100.0),
+            left: Val::Px(0.0),
+            width: Val::Px(ORBITAL_PANEL_WIDTH),
+            padding: UiRect::all(Val::Px(8.0)),
+            border: UiRect::all(Val::Px(1.0)),
+            border_radius: BorderRadius::all(Val::Px(4.0)),
+            flex_direction: FlexDirection::Column,
+            row_gap: Val::Px(5.0),
+            ..default()
+        },
+        background,
+        border,
+        Visibility::Hidden,
+        ZIndex(30),
+        OrbitEditor,
+        Name::new("HudOrbitEditor"),
+    ))
+    .with_children(|editor| {
+        orbit_toggle_row(
+            editor,
+            theme,
+            "SHAPE",
+            OrbitField::Shape,
+            OrbitTargetRequest::ToggleShape,
+        );
+        orbit_adjust_row(
+            editor,
+            theme,
+            "AP",
+            OrbitField::Apoapsis,
+            OrbitTargetRequest::AdjustApoapsis(-1),
+            OrbitTargetRequest::AdjustApoapsis(1),
+        );
+        orbit_adjust_row(
+            editor,
+            theme,
+            "PE",
+            OrbitField::Periapsis,
+            OrbitTargetRequest::AdjustPeriapsis(-1),
+            OrbitTargetRequest::AdjustPeriapsis(1),
+        );
+        orbit_adjust_row(
+            editor,
+            theme,
+            "INC",
+            OrbitField::Inclination,
+            OrbitTargetRequest::AdjustInclination(-1),
+            OrbitTargetRequest::AdjustInclination(1),
+        );
+        orbit_toggle_row(
+            editor,
+            theme,
+            "DIR",
+            OrbitField::Direction,
+            OrbitTargetRequest::ToggleDirection,
+        );
+        orbit_toggle_row(
+            editor,
+            theme,
+            "PLANE",
+            OrbitField::Plane,
+            OrbitTargetRequest::TogglePlane,
+        );
+        editor.spawn((
+            Text::new("NO PLAN"),
+            TextFont {
+                font: theme.font.clone(),
+                font_size: FontSize::Px(9.0),
+                ..default()
+            },
+            TextColor(theme.text_dim),
+            OrbitFieldText(OrbitField::Summary),
+        ));
+        editor
+            .spawn(Node {
+                flex_direction: FlexDirection::Row,
+                column_gap: Val::Px(5.0),
+                ..default()
+            })
+            .with_children(|actions| {
+                orbit_button(actions, theme, "PLAN", OrbitTargetRequest::Plan, None);
+                orbit_button(
+                    actions,
+                    theme,
+                    "EXEC ORBIT",
+                    OrbitTargetRequest::Execute,
+                    None,
+                );
+                orbit_button(
+                    actions,
+                    theme,
+                    "CLR",
+                    OrbitTargetRequest::Cancel,
+                    Some(OrbitField::CancelAction),
+                );
+            });
+    });
+}
+
+fn orbit_adjust_row(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    label_text: &str,
+    field: OrbitField,
+    decrement: OrbitTargetRequest,
+    increment: OrbitTargetRequest,
+) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                label(theme, label_text),
                 Node {
-                    align_self: AlignSelf::Center,
+                    width: Val::Px(40.0),
                     ..default()
                 },
             ));
+            orbit_button(row, theme, "−", decrement, None);
+            row.spawn((
+                Text::new("—"),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(10.0),
+                    ..default()
+                },
+                TextColor(theme.text_primary),
+                OrbitFieldText(field),
+                Node {
+                    width: Val::Px(100.0),
+                    justify_content: JustifyContent::Center,
+                    ..default()
+                },
+            ));
+            orbit_button(row, theme, "+", increment, None);
+        });
+}
+
+fn orbit_toggle_row(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    label_text: &str,
+    field: OrbitField,
+    request: OrbitTargetRequest,
+) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                label(theme, label_text),
+                Node {
+                    width: Val::Px(40.0),
+                    ..default()
+                },
+            ));
+            orbit_button(row, theme, "—", request, Some(field));
+        });
+}
+
+fn orbit_button(
+    parent: &mut ChildSpawnerCommands<'_>,
+    theme: &HudTheme,
+    label_text: &str,
+    request: OrbitTargetRequest,
+    dynamic_field: Option<OrbitField>,
+) {
+    parent
+        .spawn((
+            Button,
+            Node {
+                min_width: Val::Px(24.0),
+                padding: UiRect::axes(Val::Px(6.0), Val::Px(3.0)),
+                border: UiRect::all(Val::Px(1.0)),
+                border_radius: BorderRadius::all(Val::Px(3.0)),
+                justify_content: JustifyContent::Center,
+                ..default()
+            },
+            BackgroundColor(theme.panel_bg),
+            BorderColor::all(theme.panel_border),
+            Interaction::None,
+            OrbitControl(request),
+        ))
+        .with_children(|button| {
+            let text_bundle = (
+                Text::new(label_text),
+                TextFont {
+                    font: theme.font.clone(),
+                    font_size: FontSize::Px(9.0),
+                    ..default()
+                },
+                TextColor(theme.text_dim),
+            );
+            if let Some(field) = dynamic_field {
+                button.spawn((text_bundle, OrbitFieldText(field)));
+            } else {
+                button.spawn(text_bundle);
+            }
         });
 }
 
@@ -245,6 +516,7 @@ pub fn update(
     height_sources: Res<HeightSourceRegistry>,
     theme: Res<HudTheme>,
     units: Res<crate::units_settings::UnitsSettings>,
+    flight_ctx: Res<crate::hud::mfd::FlightContext>,
     mut display: ResMut<AltitudeDisplay>,
     mut alt_q: Query<&mut Text, With<AltitudeText>>,
     mut anchor_q: Query<(&mut Text, &mut TextColor), (With<AnchorBodyText>, Without<AltitudeText>)>,
@@ -304,15 +576,22 @@ pub fn update(
     let asl_m = rel.position.length() - body.radius_m;
     let elements = cartesian_to_elements(rel, body.gm);
 
+    // Shared readout: the altitude box shows approach height on final and
+    // orbital height on a transfer, so the situation picks the unit. AP/PE
+    // resolve through the *same* call rather than pinning to `General` — the
+    // two panels sit side by side, and one reading feet next to one reading
+    // metres would be worse than either choice alone.
+    let system = units.system_for(UnitDomain::shared(flight_ctx.airplane_flight()));
+
     // AP/PE are radius-relative (sea-level / datum), independent of GND/SEA toggle.
     let (ap_str, pe_str) = match elements {
         Some(el) => {
             let ap = if el.apoapsis_m.is_finite() {
-                format::altitude(el.apoapsis_m - body.radius_m, units.system_for(UnitDomain::General))
+                format::altitude(el.apoapsis_m - body.radius_m, system)
             } else {
                 "—".to_string()
             };
-            let pe = format::altitude(el.periapsis_m - body.radius_m, units.system_for(UnitDomain::General));
+            let pe = format::altitude(el.periapsis_m - body.radius_m, system);
             (ap, pe)
         }
         None => ("—".to_string(), "—".to_string()),
@@ -378,7 +657,7 @@ pub fn update(
     };
     display.resolved = Some((chosen, alt_value));
 
-    set_text(&mut alt_q, format::altitude(alt_value, units.system_for(UnitDomain::General)));
+    set_text(&mut alt_q, format::altitude(alt_value, system));
 
     let anchor_str = format!("{} {}", body.name, datum_label);
     if let Ok((mut text, mut color)) = anchor_q.single_mut() {
@@ -414,6 +693,117 @@ pub fn handle_click(
             AltitudeDatum::Sea => AltitudeDatum::Ground,
             AltitudeDatum::Ground => AltitudeDatum::Sea,
         });
+    }
+}
+
+pub fn handle_orbit_widget(
+    panels: Query<&Interaction, (With<OrbitPanel>, Changed<Interaction>)>,
+    controls: Query<(&Interaction, &OrbitControl), Changed<Interaction>>,
+    mut state: ResMut<OrbitWidgetState>,
+    mut requests: MessageWriter<OrbitTargetRequest>,
+) {
+    for interaction in &panels {
+        if matches!(interaction, Interaction::Pressed) {
+            state.expanded = !state.expanded;
+        }
+    }
+    for (interaction, control) in &controls {
+        if matches!(interaction, Interaction::Pressed) {
+            requests.write(control.0);
+        }
+    }
+}
+
+pub fn update_orbit_widget(
+    program: Res<OrbitProgram>,
+    state: Res<OrbitWidgetState>,
+    units: Res<crate::units_settings::UnitsSettings>,
+    flight_ctx: Res<crate::hud::mfd::FlightContext>,
+    mut editors: Query<&mut Visibility, With<OrbitEditor>>,
+    mut fields: Query<(&OrbitFieldText, &mut Text)>,
+) {
+    if let Ok(mut visibility) = editors.single_mut() {
+        *visibility = if state.expanded {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+    }
+    let system = units.system_for(UnitDomain::shared(flight_ctx.airplane_flight()));
+    for (field, mut text) in &mut fields {
+        let next = match field.0 {
+            OrbitField::CompactStatus => {
+                if program.phase == crate::orbit_program::OrbitProgramPhase::Idle {
+                    "CLICK TO CONFIGURE".to_string()
+                } else {
+                    format!(
+                        "{} · {}",
+                        format::altitude(program.draft.apoapsis_altitude_m, system),
+                        program.phase.label()
+                    )
+                }
+            }
+            OrbitField::Shape => match program.draft.shape {
+                OrbitShape::Circular => "CIRC".to_string(),
+                OrbitShape::Elliptical => "ELLIP".to_string(),
+            },
+            OrbitField::Apoapsis => format::altitude(program.draft.apoapsis_altitude_m, system),
+            OrbitField::Periapsis => format::altitude(program.draft.periapsis_altitude_m, system),
+            OrbitField::Inclination if program.draft.plane == OrbitPlaneChoice::Auto => {
+                "AUTO".to_string()
+            }
+            OrbitField::Inclination => {
+                format!("{:.0}°", program.draft.inclination_rad.to_degrees())
+            }
+            OrbitField::Direction if program.draft.plane == OrbitPlaneChoice::Auto => {
+                "AUTO".to_string()
+            }
+            OrbitField::Direction => match program.draft.direction {
+                thalos_physics_canonical::orbit_planner::OrbitDirection::Prograde => {
+                    "PROGRADE".to_string()
+                }
+                thalos_physics_canonical::orbit_planner::OrbitDirection::Retrograde => {
+                    "RETROGRADE".to_string()
+                }
+            },
+            OrbitField::Plane => match program.draft.plane {
+                OrbitPlaneChoice::Auto => "AUTO".to_string(),
+                OrbitPlaneChoice::Preserve => "PRESERVE".to_string(),
+                OrbitPlaneChoice::Nearest => "NEAREST".to_string(),
+            },
+            OrbitField::Summary => {
+                if let Some(error) = program.error.as_deref() {
+                    format!("{} · {error}", program.phase.label())
+                } else if let Some(summary) = program.summary.as_ref() {
+                    if program.surface_program {
+                        format!(
+                            "{} · ASCENT · {:.0} m/s",
+                            program.phase.label(),
+                            summary.total_delta_v_m_s
+                        )
+                    } else {
+                        format!(
+                            "{} · {} nodes · {:.0} m/s",
+                            program.phase.label(),
+                            summary.node_count,
+                            summary.total_delta_v_m_s
+                        )
+                    }
+                } else {
+                    "NO PLAN".to_string()
+                }
+            }
+            OrbitField::CancelAction => {
+                if program.active() {
+                    "CANCEL".to_string()
+                } else {
+                    "CLR".to_string()
+                }
+            }
+        };
+        if text.0 != next {
+            text.0 = next;
+        }
     }
 }
 

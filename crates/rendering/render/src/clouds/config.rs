@@ -124,6 +124,13 @@ pub struct CloudsConfig {
     /// drift stays glued to the sphere), `y`/`z` drift the detail-erosion
     /// noise for slow "boiling". Later this becomes a weather-system output.
     pub wind_velocity: Vec3,
+    /// Sim-time seconds driving cell-scale cloud evolution (cells growing and
+    /// dissolving) in `thalos::atmosphere`'s `cloud_cell_field`. Written each
+    /// frame by the game's cloud driver from the simulation clock, never from
+    /// wall time: captures pin sim time, so a wall-clock phase would make
+    /// screenshots irreproducible and break the comparison lane. Both cloud
+    /// tiers read the same value, so near and far agree on cloud shape.
+    pub cell_evolution_s: f32,
 }
 
 impl Default for CloudsConfig {
@@ -182,6 +189,7 @@ impl Default for CloudsConfig {
             history_epoch: 1,
             shadow_frame: CloudShadowFrame::default(),
             wind_velocity: Vec3::new(-1.1, 0.0, 2.3),
+            cell_evolution_s: 0.0,
         }
     }
 }

@@ -126,10 +126,12 @@ catches.
 
 ## Screenshot preset
 
-`just screenshot reentry` boots a plain orbit and drives `FlowDebugOverride` to a
-peak-heating freestream — actually flying an entry is neither deterministic nor
-reachable headlessly. `THALOS_REENTRY_DENSITY` (kg/m³) and `THALOS_REENTRY_SPEED`
-(m/s) scrub the entry point.
+`just screenshot reentry` boots the atmospheric landing approach and drives
+`FlowDebugOverride` to a peak-heating freestream — actually flying an entry is
+neither deterministic nor reachable headlessly. The real atmospheric placement
+is load-bearing: overrides cannot manufacture air in orbit.
+`THALOS_REENTRY_DENSITY` (kg/m³) and `THALOS_REENTRY_SPEED` (m/s) scrub the entry
+point.
 
 The wind is put on the craft's **belly** (`−Z` local, the dorsal convention the
 gear uses), which is the attitude a lifting body actually enters in — and the

@@ -356,5 +356,4 @@ mod tests {
             &build_jet_nacelle_body_mesh(&engine)
         ));
     }
-
 }

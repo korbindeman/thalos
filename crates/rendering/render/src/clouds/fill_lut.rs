@@ -674,7 +674,9 @@ fn march_column(
     // needs the cell distribution of clear columns too, or the occupied
     // quantile is measured against a censored sample.
     let column_style = cell_style(dir, weather[1]);
-    let column_cell = cell_field(dir, input.planet_radius_m, &column_style);
+    // Calibration is derived at evolution phase 0. Legitimate because the
+    // field is stationary under its time translation — see `cell_field`.
+    let column_cell = cell_field(dir, input.planet_radius_m, &column_style, 0.0);
     let mut samples = Vec::new();
     if cov > 1.0e-3 {
         // Type weights and the shape spectrum are per column (weather is one

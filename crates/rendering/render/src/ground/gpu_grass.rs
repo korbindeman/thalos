@@ -537,12 +537,19 @@ pub struct GpuGrassMaterial {
     pub shadow: ShadowCascadeBlock,
     /// Per-cascade sun-shadow depth maps — the same handles the ground + tree
     /// materials bind; `vertex` visibility for the per-vertex blade sample.
-    #[texture(2, sample_type = "depth", visibility(vertex, fragment))]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(8, sample_type = "depth", visibility(vertex, fragment))]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(3, sample_type = "depth", visibility(vertex, fragment))]
+    #[texture(2, sample_type = "depth", visibility(vertex, fragment))]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(4, sample_type = "depth", visibility(vertex, fragment))]
+    #[texture(3, sample_type = "depth", visibility(vertex, fragment))]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(4, sample_type = "depth", visibility(vertex, fragment))]
+    pub sun_shadow_map_3: Handle<Image>,
     /// Control window: terrain height, R32Float (non-filterable —
     /// `textureLoad` + manual bilinear in the shader).
     #[texture(5, sample_type = "float", filterable = false, visibility(vertex))]

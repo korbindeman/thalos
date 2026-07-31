@@ -24,8 +24,9 @@ use thalos_shipyard::{
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, MaterialKind, Part, PartCatalog,
     PartMaterial, PodGeometry, Ship, SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh,
     build_control_surface_mesh, build_fuselage_mesh, build_gear_bay_mesh, build_gear_mesh,
-    build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh, build_wing_mesh,
-    host_mount_geometry, jet_nacelle_length, pod_visual_profile,
+    build_gear_struct_mesh, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
+    build_wing_fairing_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
+    pod_visual_profile, wants_wing_fairing,
 };
 
 use super::placement::{body_skin_mount, on_body_click, on_pin_click};
@@ -442,6 +443,33 @@ pub(super) fn rebuild_wing_visuals(
             }
         });
 
+        // Wing-body junction fairing (derived geometry; see the ship-view
+        // twin in `ship_view::rebuild_ship_wing_visuals`). Rendered like the
+        // wing body so the editor previews the merged junction.
+        if let Ok(fus) = hosts.get(mount.parent)
+            && wants_wing_fairing(wing, mount.angle, fus)
+        {
+            let fairing = commands
+                .spawn((
+                    Mesh3d(meshes.add(build_wing_fairing_mesh(fus, top_d, wing, mount.station))),
+                    MeshMaterial3d(material.clone()),
+                    Transform::IDENTITY,
+                    Visibility::default(),
+                    WingVisual,
+                    PartBody(e),
+                    Pickable::default(),
+                ))
+                .observe(on_body_click)
+                .id();
+            commands.queue(move |world: &mut World| {
+                if world.get_entity(parent).is_ok() {
+                    world.entity_mut(fairing).insert(ChildOf(parent));
+                } else {
+                    world.entity_mut(fairing).despawn();
+                }
+            });
+        }
+
         // Control surfaces, shown deflected to a small angle so they read as
         // distinct hinged panels in the editor (no flight sim here).
         for surface in &wing.control_surfaces {
@@ -618,14 +646,40 @@ pub(super) fn rebuild_gear_visuals(
                 Pickable::IGNORE,
             ))
             .id();
+        // Wide-track carrying structure (gear beam + side-stay): hull finish,
+        // not gear black — it is airframe, and dark it reads as scaffolding.
+        let structure = build_gear_struct_mesh(gear, mount.angle, parent_radius).map(|m| {
+            commands
+                .spawn((
+                    Mesh3d(meshes.add(m)),
+                    MeshMaterial3d(if Some(e) == state.selected {
+                        assets.selected_material.clone()
+                    } else {
+                        assets.part_material.clone()
+                    }),
+                    Transform::IDENTITY,
+                    Visibility::default(),
+                    GearVisual,
+                    PartBody(e),
+                    Pickable::default(),
+                ))
+                .observe(on_body_click)
+                .id()
+        });
         let parent = e;
         commands.queue(move |world: &mut World| {
             if world.get_entity(parent).is_ok() {
                 world.entity_mut(body).insert(ChildOf(parent));
                 world.entity_mut(bay).insert(ChildOf(parent));
+                if let Some(s) = structure {
+                    world.entity_mut(s).insert(ChildOf(parent));
+                }
             } else {
                 world.entity_mut(body).despawn();
                 world.entity_mut(bay).despawn();
+                if let Some(s) = structure {
+                    world.entity_mut(s).despawn();
+                }
             }
         });
     }

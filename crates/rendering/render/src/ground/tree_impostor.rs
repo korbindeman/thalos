@@ -236,12 +236,19 @@ pub struct TreeImpostorExtension {
     /// field, as before.
     #[uniform(109)]
     pub shadow: crate::ShadowCascadeBlock,
-    #[texture(110, sample_type = "depth")]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(113, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(111, sample_type = "depth")]
+    #[texture(110, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(112, sample_type = "depth")]
+    #[texture(111, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(112, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
 }
 
 /// Far-band impostor card on the standard path — `ExtendedMaterial` like the

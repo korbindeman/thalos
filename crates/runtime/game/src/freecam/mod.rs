@@ -7,7 +7,7 @@
 //! | W / S          | Forward / back                      |
 //! | A / D          | Strafe left / right                 |
 //! | R / F          | Up / down (along the local vertical) |
-//! | Q / E          | Roll left / right (**free look only**) |
+//! | Q / E          | Roll left / right (**weak/no level lock only**) |
 //! | L              | Toggle level-to-planet-up           |
 //! | C              | Toggle the ground floor (clip stop)  |
 //! | Z (hold)       | Spring zoom (4× focal length)       |
@@ -39,16 +39,18 @@
 //!   body is never re-selected while freecam is active; a view with no resolved
 //!   terrain body deliberately remains heliocentric-inertial.
 //! - **Level lock** ([`FreeCam::level_to_up`], default on) constrains the pose to
-//!   the local vertical at the camera's *current* position while the camera is
-//!   inside that body's surface-flight envelope: yaw turns about that vertical,
-//!   pitch is clamped short of the poles, and roll is zero by construction.
-//!   Because the constraint is re-applied every frame against the up direction
-//!   where the camera now is, flying a quarter of the way around a body keeps
-//!   the horizon level instead of slowly tipping — and there is no accumulated
-//!   roll to hand-correct. Atmospheric bodies use their authored Kármán line as
-//!   the surface-flight ceiling; airless bodies use 5% of body radius, capped
-//!   at 100 km. Above that envelope freecam is 6-DOF; Q/E roll works there
-//!   without changing the remembered setting.
+//!   the local vertical at the camera's *current* position: yaw turns about that
+//!   vertical, pitch is clamped short of the poles, and roll is zero. Because the
+//!   constraint is re-applied every frame against the up direction where the
+//!   camera now is, flying a quarter of the way around a body keeps the horizon
+//!   level instead of slowly tipping — and there is no accumulated roll to
+//!   hand-correct.
+//!
+//!   Its strength is an *authority* in `0..=1` ([`level_lock_authority`]) driven
+//!   by how large the body looks from here — its apparent angular diameter, not
+//!   an authored altitude — so it is rigid while the world fills the view,
+//!   fades out as the world becomes an object you look at, and never switches
+//!   state discontinuously. Q/E roll comes back as the authority falls.
 //! - **Ground floor** ([`FreeCam::ground_collision`], default on) clamps the
 //!   camera's radius to the terrain height under it plus
 //!   [`FREECAM_GROUND_CLEARANCE_M`]. It is a *floor*, not a swept collision: it
@@ -116,10 +118,12 @@ pub struct FreeCam {
     /// The normal rig must rebuild its pose immediately, but must not consume
     /// the final freecam mouse delta as orbit input during that handoff.
     flight_input_handoff_pending: bool,
-    /// Effective surface-flight envelope state. `None` derives the initial
-    /// state directly from altitude; subsequent frames use hysteresis so the
-    /// lock cannot chatter at its atmospheric/airless ceiling.
-    level_lock_envelope_engaged: Option<bool>,
+    /// Whether freecam may constrain the current pose — see the module docs on
+    /// authored poses. Set once freecam has produced or inherited a pose of its
+    /// own, and *kept* set afterwards: the level lock eases toward level over
+    /// several frames, so it has to keep running on frames with no input or a
+    /// half-corrected horizon would freeze the moment the user let go.
+    pose_is_freecam_owned: bool,
 }
 
 impl Default for FreeCam {
@@ -133,7 +137,7 @@ impl Default for FreeCam {
             reference_frame: FreeCamReferenceFrame::Inertial,
             return_optics: None,
             flight_input_handoff_pending: false,
-            level_lock_envelope_engaged: None,
+            pose_is_freecam_owned: false,
         }
     }
 }
@@ -189,7 +193,8 @@ impl FreeCam {
             camera_rotation_world,
         ));
         self.flight_input_handoff_pending = false;
-        self.level_lock_envelope_engaged = None;
+        // An authored pose: reproduced exactly until the user moves the camera.
+        self.pose_is_freecam_owned = false;
         self.active = true;
     }
 
@@ -198,7 +203,7 @@ impl FreeCam {
         self.allow_sim_time = false;
         self.reference_frame = FreeCamReferenceFrame::Inertial;
         self.flight_input_handoff_pending = true;
-        self.level_lock_envelope_engaged = None;
+        self.pose_is_freecam_owned = false;
     }
 
     fn finish_flight_camera_handoff(&mut self) {
@@ -270,14 +275,23 @@ fn craft_allows_time_warp(sim: &SimulationState, limits: &WarpLimits) -> bool {
         .any(|(i, &speed)| i <= cap && speed > 1.0)
 }
 
-/// The local vertical at the camera, in world/render axes. big_space grid cells
-/// are pure translations, so a world direction *is* a camera-`Transform`-space
-/// direction — no conversion needed.
+/// How hard the horizon constraint holds at the camera's current position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LevelLock {
+    /// The local vertical at the camera, in world/render axes. big_space grid
+    /// cells are pure translations, so a world direction *is* a
+    /// camera-`Transform`-space direction — no conversion needed.
+    up: Vec3,
+    /// Constraint strength in `0..=1`. See [`level_lock_authority`].
+    authority: f32,
+}
+
+/// Resolve the level lock against the anchored body. `None` for a deep-space
+/// session, an unresolvable body, or a camera far enough out that the body no
+/// longer defines a horizon.
 ///
-/// Effective local vertical for the surface-flight envelope. Atmospheric
-/// bodies use their authored Kármán line; airless bodies use a radius-scaled
-/// ceiling. Body-fixed anchoring remains active outside the envelope for warp
-/// stability; only the ground-camera leveling constraint stands down.
+/// Body-fixed anchoring remains active regardless, for warp stability; only the
+/// ground-camera leveling constraint fades.
 fn local_up_world(
     reference_frame: FreeCamReferenceFrame,
     sim: &SimulationState,
@@ -285,68 +299,108 @@ fn local_up_world(
     grid: &Grid,
     cell: &CellCoord,
     transform: &Transform,
-    was_engaged: Option<bool>,
-) -> (Option<Vec3>, bool) {
+) -> Option<LevelLock> {
     let FreeCamReferenceFrame::BodyFixed(anchor) = reference_frame else {
-        return (None, false);
+        return None;
     };
-    let Some(state) = states.and_then(|states| states.get(anchor.body)) else {
-        return (None, false);
-    };
-    let Some(body) = sim.system.bodies.get(anchor.body) else {
-        return (None, false);
-    };
+    let state = states.and_then(|states| states.get(anchor.body))?;
+    let body = sim.system.bodies.get(anchor.body)?;
     let camera_world = grid.grid_position_double(cell, transform);
-    let atmosphere_top_m = body
-        .terrestrial_atmosphere
-        .as_ref()
-        .map(|atmosphere| atmosphere.karman_line_m as f64);
-    surface_flight_local_up(
-        camera_world,
-        state.position,
-        body.radius_m,
-        atmosphere_top_m,
-        was_engaged,
-    )
+    surface_flight_level_lock(camera_world, state.position, body.radius_m)
 }
 
-fn surface_flight_local_up(
+fn surface_flight_level_lock(
     camera_world: DVec3,
     body_position: DVec3,
     body_radius_m: f64,
-    atmosphere_top_m: Option<f64>,
-    was_engaged: Option<bool>,
-) -> (Option<Vec3>, bool) {
-    let ceiling_m = atmosphere_top_m
-        .filter(|top| *top > 0.0)
-        .unwrap_or_else(|| {
-            (body_radius_m * AIRLESS_LEVEL_CEILING_RADIUS_FRACTION).min(AIRLESS_LEVEL_CEILING_MAX_M)
-        });
-    if ceiling_m <= 0.0 {
-        return (None, false);
-    }
-
+) -> Option<LevelLock> {
     let radial = camera_world - body_position;
-    let radius = radial.length();
-    let altitude_m = radius - body_radius_m;
-    let engage_ceiling_m = ceiling_m * LEVEL_LOCK_REENGAGE_CEILING_FRACTION;
-    let engaged = match was_engaged {
-        None => altitude_m < ceiling_m,
-        Some(true) => altitude_m < ceiling_m,
-        Some(false) => altitude_m < engage_ceiling_m,
-    };
-    let up = engaged
-        .then(|| radial.try_normalize().map(|up| up.as_vec3()))
-        .flatten();
-    (up, engaged)
+    let up = radial.try_normalize()?.as_vec3();
+    let authority = level_lock_authority(radial.length(), body_radius_m);
+    (authority > 0.0).then_some(LevelLock { up, authority })
 }
 
-/// Re-derive the camera rotation as the roll-free, pitch-clamped look about
-/// `up` that matches the camera's current heading.
+/// Level-lock authority from the body's **apparent size** — the angular
+/// diameter `2·asin(R/r)` it subtends at the camera — smoothstepped from
+/// [`LEVEL_LOCK_FULL_ANGLE_RAD`] down to [`LEVEL_LOCK_RELEASE_ANGLE_RAD`].
 ///
-/// **Idempotent** — applying it to an already-level pose reproduces that pose —
-/// which is what lets it run every frame without drifting the view.
-fn apply_level_lock(transform: &mut Transform, up: Vec3) {
+/// Deliberately independent of where the camera looks and of the lens: it
+/// answers "how much of *everything* is planet", not "how much of the frame is
+/// planet", so panning the view or racking the zoom can never change the flight
+/// model under the user's hands.
+///
+/// Being a pure function of `r/R` is what lets one rule fit a 190 km moonlet and
+/// a 3186 km planet — the horizon is worth levelling to exactly while the body
+/// still dominates the surroundings, which is a statement about apparent size,
+/// never about metres. The old rule (authored Kármán line, or 5 % of radius
+/// capped at 100 km) released far too low and switched state on a threshold.
+fn level_lock_authority(radius_m: f64, body_radius_m: f64) -> f32 {
+    // Written positively so a NaN radius — a degenerate body state, not a
+    // camera the user flew somewhere — falls out as "no lock" rather than
+    // propagating into the pose.
+    let usable = radius_m.is_finite() && radius_m > 0.0 && body_radius_m > 0.0;
+    if !usable {
+        return 0.0;
+    }
+    // At or below the surface the whole sky is body; `min` also keeps `asin`
+    // out of its NaN domain there.
+    let sin_angular_radius = (body_radius_m / radius_m).min(1.0);
+    let angular_diameter_rad = 2.0 * sin_angular_radius.asin();
+    let t = ((angular_diameter_rad - LEVEL_LOCK_RELEASE_ANGLE_RAD)
+        / (LEVEL_LOCK_FULL_ANGLE_RAD - LEVEL_LOCK_RELEASE_ANGLE_RAD))
+        .clamp(0.0, 1.0);
+    // Smoothstep, not a linear ramp: authority then has zero slope at both ends
+    // of the band, so climbing out has no perceptible moment where the assist
+    // starts or stops — which is the whole point of the band.
+    (t * t * (3.0 - 2.0 * t)) as f32
+}
+
+/// Per-frame slerp weight toward the levelled pose.
+///
+/// The effective rate is `LEVEL_LOCK_RATE_HZ · a/(1−a)`, which diverges as
+/// authority approaches 1 and vanishes as it approaches 0. That is what makes a
+/// full-authority lock *rigid* (indistinguishable from the old hard constraint,
+/// including its pitch clamp) while keeping the correction continuous in
+/// between — mid-band the horizon returns over about half a second, near the top
+/// of the band it is a barely-perceptible drift.
+fn level_lock_weight(authority: f32, dt_s: f32) -> f32 {
+    if authority >= 1.0 {
+        return 1.0;
+    }
+    if authority <= 0.0 || dt_s <= 0.0 {
+        return 0.0;
+    }
+    let rate_hz = LEVEL_LOCK_RATE_HZ * authority / (1.0 - authority);
+    1.0 - (-rate_hz * dt_s).exp()
+}
+
+/// The reference direction the camera treats as "up" for look and climb input:
+/// the local vertical at full authority, the camera's own up with none, and the
+/// normalized blend in between — so the *control* feel crosses the band as
+/// continuously as the pose constraint does.
+fn control_up(transform: &Transform, lock: Option<LevelLock>) -> Vec3 {
+    let camera_up = *transform.up();
+    let Some(lock) = lock else { return camera_up };
+    camera_up
+        .lerp(lock.up, lock.authority)
+        // Only degenerate when the camera is exactly inverted relative to the
+        // local vertical at half authority; the local vertical is the answer
+        // the constraint is heading for anyway.
+        .try_normalize()
+        .unwrap_or(lock.up)
+}
+
+/// Ease the camera rotation toward the roll-free, pitch-clamped look about `up`
+/// that matches its current heading, by `weight` of the way.
+///
+/// **Idempotent** — applying it to an already-level pose reproduces that pose,
+/// at any weight — which is what lets it run every frame without drifting the
+/// view.
+fn apply_level_lock(transform: &mut Transform, up: Vec3, weight: f32) {
+    let weight = weight.clamp(0.0, 1.0);
+    if weight <= 0.0 {
+        return;
+    }
     let forward = *transform.forward();
     let sin_pitch = forward
         .dot(up)
@@ -361,7 +415,12 @@ fn apply_level_lock(transform: &mut Transform, up: Vec3) {
         return;
     };
     let cos_pitch = (1.0 - sin_pitch * sin_pitch).max(0.0).sqrt();
-    transform.look_to(horizontal * cos_pitch + up * sin_pitch, up);
+    let mut levelled = *transform;
+    levelled.look_to(horizontal * cos_pitch + up * sin_pitch, up);
+    transform.rotation = transform
+        .rotation
+        .slerp(levelled.rotation, weight)
+        .normalize();
 }
 
 /// Body-centred radius the camera may not descend below: terrain height under
@@ -445,17 +504,24 @@ const FREECAM_ZOOM_LERP_RATE: f32 = 12.0;
 /// Pitch limit under level lock, as `sin(pitch)`. Just short of the pole: at
 /// exactly ±90° the heading is undefined and `look_to` has no valid basis.
 const FREECAM_LEVEL_MAX_SIN_PITCH: f32 = 0.9998; // ≈ 88.9°
-/// Airless bodies have no authored atmosphere boundary, so their plane-like
-/// surface-flight envelope scales with curvature instead. Five percent keeps
-/// the horizon locally meaningful across moons and tiny asteroids.
-const AIRLESS_LEVEL_CEILING_RADIUS_FRACTION: f64 = 0.05;
-/// Large airless worlds do not need the constraint beyond a conventional
-/// planetary surface-flight altitude.
-const AIRLESS_LEVEL_CEILING_MAX_M: f64 = 100_000.0;
-/// Once the lock releases at its ceiling, descend this far into the envelope
-/// before re-engaging it. One-sided hysteresis ensures an atmospheric lock
-/// never persists above the authored atmosphere top.
-const LEVEL_LOCK_REENGAGE_CEILING_FRACTION: f64 = 0.95;
+/// Apparent angular diameter at and above which the horizon constraint is
+/// rigid. 120° is more of the surroundings than any normal lens frames, so
+/// "down" is unambiguous and a tilted horizon reads as a mistake. That is
+/// `r = 1.155 R` — ~493 km over Thalos and ~134 km over Mira, against the 80 km
+/// Kármán line and 43 km airless ceiling the old rule released at.
+const LEVEL_LOCK_FULL_ANGLE_RAD: f64 = 120.0 * std::f64::consts::PI / 180.0;
+/// Apparent angular diameter at and below which the camera is fully 6-DOF. 45°
+/// is where the body has become an object you look *at* rather than a world you
+/// are over — `r = 2.61 R`, ~5100 km over Thalos.
+const LEVEL_LOCK_RELEASE_ANGLE_RAD: f64 = 45.0 * std::f64::consts::PI / 180.0;
+/// Base rate (1/s) of the pull toward level, at half authority — see
+/// [`level_lock_weight`] for why it is scaled by `a/(1−a)` rather than used
+/// directly.
+const LEVEL_LOCK_RATE_HZ: f32 = 2.0;
+/// Authority above which Q/E roll stands down, since the constraint would win
+/// against it anyway. Below it the two coexist: roll freely, and the horizon
+/// creeps back at whatever rate the altitude earns.
+const LEVEL_LOCK_ROLL_SUPPRESS_AUTHORITY: f32 = 0.5;
 /// How far above the terrain the ground floor holds the camera. Small enough
 /// to park the lens on the deck, large enough that a metre of terrain LOD
 /// disagreement doesn't put the near plane inside a hill.
@@ -555,7 +621,7 @@ fn toggle_freecam_system(
             }
         }
         freecam.reference_frame = FreeCamReferenceFrame::Pending;
-        freecam.level_lock_envelope_engaged = None;
+        freecam.pose_is_freecam_owned = false;
         freecam.active = true;
     }
 }
@@ -673,50 +739,44 @@ fn freecam_drive_system(
     }
 
     let reference_frame = freecam.reference_frame;
-    // Level lock needs both a local vertical and a surface-flight envelope.
-    // Outside it the camera keeps 6-DOF behaviour without changing the user's
-    // remembered `level_to_up` setting.
-    let (envelope_up, envelope_engaged) = local_up_world(
-        reference_frame,
-        &sim,
-        states,
-        grid,
-        &cell,
-        &transform,
-        freecam.level_lock_envelope_engaged,
-    );
-    freecam.level_lock_envelope_engaged = Some(envelope_engaged);
-    let level_up = freecam.level_to_up.then_some(envelope_up).flatten();
+    // Level lock needs a local vertical and a body big enough in the view to
+    // define a horizon. Where it doesn't apply the camera keeps 6-DOF behaviour
+    // without changing the user's remembered `level_to_up` setting.
+    let lock = freecam
+        .level_to_up
+        .then(|| local_up_world(reference_frame, &sim, states, grid, &cell, &transform))
+        .flatten();
 
     let mut pose_changed = false;
 
-    // Mouse-look while LMB held.
+    // Mouse-look while LMB held. Pitch is always about the camera's own right;
+    // only the yaw axis moves with authority, from the camera's own up to the
+    // local vertical:
     //
-    // - **Level lock**: yaw turns about the *local vertical* and pitch about
-    //   the camera's own right, which stays horizontal — the familiar
-    //   ground-camera control. `apply_level_lock` below clamps the pitch and
-    //   removes any roll, so the horizon can never end up tilted no matter
-    //   how the drag curved.
-    // - **Free look**: yaw/pitch around the camera's own up/right (intrinsic
-    //   rotation in the camera-local frame) rather than world axes. The
-    //   ship-view orbit basis is radial-up, so when freecam activates over a
-    //   planet the camera inherits a roll relative to world-Y; yawing around
-    //   world-Y in that state arcs and tumbles instead of panning. Roll then
-    //   accumulates passively from circular drags, matching spacecraft-cam
-    //   convention — which is exactly what level lock exists to opt out of.
+    // - **Level lock**: yaw about the *local vertical*, pitch about a right
+    //   that stays horizontal — the familiar ground-camera control.
+    //   `apply_level_lock` below clamps the pitch and removes any roll, so the
+    //   horizon can never end up tilted no matter how the drag curved.
+    // - **Free look**: yaw about the camera's own up is exactly intrinsic yaw,
+    //   because pre-multiplying by a rotation about `R·Y` equals
+    //   post-multiplying by one about `Y`. Not world-Y: the ship-view orbit
+    //   basis is radial-up, so freecam activating over a planet inherits a roll
+    //   relative to world-Y, and yawing about world-Y there arcs and tumbles
+    //   instead of panning. Roll then accumulates passively from circular
+    //   drags, matching spacecraft-cam convention — which is exactly what level
+    //   lock exists to opt out of.
+    //
+    // Writing both as one axis-blended operation is what keeps the *control*
+    // continuous across the band; two branches would swap feel on a threshold
+    // even though the pose itself eased.
     if input.primary_pressed && !ui_pointer_busy {
         let delta = input.camera_motion;
         if delta != Vec2::ZERO {
-            if let Some(up) = level_up {
-                let yaw = Quat::from_axis_angle(up, -delta.x * FREECAM_LOOK_SENSITIVITY);
-                let pitch =
-                    Quat::from_axis_angle(*transform.right(), -delta.y * FREECAM_LOOK_SENSITIVITY);
-                transform.rotation = (pitch * yaw * transform.rotation).normalize();
-            } else {
-                let yaw = Quat::from_rotation_y(-delta.x * FREECAM_LOOK_SENSITIVITY);
-                let pitch = Quat::from_rotation_x(-delta.y * FREECAM_LOOK_SENSITIVITY);
-                transform.rotation = transform.rotation * yaw * pitch;
-            }
+            let yaw_axis = control_up(&transform, lock);
+            let yaw = Quat::from_axis_angle(yaw_axis, -delta.x * FREECAM_LOOK_SENSITIVITY);
+            let pitch =
+                Quat::from_axis_angle(*transform.right(), -delta.y * FREECAM_LOOK_SENSITIVITY);
+            transform.rotation = (pitch * yaw * transform.rotation).normalize();
             pose_changed = true;
         }
     }
@@ -725,9 +785,11 @@ fn freecam_drive_system(
     // toward +Y (up), which from the pilot's POV looking down -Z is a
     // counter-clockwise tilt — i.e. "roll left." E gets the negated angle so
     // it tilts the camera clockwise (right wing down) as conventional.
-    // Suppressed under level lock, whose whole contract is zero roll.
+    // Suppressed under a strong level lock, whose whole contract is zero roll;
+    // as authority fades the keys come back rather than switching on at a
+    // boundary the user can feel.
     let mut roll_input = 0.0_f32;
-    if level_up.is_none() {
+    if !lock.is_some_and(|lock| lock.authority >= LEVEL_LOCK_ROLL_SUPPRESS_AUTHORITY) {
         if pressed(KeyCode::KeyQ) {
             roll_input += 1.0;
         }
@@ -746,8 +808,8 @@ fn freecam_drive_system(
 
     // Translation keys. Under level lock R/F climb along the *local vertical*,
     // not the camera's up — "up" has to mean up, or holding R while pitched
-    // down flies you into the ground.
-    let vertical = level_up.unwrap_or_else(|| *transform.up());
+    // down flies you into the ground. Same blended reference as mouse-look.
+    let vertical = control_up(&transform, lock);
     let mut dir = Vec3::ZERO;
     if pressed(KeyCode::KeyW) {
         dir += *transform.forward();
@@ -793,7 +855,12 @@ fn freecam_drive_system(
     // is reproduced exactly until the user moves the camera. Without this an
     // authored shot with deliberate roll, or one framed under an overhang,
     // would be silently rewritten on replay, and every capture baseline with it.
-    let sanitize_pose = pose_changed || inherited_pose;
+    //
+    // Latched, not re-derived per frame: the level lock eases over several
+    // frames, so it has to keep running after the user stops moving or a
+    // half-corrected horizon would freeze the instant they let go of the mouse.
+    let sanitize_pose = freecam.pose_is_freecam_owned || pose_changed || inherited_pose;
+    freecam.pose_is_freecam_owned = sanitize_pose;
 
     // Ground floor. `ground_floor_radius_m` returns `None` while the surface is
     // cold rather than falling back to the datum — clamping to sea level would
@@ -828,19 +895,17 @@ fn freecam_drive_system(
     // the horizon hold while flying across a body: the vertical rotates under
     // the camera and the constraint follows it, instead of a one-shot level
     // that decays with every kilometre travelled.
-    let (final_envelope_up, final_envelope_engaged) = local_up_world(
-        reference_frame,
-        &sim,
-        states,
-        grid,
-        &cell,
-        &transform,
-        freecam.level_lock_envelope_engaged,
-    );
-    freecam.level_lock_envelope_engaged = Some(final_envelope_engaged);
-    if sanitize_pose && let Some(up) = freecam.level_to_up.then_some(final_envelope_up).flatten() {
+    let final_lock = freecam
+        .level_to_up
+        .then(|| local_up_world(reference_frame, &sim, states, grid, &cell, &transform))
+        .flatten();
+    if sanitize_pose && let Some(lock) = final_lock {
         let before = transform.rotation;
-        apply_level_lock(&mut transform, up);
+        apply_level_lock(
+            &mut transform,
+            lock.up,
+            level_lock_weight(lock.authority, dt_f32),
+        );
         // The entry frame has no other reason to persist, and the levelled pose
         // must reach the anchor — otherwise next frame's reprojection restores
         // the roll it just removed.
@@ -1018,91 +1083,145 @@ mod tests {
         Vec3::new(0.3, 0.9, -0.32).normalize()
     }
 
+    /// The radius at which a body of radius `r` subtends `degrees` of angular
+    /// diameter, i.e. the inverse of the authority curve's input.
+    fn radius_for_apparent_diameter(body_radius_m: f64, degrees: f64) -> f64 {
+        body_radius_m / (degrees.to_radians() / 2.0).sin()
+    }
+
+    /// The whole point of the rule: authority is a function of *apparent size*,
+    /// so two bodies three orders of magnitude apart in radius behave
+    /// identically at the same apparent size — and neither one's behaviour can
+    /// be read off an altitude in metres.
     #[test]
-    fn atmospheric_level_lock_releases_at_karman_line_with_reentry_hysteresis() {
-        let body_position = DVec3::new(50.0, -20.0, 10.0);
-        let radius_m = 1_000.0;
-        let karman_line_m = 100.0;
+    fn level_lock_authority_tracks_apparent_size_across_body_scales() {
+        let planet_m = 3_186_000.0;
+        let moonlet_m = 190_000.0;
 
-        let (inside_up, inside_engaged) = surface_flight_local_up(
-            body_position + DVec3::X * (radius_m + karman_line_m - 1.0),
-            body_position,
-            radius_m,
-            Some(karman_line_m),
-            None,
-        );
-        assert_eq!(inside_up, Some(Vec3::X));
-        assert!(inside_engaged);
-
-        let (at_boundary_up, at_boundary_engaged) = surface_flight_local_up(
-            body_position + DVec3::X * (radius_m + karman_line_m),
-            body_position,
-            radius_m,
-            Some(karman_line_m),
-            Some(true),
-        );
-        assert_eq!(at_boundary_up, None);
-        assert!(!at_boundary_engaged);
-
-        let (_, still_released) = surface_flight_local_up(
-            body_position
-                + DVec3::X
-                    * (radius_m + karman_line_m * LEVEL_LOCK_REENGAGE_CEILING_FRACTION + 1.0),
-            body_position,
-            radius_m,
-            Some(karman_line_m),
-            Some(false),
-        );
-        assert!(!still_released);
-
-        let (reentered_up, reentered) = surface_flight_local_up(
-            body_position
-                + DVec3::X
-                    * (radius_m + karman_line_m * LEVEL_LOCK_REENGAGE_CEILING_FRACTION - 1.0),
-            body_position,
-            radius_m,
-            Some(karman_line_m),
-            Some(false),
-        );
-        assert_eq!(reentered_up, Some(Vec3::X));
-        assert!(reentered);
+        for degrees in [150.0, 120.0, 90.0, 60.0, 45.0, 20.0] {
+            let planet =
+                level_lock_authority(radius_for_apparent_diameter(planet_m, degrees), planet_m);
+            let moonlet =
+                level_lock_authority(radius_for_apparent_diameter(moonlet_m, degrees), moonlet_m);
+            assert!(
+                (planet - moonlet).abs() < 1.0e-4,
+                "{degrees}° disagrees across scales: planet={planet}, moonlet={moonlet}"
+            );
+        }
     }
 
     #[test]
-    fn airless_level_lock_uses_radius_scaled_capped_surface_envelope() {
-        let body_position = DVec3::ZERO;
-        let moon_radius_m = 869_000.0;
-        let moon_ceiling_m = moon_radius_m * AIRLESS_LEVEL_CEILING_RADIUS_FRACTION;
+    fn level_lock_authority_is_full_inside_the_band_and_zero_outside_it() {
+        let radius_m = 3_186_000.0;
+        let full_deg = LEVEL_LOCK_FULL_ANGLE_RAD.to_degrees();
+        let release_deg = LEVEL_LOCK_RELEASE_ANGLE_RAD.to_degrees();
 
-        let (near_surface_up, near_surface_engaged) = surface_flight_local_up(
-            DVec3::Y * (moon_radius_m + moon_ceiling_m - 1.0),
-            body_position,
-            moon_radius_m,
-            None,
-            None,
+        // On and under the surface, and anywhere the body is bigger than the
+        // full-authority angle: rigid.
+        assert_eq!(level_lock_authority(radius_m * 0.5, radius_m), 1.0);
+        assert_eq!(level_lock_authority(radius_m, radius_m), 1.0);
+        assert_eq!(
+            level_lock_authority(radius_for_apparent_diameter(radius_m, full_deg), radius_m),
+            1.0
         );
-        assert_eq!(near_surface_up, Some(Vec3::Y));
-        assert!(near_surface_engaged);
+        // Below the release angle: fully 6-DOF, and `surface_flight_level_lock`
+        // reports no lock at all rather than a zero-strength one.
+        assert_eq!(
+            level_lock_authority(
+                radius_for_apparent_diameter(radius_m, release_deg),
+                radius_m
+            ),
+            0.0
+        );
+        assert_eq!(
+            surface_flight_level_lock(
+                DVec3::Y * radius_for_apparent_diameter(radius_m, release_deg * 0.5),
+                DVec3::ZERO,
+                radius_m,
+            ),
+            None
+        );
+    }
 
-        let (orbital_up, orbital_engaged) = surface_flight_local_up(
-            DVec3::Y * (moon_radius_m + moon_ceiling_m),
-            body_position,
-            moon_radius_m,
-            None,
-            Some(true),
-        );
-        assert_eq!(orbital_up, None);
-        assert!(!orbital_engaged);
+    /// A user climbing out must never cross a step: authority is continuous and
+    /// monotone in altitude, with no slope discontinuity at either end.
+    #[test]
+    fn level_lock_authority_decreases_smoothly_with_altitude() {
+        let radius_m = 3_186_000.0;
+        let mut previous = 1.0_f32;
+        let mut steps = 0;
+        // Sweep the whole band and a margin past both ends.
+        for i in 0..=400 {
+            let degrees = 170.0 - (i as f64) * 0.4;
+            let authority =
+                level_lock_authority(radius_for_apparent_diameter(radius_m, degrees), radius_m);
+            assert!(
+                authority <= previous + 1.0e-6,
+                "authority rose with altitude at {degrees}°: {previous} → {authority}"
+            );
+            assert!(
+                (previous - authority) < 0.05,
+                "authority stepped at {degrees}°: {previous} → {authority}"
+            );
+            if authority > 0.0 && authority < 1.0 {
+                steps += 1;
+            }
+            previous = authority;
+        }
+        assert!(steps > 50, "band is too narrow to be a transition: {steps}");
+    }
 
-        let large_body_radius_m = 4_000_000.0;
-        let (_, capped_engaged) = surface_flight_local_up(
-            DVec3::Y * (large_body_radius_m + AIRLESS_LEVEL_CEILING_MAX_M),
-            body_position,
-            large_body_radius_m,
-            None,
-            Some(true),
+    /// Mid-band the constraint pulls toward level over time rather than
+    /// snapping, and full authority still lands rigidly in one frame.
+    #[test]
+    fn level_lock_eases_at_partial_authority_and_snaps_at_full() {
+        let dt = 1.0 / 60.0;
+        assert_eq!(level_lock_weight(1.0, dt), 1.0);
+        assert_eq!(level_lock_weight(0.0, dt), 0.0);
+
+        let half = level_lock_weight(0.5, dt);
+        assert!(
+            half > 0.0 && half < 0.2,
+            "half authority should be a gentle pull, got {half}"
         );
-        assert!(!capped_engaged);
+        // Frame-rate independence is the property that matters: stepping the
+        // per-frame weight for one second must leave the residual the
+        // continuous law predicts, `exp(-LEVEL_LOCK_RATE_HZ)` at half
+        // authority — a ~0.5 s time constant — no matter how it is subdivided.
+        let expected = (-LEVEL_LOCK_RATE_HZ).exp();
+        for (frames, dt) in [(60, 1.0 / 60.0), (144, 1.0 / 144.0), (20, 1.0 / 20.0)] {
+            let step = level_lock_weight(0.5, dt);
+            let mut roll_left = 1.0_f32;
+            for _ in 0..frames {
+                roll_left *= 1.0 - step;
+            }
+            assert!(
+                (roll_left - expected).abs() < 1.0e-4,
+                "{frames} fps disagrees with the continuous law: {roll_left} vs {expected}"
+            );
+        }
+
+        // Rate rises with authority, so the band reads as "tighter the lower
+        // you are" rather than a single soft setting.
+        assert!(level_lock_weight(0.9, dt) > level_lock_weight(0.5, dt));
+        assert!(level_lock_weight(0.5, dt) > level_lock_weight(0.1, dt));
+    }
+
+    /// A partial weight moves the pose toward level without arriving, which is
+    /// what makes the boundary crossing invisible.
+    #[test]
+    fn partial_level_lock_reduces_roll_without_removing_it() {
+        let up = tilted_up();
+        let mut transform = Transform::from_translation(Vec3::ZERO);
+        transform.look_to(Vec3::new(1.0, 0.1, 0.4), up);
+        transform.rotation *= Quat::from_rotation_z(0.8);
+        let before = transform.right().dot(up).abs();
+
+        apply_level_lock(&mut transform, up, 0.25);
+
+        let after = transform.right().dot(up).abs();
+        assert!(after < before, "roll did not shrink: {before} → {after}");
+        assert!(after > 1.0e-3, "partial weight snapped to level: {after}");
     }
 
     #[test]
@@ -1114,7 +1233,7 @@ mod tests {
         transform.rotation *= Quat::from_rotation_z(0.8);
         assert!(transform.right().dot(up).abs() > 0.1, "test did not bank");
 
-        apply_level_lock(&mut transform, up);
+        apply_level_lock(&mut transform, up, 1.0);
 
         assert!(
             transform.right().dot(up).abs() < 1.0e-5,
@@ -1124,21 +1243,49 @@ mod tests {
     }
 
     /// The constraint runs every frame, so a level pose must be a fixed point —
-    /// otherwise the view would creep while the camera sits still.
+    /// otherwise the view would creep while the camera sits still. That has to
+    /// hold at *every* weight, or a camera parked mid-band would drift.
     #[test]
-    fn level_lock_is_idempotent() {
+    fn level_lock_is_idempotent_at_any_weight() {
         let up = tilted_up();
         let mut transform = Transform::from_translation(Vec3::ZERO);
         transform.look_to(Vec3::new(-0.6, 0.25, 0.9), up);
-        apply_level_lock(&mut transform, up);
+        apply_level_lock(&mut transform, up, 1.0);
         let once = transform.rotation;
 
-        apply_level_lock(&mut transform, up);
+        for weight in [1.0, 0.5, 0.05] {
+            apply_level_lock(&mut transform, up, weight);
+            assert!(
+                transform.rotation.dot(once).abs() > 1.0 - 1.0e-6,
+                "weight {weight} moved a level pose: {:?} vs {once:?}",
+                transform.rotation
+            );
+        }
+    }
 
+    /// The blended control reference is what keeps mouse-look and R/F from
+    /// switching feel on a threshold.
+    #[test]
+    fn control_up_interpolates_between_camera_and_local_vertical() {
+        let up = tilted_up();
+        let mut transform = Transform::from_translation(Vec3::ZERO);
+        transform.look_to(Vec3::new(1.0, 0.1, 0.4), up);
+        transform.rotation *= Quat::from_rotation_z(0.9);
+        let camera_up = *transform.up();
+        assert!(camera_up.dot(up) < 0.95, "test did not bank");
+
+        assert_eq!(control_up(&transform, None), camera_up);
+        let full = control_up(&transform, Some(LevelLock { up, authority: 1.0 }));
         assert!(
-            transform.rotation.dot(once).abs() > 1.0 - 1.0e-6,
-            "twice={:?}, once={once:?}",
-            transform.rotation
+            full.dot(up) > 1.0 - 1.0e-5,
+            "full authority is not local up"
+        );
+
+        let half = control_up(&transform, Some(LevelLock { up, authority: 0.5 }));
+        assert!(half.is_normalized());
+        assert!(
+            half.dot(up) > camera_up.dot(up) && half.dot(up) < full.dot(up),
+            "half authority is not between the two references"
         );
     }
 
@@ -1152,7 +1299,7 @@ mod tests {
         // of its own.
         transform.look_to(heading * 0.2 + up * 0.98, up);
 
-        apply_level_lock(&mut transform, up);
+        apply_level_lock(&mut transform, up, 1.0);
 
         let forward = *transform.forward();
         assert!(

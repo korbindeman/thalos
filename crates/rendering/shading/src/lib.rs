@@ -46,6 +46,10 @@ pub struct PlanetLightingPlugin;
 impl Plugin for PlanetLightingPlugin {
     fn build(&self, app: &mut App) {
         bevy::shader::load_shader_library!(app, "shaders/lighting.wgsl");
+        // One scattering model for every participating medium — clouds, vapour
+        // cones, fog, dust. Owns the radiance terms, never the march.
+        // See `shaders/volumetrics.wgsl` and ADR-20260730T034500Z.
+        bevy::shader::load_shader_library!(app, "shaders/volumetrics.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/atmosphere.wgsl");
         bevy::shader::load_shader_library!(app, "shaders/landcover.wgsl");
         // Shared analytic-ocean shading (wave normals + GGX water BRDF +

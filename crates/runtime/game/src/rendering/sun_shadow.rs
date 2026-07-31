@@ -39,7 +39,9 @@
 //! stock Bevy CSM is off, this is the one shadow world).
 
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
-use bevy::camera::{Camera, ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode};
+use bevy::camera::{
+    Camera, CameraProjection, ClearColorConfig, ImageRenderTarget, RenderTarget, ScalingMode,
+};
 // Bevy 0.19: render passes are systems in the `Core3d` schedule (was the
 // `Node3d::MainOpaquePass → … → MainTransparentPass` graph edges).
 use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
@@ -75,22 +77,46 @@ use crate::solar_system_state::{SimulationState, SolarSystemState};
 /// 6/7 are the impostor-bake layers; 8 is the first free index.
 pub const SHADOW_CASTER_LAYER: usize = 8;
 
-/// Per-cascade square resolution. 4096² at the extents below is ~0.2 m/texel for
-/// the near cascade and ~2.0 m for the far one — crisper cliff and ridge shadows.
+/// Per-cascade square resolution. 4096² at the extents below is ~0.03 m/texel
+/// for the near cascade and ~2.0 m for the far one.
 const SHADOW_MAP_SIZE: u32 = 4096;
 
-/// BASELINE half-width (m) of each cascade's orthographic box, near→far,
+/// BASELINE half-width (m) of each cascade's box **on the ground**, near→far,
 /// at/below [`SHADOW_REFERENCE_ALTITUDE_M`]. Centred on the craft; cascade 0 is
 /// tight + crisp, the last reaches out to cover the whole mesh-tree band
 /// (~2.2 km swap) with margin. Above the reference altitude the whole set
 /// scales ∝ camera altitude (see [`SHADOW_MAX_FOOTPRINT_SCALE`]) so coverage
 /// tracks the visible footprint.
-const CASCADE_HALF_EXTENTS_M: [f32; CASCADE_COUNT] = [400.0, 1500.0, 4000.0];
+///
+/// **The 64 m entry is new (2026-07-31).** The old near cascade was 400 m —
+/// ~0.2 m/texel — which is coarser than the landing gear, the wing edge, or a
+/// hull panel, so everything the camera actually looks at rendered its shadow
+/// on a grid too coarse to hold the silhouette. 64 m is ~0.03 m/texel and
+/// covers the band a surface camera inspects; the other three are unchanged and
+/// simply shift out one slot.
+const CASCADE_HALF_EXTENTS_M: [f32; CASCADE_COUNT] = [64.0, 400.0, 1500.0, 4000.0];
 
 /// Per-cascade orthographic far plane (m). Only needs to bracket terrain relief +
 /// tree height + the box's low-sun tilt (the centre sits near the ground).
 /// Orthographic depth is linear, so clip-space bias = metres / `(far − near)`.
-const CASCADE_FARS_M: [f32; CASCADE_COUNT] = [1500.0, 5000.0, 12000.0];
+const CASCADE_FARS_M: [f32; CASCADE_COUNT] = [400.0, 1500.0, 5000.0, 12000.0];
+
+/// Tallest caster (m) each cascade must catch from OUTSIDE its own ground box.
+///
+/// A caster `h` tall throws its shadow `h / tan(elev)` down-sun, so covering the
+/// receivers inside a cascade means also rasterizing casters up to that far
+/// up-sun of it. In LIGHT space that up-sun margin is only `h · cos(elev)` —
+/// bounded by the caster height, never by the cascade's own reach — which is
+/// what makes the square-on-ground box affordable (see the box note in
+/// `update_sun_shadow_camera`).
+///
+/// The old square-in-light-plane box had this budget implicitly, and absurdly:
+/// its ground reach was `half / sin(elev)`, i.e. it rasterized casters up to
+/// roughly `half` TALL — 4 km-tall casters for the outer cascade. Paying map
+/// resolution for casters that do not exist is exactly the waste this pass
+/// removes. Sized per cascade by what actually casts into it: craft + trees
+/// near, structures and modest relief mid, real terrain relief far.
+const CASCADE_MAX_CASTER_M: [f32; CASCADE_COUNT] = [60.0, 120.0, 400.0, 1200.0];
 
 // Depth bias / receiver offset are no longer authored here: the shared sampler
 // (`thalos::shadow`) derives them per cascade from the texel size published in
@@ -114,16 +140,17 @@ const SHADOW_NEAR_M: f32 = 0.5;
 /// tree tiles cast into the rig only out to `TREE_SHADOW_CASTER_MAX_M` (6 km —
 /// rings 0–1 in `rendering/vegetation.rs`; the coarse far rings are sub-pixel
 /// and no longer cast), so shadows "running out" inside that band is a
-/// coverage bug, while beyond it nothing exists to cast. Cascade 0 keeps its
-/// small footprint-scaled box (crisp craft / near-field shadows); cascade 1
-/// always spans the mesh-tree ring (2.4 km + fade); cascade 2 always spans the
-/// whole caster band. The footprint scale still grows any of them further when
+/// coverage bug, while beyond it nothing exists to cast. Cascades 0 and 1 keep
+/// their small footprint-scaled boxes (crisp craft / near-field shadows);
+/// cascade 2 always spans the mesh-tree ring (2.4 km + fade); cascade 3 always
+/// spans the whole caster band. The footprint scale still grows any of them
+/// further when
 /// the vantage demands it. (Previously 6.5 / 23.5 km to chase the 22 km
 /// impostor band — ~3.2 / 11.5 m per texel, which made every shadow past the
 /// near cascade a coarse blob. The far field beyond the caster band belongs to
 /// the heightfield horizon term (W12), not to stretched cascades — the
 /// MSFS-style shadow-map / terrain-shadow split.)
-const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 3_000.0, 6_500.0];
+const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 0.0, 3_000.0, 6_500.0];
 
 /// Depth margin (m) bracketing terrain relief above/below the centre's tangent
 /// plane. With band-wide boxes, casters on hills inside the box sit well above
@@ -164,6 +191,33 @@ const SHADOW_SLACK_MAX_M: f32 = 80_000.0;
 /// vanish the moment the camera boomed out — the "shadows only at some
 /// distances" bug).
 const SHADOW_MAX_ALTITUDE_M: f32 = 50_000.0;
+
+/// Altitude (AGL, m) at which craft-local mode is LEFT again — the low edge of a
+/// hysteresis band on [`SHADOW_MAX_ALTITUDE_M`].
+///
+/// The mode switch is a cliff, not a fade: entering it parks cascades 1–2 with
+/// zeroed matrices, so every ground shadow in the world turns off in one frame.
+/// With a single hard threshold, a camera loitering near 50 km AGL — hovering,
+/// or oscillating a few metres on a smoothed follow cam — re-crossed it
+/// constantly and switched the entire ground shadow world on and off at frame
+/// rate. A 10 km band means the round trip needs a deliberate 10 km descent,
+/// which no jitter produces. The gauge tell was `active_cascades` alternating
+/// 3 → 1 → 3 between one-second samples.
+const SHADOW_CRAFT_LOCAL_EXIT_M: f32 = 40_000.0;
+
+/// Ratio between the demanded and current footprint scale beyond which the
+/// smoother is bypassed and the scale snaps.
+///
+/// This exists for genuine DISCONTINUITIES (a teleport, a viewpoint jump, the
+/// first frame) where crawling in over `SHADOW_FOOTPRINT_SMOOTH_TAU_S` would
+/// just be wrong. It was 2.0, which ordinary flight trips constantly — every
+/// doubling of camera AGL, i.e. a routine climb — and each trip steps every
+/// cascade's texel size, and with it the texel-proportional foliage depth bias,
+/// by 2× in ONE frame. That is precisely the scale pop the smoother was
+/// introduced to remove (see `SHADOW_FOOTPRINT_SMOOTH_TAU_S`), left reachable by
+/// a threshold set too low. 8× is past anything continuous camera motion
+/// produces at a plausible frame rate.
+const SHADOW_FOOTPRINT_SNAP_RATIO: f32 = 8.0;
 
 /// Cap for the view footprint scale. At 32× the far cascade reaches 128 km and
 /// the near cascade's texel is ~6 m — coarse, but shadows that far from the
@@ -304,6 +358,7 @@ fn sync_shadow_receivers(
                     material.sun_shadow_map_0 = state.images[0].clone();
                     material.sun_shadow_map_1 = state.images[1].clone();
                     material.sun_shadow_map_2 = state.images[2].clone();
+                    material.sun_shadow_map_3 = state.images[3].clone();
                 }
             }
         };
@@ -319,6 +374,7 @@ fn sync_shadow_receivers(
             material.extension.sun_shadow_map_0 = state.images[0].clone();
             material.extension.sun_shadow_map_1 = state.images[1].clone();
             material.extension.sun_shadow_map_2 = state.images[2].clone();
+            material.extension.sun_shadow_map_3 = state.images[3].clone();
         }
     }
     if let Some(assets) = impostors.as_deref_mut() {
@@ -327,6 +383,7 @@ fn sync_shadow_receivers(
             material.extension.sun_shadow_map_0 = state.images[0].clone();
             material.extension.sun_shadow_map_1 = state.images[1].clone();
             material.extension.sun_shadow_map_2 = state.images[2].clone();
+            material.extension.sun_shadow_map_3 = state.images[3].clone();
         }
     }
     if let Some(assets) = legacy_ground.as_deref_mut() {
@@ -335,6 +392,7 @@ fn sync_shadow_receivers(
             material.sun_shadow_map_0 = state.images[0].clone();
             material.sun_shadow_map_1 = state.images[1].clone();
             material.sun_shadow_map_2 = state.images[2].clone();
+            material.sun_shadow_map_3 = state.images[3].clone();
         }
     }
     if let Some(assets) = tiles.as_deref_mut() {
@@ -343,6 +401,7 @@ fn sync_shadow_receivers(
             material.extension.sun_shadow_map_0 = state.images[0].clone();
             material.extension.sun_shadow_map_1 = state.images[1].clone();
             material.extension.sun_shadow_map_2 = state.images[2].clone();
+            material.extension.sun_shadow_map_3 = state.images[3].clone();
             if let Some(contact) = contact.as_deref() {
                 material.extension.contact_shadow_map = contact.handle.clone();
             }
@@ -365,6 +424,33 @@ impl Plugin for SunShadowPlugin {
                     sync_craft_shadow,
                 )
                     .chain()
+                    // MUST run after big_space has settled every `CellCoord` for
+                    // this frame. `CellCoord::recenter_large_transforms` is
+                    // registered PLAIN in `PostUpdate` by `BigSpaceCorePlugin` —
+                    // it is NOT inside `TransformSystems::Propagate` — so
+                    // `.before(TransformSystems::Propagate)` alone leaves it
+                    // completely unordered against this chain, and the
+                    // multithreaded executor is free to slot it *between*
+                    // `update_real_space_origin` (which reads the floating
+                    // origin's cell) and `update_sun_shadow_camera` (which reads
+                    // the same cell again). On the frames where it did, the whole
+                    // cascade rig was placed one 1 km grid cell away from the
+                    // world it was meant to cover — cascade 0's half-extent is
+                    // ~450 m, so every near-field receiver fell out of the crisp
+                    // cascade and dropped to the coarse one, whose foliage bias
+                    // erases tree/shrub shadows outright. Non-deterministic frame
+                    // to frame ⇒ shadows flickering in and out while the camera
+                    // moved (INC-20260730T223451Z; the tell is
+                    // `origin_frame_error_m` landing on an exact multiple of the
+                    // 1 km cell size, which `just diag` reads as
+                    // `shadow_frame_desync`).
+                    //
+                    // Order against the SYSTEM, never the enclosing
+                    // `BigSpaceSystems::RecenterLargeTransforms` set: that set
+                    // also contains `BigSpace::find_floating_origin`, which *is*
+                    // inside `TransformSystems::Propagate`, so an `.after(set)`
+                    // here would form a cycle with the `.before` below.
+                    .after(CellCoord::recenter_large_transforms)
                     .before(TransformSystems::Propagate),
             )
             .add_systems(Last, sync_shadow_receivers);
@@ -428,6 +514,8 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
             TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
         let color_handle = images.add(color);
 
+        // Spawn-time baseline only — `update_sun_shadow_camera` overwrites this
+        // every frame with the live square-on-ground extents (U ≠ V).
         let half = CASCADE_HALF_EXTENTS_M[index];
         commands.spawn((
             Camera3d {
@@ -466,18 +554,43 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
 }
 
 /// Orthographic clip matrix matching Bevy's reverse-z convention for a cascade
-/// of the given half-extent + far plane (`OrthographicProjection::get_clip_from_view`
+/// of the given half-extents + far plane (`OrthographicProjection::get_clip_from_view`
 /// swaps near/far). Built by hand so it stays in lockstep with the camera
 /// regardless of when Bevy's projection-update system runs this frame.
-fn cascade_clip_from_view(half_extent: f32, far: f32) -> Mat4 {
-    Mat4::orthographic_rh(
-        -half_extent,
-        half_extent,
-        -half_extent,
-        half_extent,
-        far,
-        SHADOW_NEAR_M,
-    )
+///
+/// Takes the two half-extents separately: the box is square on the GROUND, not
+/// in the light plane, so U (cross-sun) and V (along-sun) differ (see the box
+/// note in [`update_sun_shadow_camera`]). It stays SYMMETRIC about the camera —
+/// the up-sun caster margin is applied by sliding the eye along the V axis, not
+/// by an off-centre frustum, so the live [`OrthographicProjection`] (which is
+/// centred by construction) keeps matching this matrix exactly.
+fn cascade_clip_from_view(half_u: f32, half_v: f32, far: f32) -> Mat4 {
+    Mat4::orthographic_rh(-half_u, half_u, -half_v, half_v, far, SHADOW_NEAR_M)
+}
+
+/// Everything [`update_sun_shadow_camera`] must remember between frames.
+///
+/// One `Local` rather than six: the system sits at Bevy's `SystemParam` tuple
+/// ceiling, and these fields are one concept anyway — the state that keeps
+/// cascade placement STABLE frame to frame. Every field here exists because
+/// recomputing it from scratch each frame made something visibly jitter.
+#[derive(Default)]
+struct SunShadowMemory {
+    /// Seconds accumulated since the last `stability_gauge` emission (1 Hz).
+    diagnostic_elapsed_s: f32,
+    /// Body-fixed texel-snap anchor — see the snap note in the system body.
+    snap_anchor: Option<(BodyId, DVec3)>,
+    /// Smoothed view-footprint scale (`SHADOW_FOOTPRINT_SMOOTH_TAU_S`).
+    footprint_scale: f32,
+    /// Previous frame's light basis, parallel-transported so the cascade box
+    /// does not spin about the sun axis as the basis is rebuilt.
+    previous_light_right: Option<Vec3>,
+    /// Latched craft-local mode — hysteresis, see [`SHADOW_CRAFT_LOCAL_EXIT_M`].
+    craft_local: bool,
+    /// Last terrain height that actually resolved, and the body it belongs to.
+    /// Held across misses so a cold height source cannot step the cascade
+    /// centre and footprint (see where it is read).
+    last_terrain_h: Option<(BodyId, f64)>,
 }
 
 /// Aim every cascade camera down the sun over the craft and publish their
@@ -503,19 +616,14 @@ fn update_sun_shadow_camera(
             &mut Camera,
             &mut Projection,
             &SunShadowCascade,
+            Option<&bevy::camera::visibility::VisibleEntities>,
         ),
         Without<ShipCamera>,
     >,
     mut state: ResMut<SunShadowState>,
-    mut diagnostic_elapsed_s: Local<f32>,
-    // Body-fixed texel-snap anchor (see the snap note below) + the current
-    // quantized footprint step (power-of-two, with shrink hysteresis) + the
-    // continuously-smoothed footprint and transported light basis.
-    mut snap_anchor: Local<Option<(BodyId, DVec3)>>,
-    mut footprint_scale: Local<f32>,
-    mut previous_light_right: Local<Option<Vec3>>,
+    mut memory: Local<SunShadowMemory>,
 ) {
-    *diagnostic_elapsed_s += real_time.delta_secs();
+    memory.diagnostic_elapsed_s += real_time.delta_secs();
 
     'resolve: {
         let Some(states) = cache.states.as_deref() else {
@@ -524,7 +632,22 @@ fn update_sun_shadow_camera(
         let (Ok(root_grid), Ok((cam_cell, cam_xform))) = (grid.single(), ship_cam.single()) else {
             break 'resolve;
         };
-        let camera_world = root_grid.grid_position_double(cam_cell, cam_xform);
+        // Where is the view? The `ViewAnchor` is the one coherent answer
+        // (body-fixed, matching epoch — see `view_anchor.rs`); the raw
+        // ShipCamera pose is only the fallback for frames before the anchor
+        // first resolves. The raw entity is NOT the view whenever a mode poses
+        // the view elsewhere: the flight follow-cam writes it at the CRAFT
+        // mid-frame before the god-view/capture drivers re-pose it, so this
+        // system — sampling in PostUpdate, between those writers — read the
+        // craft. With the hub's placeholder craft parked in a 200 km orbit,
+        // the craft-local gate below latched self-shadow-only mode at a 600 m
+        // god view, parking every ground cascade and erasing all structure and
+        // tree shadows while the craft kept its own
+        // (INC-20260731T004704Z-craft-local-gate-read-the-craft).
+        let camera_world = match view_anchor.resolved.filter(|a| states.get(a.body).is_some()) {
+            Some(anchor) => anchor.cam_world(states),
+            None => root_grid.grid_position_double(cam_cell, cam_xform),
+        };
         let cam_pos = origin.to_render(camera_world);
 
         let mut best: Option<(BodyId, f32, f32)> = None;
@@ -547,8 +670,16 @@ fn update_sun_shadow_camera(
         // Off-surface, don't disable — switch to craft-local self-shadow mode
         // (see `SHADOW_MAX_ALTITUDE_M`). The gate is the CAMERA's altitude, so
         // any near-surface view (flight, god view, freecam) keeps ground
-        // shadows regardless of where the craft is.
-        let craft_local = altitude > SHADOW_MAX_ALTITUDE_M;
+        // shadows regardless of where the craft is. Latched across a hysteresis
+        // band, because the switch parks cascades 1–2 outright: a bare
+        // threshold let a camera loitering at the boundary strobe every ground
+        // shadow in the world (see `SHADOW_CRAFT_LOCAL_EXIT_M`).
+        let craft_local = if memory.craft_local {
+            altitude > SHADOW_CRAFT_LOCAL_EXIT_M
+        } else {
+            altitude > SHADOW_MAX_ALTITUDE_M
+        };
+        memory.craft_local = craft_local;
         let (Some(star), Some(body_state)) = (states.first(), states.get(active_id)) else {
             break 'resolve;
         };
@@ -627,12 +758,32 @@ fn update_sun_shadow_camera(
         let dir_body = anchor_here
             .map(|a| a.cam_dir.as_vec3())
             .unwrap_or_else(|| (body_state.orientation.inverse() * radial_dir).as_vec3());
-        let terrain_h = height_sources
-            .get(active_id)
-            .and_then(|hs| {
-                hs.sample_height_m(dir_body, crate::local_physics::PHYSICS_QUERY_TILE_LOD_M)
-            })
-            .unwrap_or(0.0) as f64;
+        // A miss HOLDS THE LAST RESOLVED HEIGHT for this body rather than
+        // snapping to the datum. The datum fallback is a step equal to the whole
+        // site elevation, and `terrain_h` feeds both the cascade centre and
+        // (through `cam_agl`) the footprint scale, where the demanded box moves
+        // by up to 6× that step — so an intermittently-cold height source
+        // shoved every cascade extent, texel size, and derived depth bias around
+        // between neighbouring frames. Holding the last good sample is strictly
+        // closer than 0.0 for a camera that has not teleported, and the source
+        // resolves again within a few frames once tiles stream in. The datum is
+        // still the floor before any sample has ever landed, which reproduces
+        // the old centring exactly.
+        let sampled_h = height_sources.get(active_id).and_then(|hs| {
+            hs.sample_height_m(dir_body, crate::local_physics::PHYSICS_QUERY_TILE_LOD_M)
+        });
+        let terrain_h = match sampled_h {
+            Some(h) => {
+                let h = h as f64;
+                memory.last_terrain_h = Some((active_id, h));
+                h
+            }
+            None => memory
+                .last_terrain_h
+                .filter(|(body, _)| *body == active_id)
+                .map(|(_, h)| h)
+                .unwrap_or(0.0),
+        };
         let player_alt = (r - body_radius_m as f64 - terrain_h) as f32;
         // Render space here means the BIG_SPACE render frame — the floating
         // origin's cell origin (`RealSpaceOrigin`), which is what the casters'
@@ -684,13 +835,15 @@ fn update_sun_shadow_camera(
             let raw = (required_half_m / CASCADE_HALF_EXTENTS_M[CASCADE_COUNT - 1])
                 .clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
             let target = (raw * SHADOW_FOOTPRINT_HEADROOM).clamp(1.0, SHADOW_MAX_FOOTPRINT_SCALE);
-            if *footprint_scale <= 0.0 || target / footprint_scale.max(1.0e-3) > 2.0 {
-                *footprint_scale = target;
+            if memory.footprint_scale <= 0.0
+                || target / memory.footprint_scale.max(1.0e-3) > SHADOW_FOOTPRINT_SNAP_RATIO
+            {
+                memory.footprint_scale = target;
             } else {
                 let alpha = 1.0 - (-real_time.delta_secs() / SHADOW_FOOTPRINT_SMOOTH_TAU_S).exp();
-                *footprint_scale += (target - *footprint_scale) * alpha;
+                memory.footprint_scale += (target - memory.footprint_scale) * alpha;
             }
-            *footprint_scale
+            memory.footprint_scale
         };
         // ── Up-sun depth slack ────────────────────────────────────────────────
         // The cascade box is square in the LIGHT plane, but its intersection
@@ -707,26 +860,55 @@ fn update_sun_shadow_camera(
         // fit. Clamped: below ~4° sun the reach diverges (and shadows are
         // horizon-length anyway), and a hard cap bounds the depth range at
         // extreme footprints.
+        //
+        // **The reach argument is now the GROUND half-extent, not the light-plane
+        // one.** With the square-on-ground box the azimuth reach is `half`
+        // outright, so the depth slack a cascade needs is `half · cos(elev)` —
+        // the old `half · cos/sin` was bounding a ground reach the box no longer
+        // has. At a 15° sun that is a ~3.9× shorter depth range for the same
+        // coverage, which tightens Depth32Float precision and shrinks every
+        // bias derived from `1/(far − near)`.
         let sin_elev = sun_dir.dot(up_radial).clamp(SHADOW_MIN_SUN_SIN, 1.0);
-        let ground_slack = |half: f32| -> f32 {
+        let ground_slack_ground_reach = |half: f32| -> f32 {
             let cos_elev = (1.0 - sin_elev * sin_elev).max(0.0).sqrt();
-            (half * cos_elev / sin_elev).min(SHADOW_SLACK_MAX_M)
+            (half * cos_elev).min(SHADOW_SLACK_MAX_M)
         };
         // Rotation is shared by every cascade (only translation differs); any
         // eye distance yields the same rotation.
-        let transported = previous_light_right
-            .map(|right| right - sun_dir * right.dot(sun_dir))
-            .unwrap_or(Vec3::ZERO);
-        let light_right = if transported.length_squared() > 1.0e-6 {
-            transported.normalize()
+        //
+        // ── Why the basis is AZIMUTH-ALIGNED, not parallel-transported ───────
+        // The box below is square on the ground, which means its two light-plane
+        // axes carry DIFFERENT world scales. That is only expressible if the
+        // axes line up with the directions whose scales differ: the sun azimuth
+        // (compressed by `sin(elev)` when the ground projects into the light
+        // plane) and the cross-azimuth direction (1:1). `sun_dir × up_radial` is
+        // exactly the cross-azimuth axis, so it becomes U and the azimuth
+        // becomes V. A parallel-transported roll frame — which is what this was,
+        // for continuity — would sit at an arbitrary angle to both, and an
+        // axis-aligned rectangle in it cannot represent the anisotropy at all.
+        //
+        // Transport is kept for the DEGENERATE case only: within a hair of the
+        // sun crossing the local zenith the cross product vanishes and its
+        // direction is meaningless. That is also precisely where the anisotropy
+        // vanishes (`sin(elev) → 1`, box → square), so the frame is free to spin
+        // there without changing coverage — it only re-rasterizes, and the
+        // smooth `aniso` blend below means extents stay continuous through it.
+        let cross_azimuth = sun_dir.cross(up_radial);
+        let light_right = if cross_azimuth.length_squared() > 1.0e-8 {
+            cross_azimuth.normalize()
         } else {
-            sun_dir
-                .cross(up_radial)
-                .try_normalize()
-                .unwrap_or_else(|| sun_dir.cross(Vec3::X).normalize_or_zero())
+            let transported = memory
+                .previous_light_right
+                .map(|right| right - sun_dir * right.dot(sun_dir))
+                .unwrap_or(Vec3::ZERO);
+            if transported.length_squared() > 1.0e-6 {
+                transported.normalize()
+            } else {
+                sun_dir.cross(Vec3::X).normalize_or_zero()
+            }
         };
         let light_up = sun_dir.cross(light_right).normalize_or_zero();
-        *previous_light_right = Some(light_right);
+        memory.previous_light_right = Some(light_right);
         let light_rotation =
             Quat::from_mat3(&Mat3::from_cols(light_right, light_up, sun_dir)).normalize();
 
@@ -749,14 +931,14 @@ fn update_sun_shadow_camera(
         } else {
             let center_bf =
                 body_state.orientation.inverse() * (center_inertial - body_state.position);
-            let anchor_bf = match *snap_anchor {
+            let anchor_bf = match memory.snap_anchor {
                 Some((b, a))
                     if b == active_id && (a - center_bf).length() < SNAP_ANCHOR_REACH_M =>
                 {
                     a
                 }
                 _ => {
-                    *snap_anchor = Some((active_id, center_bf));
+                    memory.snap_anchor = Some((active_id, center_bf));
                     center_bf
                 }
             };
@@ -764,48 +946,116 @@ fn update_sun_shadow_camera(
             (center_inertial - anchor_inertial).as_vec3()
         };
 
-        // Craft-local mode runs only the crisp near cascade; the far cascades'
-        // matrices are zeroed (the shader's `clip.w <= 0` skip sentinel) and
-        // their cameras deactivated, so their stale depth maps are never read.
-        let active_cascades = if craft_local { 1 } else { CASCADE_COUNT };
+        // Craft-local mode runs the two near cascades; the far ones' matrices
+        // are zeroed (the shader's `clip.w <= 0` skip sentinel) and their
+        // cameras deactivated, so their stale depth maps are never read.
+        // TWO, not one: cascade 0 is now a ±64 m box, which a tall launch stack
+        // can overflow, and up here it is the ONLY caster there is (stock Bevy
+        // CSM is off). Cascade 1's ±400 m brackets any craft this game can
+        // build, so the hull keeps a complete self-shadow while cascade 0 gives
+        // the near panels their detail.
+        let active_cascades = if craft_local { 2 } else { CASCADE_COUNT };
         let mut block = ShadowCascadeBlock::default();
         let mut looks = [Transform::IDENTITY; CASCADE_COUNT];
-        let mut halves = [0.0_f32; CASCADE_COUNT];
+        let mut half_us = [0.0_f32; CASCADE_COUNT];
+        let mut half_vs = [0.0_f32; CASCADE_COUNT];
         let mut fars = [0.0_f32; CASCADE_COUNT];
+        // ── Square on the GROUND, not in the light plane ─────────────────────
+        //
+        // The map is sampled by receivers standing on the ground, so what has to
+        // be uniform is the texel's footprint THERE. Projecting ground → light
+        // plane compresses the sun-azimuth direction by `sin(elev)` and leaves
+        // the cross-azimuth direction alone. A box that is square in the light
+        // plane therefore covers `half / sin(elev)` of ground along the azimuth
+        // while spending the same 4096 texels on it — at a 15° sun that is a
+        // ~3.9× coarser ground texel in one direction than the other, and it is
+        // the whole reason near-field shadows read as an elongated staircase.
+        //
+        // So: shrink the V (along-sun) half-extent by `sin(elev)`, which makes
+        // the ground footprint a SQUARE of half-width `half` and the ground
+        // texel isotropic. This is not a coverage cut in any direction that was
+        // being used — the old box's extra along-azimuth reach was an accident
+        // of the projection, not a decision, and it bought ground nobody framed.
+        //
+        // The one thing genuinely lost is casters standing up-sun of the covered
+        // ground, whose shadows fall INTO it. Those are bounded by caster height
+        // (`CASCADE_MAX_CASTER_M`): a caster `h` tall reaches `h / tan(elev)`
+        // down-sun, which is only `h · cos(elev)` of extra LIGHT-space margin.
+        // That margin is added to V and paid for by sliding the eye up-sun by
+        // half of it, keeping the frustum symmetric.
+        //
+        // **Craft-local mode opts out.** All of the above reasons about a GROUND
+        // plane the receivers stand on. In orbit there is none — the receiver is
+        // the hull, a 3-D object, and the light-plane box is already the right
+        // shape for it. Compressing V by `sin(elev)` there would squash the box
+        // along the azimuth and clip the craft out of its own shadow map, and
+        // the up-sun caster margin has nothing to catch. `sin_e = 1, cos_e = 0`
+        // makes the box square and the margin zero, i.e. exactly the behaviour
+        // this mode had before.
+        let (sin_e, cos_e) = if craft_local {
+            (1.0, 0.0)
+        } else {
+            let s = sin_elev;
+            (s, (1.0 - s * s).max(0.0).sqrt())
+        };
         for i in 0..CASCADE_COUNT {
             if i >= active_cascades {
                 block.view_proj[i] = Mat4::ZERO;
                 continue;
             }
             let half = (CASCADE_HALF_EXTENTS_M[i] * footprint).max(CASCADE_MIN_HALF_M[i]);
-            // Up-sun eye offset + far plane bracket this cascade's whole
-            // ground footprint along the sun azimuth (see the slack note) plus
-            // terrain relief above/below the tangent plane.
-            let slack = ground_slack(half) + SHADOW_RELIEF_MARGIN_M;
+            // U spans the cross-sun ground directly; V spans the same ground
+            // distance once compressed, plus the up-sun caster margin.
+            let caster_margin = CASCADE_MAX_CASTER_M[i] * footprint * cos_e;
+            let half_u = half;
+            let half_v = half * sin_e + 0.5 * caster_margin;
+            // Up-sun eye offset + far plane bracket this cascade's whole ground
+            // footprint along the sun azimuth (see the slack note) plus terrain
+            // relief above/below the tangent plane. The ground reach along the
+            // azimuth is now `half`, not `half / sin(elev)`, so the slack — and
+            // with it the ortho depth range, and every bias derived from it —
+            // collapses by that same factor at a low sun.
+            let slack = ground_slack_ground_reach(half) + SHADOW_RELIEF_MARGIN_M;
             let back = SHADOW_BACK_DISTANCE_M * footprint + slack;
             let far = CASCADE_FARS_M[i] * footprint + 2.0 * slack;
-            halves[i] = half;
+            half_us[i] = half_u;
+            half_vs[i] = half_v;
             fars[i] = far;
             // Texel-snap the cascade centre to ITS shadow-map grid in the light
             // plane, so the ortho frustum slides in whole-texel steps and shadow
             // edges stop crawling as the centre drifts (stable CSM). Each cascade
-            // snaps to its own (coarser, near→far) grid. The phase comes from
+            // snaps to its own (coarser, near→far) grid — and now to its own
+            // grid PER AXIS, since U and V texels differ. The phase comes from
             // `snap_rel` — the centre RELATIVE to a body-fixed anchor — so the
             // grid co-moves with the rotating ground (see the snap note above).
-            let texel = (2.0 * half) / SHADOW_MAP_SIZE as f32;
+            let texel_u = (2.0 * half_u) / SHADOW_MAP_SIZE as f32;
+            let texel_v = (2.0 * half_v) / SHADOW_MAP_SIZE as f32;
             let cr = snap_rel.dot(light_right);
             let cu = snap_rel.dot(light_up);
-            let snap = ((cr / texel).round() * texel - cr) * light_right
-                + ((cu / texel).round() * texel - cu) * light_up;
-            let center_i = center + snap;
+            let snap = ((cr / texel_u).round() * texel_u - cr) * light_right
+                + ((cu / texel_v).round() * texel_v - cu) * light_up;
+            // Slide the box up-sun by half the caster margin so the receiver
+            // region stays centred while the margin lands entirely on the up-sun
+            // side (where casters are) — QUANTIZED TO WHOLE V TEXELS. The margin
+            // varies continuously with sun elevation and footprint, so shifting
+            // by its raw value would hand every cascade a fresh sub-texel phase
+            // every frame and re-rasterize every shadow edge — precisely the
+            // crawl the snap above exists to prevent, re-entered by the back
+            // door.
+            let v_shift = (0.5 * caster_margin / texel_v).round() * texel_v;
+            let center_i = center + snap + light_up * v_shift;
             let eye_i = center_i + sun_dir * back;
             let look_i = Transform::from_translation(eye_i).with_rotation(light_rotation);
-            block.view_proj[i] = cascade_clip_from_view(half, far) * look_i.to_matrix().inverse();
+            block.view_proj[i] =
+                cascade_clip_from_view(half_u, half_v, far) * look_i.to_matrix().inverse();
             // x = clip units per metre of light-space depth (orthographic z is
-            // linear), y = texel size in world metres — the shared sampler
-            // derives its capped, texel-proportional bias + receiver offset
-            // from these (see the bias model note in `shadow.wgsl`).
-            block.params[i] = Vec4::new(1.0 / (far - SHADOW_NEAR_M), texel, 0.0, 0.0);
+            // linear), y/z = texel size in world metres on the U/V axes — the
+            // shared sampler derives its capped, texel-proportional bias +
+            // receiver offset from `y` and shapes its PCSS kernel from the pair
+            // (see the bias model note in `shadow.wgsl`). `y` stays the U texel
+            // specifically so the bias model keeps the exact meaning it was
+            // calibrated against: U is the axis with no projective compression.
+            block.params[i] = Vec4::new(1.0 / (far - SHADOW_NEAR_M), texel_u, texel_v, 0.0);
             looks[i] = look_i;
         }
         // z = the contact-shadow gate (W18a). Published from the rig rather than
@@ -823,7 +1073,12 @@ fn update_sun_shadow_camera(
         block.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
         state.block = block;
 
-        for (mut tf, mut cam, mut proj, cascade) in &mut shadow_cams {
+        let mut dbg_visible = [0usize; CASCADE_COUNT];
+        for (mut tf, mut cam, mut proj, cascade, visible) in &mut shadow_cams {
+            if let Some(visible) = visible {
+                dbg_visible[cascade.index as usize] =
+                    visible.len(core::any::TypeId::of::<bevy::mesh::Mesh3d>());
+            }
             let idx = cascade.index as usize;
             let on = idx < active_cascades;
             if on {
@@ -831,21 +1086,43 @@ fn update_sun_shadow_camera(
                 // Keep the LIVE camera projection in lockstep with the
                 // hand-built `block.view_proj` — the spawn-time projection only
                 // covers the unscaled baseline footprint.
-                *proj = Projection::Orthographic(OrthographicProjection {
+                let mut ortho = OrthographicProjection {
+                    // Width/height are the U/V half-extents doubled — the box is
+                    // square on the ground, not in the light plane, so these
+                    // differ. `ScalingMode::Fixed` maps them straight onto the
+                    // square map, which IS the anisotropic sampling that makes
+                    // the ground texel isotropic.
                     scaling_mode: ScalingMode::Fixed {
-                        width: halves[idx] * 2.0,
-                        height: halves[idx] * 2.0,
+                        width: half_us[idx] * 2.0,
+                        height: half_vs[idx] * 2.0,
                     },
                     near: SHADOW_NEAR_M,
                     far: fars[idx],
                     ..OrthographicProjection::default_3d()
-                });
+                };
+                // Seat `area` HERE, not later. `get_clip_from_view` (and with
+                // it `update_frusta`'s culling frustum) reads `area`, which
+                // `default_3d()` leaves at a ±1 m placeholder; only
+                // `camera_system` recomputes it from the scaling mode, and
+                // that system is UNORDERED against this one. On frames where
+                // it ran first, `update_frusta` (post-Propagate, reading the
+                // LIVE projection) built a two-metre frustum: km-scale
+                // terrain-tile casters still intersected it, every small
+                // caster (buildings, posts, rocks) was culled out of its own
+                // shadow map, and rendering looked fine because extraction
+                // uses the clip matrix `camera_system` cached the frame
+                // before. `update()` with the map extent is exact for
+                // `ScalingMode::Fixed` (the arguments are ignored) and makes
+                // the write order-independent
+                // (INC-20260731T011523Z-cascade-frustum-default-area).
+                ortho.update(SHADOW_MAP_SIZE as f32, SHADOW_MAP_SIZE as f32);
+                *proj = Projection::Orthographic(ortho);
             }
             cam.is_active = on;
         }
 
-        if *diagnostic_elapsed_s >= 1.0 {
-            *diagnostic_elapsed_s = 0.0;
+        if memory.diagnostic_elapsed_s >= 1.0 {
+            memory.diagnostic_elapsed_s = 0.0;
             let expected_origin = root_grid.grid_position_double(cam_cell, &Transform::IDENTITY);
             info!(
                 target: "thalos::diagnostic::shadow",
@@ -853,17 +1130,38 @@ fn update_sun_shadow_camera(
                 body_id = active_id,
                 origin_frame_error_m = origin.position.distance(expected_origin),
                 footprint_scale = footprint,
-                cascade0_texel_m = block.params[0].y,
+                // Both axes: the box is square on the ground, so these diverge
+                // with sun elevation and their RATIO is the tell that the
+                // anisotropy is being applied at all (1.0 ⇒ overhead sun or a
+                // regression back to a light-plane-square box).
+                cascade0_texel_u_m = block.params[0].y,
+                cascade0_texel_v_m = block.params[0].z,
                 active_cascades = active_cascades,
                 sun_sin_elev = sun_dir.dot(up_radial),
                 night_fade = night_fade,
+                // The altitude the craft-local gate actually saw this frame,
+                // plus the latch it produced. `active_cascades` alone cannot
+                // distinguish "the gate's camera altitude is wrong" from "the
+                // hysteresis failed to unlatch" (INC pending: craft-local stuck
+                // on at a surface god view, killing every non-craft shadow).
+                gate_alt_m = altitude,
+                craft_local = craft_local,
+                // Meshes that passed culling for each cascade camera LAST
+                // frame (`VisibleEntities` is written by check_visibility
+                // after this system runs). Terrain caster twins alone put
+                // this in the hundreds; a near-zero count with props in
+                // frame means the casters are being CULLED, not mis-drawn.
+                cascade0_visible = dbg_visible[0] as u32,
+                cascade1_visible = dbg_visible[1] as u32,
+                cascade2_visible = dbg_visible[2] as u32,
+                cascade3_visible = dbg_visible[3] as u32,
                 "shadow stability gauge"
             );
         }
         return;
     }
 
-    for (_tf, mut cam, _proj, _cascade) in &mut shadow_cams {
+    for (_tf, mut cam, _proj, _cascade, _visible) in &mut shadow_cams {
         cam.is_active = false;
     }
     state.block.gate.x = 0.0;

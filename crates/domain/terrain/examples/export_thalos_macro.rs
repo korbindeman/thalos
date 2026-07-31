@@ -104,7 +104,11 @@ fn main() -> std::io::Result<()> {
     let width = (std::f64::consts::TAU * f64::from(THALOS_RADIUS_M) / COARSE_PX_M).round() as usize;
     let surface = ProceduralSurface::new(THALOS_RADIUS_M, THALOS_BODY_SEED);
 
-    println!("sampling {width}x{} at {:.0} m/px …", width / 2, COARSE_PX_M);
+    println!(
+        "sampling {width}x{} at {:.0} m/px …",
+        width / 2,
+        COARSE_PX_M
+    );
     let chart = ConditioningChart::build(&surface, width, SAMPLE_LOD_M);
 
     for (name, data) in [
@@ -131,7 +135,12 @@ fn main() -> std::io::Result<()> {
     println!("\nchannel distributions — LAND ONLY (compare against the producer's prior):");
     percentiles("elev m", &chart.elevation_m, &land_mask, &weights);
     percentiles("temp C", &chart.temperature_c, &land_mask, &weights);
-    percentiles("temp sd x100", &chart.temperature_sd_c100, &land_mask, &weights);
+    percentiles(
+        "temp sd x100",
+        &chart.temperature_sd_c100,
+        &land_mask,
+        &weights,
+    );
     percentiles("precip mm", &chart.precipitation_mm, &land_mask, &weights);
     percentiles("precip cv", &chart.precipitation_cv, &land_mask, &weights);
     percentiles("relief m", &chart.relief_m, &land_mask, &weights);
@@ -178,6 +187,9 @@ fn main() -> std::io::Result<()> {
         chart.width, chart.height
     );
     std::fs::write(out_dir.join("thalos_macro.json"), meta)?;
-    println!("\nwrote 5 channels + thalos_macro.json to {}", out_dir.display());
+    println!(
+        "\nwrote 5 channels + thalos_macro.json to {}",
+        out_dir.display()
+    );
     Ok(())
 }

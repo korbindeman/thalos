@@ -39,10 +39,10 @@ use bevy::tasks::{AsyncComputeTaskPool, Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, GrassBladeLod, GrassMaterial, GrassProfile, GrassTileBuildInput, GrassTileKey,
-    GrassTileMesh, LIGHT_AT_1AU, ScatterRegion, ScatterTreatment, TerrainShadingStyle,
-    build_grass_card_atlas, build_grass_tile_mesh, fallback_shadow_map, grass_tile_frame,
-    grass_tile_key, grass_tiles_per_side,
+    AU_M, CASCADE_COUNT, GrassBladeLod, GrassMaterial, GrassProfile, GrassTileBuildInput,
+    GrassTileKey, GrassTileMesh, LIGHT_AT_1AU, ScatterRegion, ScatterTreatment,
+    TerrainShadingStyle, build_grass_card_atlas, build_grass_tile_mesh, fallback_shadow_map,
+    grass_tile_frame, grass_tile_key, grass_tiles_per_side,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_terrain::TerrainFlatten;
@@ -760,11 +760,11 @@ fn ensure_ring_materials(
     if grass.materials.len() == GRASS_RINGS.len() {
         return;
     }
-    let maps: [Handle<Image>; 3] = match sun_shadow {
+    let maps: [Handle<Image>; CASCADE_COUNT] = match sun_shadow {
         Some(s) => s.images.clone(),
         None => {
             let fb = images.add(fallback_shadow_map());
-            [fb.clone(), fb.clone(), fb]
+            core::array::from_fn(|_| fb.clone())
         }
     };
     // The baked clump-card atlas the far ring's CARD quads sample; one image
@@ -781,6 +781,7 @@ fn ensure_ring_materials(
                 sun_shadow_map_0: maps[0].clone(),
                 sun_shadow_map_1: maps[1].clone(),
                 sun_shadow_map_2: maps[2].clone(),
+                sun_shadow_map_3: maps[3].clone(),
                 card_atlas: card_atlas.clone(),
                 ..default()
             })

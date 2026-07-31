@@ -246,7 +246,13 @@ fn machine_budget_bytes() -> usize {
 /// arbitrary times, so a share fixed at startup would be wrong for whichever
 /// process was already running — the one that would keep its full entitlement
 /// precisely when a peer appears.
-fn residency_budget_bytes() -> usize {
+///
+/// Public because it is the denominator of
+/// [`TileTerrainRoot::resident_bytes`]: any readout of tile residency that
+/// omits it cannot tell "512 MiB, plenty of room" from "512 MiB, about to
+/// brake". `usize::MAX` means the budget is disabled
+/// (`THALOS_TILE_BUDGET_MB=0`).
+pub fn residency_budget_bytes() -> usize {
     let machine = machine_budget_bytes();
     if machine == usize::MAX {
         return usize::MAX;
@@ -541,7 +547,18 @@ impl TerrainTileProvider for SurfaceQueryProvider {
 /// noise). Mirrored as `TILE_WRAP_M` in the shader.
 pub const TILE_WRAP_M: f64 = 8192.0;
 
-/// Skirt depth: chord sag + band-gate allowance (shared probe formula).
+/// Fallback skirt depth for a provider with **no relief metadata**
+/// (`height_range_m() == INFINITY`): chord sag + band-gate allowance (the
+/// original probe formula).
+///
+/// Every real provider has a finite envelope, and those tiles skirt down to
+/// the body-wide floor sphere instead (see the curtain construction in
+/// [`build_tile_mesh`]). This formula's 150 m clamp is exactly what made
+/// inter-level cracks visible: its own allowance model (`spacing × 0.06`)
+/// wants ~550 m at Thalos's `MIN_LEVEL` spacing, and a *transient* junction —
+/// a fast-orbiting eye juxtaposing freshly-revealed coarse tiles with
+/// lingering fine ones, levels apart — disagrees by far more than any
+/// per-own-spacing drop can cover (`skirt_tests::junction_cracks_exceed_the_old_skirt_clamp`).
 pub fn skirt_drop_m(sample_spacing_m: f64, radius_m: f64) -> f32 {
     let sag = sample_spacing_m * sample_spacing_m / (8.0 * radius_m);
     (sag * 4.0 + sample_spacing_m * 0.06).clamp(0.5, 150.0) as f32
@@ -570,7 +587,7 @@ fn debug_height_scale() -> f64 {
     })
 }
 
-fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
+fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64, relief_m: f64) -> BuiltTile {
     let key = tile.key;
     let halo = TILE_HALO;
     let side = SurfaceTile::grid_side();
@@ -673,7 +690,26 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
         );
     }
 
-    let drop_m = skirt_drop_m(tile.sample_spacing_m, radius_m);
+    // Skirt: every border vertex hangs a radial curtain down to a body-wide
+    // floor sphere below the deepest terrain (`radius − relief`, the provider's
+    // conservative absolute-height envelope). Depth here is what decides
+    // whether an inter-level junction reads as ground or as a see-through
+    // crack: the two edges disagree by the coarser side's chord error plus the
+    // LOD-gated detail difference, and while streaming settles after a fast
+    // camera move the resident mosaic transiently juxtaposes tiles *levels*
+    // apart — freshly-landed coarse ground against lingering fine tiles —
+    // where that disagreement reaches hundreds of metres. A curtain to the
+    // floor sphere covers ANY resident partner by construction: no partner
+    // surface (or chord between its samples) can sit below the body's own
+    // minimum terrain. Settled junctions bury the walls under the neighbour's
+    // surface, so the extra depth costs no vertices, no VRAM, and no visible
+    // geometry — only a deeper mesh AABB.
+    //
+    // A provider without relief metadata (INFINITY) falls back to the original
+    // spacing-scaled drop; feeding an unbounded figure through the curtain
+    // maths would put the floor at −∞, not at "deep enough".
+    let legacy_drop_m = skirt_drop_m(tile.sample_spacing_m, radius_m) as f64;
+    let floor_radius_m = radius_m - relief_m.max(0.0);
     let border: Vec<u32> = {
         let mut b = Vec::new();
         for i in 0..res {
@@ -694,11 +730,13 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64) -> BuiltTile {
     let base = positions.len() as u32;
     for &idx in &border {
         let p = positions[idx as usize];
-        positions.push([
-            p[0] + down.x as f32 * drop_m,
-            p[1] + down.y as f32 * drop_m,
-            p[2] + down.z as f32 * drop_m,
-        ]);
+        let abs = origin + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
+        let bottom = if relief_m.is_finite() {
+            abs.normalize() * floor_radius_m
+        } else {
+            abs + down * legacy_drop_m
+        } - origin;
+        positions.push([bottom.x as f32, bottom.y as f32, bottom.z as f32]);
         normals.push(normals[idx as usize]);
         colors.push(colors[idx as usize]);
         uv0.push(uv0[idx as usize]);
@@ -996,6 +1034,15 @@ impl TileTerrainRoot {
 
     pub fn resident_count(&self) -> usize {
         self.resident.len()
+    }
+
+    /// Tiles the selector currently *wants*, before the brake. Paired with
+    /// [`Self::resident_count`] this is what separates "the framing is settled"
+    /// from "the framing is being held back": a desire far above residency
+    /// while [`Self::split_scale`] is under 1.0 is the brake biting, and a
+    /// capture receipt records both so the reader does not have to guess.
+    pub fn desired_count(&self) -> usize {
+        self.desired.len()
     }
 
     /// Replace the authored refinement floors (see [`RefinementSite`]).
@@ -1618,6 +1665,9 @@ fn stream_tile_terrain(
     let pool = crate::ground::tile_synthesis_pool::tile_synthesis_pool();
     for key in missing.into_iter().take(budget) {
         let provider = root_ref.provider.clone();
+        // The skirt curtain's floor — per-body constant, cached at root
+        // construction from the provider's height envelope.
+        let relief_m = root_ref.relief_m;
         let task = pool.spawn(async move {
             let started = std::time::Instant::now();
             let tile = provider.request(key, radius);
@@ -1627,7 +1677,7 @@ fn stream_tile_terrain(
                 .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &h| {
                     (lo.min(h), hi.max(h))
                 });
-            let built = build_tile_mesh(&tile, radius);
+            let built = build_tile_mesh(&tile, radius, relief_m);
             StreamedTile {
                 key,
                 built,
@@ -1906,6 +1956,7 @@ mod budget_tests {
                 y: 5,
             }),
             R,
+            RELIEF,
         );
         let vertex_bytes = built.mesh.get_vertex_buffer_size();
         let index_bytes = built
@@ -1938,6 +1989,7 @@ mod budget_tests {
                 y: 5,
             }),
             R,
+            RELIEF,
         );
         assert!(
             !crate::rt::is_raytracing_eligible(&built.mesh),
@@ -2163,7 +2215,7 @@ mod budget_tests {
         // Every level from the pad floor (10 on Thalos) up to the deepest.
         for level in 10..=max_level_for(R) {
             let key = TileKey::containing_dir(center_dir, level);
-            let built = build_tile_mesh(&provider.request(key, R), R);
+            let built = build_tile_mesh(&provider.request(key, R), R, RELIEF);
             let lift = level as f64 * LEVEL_RENDER_LIFT_M;
             let positions = built
                 .mesh
@@ -2470,6 +2522,139 @@ mod horizon_tests {
                 gated.len(),
                 open.len()
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod skirt_tests {
+    use super::*;
+
+    const R: f64 = 3_186_000.0;
+    /// Test surface: macro relief only — 2 km amplitude at ~29 km wavelength, a
+    /// rugged massif. Present identically at every LOD, so the inter-level edge
+    /// disagreement measured below is PURE sampling geometry (coarse chords
+    /// cutting across relief the fine edge resolves); the real providers'
+    /// LOD-gated detail bands only widen it.
+    const AMP_M: f64 = 2_000.0;
+
+    fn h(dir: DVec3) -> f64 {
+        AMP_M * (dir.x * 700.0).sin() * (dir.z * 640.0).cos()
+    }
+
+    /// The falsifier for the transient-seam mechanism (fast orbit at altitude:
+    /// tile junctions visibly crack open until streaming settles). A junction
+    /// three levels deep — which the 2:1 balance forbids *settled* but the
+    /// resident mosaic produces *transiently* (freshly-landed coarse ground
+    /// beside lingering fine tiles) — disagrees across the shared edge by more
+    /// than the old per-own-spacing skirt drops could curtain, on either side.
+    /// If terrain ever becomes tame enough that this stops failing the old
+    /// drops, the floor curtain could be retired for the cheaper formula.
+    #[test]
+    fn junction_cracks_exceed_the_old_skirt_clamp() {
+        let a = TileKey {
+            face: 0,
+            level: 3,
+            x: 3,
+            y: 5,
+        };
+        let coarse_spacing = a.sample_spacing_m(R);
+        let fine_spacing = coarse_spacing / 8.0;
+        // A's right-edge polyline: 3D vertices at its own sampling.
+        let coarse: Vec<DVec3> = (0..TILE_RES)
+            .map(|j| {
+                let t = j as f64 / (TILE_RES - 1) as f64;
+                let dir = a.dir_at(1.0, t);
+                dir * (R + h(dir))
+            })
+            .collect();
+
+        let mut worst_above = 0.0f64; // fine edge above the coarse chord
+        let mut worst_below = 0.0f64; // fine edge below it
+        // Every level-6 tile bordering that edge from the other side.
+        for y6 in (a.y * 8)..((a.y + 1) * 8) {
+            let f = TileKey {
+                face: 0,
+                level: 6,
+                x: (a.x + 1) * 8,
+                y: y6,
+            };
+            for k in 0..TILE_RES {
+                let t_f = k as f64 / (TILE_RES - 1) as f64;
+                let dir = f.dir_at(0.0, t_f);
+                let p_f = dir * (R + h(dir));
+                // The enclosing coarse mesh segment, by shared-edge parameter.
+                let seg = ((y6 - a.y * 8) as f64 + t_f) / 8.0 * (TILE_RES - 1) as f64;
+                let i = (seg as usize).min(TILE_RES - 2);
+                let chord = coarse[i].lerp(coarse[i + 1], seg - i as f64);
+                let gap = (p_f - chord).dot(dir);
+                worst_above = worst_above.max(gap);
+                worst_below = worst_below.max(-gap);
+            }
+        }
+        let coarse_drop = skirt_drop_m(coarse_spacing, R) as f64;
+        let fine_drop = skirt_drop_m(fine_spacing, R) as f64;
+        assert!(
+            worst_above > fine_drop || worst_below > coarse_drop,
+            "the transient junction never out-ran the old skirts (fine edge rises \
+             {worst_above:.0} m over the coarse chord vs a {fine_drop:.0} m fine drop; \
+             dips {worst_below:.0} m under it vs a {coarse_drop:.0} m coarse drop)"
+        );
+    }
+
+    /// The invariant that replaces the old 150 m clamp: every skirt vertex
+    /// lands on the body-wide floor sphere (`radius − relief`), which no
+    /// partner tile's surface — nor any chord between its samples — can
+    /// undercut, since heights are bounded by the same envelope. A junction
+    /// crack of ANY transient level gap therefore backs onto terrain-coloured
+    /// curtain, never onto see-through.
+    #[test]
+    fn skirt_curtains_reach_the_body_floor() {
+        const RELIEF: f64 = 2_500.0; // envelope over the 2 km test amplitude
+        let key = TileKey {
+            face: 0,
+            level: 6,
+            x: 25,
+            y: 42,
+        };
+        let side = SurfaceTile::grid_side();
+        let step = 1.0 / (TILE_RES - 1) as f64;
+        let mut heights = Vec::with_capacity(side * side);
+        for j in 0..side {
+            for i in 0..side {
+                let s = (i as f64 - TILE_HALO as f64) * step;
+                let t = (j as f64 - TILE_HALO as f64) * step;
+                heights.push(h(key.dir_at(s, t)) as f32);
+            }
+        }
+        let tile = SurfaceTile {
+            key,
+            sample_spacing_m: key.sample_spacing_m(R),
+            heights_m: heights,
+            albedo_linear: vec![[0.4, 0.4, 0.4]; side * side],
+            bands: vec![[0.0, 0.0]; side * side],
+        };
+        let built = build_tile_mesh(&tile, R, RELIEF);
+        let positions = built
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|a| a.as_float3())
+            .expect("tile meshes carry positions");
+        let floor = R - RELIEF;
+        for (n, p) in positions.iter().enumerate() {
+            let r = (built.origin + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).length();
+            if n < TILE_RES * TILE_RES {
+                assert!(
+                    r > floor + 100.0,
+                    "core vertex {n} sits at the floor — the curtain ate the surface"
+                );
+            } else {
+                assert!(
+                    r <= floor + 0.01,
+                    "skirt vertex {n} floats {:.1} m above the floor sphere",
+                    r - floor
+                );
+            }
         }
     }
 }

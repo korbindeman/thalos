@@ -112,6 +112,44 @@ four `CSC` words and deliberately omits the three-arc `CCC` words:
 Turn radius uses the **local** gravity the caller supplies: Thalos is not Earth,
 and the same craft turns wider on a heavier world.
 
+## Getting back on: the rejoin
+
+Being off course is the normal case, not the exception, so "how do I get back?"
+is a first-class answer rather than a correction term.
+
+The naive answer — steer at the nearest point on the route — arrives
+perpendicular, and an aircraft cannot fly a corner. The usual softening (aim at a
+point a fixed lookahead ahead) converges smoothly but is radius-blind: at low
+speed it dawdles, at high speed it asks for turns the craft cannot make.
+
+So `thalos_navigation::rejoin` **plans** the way back with the same bank-limited
+machinery the route was planned with: search forward along the route for the
+earliest point the craft can meet, and join it with a Dubins path.
+
+**"The earliest point we can meet"** is the whole idea, and the comfort test is
+what makes it work:
+
+- Not path length. A hard 90°-out-and-back S has a perfectly respectable length
+  ratio while being exactly the corner this exists to avoid.
+- Not total turning. A craft pointing 180° from the route must turn 180°
+  whichever point it aims at, and that is not the capture point's fault.
+- **Excess turning** — the turning demanded *beyond* the unavoidable heading
+  change (`RejoinParams::max_excess_turn_rad`, ~70°). A small deviation then
+  captures close and converges gently; a large one pushes the capture point
+  further along until the join is comfortable. One knob, no gain schedule.
+
+Two properties worth keeping:
+
+- **A rejoin never modifies the route.** The route is the commitment; the rejoin
+  is advice, recomputed as the craft moves. That is what lets the plan stay
+  frozen on final while the steering cue still responds to drift.
+- **It is route-relative.** It works against the `LateralPath`, so it is
+  identical on an approach's base leg, its final, or a future waypoint route.
+
+The capture point is held steady frame to frame via a hint the caller passes back
+in (`route::RouteState::rejoin_hint_along_m`) — `plan_rejoin` stays pure, so that
+memory lives with the caller, per ADR-20260730T005746Z.
+
 ## The approach
 
 `plan_approach(end, craft_position, craft_track, params)` produces one route:
@@ -163,9 +201,23 @@ air).
 
 ## Guidance
 
-`compute_guidance(plan, craft_state)` is pure — no integrators, no mode latches,
-no memory — so every consumer reading it gets the same numbers, and anything
-stateful (engagement, selection, re-plan policy) stays with the caller.
+`compute_guidance(plan, craft_state, rejoin)` is pure — no integrators, no mode
+latches, no memory — so every consumer reading it gets the same numbers, and
+anything stateful (engagement, selection, re-plan policy, the rejoin hint) stays
+with the caller.
+
+It answers **two different questions**, and confusing them is how displays end up
+lying:
+
+- **"Where should I point?"** — the steering director
+  (`desired_heading_rad`, `fpa_command_rad`, and the `director_*` deflections).
+  **Route-relative**: it follows the planned path on whatever leg the craft is
+  on, and when off course it points along the flyable rejoin. The destination
+  being a runway is incidental — the same cue flies a waypoint route.
+- **"How far off the beam am I?"** — the ILS localizer and glideslope
+  deviations. **Runway-relative** by definition, measured against the final
+  approach centreline exactly like the ground equipment they imitate, and
+  meaningless on a base leg. Displays show them only once established on final.
 
 Outputs, with the pilot's sign sense throughout (positive cross-track and
 positive localizer mean *you are right of where you should be*; positive
@@ -173,7 +225,9 @@ glideslope means *you are high*; positive bank command means *roll right*):
 
 | Output | Notes |
 |---|---|
-| `cross_track_m`, `course_heading_rad`, `track_heading_rad`, `desired_heading_rad` | Lateral state and the track to fly to capture. |
+| `cross_track_m`, `course_heading_rad`, `track_heading_rad` | Lateral state against the route. |
+| `desired_heading_rad`, `fpa_rad`, `fpa_command_rad` | The steering answer: the track and flight-path angle to fly now. With a rejoin supplied, the heading points along it (pure pursuit at a lookahead), so capture needs no mode change — the cue simply converges. |
+| `director_lateral()`, `director_vertical()` | The same answer as `[-1, 1]` deflections, full scale at 25° of heading error and 4° of flight-path-angle error. **Positive = turn right / pitch up.** |
 | `dtg_m`, `along_m`, `threshold_range_m` | Route distance-to-go is **not** straight-line range to the threshold; both are published because they answer different questions. |
 | `loc_deviation_rad`, `gs_deviation_rad` (+ `loc_deflection()` / `gs_deflection()`) | **Angular**, full scale ±2.5° / ±0.7° as per ILS. The same 40 m of error is full-scale on short final and nothing 20 km out — that sensitivity growth is the whole reason the instrument works. |
 | `target_altitude_m`, `altitude_error_m`, `target_speed_m_s`, `next_gate` | Vertical + speed profile state. |
@@ -196,6 +250,30 @@ optimisation. Re-planning from a position past the final approach point asks the
 planner to fly back to a fix behind the craft, which it solves with a full
 turn-around — the plan would loop the aircraft away from the runway it is three
 kilometres from.
+
+## Runway destination contract — designed, not built
+
+LAND is not limited to a craft already near final. Its product contract is:
+from any normal airborne position on the current atmospheric body, select any
+runway on that body and let the aircraft navigate, land, roll out, brake to a
+complete stop, and only then disengage
+([approach_autopilot.md](../simulation/approach_autopilot.md)).
+
+The current runway-local `ApproachPlan` cannot honestly provide the “anywhere”
+part by itself. `RouteFrame` is gnomonic: excellent for the terminal region,
+singular at the horizon. LAND therefore needs one composite route under this
+same navigation authority:
+
+1. a body-fixed spherical great-circle ingress to an arrival fix behind the
+   selected runway;
+2. a conservative terrain-clearing cruise/descent profile;
+3. the existing bank-limited local terminal approach.
+
+This specialised runway-destination leg is the reusable seed of later general
+routes, not an excuse to build the route editor first. Arbitrary player-authored
+waypoints and route persistence remain deferred. Displays, the flight director,
+and LAND continue to read one published route/guidance state throughout the
+enroute-to-terminal handoff.
 
 ## Displays
 
@@ -220,30 +298,64 @@ construction.
   send a `RouteRequest`, keeping `crate::route` the sole writer): click a runway
   on the plot (clicking the armed one again lands the other way), or use the
   `< > FLIP CLR` buttons for a strip that is off-plot.
+- **Range is zoomable.** `−` / `+` step the same `RANGE_LEVELS_M` ladder AUTO
+  uses (500 m … 300 km), `AUTO` hands it back, and the scroll wheel zooms while
+  the cursor is over the plot. `NavZoom` (sole writer `handle_zoom`) holds the
+  override; the automatic rung keeps tracking underneath, so releasing to AUTO
+  lands on the rung the situation needs rather than wherever the pilot left it.
+- **AUTO frames what is still ahead, not the whole plan.** The plan freezes once
+  established on final, so its points still include the intercept from tens of km
+  out; framing all of them kept the plot at 50 km while the threshold was 700 m
+  away. The content is now the remaining route (points at or beyond the craft's
+  along-track position — this is what `RouteDisplay::path_along_m` is for) plus
+  the armed threshold.
+- **A centring dot** carries both deviations in one glyph: keep it in the middle
+  and you are on the centreline and on the glideslope. It goes amber→warning when
+  either axis pegs at full scale. This is the ND's own indicator and is visible in
+  both navball and HUD modes — unlike the PFD scales below.
 
 ### PFD
 
 Localizer scale (horizontal, under the ladder) and glideslope scale (vertical,
 inboard of the altitude tape), each with a deviation index, plus a two-axis
-flight director and an `APPR RWY nn` annunciation. All hidden unless an approach
-is armed.
+flight director and an `APPR RWY nn` annunciation. **The scales appear only once
+established on final** — they are runway beams and say nothing on a base leg —
+while the director, being route-relative, shows throughout. Its pitch cue reads
+the guidance's published flight-path angles rather than recomputing them, so it
+cannot disagree with the ND's dot. All hidden unless an approach is armed —
+**and the whole PFD only exists in HUD mode** (`NavDisplayMode::Hud`,
+the `BALL`/`HUD` selector). A pilot flying the navball sees none of it, which is
+why the ND carries its own centring dot.
 
-**The index moves opposite the error** — the universal "fly toward the needle"
-convention: being right of course puts the course to your left, so the index sits
-left of centre. Inverting this yields a perfectly plausible instrument that flies
-you off the side of the runway, so the mapping is pinned by a unit test.
+**The index moves toward the course, and the two axes therefore carry opposite
+signs.** This looks like a bug and is not:
+
+- Right of course (positive localizer) → the course is to your **left** → the
+  index goes left: a *negative* x offset.
+- High on the slope (positive glideslope) → the slope is **below** you → the
+  index goes down, and screen `y` grows downward: a *positive* y offset.
+
+Mirroring the lateral sign onto the vertical axis — the natural thing to do when
+copying the first case — produces an instrument that tells a high aircraft to
+climb. Both mappings are pinned by unit tests
+(`deviation_indices_point_toward_the_course_and_the_slope`,
+`the_dot_leads_toward_the_course_and_the_slope`) for exactly that reason.
 
 ## Verification
 
-- **`just nd-preview`** (agent-runnable, seconds): renders the ND in eight
-  approach situations — straight-in, offset intercept, overflown-and-turning-back,
-  short final, reciprocal end, crosswind strip, 60 km out, idle — and writes
+- **`just nd-preview`** (agent-runnable, seconds): renders the ND in ten approach
+  situations — straight-in, offset intercept, overflown-and-turning-back, short
+  final, reciprocal end, crosswind strip, 60 km out, idle, and two close-in
+  ranges for the last mile — and writes
   `artifacts/visual/latest/nav_preview.png`. Every panel is a **real**
   `plan_approach` result, tessellated by the game's own `route::plan_display`,
   projected by the game's own `build_nav_scene`, drawn by the real shader. It is
   therefore genuine evidence about planner geometry, projection, scale, and
   symbology — and **not** evidence about ECS wiring, widget auto-selection, click
-  handling, or the PFD scales, which still need an in-game check.
+  handling, the zoom controls, the panel chrome, or the PFD scales, which still
+  need an in-game check. The preview renders the *plot* (a shader material); the
+  header, the centring dot, the zoom row, and the data column are Bevy UI nodes
+  and are not in the image.
 - Unit tests: `cargo test -p thalos_navigation` (geometry, planner, VNAV,
   guidance signs) and `cargo test -p thalos_runtime --lib -- nav_display`
   (scale, culling, decimation, range ladder).
@@ -261,7 +373,7 @@ already accommodate these, so none of them needs a redesign:
 | Deferred | What it needs | Notes |
 |---|---|---|
 | **Arbitrary waypoints** (`BL-20260730T005746Z-arbitrary-waypoints`) | A route as an ordered `Vec<Waypoint>` with leg-to-leg sequencing, plus a way to create one (map click / ND click / saved viewpoints). | The approach is already a special case of this: a two-leg route whose last leg is constrained to a runway centreline. |
-| **Autoland / route autopilot** (`BL-20260730T005746Z-approach-autopilot`) | A `DemandSource` in `thalos_control` consuming `bank_command_rad` / `vertical_speed_command_m_s`, plus throttle to hold `target_speed_m_s`, plus flare and gear/flap scheduling from the speed gates. | The guidance already publishes every command it needs; the missing part is the control-bus seam and the flare law. The bank command is already clamped to the same limit the planner planned to. |
+| **Runway destination autoland** (`BL-20260730T005746Z-approach-autopilot`) | One LAND mode: spherical same-body ingress from any airborne position, terminal approach guidance, autothrottle/configuration/flare, then centreline-tracked braking to a complete stop. | **Specced:** [simulation/approach_autopilot.md](../simulation/approach_autopilot.md). Missing pieces are the global ingress leg, shared autoflight mode ownership, canonical throttle/ground-control demands, the airborne laws, go-around recovery, and rollout completion. General player-authored routes remain later. |
 | **In-world 3D path** (`BL-20260730T005746Z-in-world-route-path`) | Render the route in the ship view as a ribbon or gates. | Purely a rendering job on `RouteState.display`; needs its own screenshot verification pass. |
 | **Rovers and surface ships** | Lateral-only guidance: ignore the vertical half, replace the bank-limited planner with a curvature limit appropriate to the vehicle (or none), sequence waypoints on arrival radius. | `vertical: None` is already the correct, supported state; `Guidance`'s vertical fields are separable. |
 | **Submersibles** | Vertical constraints become depth (negative altitude against the same radial axis) and the "glideslope" becomes a dive gradient. | The vertical profile is already a function of distance-to-go with no aircraft-specific assumption beyond the default angles. |

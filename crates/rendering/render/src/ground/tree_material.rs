@@ -82,12 +82,19 @@ pub struct TreeShadingExtension {
     /// Per-cascade sun-shadow depth maps (near→far) — the same handles the
     /// terrain binds. Must always be valid depth textures (see
     /// [`fallback_shadow_map`]); `shadow.config.x` gates sampling.
-    #[texture(105, sample_type = "depth")]
+    /// Cascade 0 — the ±64 m near box added 2026-07-31. Bound at the END of
+    /// this material's range rather than renumbered into the near→far slot:
+    /// only the ARGUMENT order at the `thalos::shadow` call site is
+    /// ordering-significant, so shifting live binding indices would be risk
+    /// with no payoff. Field name still equals the cascade index.
+    #[texture(111, sample_type = "depth")]
     pub sun_shadow_map_0: Handle<Image>,
-    #[texture(106, sample_type = "depth")]
+    #[texture(105, sample_type = "depth")]
     pub sun_shadow_map_1: Handle<Image>,
-    #[texture(107, sample_type = "depth")]
+    #[texture(106, sample_type = "depth")]
     pub sun_shadow_map_2: Handle<Image>,
+    #[texture(107, sample_type = "depth")]
+    pub sun_shadow_map_3: Handle<Image>,
     /// Cloud sun-transmittance cascade (CLOUD-5 / W2) — the same map the tile
     /// ground samples, fanned in per frame by the game's cloud-shadow driver so
     /// a forest under the deck dims exactly with the ground it stands on.

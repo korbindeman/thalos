@@ -1,10 +1,10 @@
 {
   "width": 6144,
   "height": 6144,
-  "sha256_le_f32": "e92f553a03a2708f186d9b55cc33dce89b62c7a5a5cb07778a7f12c29727c440",
-  "min": 38.06417465209961,
-  "max": 4953.4404296875,
-  "mean": 1042.2723388671875,
+  "sha256_le_f32": "60828b673d43b8badc0747861f59d9058a59fa7d49487046ff61b4fbc03c3482",
+  "min": 120.92494201660156,
+  "max": 6663.2744140625,
+  "mean": 1271.8453369140625,
   "source": "xandergos/terrain-diffusion-90m native band, seed 1337",
   "origin_native_px_xy": [
     -4179,

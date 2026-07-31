@@ -83,12 +83,14 @@ var material_tex: texture_2d<f32>;
 // Shared cascaded sun-shadow receive (same maps the terrain samples).
 @group(#{MATERIAL_BIND_GROUP}) @binding(104)
 var<uniform> tree_shadow: ShadowCascadeBlock;
-@group(#{MATERIAL_BIND_GROUP}) @binding(105)
+@group(#{MATERIAL_BIND_GROUP}) @binding(111)
 var sun_shadow_map_0: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(106)
+@group(#{MATERIAL_BIND_GROUP}) @binding(105)
 var sun_shadow_map_1: texture_depth_2d;
-@group(#{MATERIAL_BIND_GROUP}) @binding(107)
+@group(#{MATERIAL_BIND_GROUP}) @binding(106)
 var sun_shadow_map_2: texture_depth_2d;
+@group(#{MATERIAL_BIND_GROUP}) @binding(107)
+var sun_shadow_map_3: texture_depth_2d;
 // Cloud sun-transmittance cascade — same block/texture the tile ground samples,
 // fanned in by `apply_tree_cloud_shadow`.
 @group(#{MATERIAL_BIND_GROUP}) @binding(108)
@@ -314,6 +316,7 @@ fn fragment(
         sun_shadow_map_0,
         sun_shadow_map_1,
         sun_shadow_map_2,
+        sun_shadow_map_3,
     );
     let cloud_t = cloud_sun_transmittance(
         cloud_shadow,

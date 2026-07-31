@@ -9357,6 +9357,7 @@ dependencies = [
  "thalos_shipyard",
  "thalos_terrain",
  "thalos_ui",
+ "thalos_weather",
  "thalos_world",
  "tracing",
  "wgpu",
@@ -9456,6 +9457,14 @@ name = "thalos_ui"
 version = "0.1.0"
 dependencies = [
  "bevy",
+]
+
+[[package]]
+name = "thalos_weather"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "rayon",
 ]
 
 [[package]]

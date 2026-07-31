@@ -36,7 +36,8 @@ use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
 use thalos_navigation::{
-    ApproachParams, ApproachPlan, RouteFrame, RunwayEnd, RunwayStrip, VnavParams, plan_approach,
+    ApproachParams, ApproachPlan, Pose2, RejoinParams, RouteFrame, RunwayEnd, RunwayStrip,
+    VnavParams, plan_approach, plan_rejoin, theta_of,
 };
 use thalos_runtime::display_preview::{
     NavDisplayMaterial, NavSceneInputs, build_nav_scene, nav_display_data,
@@ -46,10 +47,10 @@ use thalos_runtime::route::plan_display;
 /// Plot size per panel (px). Larger than the in-game 200 px so thin symbology is
 /// legible in the contact sheet.
 const PLOT_PX: f32 = 250.0;
-const COLUMNS: usize = 4;
+const COLUMNS: usize = 5;
 const OUT_PATH: &str = "artifacts/visual/latest/nav_preview.png";
-const WIDTH: u32 = 1180;
-const HEIGHT: u32 = 700;
+const WIDTH: u32 = 1460;
+const HEIGHT: u32 = 1010;
 /// Frames before the capture: pipeline compile + font atlas fill.
 const WARMUP_FRAMES: u32 = 90;
 const TAIL_FRAMES: u32 = 16;
@@ -147,6 +148,16 @@ fn strips() -> Vec<RunwayStrip> {
     vec![primary, secondary]
 }
 
+/// Panel caption range, which has to stay honest below a kilometre — the
+/// close-in rungs are exactly what these panels exist to show.
+fn fmt_range(range_m: f64) -> String {
+    if range_m >= 1_000.0 {
+        format!("{:.0} km", range_m / 1_000.0)
+    } else {
+        format!("{range_m:.0} m")
+    }
+}
+
 /// Body-fixed unit direction for a compass heading in a frame.
 fn local_dir(frame: &RouteFrame, heading_rad: f64) -> DVec3 {
     (frame.north * heading_rad.cos() + frame.east * heading_rad.sin()).normalize()
@@ -167,6 +178,7 @@ struct PanelInputs {
     strips: Vec<RunwayStrip>,
     armed: Option<RunwayEnd>,
     route_points: Vec<DVec3>,
+    rejoin_points: Vec<DVec3>,
     final_start_index: usize,
     waypoints: Vec<(DVec3, thalos_navigation::WaypointKind)>,
     range_m: f64,
@@ -200,6 +212,34 @@ fn panel(
     heading_offset_deg: f64,
     range_m: f64,
 ) -> Panel {
+    panel_drifted(
+        caption,
+        armed_index,
+        reciprocal,
+        along_m,
+        across_m,
+        altitude_m,
+        heading_offset_deg,
+        range_m,
+        0.0,
+    )
+}
+
+/// Like [`panel`], but the craft is displaced `drift_across_m` to the right
+/// *after* the route was planned — which is the situation a rejoin exists for:
+/// a committed route and a craft no longer on it.
+#[allow(clippy::too_many_arguments)]
+fn panel_drifted(
+    caption: &str,
+    armed_index: Option<usize>,
+    reciprocal: bool,
+    along_m: f64,
+    across_m: f64,
+    altitude_m: f64,
+    heading_offset_deg: f64,
+    range_m: f64,
+    drift_across_m: f64,
+) -> Panel {
     let all = strips();
     let strip = all[armed_index.unwrap_or(0)];
     let end = RunwayEnd { strip, reciprocal };
@@ -213,12 +253,8 @@ fn panel(
 
     let landing_heading = end.landing_heading_rad(&frame);
     let craft_heading = landing_heading + heading_offset_deg.to_radians();
-    let craft_frame = RouteFrame::new(
-        craft_body_fixed.normalize(),
-        BODY_RADIUS_M,
-        altitude_m,
-    )
-    .expect("valid craft frame");
+    let craft_frame = RouteFrame::new(craft_body_fixed.normalize(), BODY_RADIUS_M, altitude_m)
+        .expect("valid craft frame");
     let nose_body_fixed = local_dir(&craft_frame, craft_heading);
     // A flying craft tracks its nose here (no wind in this preview).
     let velocity_body_fixed = nose_body_fixed * 90.0;
@@ -230,6 +266,48 @@ fn panel(
         }
         None => (None, None),
     };
+
+    // Displace the craft off the planned route, then plan the way back.
+    let (craft_body_fixed, nose_body_fixed, velocity_body_fixed) = if drift_across_m.abs() > 1.0 {
+        let right = DVec2::new(landing_local.y, -landing_local.x);
+        let drifted_local = local + right * drift_across_m;
+        let drifted = frame.to_body_fixed(drifted_local, altitude_m);
+        let drifted_frame =
+            RouteFrame::new(drifted.normalize(), BODY_RADIUS_M, altitude_m).expect("valid");
+        let nose = local_dir(&drifted_frame, craft_heading);
+        (drifted, nose, nose * 90.0)
+    } else {
+        (craft_body_fixed, nose_body_fixed, velocity_body_fixed)
+    };
+
+    let rejoin_points = plan
+        .as_ref()
+        .filter(|_| drift_across_m.abs() > 1.0)
+        .and_then(|plan| {
+            let plan_frame = plan.frame;
+            let here = plan_frame.to_local(craft_body_fixed);
+            let track = plan_frame
+                .direction_to_local(nose_body_fixed)
+                .try_normalize()?;
+            let closest = plan.path.closest(here)?;
+            let rejoin = plan_rejoin(
+                &plan.path,
+                Pose2::new(here, theta_of(track)),
+                closest.along_m,
+                &RejoinParams::for_radius(plan.turn_radius_m),
+                None,
+            )?;
+            let elevation = plan_frame.origin_altitude_m;
+            Some(
+                rejoin
+                    .path
+                    .polyline(20.0)
+                    .into_iter()
+                    .map(|q| plan_frame.to_body_fixed(q, elevation))
+                    .collect::<Vec<_>>(),
+            )
+        })
+        .unwrap_or_default();
 
     let display = plan.as_ref().map(plan_display);
     Panel {
@@ -244,6 +322,7 @@ fn panel(
                 .as_ref()
                 .map(|d| d.path_points.clone())
                 .unwrap_or_default(),
+            rejoin_points,
             final_start_index: display.as_ref().map(|d| d.final_start_index).unwrap_or(0),
             waypoints: display
                 .as_ref()
@@ -259,21 +338,140 @@ fn panel(
 fn panels() -> Vec<Panel> {
     vec![
         // Is the runway drawn at its real 5 km, and does the route run straight in?
-        panel("straight-in 12 km", Some(0), false, -12_000.0, 0.0, 1_400.0, 0.0, 20_000.0),
+        panel(
+            "straight-in 12 km",
+            Some(0),
+            false,
+            -12_000.0,
+            0.0,
+            1_400.0,
+            0.0,
+            20_000.0,
+        ),
         // Does an offset approach produce a real S-turn intercept?
-        panel("offset 6 km right", Some(0), false, -20_000.0, 6_000.0, 2_200.0, 0.0, 50_000.0),
+        panel(
+            "offset 6 km right",
+            Some(0),
+            false,
+            -20_000.0,
+            6_000.0,
+            2_200.0,
+            0.0,
+            50_000.0,
+        ),
         // Overflown the field: does it plan the turn-around rather than a straight line?
-        panel("overflown, turning back", Some(0), false, 8_000.0, 1_500.0, 1_600.0, 0.0, 20_000.0),
+        panel(
+            "overflown, turning back",
+            Some(0),
+            false,
+            8_000.0,
+            1_500.0,
+            1_600.0,
+            0.0,
+            20_000.0,
+        ),
         // Short final: does the strip fill the plot and the threshold bar read?
-        panel("short final 3 km", Some(0), false, -3_000.0, -150.0, 850.0, -4.0, 5_000.0),
+        panel(
+            "short final 3 km",
+            Some(0),
+            false,
+            -3_000.0,
+            -150.0,
+            850.0,
+            -4.0,
+            5_000.0,
+        ),
         // Landing the other way: the threshold bar and designator must flip ends.
-        panel("reciprocal end", Some(0), true, -11_000.0, 0.0, 1_300.0, 0.0, 20_000.0),
+        panel(
+            "reciprocal end",
+            Some(0),
+            true,
+            -11_000.0,
+            0.0,
+            1_300.0,
+            0.0,
+            20_000.0,
+        ),
         // The crosswind strip armed, with the primary still drawn unarmed.
-        panel("crosswind strip", Some(1), false, -9_000.0, 3_000.0, 1_200.0, 20.0, 20_000.0),
+        panel(
+            "crosswind strip",
+            Some(1),
+            false,
+            -9_000.0,
+            3_000.0,
+            1_200.0,
+            20.0,
+            20_000.0,
+        ),
         // Long range: a 90 m-wide strip must still be visible, at true length.
-        panel("60 km out", Some(0), false, -60_000.0, 12_000.0, 6_000.0, -30.0, 150_000.0),
+        panel(
+            "60 km out",
+            Some(0),
+            false,
+            -60_000.0,
+            12_000.0,
+            6_000.0,
+            -30.0,
+            150_000.0,
+        ),
         // Nothing armed: two strips, no route, no bearing pointer.
-        panel("idle, none armed", None, false, -6_000.0, 2_000.0, 900.0, 15.0, 20_000.0),
+        panel(
+            "idle, none armed",
+            None,
+            false,
+            -6_000.0,
+            2_000.0,
+            900.0,
+            15.0,
+            20_000.0,
+        ),
+        // Zoomed in for the last mile — the rungs the range ladder gained. The
+        // 5 km strip runs off the plot on purpose: at this range you are looking
+        // at the touchdown zone, not at the airfield.
+        panel(
+            "1.5 km out, 1 km range",
+            Some(0),
+            false,
+            -1_500.0,
+            -60.0,
+            780.0,
+            -2.0,
+            1_000.0,
+        ),
+        panel(
+            "over the threshold, 500 m",
+            Some(0),
+            false,
+            -200.0,
+            -10.0,
+            720.0,
+            0.0,
+            500.0,
+        ),
+        // Blown off a committed route: the dashed rejoin is the flyable way
+        // back, meeting the route tangentially rather than cutting at it.
+        panel_drifted(
+            "drifted 2 km right",
+            Some(0),
+            false,
+            -14_000.0,
+            0.0,
+            1_500.0,
+            0.0,
+            20_000.0,
+            2_000.0,
+        ),
+        panel_drifted(
+            "drifted 5 km left",
+            Some(0),
+            false,
+            -18_000.0,
+            0.0,
+            1_900.0,
+            0.0,
+            50_000.0,
+            -5_000.0,
+        ),
     ]
 }
 
@@ -362,14 +560,14 @@ fn setup(
                             strips: &inputs.strips,
                             armed: inputs.armed,
                             route_points: &inputs.route_points,
+                            rejoin_points: &inputs.rejoin_points,
                             final_start_index: inputs.final_start_index,
                             waypoints: &inputs.waypoints,
                             range_m: inputs.range_m,
                         })
                         .expect("scene projects");
-                        let material = materials.add(NavDisplayMaterial::new(nav_display_data(
-                            &scene,
-                        )));
+                        let material =
+                            materials.add(NavDisplayMaterial::new(nav_display_data(&scene)));
                         row_node
                             .spawn((
                                 Node {
@@ -402,8 +600,8 @@ fn setup(
                                 ));
                                 cell.spawn((
                                     Text::new(format!(
-                                        "R {:.0} km  HDG {:03.0}",
-                                        inputs.range_m / 1000.0,
+                                        "R {}  HDG {:03.0}",
+                                        fmt_range(inputs.range_m),
                                         scene.heading_rad.to_degrees().rem_euclid(360.0)
                                     )),
                                     TextFont {

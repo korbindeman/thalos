@@ -52,7 +52,11 @@ fn load_surface() -> (Box<dyn SurfaceQuery>, &'static str) {
 }
 
 fn tangent_basis(dir: DVec3) -> (DVec3, DVec3) {
-    let seed = if dir.y.abs() < 0.9 { DVec3::Y } else { DVec3::X };
+    let seed = if dir.y.abs() < 0.9 {
+        DVec3::Y
+    } else {
+        DVec3::X
+    };
     let east = seed.cross(dir).normalize();
     let north = dir.cross(east).normalize();
     (east, north)
@@ -206,16 +210,18 @@ fn main() {
                     if h > 0.0 {
                         // Central-difference normal in the local tangent frame.
                         let e = PX_M;
-                        let hx = surface
-                            .sample_height_m(offset_dir(site, east, north, du + e, dv).as_vec3(), lod)
-                            as f64
+                        let hx = surface.sample_height_m(
+                            offset_dir(site, east, north, du + e, dv).as_vec3(),
+                            lod,
+                        ) as f64
                             - surface.sample_height_m(
                                 offset_dir(site, east, north, du - e, dv).as_vec3(),
                                 lod,
                             ) as f64;
-                        let hy = surface
-                            .sample_height_m(offset_dir(site, east, north, du, dv + e).as_vec3(), lod)
-                            as f64
+                        let hy = surface.sample_height_m(
+                            offset_dir(site, east, north, du, dv + e).as_vec3(),
+                            lod,
+                        ) as f64
                             - surface.sample_height_m(
                                 offset_dir(site, east, north, du, dv - e).as_vec3(),
                                 lod,
@@ -274,7 +280,11 @@ fn main() {
         let r = to_row(h);
         // Fill the column between the curve and sea level so land reads as a
         // body and water as a trough.
-        let (lo, hi) = if r < sea_row { (r, sea_row) } else { (sea_row, r) };
+        let (lo, hi) = if r < sea_row {
+            (r, sea_row)
+        } else {
+            (sea_row, r)
+        };
         for y in lo..=hi {
             let c = if h > 0.0 {
                 [0.42, 0.38, 0.26]
@@ -291,7 +301,10 @@ fn main() {
 
     let min_h = heights.iter().cloned().fold(f64::INFINITY, f64::min);
     let max_h = heights.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let crossings = heights.windows(2).filter(|w| (w[0] > 0.0) != (w[1] > 0.0)).count();
+    let crossings = heights
+        .windows(2)
+        .filter(|w| (w[0] > 0.0) != (w[1] > 0.0))
+        .count();
     println!(
         "profile: {crossings} waterline crossing(s) across {:.0} km, height {min_h:.1} … {max_h:.1} m",
         SIZE as f64 * PX_M / 1000.0

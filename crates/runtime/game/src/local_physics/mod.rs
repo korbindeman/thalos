@@ -82,6 +82,7 @@ impl Plugin for GameLocalPhysicsPlugin {
             .init_resource::<WeightOnWheels>()
             .init_resource::<GearVisualCompression>()
             .init_resource::<SurfaceFriction>()
+            .init_resource::<HullGroundContact>()
             .init_resource::<TerrainFloorBackstop>()
             .register_type::<TerrainFloorBackstop>()
             .register_type::<AvianRole>()
@@ -92,6 +93,7 @@ impl Plugin for GameLocalPhysicsPlugin {
             .register_type::<ParkingBrake>()
             .register_type::<WeightOnWheels>()
             .register_type::<SurfaceFriction>()
+            .register_type::<HullGroundContact>()
             .register_type::<Wheel>()
             .register_type::<WheelSet>()
             .add_systems(

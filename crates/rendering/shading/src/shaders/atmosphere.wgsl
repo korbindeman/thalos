@@ -920,12 +920,20 @@ fn cloud_march_stop_m(steps: f32, t_entry: f32, pixel_angle: f32) -> f32 {
     let a = max(pixel_angle * CLOUD_MARCH_FOOTPRINT_STEPS, 1.0e-9);
     let t_floor = CLOUD_MARCH_MIN_STEP_M / a;
     let t_cap = CLOUD_MARCH_MAX_CELL_STEP_M / a;
+    // The geometric reach cap bounds the marched SEGMENT from its entry —
+    // mirroring `get_ray`'s `seg_start + CLOUD_MARCH_REACH_M` clamp — never the
+    // absolute camera distance. Clamping the absolute stop to the constant put
+    // the frontier BEHIND the shell entry for any camera more than 300 km from
+    // the deck, which killed the whole near tier from LEO while the composite's
+    // inverted fade window flipped ownership per-ray on a knife edge
+    // (2026-07-31: clouds covered only an annulus of the disc at 404 km).
+    let t_reach = max(t_entry, 0.0) + CLOUD_MARCH_REACH_M;
     var remaining = steps;
     var t = max(t_entry, 0.0);
     if t < t_floor {
         let n = (t_floor - t) / CLOUD_MARCH_MIN_STEP_M;
         if remaining <= n {
-            return t + remaining * CLOUD_MARCH_MIN_STEP_M;
+            return min(t + remaining * CLOUD_MARCH_MIN_STEP_M, t_reach);
         }
         remaining -= n;
         t = t_floor;
@@ -933,12 +941,12 @@ fn cloud_march_stop_m(steps: f32, t_entry: f32, pixel_angle: f32) -> f32 {
     if t < t_cap {
         let n = log(t_cap / t) / a;
         if remaining <= n {
-            return t * exp(a * remaining);
+            return min(t * exp(a * remaining), t_reach);
         }
         remaining -= n;
         t = t_cap;
     }
-    return min(t + remaining * CLOUD_MARCH_MAX_CELL_STEP_M, CLOUD_MARCH_REACH_M);
+    return min(t + remaining * CLOUD_MARCH_MAX_CELL_STEP_M, t_reach);
 }
 
 // ── Shared strata domain warp ────────────────────────────────────────────────
@@ -1045,6 +1053,36 @@ const CLOUD_CELL_BILLOW_MEAN: f32 = 0.302816;
 /// spreading as one uniform grain size.
 const CLOUD_CELL_WEIGHTS: vec3<f32> = vec3<f32>(0.62, 0.26, 0.12);
 const CLOUD_CELL_BILLOW: vec3<f32> = vec3<f32>(0.0, 0.75, 0.35);
+/// Per-octave evolution rate in that octave's LATTICE UNITS PER SECOND, so one
+/// unit is one period of drift = a full decorrelation of that octave. Set from
+/// convective timescales: the ~961 m detail octave turns over in ~30 min (a
+/// cumulus cell's life), the ~2.3 km octave in ~2 h (its cluster), and the
+/// 5.4 km arrangement octave in ~6 h (the mesoscale organisation). Small
+/// features therefore boil while the pattern they sit in holds — the opposite
+/// ordering reads as the whole sky sliding.
+/// Decorrelations per sim-day: 4 / 12 / 48, i.e. the ~961 m detail octave turns
+/// over in 30 min (a cumulus cell's life), the ~2.3 km octave in 2 h (its
+/// cluster), and the 5.4 km arrangement octave in 6 h (the mesoscale
+/// organisation). Small features boil while the pattern they sit in holds; the
+/// opposite ordering reads as the whole sky sliding.
+///
+/// **`evolution_s` is raw sim time and is NOT wrapped.** A wrap was tried and
+/// removed: this field is lattice value noise keyed by a hash of the integer
+/// corner coordinates, so it is APERIODIC — no translation, integer or
+/// otherwise, ever returns it to itself, and every candidate wrap period is
+/// therefore a visible discontinuity. What makes the un-wrapped form safe is
+/// that Thalos sim time is a time-of-day-scale epoch (~1e4–1e6 s), where f32
+/// still resolves ~0.1 s. Guarded by `evolution_phase_resolves_at_sim_epochs`.
+const CLOUD_CELL_EVOLVE_PERIOD_S: f32 = 86400.0;
+const CLOUD_CELL_EVOLVE_RATE: vec3<f32> =
+    vec3<f32>(4.0, 12.0, 48.0) / CLOUD_CELL_EVOLVE_PERIOD_S;
+/// Fixed, mutually decorrelated unit drift directions. Each octave translating
+/// along a DIFFERENT axis is what turns three translations into a morph:
+/// nothing in the composite moves coherently, so cells appear, deepen and
+/// dissolve in place instead of sliding.
+const CLOUD_CELL_DRIFT_0: vec3<f32> = vec3<f32>(0.7071, 0.3162, -0.6325);
+const CLOUD_CELL_DRIFT_1: vec3<f32> = vec3<f32>(-0.4364, 0.7857, 0.4364);
+const CLOUD_CELL_DRIFT_2: vec3<f32> = vec3<f32>(0.5774, -0.5148, 0.6337);
 
 // ── Morphology varies with PLACE (2026-07-26) ───────────────────────────────
 //
@@ -1359,22 +1397,61 @@ fn cloud_cell_arrangement(
 /// `spread_norm` is applied to the octave mix and NOT to the fade: the fade's
 /// variance loss is the intended band-limiting, and re-inflating it would undo
 /// the aliasing protection the whole LOD contract rests on.
+/// `evolution_s` is sim-time seconds. It advances each octave's sampling
+/// offset along its own fixed direction, which makes cells GROW and DISSOLVE
+/// rather than slide: the octaves decorrelate from each other at different
+/// rates, so the composite morphs in place even though each octave is a pure
+/// translation. Per-octave rates are real convective timescales — a cumulus
+/// cell lives 20–60 min, its cluster hours, the arrangement most of a day — so
+/// small features boil while the organisation holds.
+///
+/// **A translation is the only safe way to animate this field.** Three
+/// properties depend on it:
+///   1. It cannot introduce a spatial phase gradient, so the band-limit fades
+///      still filter for the period the field actually has (the hatching trap
+///      documented at the head of this section — a time-varying *period* or
+///      *aspect* would reintroduce it exactly as a per-place one did).
+///   2. The noise is stationary, so the field's distribution is invariant in
+///      time. `fill_lut`'s calibration is derived once at spawn; anything that
+///      moved σ or the mean would silently invalidate it every frame.
+///   3. It is free — no extra samples, no 4-D noise.
+/// Do not animate this with amplitude, billow, weights, or `spread_norm`.
+///
+/// `evolution_s` must come from SIM time, never wall-clock: captures pin sim
+/// time, and a wall-clock phase would make every screenshot irreproducible and
+/// silently break the comparison lane.
 fn cloud_cell_field(
     dir: vec3<f32>,
     radius: f32,
     filter_m: f32,
     style: CloudCellStyle,
+    evolution_s: f32,
 ) -> f32 {
     let p0 = CLOUD_CELL_PERIOD_M;
     let p1 = p0 / CLOUD_CELL_LACUNARITY;
     let p2 = p1 / CLOUD_CELL_LACUNARITY;
     let b = CLOUD_CELL_BILLOW * style.billow;
+    // Offsets are in that octave's own lattice units, so one unit of drift is
+    // one period of physical distance — a full decorrelation of that octave.
+    let t0 = evolution_s * CLOUD_CELL_EVOLVE_RATE.x;
+    let t1 = evolution_s * CLOUD_CELL_EVOLVE_RATE.y;
+    let t2 = evolution_s * CLOUD_CELL_EVOLVE_RATE.z;
     // Only the coarse octave carries the arrangement, so only it is elongated.
     let o0 = cloud_cell_arrangement(
-        dir, radius, p0, vec3<f32>(11.3, -4.1, 27.9), filter_m, b.x, style.roll,
+        dir,
+        radius,
+        p0,
+        vec3<f32>(11.3, -4.1, 27.9) + CLOUD_CELL_DRIFT_0 * t0,
+        filter_m,
+        b.x,
+        style.roll,
     );
-    let o1 = cloud_cell_octave(dir, radius, p1, vec3<f32>(-23.7, 8.4, 3.2), filter_m, b.y);
-    let o2 = cloud_cell_octave(dir, radius, p2, vec3<f32>(5.9, 31.2, -17.6), filter_m, b.z);
+    let o1 = cloud_cell_octave(
+        dir, radius, p1, vec3<f32>(-23.7, 8.4, 3.2) + CLOUD_CELL_DRIFT_1 * t1, filter_m, b.y,
+    );
+    let o2 = cloud_cell_octave(
+        dir, radius, p2, vec3<f32>(5.9, 31.2, -17.6) + CLOUD_CELL_DRIFT_2 * t2, filter_m, b.z,
+    );
     let w = style.weights;
     let raw = w.x * o0 + w.y * o1 + w.z * o2;
     let x = (raw - 0.5) * style.spread_norm * CLOUD_CELL_GAIN;

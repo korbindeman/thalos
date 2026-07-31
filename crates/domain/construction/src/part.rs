@@ -514,7 +514,10 @@ mod pressure_thrust_tests {
         let e = rocket(380.0, Some(120.0));
         let f = e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA);
         assert!((f - 120.0 / 380.0).abs() < 1e-12);
-        assert_eq!(e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA * 3.0), 0.0);
+        assert_eq!(
+            e.pressure_thrust_factor(ISP_REFERENCE_PRESSURE_PA * 3.0),
+            0.0
+        );
     }
 
     #[test]

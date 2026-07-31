@@ -146,7 +146,13 @@ Automation defaults are intentionally safer than the interactive renderer:
   named fidelity profiles land, while `--size` may choose another matching
   pixel extent but may not silently change the saved sensor aspect;
 - headless capture defaults the machine-wide tile-mesh allowance to 2 GiB
-  (`THALOS_TILE_BUDGET_MB` remains an expert override);
+  (`THALOS_TILE_BUDGET_MB` remains an expert override). Because that is *half*
+  what an interactive session gets, the tile memory brake is reachable here, and
+  a braked frame renders the ground coarser than the preset authored. The
+  readback therefore **waits up to 45 s for the brake to release**
+  (`BRAKE_RECOVER_TIMEOUT_S`; it recovers in ~15 s in practice), then captures
+  anyway with the verdict recorded — see *Terrain residency* under the artifact
+  contract;
 - the controller terminates a host above 8 GiB resident memory by default
   (`THALOS_CAPTURE_RSS_LIMIT_MB=0` disables only for deliberate diagnosis);
 - OOM, device loss, GPU submission timeout, and RSS runaway never auto-retry.
@@ -298,6 +304,28 @@ orbit/ocean/cloud views amortize one expensive world boot without pretending
 incompatible scenes share state.
 See ADR-20260724T162943Z-capture-reuse-by-boot-context.
 
+### 3.1 Adding a preset
+
+The catalog is declared **once**, in `capture_preset_catalog!`
+(`thalos_capture_protocol`): one `Variant => "wire-name"` line per preset, in
+canonical order. Both the protocol's `CAPTURE_PRESETS` table and the runtime's
+`ScreenshotPreset::{ALL, name, from_canonical_name}` expand from it, so adding
+a preset is exactly two edits — the enum variant (carrying its framing
+documentation) and one catalog line.
+
+A divergence between the two is a **compile error in either direction**: an
+orphan catalog entry fails to resolve its variant, and a variant missing from
+the catalog makes the generated `name()` match non-exhaustive. `just check`
+catches both.
+
+That gate replaced a `debug_assert_eq!` inside the booted capture host, which
+could only be reached by paying a full host boot per shot — on 2026-07-30 it
+took out 6 of 37 shots in one evening while a preset was landing, with
+`just check` and `just clippy` green throughout. Nicknames and underscore
+spellings still live in the hand-written `ScreenshotPreset::try_parse` alias
+table, but the canonical wire name now parses through the generated fallback
+whether or not an alias arm exists.
+
 ## 4. Capture runtime
 
 `thalos_capture_runtime` owns one explicit state machine:
@@ -414,6 +442,73 @@ The latest tree is convenient and overwritten. A run bundle is immutable and
 self-describing: revision/dirty state, lane, request, dimensions, frame clock,
 renderer fingerprint, pipeline validity, output hashes, and metrics.
 
+### 6.1 Terrain residency — is this image the detail the preset authored?
+
+Every `<name>.capture.json` carries a `terrain` block sampled **at readback**:
+
+```json
+"terrain": {
+  "split_scale": 1.0, "worst_split_scale": 1.0,
+  "resident_tiles": 5572, "desired_tiles": 7830,
+  "resident_mib": 1888.5, "budget_mib": 2048.0,
+  "instances": 1, "brake_wait_s": 0.0
+}
+```
+
+`split_scale` below 1.0 means the tile memory brake was still holding detail
+back when the frame was read — **the ground in that PNG is coarser than the
+preset authored, and it is not terrain evidence.** The client prints a loud
+stderr warning, the tool lane records `tile_split_scale` / `terrain_braked_count`,
+and `just diag` reports it as `capture_terrain_braked` naming the preset. Absent
+block = the legacy udlod path, where there is no such thing to report.
+
+Read the other fields before blaming the framing:
+
+- `instances` above 1 means a peer renderer halved this host's share
+  (INC-20260725T012104Z), so the framing is fine and the machine is busy.
+- `desired_tiles` far above `resident_tiles` with `split_scale` at 1.0 is a
+  framing living close to its allowance — `cloud-godray` reads 5,572 resident of
+  7,830 wanted at 92 % of a 2 GiB share, which is why it is the preset that
+  brakes first.
+- `brake_wait_s` above zero with `split_scale` back at 1.0 is the readback gate
+  working: it waited, the brake let go, the image is good.
+
+### 6.2 Clock — wall or driven
+
+Every receipt carries a `clock` block:
+
+```json
+"clock": { "driven_dt_s": 0.016666666666666666 }
+```
+
+`null` (the default) is the **wall** clock: every warmup frame advances the
+world by however long that frame took, so the same preset settles to a
+different world state on a busy machine than on an idle one — visible wherever
+anything is time-dependent (cloud advection, plumes, the settle gate). A number
+is the **driven** clock: every frame advances the world by exactly that step
+regardless of render cost, which is what lets frame *n* of a sequence land at
+*n · dt*.
+
+Select it per host with a startup override:
+
+```bash
+cargo run -p thalos_capture --bin thalos_capture -- shot spaceport-aerial --set THALOS_CAPTURE_CLOCK=driven
+```
+
+Accepted values: `wall` (default), `driven` (60 fps), `driven:<fps>`, or a bare
+frame rate. It is a **boot** property — it changes how Avian steps and how every
+warmup frame advances the world — so it lives in `STARTUP_OVERRIDE_KEYS` and
+changing it restarts the host, the same way `THALOS_TILE_RENDERER` does. An
+unparseable value is a hard error, not a silent fall back to wall time: a
+sequence render that quietly ran on the wall clock produces plausible frames
+with the wrong world state.
+
+**Real elapsed time is never read from the driven clock.** The streaming hold,
+the brake-recovery wait, and the perf lane's frame cost measure a *machine*, not
+world time, so they take `Instant` deltas directly. Hanging them off `Time<Real>`
+would reinterpret the 180 s stream ceiling as 10 800 frames the moment a driven
+render started. See `sim_clock` (`cine §3`, ADR-20260730T212556Z).
+
 ## 7. Migration
 
 ### CAP-1 — Shared game runtime and thin interactive launcher
@@ -438,9 +533,17 @@ shader/pipeline/device-error promotion have landed compile-clean.
 
 ### CAP-4 — Deterministic frame sequences and video
 
-Add fixed capture time, camera tracks, readback pipelining, background frame
-writes, resumable/validated sequences, and external FFmpeg muxing. Verify a
-short motion/temporal probe in both persistent and cold lanes.
+**Superseded 2026-07-30 by [cinematics](../roadmap/cinematics.md) (`cine`) and
+ADR-20260730T212556Z**, which keeps this scope whole and widens it: one authored
+sequence document sampled as a still, a keyframe set, or a full render, plus
+in-game recording and scripted craft control. Track the work as `CINE-A`
+(driven `SimClock`), `CINE-B` (document + evaluator + keyframe stills), and
+`CINE-C` (frame sequence + per-frame hash + FFmpeg mux) in the backlog.
+
+Scope retained here for reference: fixed capture time, camera tracks, readback
+pipelining, background frame writes, resumable/validated sequences, and external
+FFmpeg muxing. Verify a short motion/temporal probe in both persistent and cold
+lanes.
 
 ## 8. Exit criteria
 
