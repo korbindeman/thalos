@@ -4,13 +4,13 @@ use super::super::helpers::{node_world_position, overlay_marker_transform};
 use super::super::state::{
     InteractionMode, ManeuverPlan, NodeMarkerDisc, SelectedNode, SnapIndicator,
 };
-use thalos_game_state::camera::ActiveCamera;
-use thalos_game_state::coords::{RenderOrigin, WorldScale};
 use crate::flight_plan_view::FlightPlanView;
-use thalos_game_state::ui::HideInPhotoMode;
+use thalos_game_state::camera::ActiveCamera;
 use thalos_game_state::coords::screen_marker_radius;
-use thalos_game_state::{SimulationState, SolarSystemState};
+use thalos_game_state::coords::{RenderOrigin, WorldScale};
+use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HideInShipView;
+use thalos_game_state::{SimulationState, SolarSystemState};
 
 /// Spawn the snap indicator (hidden by default).
 pub(in crate::maneuver) fn spawn_snap_indicator(

@@ -25,7 +25,6 @@ pub const CLICK_THRESHOLD_PX: f32 = 4.0;
 /// zoom levels. Cost is negligible at the part counts we render.
 pub const PART_RESOLUTION: u32 = 128;
 
-
 /// Front-end-supplied pointer gate. `pointer_busy` must be true whenever
 /// the cursor is over (or captured by) the front-end's 2D UI, so scene
 /// interactions (picking, deselect, placement preview) stand down.

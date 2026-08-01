@@ -30,11 +30,11 @@ use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
 use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemState};
 use crate::view::ViewMode;
 
+pub use thalos_game_state::camera::focus_transition_progress;
 pub use thalos_game_state::camera::{
     ActiveCamera, BlockCameraInput, CameraFocus, CameraFocusTarget, OrbitCamera,
     find_reference_body,
 };
-pub use thalos_game_state::camera::focus_transition_progress;
 use thalos_game_state::camera::{DISTANCE_MIN_DEFAULT, FOCUS_TRANSITION_DURATION_S};
 
 /// Plugin that registers the orbit camera systems and spawns the camera entity.
@@ -68,7 +68,6 @@ impl Plugin for CameraPlugin {
     }
 }
 
-
 /// Marker for the map-view camera (renders [`MAP_LAYER`]).
 #[derive(Component)]
 pub struct MapCamera;
@@ -81,7 +80,6 @@ pub struct MapCamera;
 #[derive(Component, Clone, ExtractComponent)]
 pub struct ShipCamera;
 
-
 /// Per-target offset, in the target's local frame, that the camera should
 /// pivot around instead of the entity's transform translation. Used by the
 /// player ship to centre the camera on the mass-weighted CoM of all parts
@@ -89,7 +87,6 @@ pub struct ShipCamera;
 /// this and simply omit the component.
 #[derive(Component, Default, Debug, Clone, Copy)]
 pub struct CameraTargetOffset(pub Vec3);
-
 
 #[derive(Resource, Default)]
 pub(crate) struct CameraCollisionState {
@@ -124,12 +121,7 @@ impl ShipCameraMode {
     }
 }
 
-
-
-
-
-
- // 100 km
+// 100 km
 const MAP_DISTANCE_MAX: f64 = 1e13; // ~67 AU
 /// Farthest the ship-view chase camera may pull back from the vessel.
 /// Map view handles orbital/system-scale framing; ship view stays local.
@@ -488,7 +480,6 @@ fn camera_focus_transition_system(time: Res<Time<Real>>, mut focus: ResMut<Camer
         focus.transition_elapsed_s = 0.0;
     }
 }
-
 
 /// Metres the camera spring arm stays away from the blocking surface.
 /// Keep this small; large probe radii turn shallow ground hits into violent
@@ -1082,7 +1073,6 @@ fn ship_camera_basis(
         }
     }
 }
-
 
 #[cfg(test)]
 mod tests {

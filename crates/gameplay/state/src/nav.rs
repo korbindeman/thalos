@@ -622,6 +622,9 @@ pub enum OrbitTargetRequest {
     AdjustApoapsis(i8),
     AdjustInclination(i8),
     ToggleDirection,
+    /// Resolve the efficient plane from the live craft state and write the
+    /// resulting inclination + direction into the editable draft.
+    AutoSet,
     TogglePlane,
     Plan,
     Execute,

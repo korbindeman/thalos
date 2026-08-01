@@ -97,19 +97,6 @@ pub use thalos_game_state::nav::{
 
 const MANEUVER_DIRECTIVE_NAMESPACE: &str = "maneuver";
 
-
-
-
-
-
-
-
-
-
-
-
-
-
 pub struct AutopilotPlugin;
 
 impl Plugin for AutopilotPlugin {

@@ -71,10 +71,7 @@ pub struct GamePause {
     pub active: bool,
 }
 
-pub fn not_game_paused(
-    pause: Res<GamePause>,
-    scenario: Res<ScenarioMenu>,
-) -> bool {
+pub fn not_game_paused(pause: Res<GamePause>, scenario: Res<ScenarioMenu>) -> bool {
     !pause.active && !scenario.open
 }
 

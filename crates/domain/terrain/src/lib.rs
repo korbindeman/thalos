@@ -25,8 +25,8 @@ pub mod noise;
 pub mod package;
 pub mod pipeline;
 pub mod procedural;
-pub mod rivers;
 pub mod query;
+pub mod rivers;
 pub mod sample;
 pub mod seeding;
 pub mod spatial_index;
@@ -73,12 +73,12 @@ pub use procedural::{
     COAST_BAND_M, GENERATOR_VERSION, MacroBiome, MacroSignals, ProceduralSurface,
     climate_cold_lift_m, climate_warmth, combine_macro_and_relief,
 };
-pub use rivers::RiverField;
 pub use query::{
     BakedSurface, FlattenHandle, FlattenRegion, FlattenedSurface, MaterialBands, Region,
     SurfaceQuery, SurfaceRef, TerrainFlatten, flatten_handle, nearest_flatten, surface_height_m,
     surface_height_range_m, surface_normal, surface_sample,
 };
+pub use rivers::RiverField;
 pub use sample::{
     SurfaceSample, apply_dynamic_surface_layers, sample_static_surface, sample_surface,
 };

@@ -157,6 +157,9 @@ impl Plugin for ShipEditorCorePlugin {
                         .before(visuals::rebuild_wing_visuals)
                         .before(visuals::rebuild_nacelle_visuals),
                     visuals::rebuild_wing_visuals,
+                    visuals::rebuild_changed_fuselage_fairings
+                        .after(visuals::rebuild_visuals)
+                        .after(visuals::rebuild_wing_visuals),
                     visuals::rebuild_nacelle_visuals,
                     visuals::rebuild_gear_visuals,
                     visuals::update_part_transforms.after(propagate_node_sizes),

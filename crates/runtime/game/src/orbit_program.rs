@@ -35,6 +35,10 @@ const TURN_END_HEIGHT_M: f64 = 15_000.0;
 const MAX_DYNAMIC_PRESSURE_PA: f64 = 35_000.0;
 const MAX_ASCENT_ACCELERATION_M_S2: f64 = 4.0 * 9.806_65;
 const MECO_APOAPSIS_MARGIN_M: f64 = 2_000.0;
+/// Pad-to-orbit gravity + drag allowance after the body's rotational boost is
+/// credited explicitly. The live remaining estimate tapers this to zero at
+/// the atmosphere boundary instead of charging it again on every resume.
+const SURFACE_ASCENT_LOSS_RESERVE_M_S: f64 = 1_200.0;
 const PREFLIGHT_POINTING_COS: f64 = 0.984_807_753; // 10°
 const PREFLIGHT_POINTING_TIMEOUT_S: f64 = 5.0;
 /// Reference normal used by `orbital_math::cartesian_to_elements`.
@@ -51,7 +55,11 @@ impl Plugin for OrbitProgramPlugin {
             .add_message::<OrbitTargetRequest>()
             .add_systems(
                 Update,
-                handle_orbit_target_requests.before(crate::SimStage::Physics),
+                (
+                    initialize_orbit_auto_target,
+                    handle_orbit_target_requests.after(initialize_orbit_auto_target),
+                )
+                    .before(crate::SimStage::Physics),
             )
             .add_systems(
                 Update,
@@ -70,6 +78,76 @@ impl Plugin for OrbitProgramPlugin {
                     .in_set(crate::SimStage::Physics),
             );
     }
+}
+
+/// Resolve the default AUTO suggestion once the live craft/body state exists.
+/// AUTO is an action in the UI, not a persistent target value: after this
+/// write the editable draft always contains concrete inclination/direction.
+fn initialize_orbit_auto_target(
+    mut program: ResMut<OrbitProgram>,
+    sim: Res<SimulationState>,
+    solar: Res<SolarSystemState>,
+) {
+    if program.phase == OrbitProgramPhase::Idle && program.draft.plane == OrbitPlaneChoice::Auto {
+        resolve_auto_draft(&mut program, &sim, &solar);
+    }
+}
+
+fn resolve_auto_draft(
+    program: &mut OrbitProgram,
+    sim: &SimulationState,
+    solar: &SolarSystemState,
+) -> bool {
+    let body_id = sim.simulation.dominant_body();
+    let Some(body) = sim.system.bodies.get(body_id) else {
+        return false;
+    };
+    let Some(body_state) = solar
+        .states
+        .as_deref()
+        .and_then(|states| states.get(body_id))
+    else {
+        return false;
+    };
+    let ship = sim.simulation.ship_state();
+    let relative = StateVector {
+        position: ship.position - body_state.position,
+        velocity: ship.velocity - body_state.velocity,
+    };
+    let altitude_m = relative.position.length() - body.radius_m;
+    let atmosphere_top_m = body
+        .terrestrial_atmosphere
+        .as_ref()
+        .map_or(0.0, |atmosphere| atmosphere.karman_line_m as f64);
+    let surface_ascent = matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
+        || altitude_m <= atmosphere_top_m.max(5_000.0);
+
+    let (inclination_rad, direction) = if surface_ascent {
+        (
+            orbital_latitude(relative.position).abs(),
+            OrbitDirection::Prograde,
+        )
+    } else {
+        let Some(elements) =
+            thalos_physics_canonical::orbital_math::cartesian_to_elements(relative, body.gm)
+        else {
+            return false;
+        };
+        if elements.inclination_rad <= std::f64::consts::FRAC_PI_2 {
+            (elements.inclination_rad, OrbitDirection::Prograde)
+        } else {
+            (
+                std::f64::consts::PI - elements.inclination_rad,
+                OrbitDirection::Retrograde,
+            )
+        }
+    };
+
+    program.draft.inclination_rad = inclination_rad;
+    program.draft.direction = direction;
+    program.draft.plane = OrbitPlaneChoice::Nearest;
+    program.draft.normalize();
+    true
 }
 
 fn handle_orbit_target_requests(
@@ -122,11 +200,18 @@ fn handle_orbit_target_requests(
                 };
                 invalidate_preview(&mut program, &mut maneuver_plan);
             }
+            OrbitTargetRequest::AutoSet => {
+                if !resolve_auto_draft(&mut program, &sim, &solar) {
+                    program.error = Some("craft orbit is not available yet".to_string());
+                } else {
+                    invalidate_preview(&mut program, &mut maneuver_plan);
+                }
+            }
             OrbitTargetRequest::TogglePlane => {
                 program.draft.plane = match program.draft.plane {
                     OrbitPlaneChoice::Auto => OrbitPlaneChoice::Nearest,
                     OrbitPlaneChoice::Nearest => OrbitPlaneChoice::Preserve,
-                    OrbitPlaneChoice::Preserve => OrbitPlaneChoice::Auto,
+                    OrbitPlaneChoice::Preserve => OrbitPlaneChoice::Nearest,
                 };
                 invalidate_preview(&mut program, &mut maneuver_plan);
             }
@@ -176,6 +261,12 @@ fn plan_current_target(
     solar: &SolarSystemState,
     execute: bool,
 ) {
+    let resume_surface = execute
+        && program.surface_program
+        && program.phase == OrbitProgramPhase::Abort
+        && program.error.as_deref() == Some("pilot override");
+    let original_launch_altitude_m = program.launch_altitude_m;
+    let original_target_plane_normal = program.target_plane_normal;
     clear_program_nodes(program, maneuver_plan);
     program.idle_handoff_pending = false;
     program.error = None;
@@ -205,7 +296,8 @@ fn plan_current_target(
         .terrestrial_atmosphere
         .as_ref()
         .map_or(0.0, |atmosphere| atmosphere.karman_line_m as f64);
-    let surface_program = matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
+    let surface_program = resume_surface
+        || matches!(sim.simulation.authority(), AuthorityMode::BodyFixed { .. })
         || altitude_m <= atmosphere_top_m.max(5_000.0);
 
     program.target_body = Some(body_id);
@@ -213,12 +305,20 @@ fn plan_current_target(
     if surface_program {
         let launch_inclination_rad = launch_inclination(program.draft, relative.position);
         let launch_direction = launch_direction(program.draft);
-        program.launch_altitude_m = altitude_m;
+        program.launch_altitude_m = if resume_surface {
+            original_launch_altitude_m
+        } else {
+            altitude_m
+        };
         program.phase_started_s = sim.simulation.sim_time();
         program.sequence = SequenceEvent::None;
         program.diagnostic_s = 0.0;
         program.within_tolerance_s = 0.0;
-        program.target_plane_normal = DVec3::ZERO;
+        program.target_plane_normal = if resume_surface {
+            original_target_plane_normal
+        } else {
+            DVec3::ZERO
+        };
         program.phase = if execute {
             OrbitProgramPhase::Preflight
         } else {
@@ -226,7 +326,14 @@ fn plan_current_target(
         };
         program.summary = Some(OrbitPlanSummary {
             node_count: 0,
-            total_delta_v_m_s: estimate_surface_delta_v(body.gm, body.radius_m, program.draft),
+            total_delta_v_m_s: estimate_remaining_ascent_delta_v(
+                body.gm,
+                body.radius_m,
+                atmosphere_top_m,
+                program.draft,
+                relative.position,
+                relative.velocity,
+            ),
             predicted_periapsis_altitude_m: program.draft.periapsis_altitude_m,
             predicted_apoapsis_altitude_m: program.draft.apoapsis_altitude_m,
             predicted_inclination_rad: resolved_inclination(
@@ -310,6 +417,7 @@ pub(crate) fn update_surface_orbit_program(
     staging: Res<StagingSummaries>,
     input: Res<GameInputIntent>,
     pilot_throttle: Res<PilotThrottleInput>,
+    throttle_state: Res<ThrottleState>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     clock: Res<SimClock>,
@@ -365,6 +473,24 @@ pub(crate) fn update_surface_orbit_program(
     let latitude_rad = orbital_latitude(relative_position);
     let launch_inclination_rad = launch_inclination(program.draft, relative_position);
     let launch_direction = launch_direction(program.draft);
+    let Some(launch_heading) = launch_heading(
+        up,
+        ORBIT_REFERENCE_NORMAL,
+        latitude_rad,
+        launch_inclination_rad,
+        launch_direction,
+    ) else {
+        abort_surface_program(&mut program, "launch_heading_undefined");
+        return;
+    };
+    if program.target_plane_normal.length_squared() <= 1.0e-12 {
+        program.target_plane_normal = up.cross(launch_heading).normalize();
+    }
+    let plane_heading = program
+        .target_plane_normal
+        .cross(up)
+        .try_normalize()
+        .unwrap_or(launch_heading);
 
     // Everything knowable without lighting an engine is checked first. A
     // cold staged vessel reports no ActivePropulsion by design, so the staged
@@ -410,8 +536,24 @@ pub(crate) fn update_surface_orbit_program(
             return;
         }
         let available_delta_v_m_s: f64 = staging.0.iter().map(|stage| stage.delta_v_m_s).sum();
-        let required_delta_v_m_s = estimate_surface_delta_v(body.gm, body.radius_m, program.draft);
-        if available_delta_v_m_s < required_delta_v_m_s * 0.9 {
+        let relative_velocity = ship.velocity - body_state.velocity;
+        let required_delta_v_m_s = estimate_remaining_ascent_delta_v(
+            body.gm,
+            body.radius_m,
+            atmosphere_top_m,
+            program.draft,
+            relative_position,
+            relative_velocity,
+        );
+        if available_delta_v_m_s < required_delta_v_m_s {
+            warn!(
+                target: "thalos::diagnostic::orbit_autoflight",
+                event = "orbit_delta_v_refused",
+                available_delta_v_m_s,
+                required_delta_v_m_s,
+                altitude_m,
+                "ORBIT remaining delta-v gate refused execution"
+            );
             abort_surface_program(&mut program, "insufficient_delta_v");
             return;
         }
@@ -452,6 +594,7 @@ pub(crate) fn update_surface_orbit_program(
     // 60 Hz a one-frame-old throttle tracks a changing setting far inside
     // the cutoff lead.
     let commanded_throttle = program.demand.throttle.unwrap_or(0.0);
+    let active_stage = staging.0.iter().any(|stage| stage.active);
     let active_stage_fuel_kg = staging
         .0
         .iter()
@@ -463,9 +606,14 @@ pub(crate) fn update_surface_orbit_program(
             active_stage_fuel_kg,
             mass_flow_full_kg_per_s: propulsion.mass_flow_kg_per_s,
             commanded_throttle,
-            total_thrust_n: propulsion.total_thrust_n,
+            active_stage,
+            producing_thrust_n: propulsion.total_thrust_n * throttle_state.effective,
             angular_rate_rad_s: sim.simulation.attitude().angular_velocity.length(),
-            stage_available: staging.0.iter().any(|stage| !stage.active),
+            stage_available: if active_stage {
+                staging.0.iter().any(|stage| !stage.active)
+            } else {
+                !staging.0.is_empty()
+            },
         },
         &mut stage_demand,
     );
@@ -481,29 +629,21 @@ pub(crate) fn update_surface_orbit_program(
         None => SequenceEvent::None,
     };
 
+    // Preflight owns first-stage ignition. Wait for the canonical staging
+    // acknowledgement and the short ignition settle before asking live TWR
+    // or advancing into powered guidance.
+    if program.phase == OrbitProgramPhase::Preflight
+        && (!active_stage || stage_command != StageCommand::Free)
+    {
+        program.demand =
+            ControlDemand::autoflight(AttitudeDemand::PointNose(up), Some(0.0), None, None);
+        return;
+    }
+
     if launch_inclination_rad + 1.0e-6 < latitude_rad.abs() {
         abort_surface_program(&mut program, "inclination_unreachable_from_launch_site");
         return;
     }
-    let Some(launch_heading) = launch_heading(
-        up,
-        ORBIT_REFERENCE_NORMAL,
-        latitude_rad,
-        launch_inclination_rad,
-        launch_direction,
-    ) else {
-        abort_surface_program(&mut program, "launch_heading_undefined");
-        return;
-    };
-    if program.target_plane_normal.length_squared() <= 1.0e-12 {
-        program.target_plane_normal = up.cross(launch_heading).normalize();
-    }
-    let plane_heading = program
-        .target_plane_normal
-        .cross(up)
-        .try_normalize()
-        .unwrap_or(launch_heading);
-
     if program.phase == OrbitProgramPhase::Preflight {
         let live_twr = propulsion.total_thrust_n
             / (propulsion.wet_mass_kg.max(1.0) * surface_gravity_m_s2.max(1.0e-6));
@@ -511,11 +651,15 @@ pub(crate) fn update_surface_orbit_program(
             abort_surface_program(&mut program, "insufficient_live_thrust_to_weight");
             return;
         }
-        set_orbit_phase(
-            &mut program,
-            OrbitProgramPhase::Rise,
-            sim.simulation.sim_time(),
-        );
+        let resumed_height_m = altitude_m - program.launch_altitude_m;
+        let initial_phase = if resumed_height_m < RISE_HEIGHT_M {
+            OrbitProgramPhase::Rise
+        } else if resumed_height_m < TURN_END_HEIGHT_M {
+            OrbitProgramPhase::Turn
+        } else {
+            OrbitProgramPhase::Ascent
+        };
+        set_orbit_phase(&mut program, initial_phase, sim.simulation.sim_time());
     }
 
     let relative_velocity = ship.velocity - body_state.velocity;
@@ -895,11 +1039,60 @@ fn resolved_inclination(inclination_rad: f64, direction: OrbitDirection) -> f64 
     }
 }
 
-fn estimate_surface_delta_v(mu: f64, body_radius_m: f64, draft: OrbitDraft) -> f64 {
-    let target_radius_m = body_radius_m + draft.apoapsis_altitude_m;
-    let orbital_speed_m_s = (mu / target_radius_m).sqrt();
-    let gravity_drag_reserve_m_s = 1_800.0;
-    orbital_speed_m_s + gravity_drag_reserve_m_s
+fn estimate_remaining_ascent_delta_v(
+    mu: f64,
+    body_radius_m: f64,
+    atmosphere_top_m: f64,
+    draft: OrbitDraft,
+    position: DVec3,
+    velocity: DVec3,
+) -> f64 {
+    let radius_m = position.length();
+    if !mu.is_finite() || mu <= 0.0 || !radius_m.is_finite() || radius_m <= body_radius_m * 0.5 {
+        return f64::INFINITY;
+    }
+
+    let target_apoapsis_radius_m = (body_radius_m + draft.apoapsis_altitude_m).max(radius_m + 1.0);
+    let target_periapsis_radius_m =
+        (body_radius_m + draft.periapsis_altitude_m).min(target_apoapsis_radius_m);
+    let transfer_a_m = 0.5 * (radius_m + target_apoapsis_radius_m);
+    let target_a_m = 0.5 * (target_periapsis_radius_m + target_apoapsis_radius_m);
+
+    let departure_speed_m_s = (mu * (2.0 / radius_m - 1.0 / transfer_a_m)).max(0.0).sqrt();
+    let transfer_apoapsis_speed_m_s = (mu * (2.0 / target_apoapsis_radius_m - 1.0 / transfer_a_m))
+        .max(0.0)
+        .sqrt();
+    let target_apoapsis_speed_m_s = (mu * (2.0 / target_apoapsis_radius_m - 1.0 / target_a_m))
+        .max(0.0)
+        .sqrt();
+
+    let up = position / radius_m;
+    let latitude_rad = orbital_latitude(position);
+    let forward = launch_heading(
+        up,
+        ORBIT_REFERENCE_NORMAL,
+        latitude_rad,
+        launch_inclination(draft, position),
+        launch_direction(draft),
+    )
+    .unwrap_or_else(|| (velocity - up * velocity.dot(up)).normalize_or_zero());
+    // Credit only velocity already pointing along the selected launch plane.
+    // Radial speed and wrong-way crossrange cannot masquerade as usable Δv.
+    let useful_speed_m_s = velocity.dot(forward).max(0.0);
+    let powered_ascent_m_s = (departure_speed_m_s - useful_speed_m_s).max(0.0);
+    let circularization_m_s = (target_apoapsis_speed_m_s - transfer_apoapsis_speed_m_s).abs();
+
+    let altitude_m = (radius_m - body_radius_m).max(0.0);
+    let loss_completion_altitude_m = if atmosphere_top_m > 0.0 {
+        atmosphere_top_m
+    } else {
+        draft.apoapsis_altitude_m.max(1.0) * 0.25
+    };
+    let remaining_loss_fraction =
+        (1.0 - altitude_m / loss_completion_altitude_m.max(1.0)).clamp(0.0, 1.0);
+    let remaining_losses_m_s = SURFACE_ASCENT_LOSS_RESERVE_M_S * remaining_loss_fraction;
+
+    powered_ascent_m_s + circularization_m_s + remaining_losses_m_s
 }
 
 fn plan_error_label(error: &OrbitPlanError) -> String {
@@ -995,5 +1188,42 @@ mod tests {
         assert_eq!(ascent_throttle(0.0, 9.0), 1.0);
         assert!(ascent_throttle(MAX_DYNAMIC_PRESSURE_PA * 2.0, 9.0) <= 0.5 + f64::EPSILON);
         assert!(ascent_throttle(0.0, MAX_ASCENT_ACCELERATION_M_S2 * 2.0) <= 0.5 + f64::EPSILON);
+    }
+
+    #[test]
+    fn remaining_delta_v_credits_live_ascent_progress() {
+        let mu = 3.986_004_418e14;
+        let radius_m = 6_371_000.0;
+        let atmosphere_top_m = 100_000.0;
+        let draft = OrbitDraft {
+            plane: OrbitPlaneChoice::Nearest,
+            inclination_rad: 0.0,
+            ..default()
+        };
+        let pad = estimate_remaining_ascent_delta_v(
+            mu,
+            radius_m,
+            atmosphere_top_m,
+            draft,
+            DVec3::X * radius_m,
+            DVec3::Z * 465.0,
+        );
+        let in_ascent = estimate_remaining_ascent_delta_v(
+            mu,
+            radius_m,
+            atmosphere_top_m,
+            draft,
+            DVec3::X * (radius_m + 33_000.0),
+            DVec3::Z * 3_000.0,
+        );
+
+        assert!(
+            (8_500.0..9_000.0).contains(&pad),
+            "unexpected pad requirement {pad:.1} m/s"
+        );
+        assert!(
+            in_ascent < pad - 2_000.0,
+            "resume charged pad-to-orbit delta-v again: pad={pad:.1}, resume={in_ascent:.1}"
+        );
     }
 }

@@ -54,7 +54,7 @@ use thalos_game_state::nav::{RouteRequest, RouteState, RouteStatus};
 use thalos_game_state::units::{UnitDomain, UnitSystem};
 use thalos_game_state::{SimulationState, SolarSystemState};
 
-use super::super::{ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind};
+use super::super::{ActiveWidgets, FlightContext, MfdWidgetRoot, WidgetKind};
 
 /// Body nose axis, matching the navball / PFD conventions.
 const BODY_NOSE: DVec3 = DVec3::Y;
@@ -1247,7 +1247,7 @@ pub(crate) struct NavWidgets<'w, 's> {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update(
-    active: Res<ActiveWidget>,
+    active: Res<ActiveWidgets>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     route: Res<RouteState>,
@@ -1259,7 +1259,7 @@ pub(crate) fn update(
     mut widgets: NavWidgets,
     mut range_state: ResMut<NavRangeState>,
 ) {
-    if active.0 != Some(WidgetKind::NavDisplay) {
+    if !active.contains(WidgetKind::NavDisplay) {
         return;
     }
     let Ok(canvas) = canvas_q.single() else {
@@ -1526,14 +1526,14 @@ fn deviation_offsets_px(guidance: &Guidance) -> (f32, f32) {
 
 /// Zoom controls and the scroll wheel. **Sole writer** of [`NavZoom`].
 pub(crate) fn handle_zoom(
-    active: Res<ActiveWidget>,
+    active: Res<ActiveWidgets>,
     buttons: Query<(&Interaction, &NavZoomButton), Changed<Interaction>>,
     canvas_q: Query<&Interaction, With<NavCanvas>>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
     mut zoom: ResMut<NavZoom>,
     range_state: Res<NavRangeState>,
 ) {
-    if active.0 != Some(WidgetKind::NavDisplay) {
+    if !active.contains(WidgetKind::NavDisplay) {
         // Drain the wheel so a scroll made elsewhere does not apply late.
         wheel.clear();
         return;
@@ -1589,7 +1589,7 @@ fn fmt_altitude_error(guidance: &Guidance, system: UnitSystem) -> String {
 
 /// Clicking the plot arms an approach to the runway under the cursor.
 pub(crate) fn handle_canvas_click(
-    active: Res<ActiveWidget>,
+    active: Res<ActiveWidgets>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     route: Res<RouteState>,
@@ -1601,7 +1601,7 @@ pub(crate) fn handle_canvas_click(
     mut requests: MessageWriter<RouteRequest>,
     range_state: Res<NavRangeState>,
 ) {
-    if active.0 != Some(WidgetKind::NavDisplay) {
+    if !active.contains(WidgetKind::NavDisplay) {
         return;
     }
     for (interaction, cursor) in &canvas_q {

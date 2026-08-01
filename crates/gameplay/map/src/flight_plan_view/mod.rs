@@ -39,10 +39,12 @@ impl Plugin for FlightPlanViewPlugin {
                     ghost::sync_ghost_bodies,
                     ghost::update_ghost_transforms,
                     render::render_trajectory.run_if(
-                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                        thalos_game_state::ui::not_in_photo_mode
+                            .and_then(thalos_game_state::nav::in_map_view),
                     ),
                     markers::manage_trajectory_markers.run_if(
-                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                        thalos_game_state::ui::not_in_photo_mode
+                            .and_then(thalos_game_state::nav::in_map_view),
                     ),
                 )
                     .chain()

@@ -31,8 +31,6 @@ use crate::shipyard_editor::scene::EditorCamera;
 pub use thalos_game_state::nav::{ViewMode, in_map_view};
 pub use thalos_game_state::ui::HideInShipView;
 
-
-
 /// Marker: entities with this component are hidden while the view is
 /// [`ViewMode::Map`]. Attach to the 3D ship mesh and the real-scale body
 /// spheres that only make sense up close.
@@ -205,7 +203,6 @@ fn apply_active_camera(
         }
     }
 }
-
 
 fn toggle_view_input(
     input: Res<GameInputIntent>,

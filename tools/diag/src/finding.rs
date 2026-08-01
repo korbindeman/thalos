@@ -164,6 +164,11 @@ pub const STAGE_UNPREDICTED_ATTENTION: usize = 1;
 /// not a tuning question. One is worth a look.
 pub const STAGE_REFUSED_ATTENTION: usize = 1;
 
+/// First-stage activation is an acknowledged transaction and normally closes
+/// within one frame. A command left unmatched at session end means ORBIT could
+/// not ignite its cold stack (or the acknowledgement lane broke).
+pub const STAGE_IGNITION_UNACKNOWLEDGED_ATTENTION: usize = 1;
+
 // ── Capture-lane thresholds ─────────────────────────────────────────────────
 //
 // The capture lane is the throughput floor for agent work, so its bar is the

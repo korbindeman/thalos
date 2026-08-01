@@ -69,6 +69,9 @@ pub enum StageSequence {
     Idle,
     /// Burnout predicted and annunciated; still burning normally.
     Armed { burnout_at_s: f64 },
+    /// The first/live stage activation was requested; awaiting the canonical
+    /// staging transaction's acknowledgement.
+    Activating { request_id: u64 },
     /// Cutoff commanded. Throttle closed, waiting out tail-off.
     Cutoff { until_s: f64 },
     /// Interlocks passed and separation requested; awaiting acknowledgement
@@ -103,8 +106,11 @@ pub struct StageSequencerInput {
     pub mass_flow_full_kg_per_s: f64,
     /// The throttle guidance is currently commanding, 0..1.
     pub commanded_throttle: f64,
-    /// Total thrust the enabled engines are producing, N.
-    pub total_thrust_n: f64,
+    /// Whether one stage is currently activated.
+    pub active_stage: bool,
+    /// Actual thrust being produced after the effective throttle/fuel gate, N.
+    /// This is deliberately not the enabled engines' full-throttle rating.
+    pub producing_thrust_n: f64,
     /// Vehicle angular rate magnitude, rad/s.
     pub angular_rate_rad_s: f64,
     /// Whether a further stage exists to fire.
@@ -160,8 +166,11 @@ impl StageSequencer {
     /// Cancel any in-flight request. Called when the owning program aborts,
     /// so a pending demand cannot be acknowledged into a dead program.
     pub fn cancel(&mut self, demand: &mut StageDemand) {
-        if let StageSequence::Separating { request_id } = self.state {
-            demand.cancel(request_id);
+        match self.state {
+            StageSequence::Activating { request_id } | StageSequence::Separating { request_id } => {
+                demand.cancel(request_id)
+            }
+            _ => {}
         }
         self.state = StageSequence::Idle;
     }
@@ -170,7 +179,8 @@ impl StageSequencer {
     pub fn armed_in_s(&self, now_s: f64) -> Option<f64> {
         match self.state {
             StageSequence::Armed { burnout_at_s } => Some((burnout_at_s - now_s).max(0.0)),
-            StageSequence::Cutoff { .. }
+            StageSequence::Activating { .. }
+            | StageSequence::Cutoff { .. }
             | StageSequence::Separating { .. }
             | StageSequence::Ignition { .. } => Some(0.0),
             StageSequence::Idle | StageSequence::Exhausted => None,
@@ -178,16 +188,30 @@ impl StageSequencer {
     }
 
     /// Advance the sequence one frame and say what guidance should do.
-    pub fn update(
-        &mut self,
-        input: StageSequencerInput,
-        demand: &mut StageDemand,
-    ) -> StageCommand {
+    pub fn update(&mut self, input: StageSequencerInput, demand: &mut StageDemand) -> StageCommand {
         let now = input.now_s;
         match self.state {
             StageSequence::Exhausted => StageCommand::Exhausted,
 
             StageSequence::Idle => {
+                // A cold stack has no active engine by construction. ORBIT
+                // owns launch, so request the first stage through the same
+                // acknowledged transaction used for every later separation.
+                if !input.active_stage {
+                    if !input.stage_available {
+                        self.state = StageSequence::Exhausted;
+                        return StageCommand::Exhausted;
+                    }
+                    let request_id = demand.request();
+                    info!(
+                        target: "thalos::diagnostic::staging",
+                        event = "stage_ignition_commanded",
+                        request_id,
+                        "initial stage activation commanded"
+                    );
+                    self.state = StageSequence::Activating { request_id };
+                    return StageCommand::HoldThrottleClosed;
+                }
                 let remaining = seconds_to_burnout(
                     input.active_stage_fuel_kg,
                     input.mass_flow_full_kg_per_s,
@@ -197,7 +221,8 @@ impl StageSequencer {
                 // prediction missed (a stage with no usable propellant
                 // reading, crossfeed we could not see, a resource the
                 // summary does not model). Stage anyway and record it.
-                if input.total_thrust_n <= STAGE_THRUST_SETTLED_N && input.commanded_throttle > 0.0
+                if input.producing_thrust_n <= STAGE_THRUST_SETTLED_N
+                    && input.commanded_throttle > 0.0
                 {
                     self.unpredicted_events += 1;
                     warn!(
@@ -229,6 +254,32 @@ impl StageSequencer {
                 }
             }
 
+            StageSequence::Activating { request_id } => match demand.outcome(request_id) {
+                Some(true) => {
+                    info!(
+                        target: "thalos::diagnostic::staging",
+                        event = "stage_ignited",
+                        request_id,
+                        "initial stage activation acknowledged"
+                    );
+                    self.state = StageSequence::Ignition {
+                        until_s: now + STAGE_IGNITION_SETTLE_S,
+                    };
+                    StageCommand::HoldThrottleClosed
+                }
+                Some(false) => {
+                    warn!(
+                        target: "thalos::diagnostic::staging",
+                        event = "stage_refused",
+                        request_id,
+                        "initial stage activation refused"
+                    );
+                    self.state = StageSequence::Exhausted;
+                    StageCommand::Exhausted
+                }
+                None => StageCommand::HoldThrottleClosed,
+            },
+
             StageSequence::Armed { .. } => {
                 let remaining = seconds_to_burnout(
                     input.active_stage_fuel_kg,
@@ -259,7 +310,7 @@ impl StageSequencer {
                 // Interlocks: thrust actually decayed, tail-off elapsed, and
                 // the stack is not rotating fast enough for the halves to
                 // re-contact. Confirmation, not trigger.
-                let thrust_settled = input.total_thrust_n <= STAGE_THRUST_SETTLED_N;
+                let thrust_settled = input.producing_thrust_n <= STAGE_THRUST_SETTLED_N;
                 let tailoff_done = now >= until_s;
                 let rates_ok = input.angular_rate_rad_s <= STAGE_SEPARATION_RATE_LIMIT_RAD_S;
                 if thrust_settled && tailoff_done && rates_ok {
@@ -347,7 +398,8 @@ mod tests {
             active_stage_fuel_kg: fuel_kg,
             mass_flow_full_kg_per_s: 100.0,
             commanded_throttle: 1.0,
-            total_thrust_n: 500_000.0,
+            active_stage: true,
+            producing_thrust_n: 500_000.0,
             angular_rate_rad_s: 0.01,
             stage_available: true,
         }
@@ -363,15 +415,38 @@ mod tests {
     }
 
     #[test]
+    fn cold_stack_requests_and_acknowledges_first_stage_ignition() {
+        let mut seq = StageSequencer::default();
+        let mut demand = StageDemand::default();
+        let mut cold = burning(1_000.0);
+        cold.active_stage = false;
+        cold.producing_thrust_n = 0.0;
+
+        assert_eq!(
+            seq.update(cold, &mut demand),
+            StageCommand::HoldThrottleClosed
+        );
+        let StageSequence::Activating { request_id } = seq.state else {
+            panic!("cold stack did not request first-stage activation");
+        };
+
+        demand.test_complete(true);
+        assert_eq!(demand.outcome(request_id), Some(true));
+        cold.now_s += 0.1;
+        assert_eq!(
+            seq.update(cold, &mut demand),
+            StageCommand::HoldThrottleClosed
+        );
+        assert!(matches!(seq.state, StageSequence::Ignition { .. }));
+    }
+
+    #[test]
     fn arms_then_cuts_as_the_tank_empties() {
         let mut seq = StageSequencer::default();
         let mut demand = StageDemand::default();
 
         // 10 s of propellant: nothing yet.
-        assert_eq!(
-            seq.update(burning(1000.0), &mut demand),
-            StageCommand::Free
-        );
+        assert_eq!(seq.update(burning(1000.0), &mut demand), StageCommand::Free);
         assert_eq!(seq.state, StageSequence::Idle);
 
         // 3 s: armed and annunciating, still burning.
@@ -416,7 +491,7 @@ mod tests {
         // Thrust gone but tumbling: still hold.
         let mut tumbling = burning(0.0);
         tumbling.now_s = 101.0;
-        tumbling.total_thrust_n = 0.0;
+        tumbling.producing_thrust_n = 0.0;
         tumbling.angular_rate_rad_s = 1.0;
         seq.update(tumbling, &mut demand);
         assert!(matches!(seq.state, StageSequence::Cutoff { .. }));
@@ -424,7 +499,7 @@ mod tests {
         // All interlocks pass: separation commanded.
         let mut clean = burning(0.0);
         clean.now_s = 101.0;
-        clean.total_thrust_n = 0.0;
+        clean.producing_thrust_n = 0.0;
         seq.update(clean, &mut demand);
         assert!(matches!(seq.state, StageSequence::Separating { .. }));
     }
@@ -435,7 +510,7 @@ mod tests {
         let mut demand = StageDemand::default();
         // The predictor sees plenty of fuel, but thrust is gone.
         let mut dead = burning(5_000.0);
-        dead.total_thrust_n = 0.0;
+        dead.producing_thrust_n = 0.0;
         assert_eq!(
             seq.update(dead, &mut demand),
             StageCommand::HoldThrottleClosed
@@ -454,7 +529,7 @@ mod tests {
         seq.state = StageSequence::Cutoff { until_s: 100.0 };
         let mut last = burning(0.0);
         last.now_s = 101.0;
-        last.total_thrust_n = 0.0;
+        last.producing_thrust_n = 0.0;
         last.stage_available = false;
         assert_eq!(seq.update(last, &mut demand), StageCommand::Exhausted);
         assert_eq!(seq.state, StageSequence::Exhausted);
@@ -468,7 +543,7 @@ mod tests {
 
         let mut clean = burning(0.0);
         clean.now_s = 101.0;
-        clean.total_thrust_n = 0.0;
+        clean.producing_thrust_n = 0.0;
         seq.update(clean, &mut demand);
         let StageSequence::Separating { request_id } = seq.state else {
             panic!("expected a separation request");

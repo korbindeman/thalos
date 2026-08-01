@@ -26,8 +26,8 @@ use crate::HudPanel;
 use crate::format;
 use crate::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
 use thalos_game_state::nav::{OrbitPlaneChoice, OrbitProgram, OrbitShape, OrbitTargetRequest};
-use thalos_game_state::{SimulationState, SolarSystemState};
 use thalos_game_state::units::UnitDomain;
+use thalos_game_state::{SimulationState, SolarSystemState};
 
 use thalos_game_state::flight::PHYSICS_QUERY_TILE_LOD_M;
 
@@ -77,8 +77,8 @@ pub(super) struct OrbitPanel;
 pub(super) struct OrbitEditor;
 
 #[derive(Resource, Default)]
-pub(super) struct OrbitWidgetState {
-    expanded: bool,
+pub struct OrbitWidgetState {
+    pub expanded: bool,
 }
 
 #[derive(Component, Clone, Copy)]
@@ -94,6 +94,7 @@ enum OrbitField {
     Direction,
     Plane,
     Summary,
+    ExecuteAction,
     CancelAction,
 }
 
@@ -302,13 +303,7 @@ fn spawn_orbit_editor(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
             OrbitField::Direction,
             OrbitTargetRequest::ToggleDirection,
         );
-        orbit_toggle_row(
-            editor,
-            theme,
-            "PLANE",
-            OrbitField::Plane,
-            OrbitTargetRequest::TogglePlane,
-        );
+        orbit_plane_row(editor, theme);
         editor.spawn((
             Text::new("NO PLAN"),
             TextFont {
@@ -332,7 +327,7 @@ fn spawn_orbit_editor(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                     theme,
                     "EXEC ORBIT",
                     OrbitTargetRequest::Execute,
-                    None,
+                    Some(OrbitField::ExecuteAction),
                 );
                 orbit_button(
                     actions,
@@ -343,6 +338,33 @@ fn spawn_orbit_editor(c: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
                 );
             });
     });
+}
+
+fn orbit_plane_row(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    parent
+        .spawn(Node {
+            flex_direction: FlexDirection::Row,
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(5.0),
+            ..default()
+        })
+        .with_children(|row| {
+            row.spawn((
+                label(theme, "PLANE"),
+                Node {
+                    width: Val::Px(40.0),
+                    ..default()
+                },
+            ));
+            orbit_button(row, theme, "AUTO SET", OrbitTargetRequest::AutoSet, None);
+            orbit_button(
+                row,
+                theme,
+                "—",
+                OrbitTargetRequest::TogglePlane,
+                Some(OrbitField::Plane),
+            );
+        });
 }
 
 fn orbit_adjust_row(
@@ -749,14 +771,8 @@ pub fn update_orbit_widget(
             },
             OrbitField::Apoapsis => format::altitude(program.draft.apoapsis_altitude_m, system),
             OrbitField::Periapsis => format::altitude(program.draft.periapsis_altitude_m, system),
-            OrbitField::Inclination if program.draft.plane == OrbitPlaneChoice::Auto => {
-                "AUTO".to_string()
-            }
             OrbitField::Inclination => {
                 format!("{:.0}°", program.draft.inclination_rad.to_degrees())
-            }
-            OrbitField::Direction if program.draft.plane == OrbitPlaneChoice::Auto => {
-                "AUTO".to_string()
             }
             OrbitField::Direction => match program.draft.direction {
                 thalos_physics_canonical::orbit_planner::OrbitDirection::Prograde => {
@@ -767,7 +783,9 @@ pub fn update_orbit_widget(
                 }
             },
             OrbitField::Plane => match program.draft.plane {
-                OrbitPlaneChoice::Auto => "AUTO".to_string(),
+                // AUTO is resolved by the runtime before the widget becomes
+                // interactive; keep a concrete fallback during that boot frame.
+                OrbitPlaneChoice::Auto => "NEAREST".to_string(),
                 OrbitPlaneChoice::Preserve => "PRESERVE".to_string(),
                 OrbitPlaneChoice::Nearest => "NEAREST".to_string(),
             },
@@ -791,6 +809,15 @@ pub fn update_orbit_widget(
                     }
                 } else {
                     "NO PLAN".to_string()
+                }
+            }
+            OrbitField::ExecuteAction => {
+                if program.phase == thalos_game_state::nav::OrbitProgramPhase::Abort
+                    && program.error.as_deref() == Some("pilot override")
+                {
+                    "RESUME ORBIT".to_string()
+                } else {
+                    "EXEC ORBIT".to_string()
                 }
             }
             OrbitField::CancelAction => {

@@ -148,8 +148,6 @@ pub struct SelectedNode {
     pub id: Option<NodeId>,
 }
 
-
-
 /// Mutually exclusive interaction modes for the maneuver system.
 ///
 /// Only one mode can be active at a time. Camera rotation is blocked whenever
@@ -209,22 +207,9 @@ impl bevy::ecs::message::Message for ManeuverEvent {}
 // Arrow components
 // ---------------------------------------------------------------------------
 
-
-
-
-
-
-
-
-
-
-
 // ---------------------------------------------------------------------------
 // Visual constants
 // ---------------------------------------------------------------------------
-
-
-
 
 fn state_at_samples(samples: &[TrajectorySample], time: f64) -> Option<StateVector> {
     let n = samples.len();

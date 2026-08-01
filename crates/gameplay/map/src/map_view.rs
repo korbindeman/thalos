@@ -3,12 +3,14 @@ use thalos_physics_canonical::canonical::Epoch;
 use thalos_physics_canonical::trajectory::{Encounter, FlightPlan, Trajectory};
 use thalos_world::BodyId;
 
-use thalos_game_state::{SimulationState, SolarSystemState};
 use thalos_game_state::nav::TargetBody;
+use thalos_game_state::{SimulationState, SolarSystemState};
 
 // The snapshot vocabulary moved to `thalos_game_state::map` (Phase 5a);
 // this module keeps the sole writer and the projection systems.
-pub use thalos_game_state::map::{LinearMapProjection, MapProjection, MapSnapshot, ProjectedBodyState};
+pub use thalos_game_state::map::{
+    LinearMapProjection, MapProjection, MapSnapshot, ProjectedBodyState,
+};
 
 pub fn update_map_snapshot(
     sim: Res<SimulationState>,

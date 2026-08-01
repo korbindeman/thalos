@@ -74,9 +74,7 @@ impl FlyabilityFinding {
             FlyabilityFault::NoPropulsion => {
                 "No engine on any stage — the craft cannot produce thrust".to_string()
             }
-            FlyabilityFault::EngineStarved {
-                label, missing, ..
-            } => {
+            FlyabilityFault::EngineStarved { label, missing, .. } => {
                 let names: Vec<&str> = missing.iter().map(|r| r.display_name()).collect();
                 format!(
                     "{label} cannot reach any {} — add a tank on its side of the decoupler",
@@ -345,7 +343,10 @@ mod tests {
         // pod(0) → tank(1) → engine(2)
         let parts = vec![
             tank(None, &[]),
-            tank(Some(0), &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)]),
+            tank(
+                Some(0),
+                &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)],
+            ),
             engine(Some(1), &[Resource::Methane, Resource::Lox]),
         ];
         let findings = check_flyability(&parts, &[stage(1, true, 3_200.0)]);
@@ -359,7 +360,10 @@ mod tests {
         // pod(0) → tank(1) → decoupler(2) → engine(3)
         let parts = vec![
             tank(None, &[]),
-            tank(Some(0), &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)]),
+            tank(
+                Some(0),
+                &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)],
+            ),
             decoupler(Some(1)),
             engine(Some(2), &[Resource::Methane, Resource::Lox]),
         ];
@@ -407,18 +411,23 @@ mod tests {
         // Stage 2 is a pure decoupler stage — a legitimate design, not a fault.
         let parts = vec![
             tank(None, &[]),
-            tank(Some(0), &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)]),
+            tank(
+                Some(0),
+                &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)],
+            ),
             engine(Some(1), &[Resource::Methane, Resource::Lox]),
         ];
-        let findings =
-            check_flyability(&parts, &[stage(1, true, 3_000.0), stage(2, false, 0.0)]);
+        let findings = check_flyability(&parts, &[stage(1, true, 3_000.0), stage(2, false, 0.0)]);
         assert!(findings.is_empty(), "unexpected: {findings:?}");
     }
 
     #[test]
     fn a_dry_powered_stage_warns_without_blocking() {
         let parts = vec![
-            tank(None, &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)]),
+            tank(
+                None,
+                &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)],
+            ),
             engine(Some(0), &[Resource::Methane, Resource::Lox]),
         ];
         let findings = check_flyability(&parts, &[stage(1, true, 0.0)]);
@@ -437,7 +446,10 @@ mod tests {
     #[test]
     fn electricity_is_not_treated_as_plumbed_propellant() {
         let parts = vec![
-            tank(None, &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)]),
+            tank(
+                None,
+                &[(Resource::Methane, 900.0), (Resource::Lox, 2_200.0)],
+            ),
             engine(
                 Some(0),
                 &[Resource::Methane, Resource::Lox, Resource::Electricity],

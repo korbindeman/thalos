@@ -95,7 +95,7 @@ impl SpawnSituation {
         }
     }
 
-        /// Human label for the descent-style scenarios (used by boot logging and
+    /// Human label for the descent-style scenarios (used by boot logging and
     /// the scenario menu). `const` so the runtime's descent profiles can cite
     /// it as the one label source.
     pub const fn descent_label(self) -> Option<&'static str> {

@@ -52,7 +52,11 @@ pub const PAVED_CLEAR_RAMP_M: f64 = 1.0;
 pub const CONNECTION_LIFT_BASE_M: f32 = 0.12;
 
 /// The paved rectangles a strip network over `edges` covers.
-pub fn network_paved_rects(nodes: &[Node], edges: &[(usize, usize)], width_m: f64) -> Vec<PavedRect> {
+pub fn network_paved_rects(
+    nodes: &[Node],
+    edges: &[(usize, usize)],
+    width_m: f64,
+) -> Vec<PavedRect> {
     edges
         .iter()
         .flat_map(|&(i, j)| {

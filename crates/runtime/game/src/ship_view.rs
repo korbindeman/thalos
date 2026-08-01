@@ -29,9 +29,9 @@ use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, Part, PartCatalog, PartMaterial,
     PodGeometry, Ship, ShipBlueprint, ShipyardPlugin, SurfaceMount, SurfaceMountKind, Wing,
-    build_cockpit_mesh, build_control_surface_mesh, build_fuselage_mesh, build_gear_mesh,
-    build_gear_struct_mesh, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
-    build_wing_fairing_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
+    build_cockpit_mesh, build_control_surface_mesh, build_fuselage_mesh,
+    build_fuselage_mesh_with_fairing, build_gear_mesh, build_jet_nacelle_body_mesh,
+    build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
     pod_visual_profile, wants_wing_fairing,
 };
 
@@ -651,6 +651,7 @@ fn visual_spec(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     fuselage: Option<&Fuselage>,
+    fairing: Option<(&Wing, f32)>,
     engine: Option<&Engine>,
     intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
@@ -713,7 +714,10 @@ fn visual_spec(
     } else if let Some(f) = fuselage {
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(f.max_width);
         Some(VisualSpec {
-            mesh: build_fuselage_mesh(f, d),
+            mesh: fairing.map_or_else(
+                || build_fuselage_mesh(f, d),
+                |(wing, station)| build_fuselage_mesh_with_fairing(f, d, wing, station),
+            ),
             height: f.length,
         })
     } else if let Some(e) = engine {
@@ -799,6 +803,7 @@ fn rebuild_ship_visuals(
     mut ship_materials: ResMut<Assets<ShipPartMaterial>>,
     mut std_materials: ResMut<Assets<ShadowedStandardMaterial>>,
     parts: VisualQuery,
+    wings: Query<(&Wing, &SurfaceMount), Without<EditorPart>>,
     stale: Query<(), With<PartVisual>>,
 ) {
     for (
@@ -831,8 +836,17 @@ fn rebuild_ship_visuals(
             continue;
         }
 
-        let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, fuselage, engine, intake)
-        else {
+        let fairing = fuselage.and_then(|fus| {
+            wings
+                .iter()
+                .find(|(wing, mount)| {
+                    mount.parent == e && wants_wing_fairing(wing, mount.angle, fus)
+                })
+                .map(|(wing, mount)| (wing, mount.station))
+        });
+        let Some(spec) = visual_spec(
+            nodes, pod, dec, adapter, tank, fuselage, fairing, engine, intake,
+        ) else {
             continue;
         };
         let mesh = meshes.add(spec.mesh);
@@ -934,27 +948,6 @@ fn rebuild_ship_wing_visuals(
             ))
             .id();
         commands.entity(e).add_child(body);
-
-        // Wing-body junction fairing: the belly blister that merges a main
-        // wing pair into the fuselage (and encloses the gear structure).
-        // Derived geometry — generated for the right-hand panel of a low/mid
-        // pair on a loft host, in the same host-local frame as the wing mesh.
-        if let Ok(fus) = hosts.get(mount.parent)
-            && wants_wing_fairing(wing, mount.angle, fus)
-        {
-            let mat = std_materials.add(shadowed(stainless_steel_base()));
-            let fairing = commands
-                .spawn((
-                    Mesh3d(meshes.add(build_wing_fairing_mesh(fus, top_d, wing, mount.station))),
-                    MeshMaterial3d(mat),
-                    Transform::IDENTITY,
-                    Visibility::default(),
-                    NoFrustumCulling,
-                    PartVisual,
-                ))
-                .id();
-            commands.entity(e).add_child(fairing);
-        }
 
         // One hinged child per control surface. Right panels (mount sin > 0)
         // take side_sign +1, left panels −1, so a roll command splits them.
@@ -1142,25 +1135,6 @@ fn rebuild_ship_gear_visuals(
             ))
             .id();
         commands.entity(e).add_child(body);
-        // The carrying structure of a wide-track leg (gear beam + side-stay)
-        // is airframe, not undercarriage: hull finish, so it reads as part of
-        // the wing/fairing rather than black scaffolding under the belly. It
-        // retracts with the gear (same `GearVisual` visibility latch).
-        if let Some(struct_mesh) = build_gear_struct_mesh(gear, mount.angle, parent_radius) {
-            let mat = std_materials.add(shadowed(stainless_steel_base()));
-            let structure = commands
-                .spawn((
-                    Mesh3d(meshes.add(struct_mesh)),
-                    MeshMaterial3d(mat),
-                    Transform::IDENTITY,
-                    Visibility::default(),
-                    NoFrustumCulling,
-                    PartVisual,
-                    GearVisual,
-                ))
-                .id();
-            commands.entity(e).add_child(structure);
-        }
     }
 }
 

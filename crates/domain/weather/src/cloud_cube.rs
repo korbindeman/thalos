@@ -111,7 +111,12 @@ impl CloudWeatherField {
         // OFF the equator (Earth's annual mean is ~6°N — a centered band is a
         // tell of synthetic weather), and one hemisphere's storm track is
         // stronger than the other's (Earth: the ocean hemisphere).
-        let itcz_lat = 0.10 * if hash01(climate.seed, 0x17C2) < 0.5 { 1.0 } else { -1.0 };
+        let itcz_lat = 0.10
+            * if hash01(climate.seed, 0x17C2) < 0.5 {
+                1.0
+            } else {
+                -1.0
+            };
         let storm_boost = if hash01(climate.seed, 0x570B) < 0.5 {
             [1.15, 0.85]
         } else {
@@ -358,9 +363,10 @@ impl CloudWeatherField {
                     // ITCZ clusters and strongly precipitating frontal bands
                     // count as developed systems: deep convection shares the
                     // storm/depth pathway the synoptic cores use.
-                    let intensity = smoothstep(occ_threshold + 0.02, occ_threshold + 0.22, system_field)
-                        .max(0.6 * itcz_occ)
-                        .max(0.55 * rain);
+                    let intensity =
+                        smoothstep(occ_threshold + 0.02, occ_threshold + 0.22, system_field)
+                            .max(0.6 * itcz_occ)
+                            .max(0.55 * rain);
 
                     // Regime selector: an independent low-frequency partition,
                     // uniformized so the authored type_mix reads as area
@@ -1097,7 +1103,8 @@ fn zonal_climatology(lat: f32, itcz: f32, storm_boost: [f32; 2]) -> f32 {
     // directly — see the note there.
     // Polar decline is MILD: real polar caps carry 0.6–0.7 broken stratus,
     // well above the subtropical minima — the caps must not go dark.
-    1.35 * itcz + 0.95 * hemisphere * gauss(a, 0.92, 0.24) - 0.40 * gauss(a, 0.0, 0.22)
+    1.35 * itcz + 0.95 * hemisphere * gauss(a, 0.92, 0.24)
+        - 0.40 * gauss(a, 0.0, 0.22)
         - 0.90 * gauss(a, 0.40, 0.17)
         - 0.10 * gauss(a, std::f32::consts::FRAC_PI_2, 0.22)
 }

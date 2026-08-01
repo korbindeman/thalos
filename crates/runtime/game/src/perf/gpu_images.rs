@@ -63,10 +63,7 @@ struct GpuImageBytesMeasurement {
     bytes: AtomicU64,
 }
 
-fn publish_measurement(
-    mut diagnostics: Diagnostics,
-    measurement: Res<GpuImageBytesMeasurement>,
-) {
+fn publish_measurement(mut diagnostics: Diagnostics, measurement: Res<GpuImageBytesMeasurement>) {
     diagnostics.add_measurement(&GPU_IMAGE_BYTES, || {
         measurement.bytes.load(Ordering::Relaxed) as f64
     });

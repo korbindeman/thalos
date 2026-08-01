@@ -33,7 +33,6 @@ impl Plugin for PhotoModePlugin {
     }
 }
 
-
 fn toggle_photo_mode_input(
     input: Res<GameInputIntent>,
     ui_keyboard: Res<crate::hud::UiKeyboardGate>,

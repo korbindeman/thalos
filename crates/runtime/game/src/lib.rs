@@ -535,6 +535,10 @@ impl AppBuilder {
                 })
                 .unwrap_or_default();
             app_settings.graphics = graphics_settings::GraphicsSettings::for_capture(graphics);
+            // Capture evidence must not depend on a player's last dragged HUD
+            // arrangement. The default workspace gives deterministic framing;
+            // the capture preset still decides whether HUD is visible at all.
+            app_settings.hud = thalos_hud::mfd::HudWorkspaceSettings::for_capture_env();
         }
         let win_overrides = window_settings::overrides_from_env();
         let window = window_settings::initial_window(&app_settings.window, &win_overrides);
@@ -635,7 +639,7 @@ impl AppBuilder {
                     .chain(),
             )
             .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
-            // The three settings sections become three separate resources (so every
+            // The four settings sections become separate resources (so every
             // consumer is unchanged); `settings::AppSettingsPlugin` persists them
             // back to the one file. Window must be inserted here (pre-app) since it
             // shaped the initial window above.
@@ -643,6 +647,7 @@ impl AppBuilder {
             .insert_resource(win_overrides)
             .insert_resource(app_settings.graphics)
             .insert_resource(app_settings.units)
+            .insert_resource(app_settings.hud)
             .insert_resource(
                 InputSettings::load_from_path("assets/input.ron")
                     .expect("Failed to load input bindings from assets/input.ron"),
@@ -792,8 +797,8 @@ impl AppBuilder {
             .add_plugins(PauseMenuPlugin)
             .add_plugins(main_menu::MainMenuPlugin)
             .add_plugins(SettingsMenuPlugin)
-            // FPS/FRAME_TIME diagnostics for `hud/fps_overlay` (not part of
-            // `DefaultPlugins`, so add it explicitly).
+            // FPS/FRAME_TIME diagnostics for the F3 performance view and
+            // telemetry collectors (not part of `DefaultPlugins`).
             .add_plugins(FrameTimeDiagnosticsPlugin::default())
             // Always-on perf telemetry: the F3 debug view, the runtime.jsonl
             // perf lane, and the opt-in full-rate recorder. Also owns

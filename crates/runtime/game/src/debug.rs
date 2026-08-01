@@ -33,9 +33,7 @@ use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemSt
 use crate::target::TargetBody;
 use crate::view::{ViewMode, in_map_view};
 
-pub use thalos_game_state::debug::{
-    DebugMode, DebugSurfaceTeleport, DebugSurfaceTeleportHit,
-};
+pub use thalos_game_state::debug::{DebugMode, DebugSurfaceTeleport, DebugSurfaceTeleportHit};
 
 /// Debug surface drops place the craft this far above the terrain in a landed
 /// `BodyFixed` pose; the player throttles up to fly it off
@@ -46,10 +44,6 @@ pub const DEBUG_SURFACE_DROP_HEIGHT_M: f64 = 18.0;
 /// rendered terrain; `step_eva_controller` re-seeds and snaps it onto the
 /// surface on the next frame, so this is just a safe initial clearance.
 const EVA_SURFACE_CLEARANCE_M: f64 = 2.0;
-
-
-
-
 
 pub struct DebugPlugin;
 
@@ -304,7 +298,6 @@ fn draw_collider_primitive(
         }
     }
 }
-
 
 /// Compute a surface-aligned debug spawn state for `body`.
 ///

@@ -121,9 +121,6 @@ const GROUND_AERO_AIRSPEED_FLOOR_M_S: f64 = 5.0;
 const MAX_LIN_ACCEL_M_S2: f64 = 100.0; // ~10 g (covers steep reentry drag)
 const MAX_ANG_ACCEL_RAD_S2: f64 = 4.0;
 
-
-
-
 /// Apply the live-tunable winged-aircraft moment coefficients to a base config,
 /// exactly as [`apply_aero_forces`] does before evaluating. The control
 /// allocator ([`crate::control_bus`]) calls this so the aero authority it splits
@@ -184,7 +181,6 @@ impl Default for AeroTuning {
         }
     }
 }
-
 
 /// Debug snapshot for the F3 overlay: net force + relative wind, body frame.
 #[derive(Component, Default)]

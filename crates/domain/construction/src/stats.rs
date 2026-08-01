@@ -406,7 +406,8 @@ impl ShipBlueprint {
         for (i, (pb, entry)) in self.parts.iter().zip(&entries).enumerate() {
             let m = part_total_mass(pb, entry);
             com_total_mass += m;
-            com_weighted += (geo[i].position + part_centroid_offset(entry, &pb.params, geo[i].diameter)) * m;
+            com_weighted +=
+                (geo[i].position + part_centroid_offset(entry, &pb.params, geo[i].diameter)) * m;
         }
         let com = if com_total_mass > 0.0 {
             com_weighted / com_total_mass

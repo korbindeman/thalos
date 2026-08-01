@@ -123,16 +123,11 @@ impl Plugin for PlayerControllerPlugin {
     }
 }
 
-
-
-
 #[derive(Component)]
 pub struct PlayerControllerBody;
 
 #[derive(Component)]
 pub struct PlayerControllerVisual;
-
-
 
 fn body_state_for(sim: &SimulationState, body_id: BodyId) -> BodyState {
     sim.ephemeris

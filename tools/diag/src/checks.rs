@@ -322,6 +322,25 @@ fn staging_sequence_health(stream: &Stream) -> Vec<Finding> {
         *refused.entry(record.session.as_str()).or_default() += 1;
     }
 
+    let mut ignition_commanded: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("stage_ignition_commanded")
+        .filter(|record| record.target.ends_with("::staging"))
+    {
+        *ignition_commanded
+            .entry(record.session.as_str())
+            .or_default() += 1;
+    }
+    let mut ignition_acknowledged: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("stage_ignited")
+        .filter(|record| record.target.ends_with("::staging"))
+    {
+        *ignition_acknowledged
+            .entry(record.session.as_str())
+            .or_default() += 1;
+    }
+
     let mut findings = Vec::new();
     if let Some((session, count)) = unpredicted
         .iter()
@@ -351,6 +370,25 @@ fn staging_sequence_health(stream: &Stream) -> Vec<Finding> {
                 if *count == 1 { "" } else { "s" },
             ),
             format!("runtime.jsonl session={session} event=stage_refused"),
+        ));
+    }
+    if let Some((session, missing)) = ignition_commanded
+        .iter()
+        .filter_map(|(session, commanded)| {
+            let acknowledged = ignition_acknowledged.get(session).copied().unwrap_or(0);
+            let missing = commanded.saturating_sub(acknowledged);
+            (missing >= STAGE_IGNITION_UNACKNOWLEDGED_ATTENTION).then_some((*session, missing))
+        })
+        .max_by_key(|(_, missing)| *missing)
+    {
+        findings.push(Finding::new(
+            Severity::Attention,
+            "stage_ignition_unacknowledged",
+            format!(
+                "{missing} first-stage activation request{} had no acknowledgement",
+                if missing == 1 { "" } else { "s" },
+            ),
+            format!("runtime.jsonl session={session} event=stage_ignition_commanded"),
         ));
     }
     findings
@@ -1796,6 +1834,29 @@ mod tests {
             json!({ "event": "stage_refused", "request_id": 7 }),
         );
         assert!(finding_ids(vec![refused]).contains(&"stage_request_refused"));
+    }
+
+    #[test]
+    fn cold_stack_ignition_requires_an_acknowledgement() {
+        let commanded = record(
+            "cold-stack",
+            1_000,
+            "INFO",
+            "thalos::diagnostic::staging",
+            json!({ "event": "stage_ignition_commanded", "request_id": 1 }),
+        );
+        assert!(finding_ids(vec![commanded.clone()]).contains(&"stage_ignition_unacknowledged"));
+
+        let acknowledged = record(
+            "cold-stack",
+            1_016,
+            "INFO",
+            "thalos::diagnostic::staging",
+            json!({ "event": "stage_ignited", "request_id": 1 }),
+        );
+        assert!(
+            !finding_ids(vec![commanded, acknowledged]).contains(&"stage_ignition_unacknowledged")
+        );
     }
 
     #[test]

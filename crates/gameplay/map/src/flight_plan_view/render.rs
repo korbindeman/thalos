@@ -27,8 +27,8 @@ use thalos_physics_canonical::trajectory::{
 use thalos_physics_canonical::types::TrajectorySample;
 use thalos_world::{BodyDefinition, BodyId};
 
-use thalos_game_state::coords::{RenderGhostFocus, RenderOrigin, WorldScale, sample_render_pos};
 use crate::map_view::MapSnapshot;
+use thalos_game_state::coords::{RenderGhostFocus, RenderOrigin, WorldScale, sample_render_pos};
 
 use super::view::{FlightPlanView, Ghost, GhostPhase};
 

@@ -61,7 +61,8 @@
 //! a cylinder. For a circular section [`skin_radius`] reduces to the barrel
 //! radius, so a wing on a plain tank is unaffected.
 
-use crate::part::Fuselage;
+use crate::fairing_mesh::{FuselageFairing, deform_lower_section};
+use crate::part::{Fuselage, Wing};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -222,6 +223,31 @@ const APEX_EPS: f32 = 1e-3;
 /// body (`nose_fraction = 0`) leaves the top open — the cockpit end-cap covers
 /// it, exactly as the old cylinder + nose pair did.
 pub fn build_fuselage_mesh(fus: &Fuselage, effective_diameter: f32) -> Mesh {
+    build_fuselage_mesh_profiled(fus, effective_diameter, None)
+}
+
+/// Build a fuselage whose own loft includes the derived main-wing / gear
+/// fairing. Unlike the old overlay mesh, this shares complete cross-section
+/// rings, normals, tangents, and material with the host body, so no intersection
+/// seam can appear at the fairing boundary.
+pub fn build_fuselage_mesh_with_fairing(
+    fus: &Fuselage,
+    effective_diameter: f32,
+    wing: &Wing,
+    station: f32,
+) -> Mesh {
+    build_fuselage_mesh_profiled(
+        fus,
+        effective_diameter,
+        Some(FuselageFairing::from_wing(wing, station)),
+    )
+}
+
+fn build_fuselage_mesh_profiled(
+    fus: &Fuselage,
+    effective_diameter: f32,
+    fairing: Option<FuselageFairing>,
+) -> Mesh {
     let stations = stations(fus, effective_diameter);
     let n_exp = superellipse_exponent(fus.roundness);
 
@@ -240,7 +266,23 @@ pub fn build_fuselage_mesh(fus: &Fuselage, effective_diameter: f32) -> Mesh {
         for j in 0..RADIAL_SEGMENTS {
             let theta = std::f32::consts::TAU * (j as f32 / RADIAL_SEGMENTS as f32);
             let p = section_point(st.a, st.b, n_exp, theta);
-            positions.push([p.x, st.y, p.y + st.v]);
+            let (x, z) = fairing
+                .filter(|_| p.y <= 0.0)
+                .map(|fairing| {
+                    let station01 = (fus.length * 0.5 - st.y) / fus.length.max(0.01);
+                    let lower_mu = (-theta.sin()).max(0.0);
+                    deform_lower_section(
+                        fairing,
+                        fus.length,
+                        st.a.max(st.b),
+                        station01,
+                        lower_mu,
+                        p.x,
+                        p.y,
+                    )
+                })
+                .unwrap_or((p.x, p.y));
+            positions.push([x, st.y, z + st.v]);
         }
     }
     for w in ring_bases.windows(2) {
@@ -439,6 +481,20 @@ mod tests {
         }
     }
 
+    fn main_wing() -> Wing {
+        Wing {
+            span: 15.0,
+            root_chord: 5.2,
+            tip_chord: 1.5,
+            sweep: 0.52,
+            dihedral: 0.365,
+            thickness: 0.11,
+            incidence: 0.0,
+            dry_mass: 0.0,
+            control_surfaces: Vec::new(),
+        }
+    }
+
     fn extents(mesh: &Mesh) -> (Vec3, Vec3) {
         let pos = mesh
             .attribute(Mesh::ATTRIBUTE_POSITION)
@@ -468,6 +524,55 @@ mod tests {
             "barrel half-width in X"
         );
         assert!(m.attribute(Mesh::ATTRIBUTE_NORMAL).is_some());
+    }
+
+    #[test]
+    fn wing_fairing_deforms_the_fuselage_loft_in_place() {
+        let f = Fuselage {
+            length: 35.0,
+            max_width: 3.3,
+            max_height: 3.3,
+            nose_fraction: 0.13,
+            tail_fraction: 0.34,
+            ..a220_fuselage()
+        };
+        let base = build_fuselage_mesh(&f, f.max_width);
+        let faired = build_fuselage_mesh_with_fairing(&f, f.max_width, &main_wing(), 0.44);
+        let (base_min, base_max) = extents(&base);
+        let (fair_min, fair_max) = extents(&faired);
+
+        assert!(
+            fair_max.x <= base_max.x + 1.0e-3,
+            "fairing never exceeds the fuselage maximum width"
+        );
+        assert!(
+            fair_min.z >= base_min.z - 1.0e-3,
+            "fairing never drops below the original keel"
+        );
+        assert!(
+            faired
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap()
+                .iter()
+                .zip(
+                    base.attribute(Mesh::ATTRIBUTE_POSITION)
+                        .unwrap()
+                        .as_float3()
+                        .unwrap()
+                )
+                .any(|(faired, base)| (faired[0] - base[0]).abs() > 0.05),
+            "lower shoulder becomes subtly fuller"
+        );
+        // Same rings and index topology: the fairing is literally the body
+        // skin, not a second mesh intersecting it.
+        assert_eq!(
+            base.count_vertices(),
+            faired.count_vertices(),
+            "fairing must reuse fuselage rings"
+        );
+        assert!(crate::part_mesh::is_raytracing_ready(&faired));
     }
 
     #[test]

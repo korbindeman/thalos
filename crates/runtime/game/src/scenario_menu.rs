@@ -38,12 +38,11 @@ use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::player_controller::EvaMode;
 use crate::rendering::{PlayerShip, SimulationState};
 
-pub use thalos_game_state::ui::ScenarioMenu;
 use crate::spawn::{
     Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
     place_craft, polar_orbit_respawn_state,
 };
-
+pub use thalos_game_state::ui::ScenarioMenu;
 
 #[derive(Component)]
 struct ScenarioMenuRoot;

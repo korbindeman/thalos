@@ -23,7 +23,6 @@ use crate::target::TargetBody;
 
 pub use thalos_game_state::ui::{GamePause, not_game_paused};
 
-
 #[derive(Component)]
 struct PauseMenuRoot;
 
@@ -57,7 +56,6 @@ impl Plugin for PauseMenuPlugin {
             .add_systems(Update, (handle_button_clicks, update_visibility).chain());
     }
 }
-
 
 fn setup(mut commands: Commands, theme: Res<UiTheme>) {
     commands

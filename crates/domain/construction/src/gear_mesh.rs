@@ -17,15 +17,12 @@
 //! (θ = 0 → +Z dorsal, θ = π → −Z belly, θ = π/2 → +X right). Each wheel hub
 //! sits at radial depth `parent_radius + strut_length` at its lateral track
 //! offset, with the axle along the lateral axis so it rolls fore/aft. The
-//! **oleo strut is always vertical over the hub** — that verticality is what
-//! makes gear read as aircraft gear (a hub-to-belly diagonal reads as a
-//! glider outrigger; user-rejected). A leg inside the hull silhouette is just
-//! that oleo from the skin; a wide-track leg (`track_fraction > 1`, wheels
-//! outboard of the hull — the airliner stance) adds the cantilever truss: a
-//! horizontal gear beam from the lower skin quadrant out over the wheel,
-//! plus a diagonal side-stay. The physics contact frame
-//! ([`gear_leg_frames`]) is independent of all of it: the suspension ray is
-//! always the outward radial through the hub.
+//! **oleo strut is always vertical over the hub** — a single post starts
+//! inside the wing/body silhouette and drops directly to the wheel. Letting
+//! the opaque aircraft skin hide its upper portion makes the gear visibly
+//! emerge from the underside without separate plates, doors, beams, or braces.
+//! The physics contact frame ([`gear_leg_frames`]) is independent of the
+//! visual inset: its suspension ray remains the outward radial through the hub.
 //!
 //! The lateral axis (leg spacing + wheel axle) is `r̂ × ŷ`, pinned to the +X
 //! hemisphere so a left/right pair is consistent regardless of how the cross
@@ -40,12 +37,6 @@ use bevy::prelude::*;
 /// Radial segment count for the wheel barrels. Round enough at editor zoom,
 /// cheap at the part counts we render.
 const WHEEL_SEGMENTS: u32 = 24;
-
-/// How far around the lower skin quadrant a strut may anchor, as a fraction
-/// of the host radius along the lateral axis (≈ 40° off the mount radial).
-/// A wide-track leg's wheels sit outboard of this; the strut slants from the
-/// anchor out to the hub instead of floating its root in mid-air.
-const MAX_ANCHOR_LATERAL_FRAC: f32 = 0.64;
 
 /// Orthonormal gear frame for a given mount angle, in host-local space.
 #[derive(Clone, Copy, Debug)]
@@ -137,24 +128,13 @@ pub fn build_gear_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Mesh {
     for off in leg_offsets(gear, parent_radius) {
         let end = frame.r_hat * (parent_radius + gear.strut_length) + frame.lateral * off;
 
-        // Leg structure. What reads as "airliner" is a **vertical oleo** over
-        // the wheels — real mains attach out at the wing, so their struts drop
-        // straight down; a single hub-to-belly diagonal reads as a glider
-        // outrigger (user-rejected 2026-07-30). A leg inside the hull
-        // silhouette is just that vertical oleo from the skin. A wide-track
-        // leg (`track_fraction > 1`) gets the truss a real cantilever stance
-        // has: a **gear beam** running laterally from the lower skin quadrant
-        // out over the wheel, the vertical oleo from the beam's end down to
-        // the hub, and a thin diagonal **side-stay** bracing beam-root to
-        // mid-oleo. The wheel keeps the same drop either way, so the physics
-        // contact frame ([`gear_leg_frames`]) is untouched by any of this.
-        let leg = leg_structure(parent_radius, off, &frame);
-        // Vertical oleo: elbow straight down to the hub. The beam + side-stay
-        // that carry a wide leg's elbow live in [`build_gear_struct_mesh`] —
-        // airframe structure rendered in hull material, not gear black.
-        let oleo_len = (end - leg.elbow).length().max(1.0e-4);
+        // One straight post, deliberately beginning inside the aircraft. The
+        // body/wing skin occludes the buried portion, so the visible geometry
+        // simply starts at the underside and runs directly to the wheel.
+        let top = frame.r_hat * (parent_radius * 0.18) + frame.lateral * off;
+        let oleo_len = (end - top).length().max(1.0e-4);
         append_box(
-            (leg.elbow + end) * 0.5,
+            (top + end) * 0.5,
             frame.lateral,
             frame.fore,
             frame.r_hat,
@@ -210,102 +190,6 @@ pub fn build_gear_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Mesh {
     mesh.compute_smooth_normals();
     crate::part_mesh::add_raytracing_tangents(&mut mesh);
     mesh
-}
-
-/// Per-leg cantilever geometry shared by the gear and structure meshes: the
-/// hull **anchor** (true skin point at the clamped lateral offset), and the
-/// **elbow** directly above the wheel at the anchor's depth — the beam runs
-/// anchor→elbow horizontally, the oleo drops elbow→hub vertically.
-struct LegStructure {
-    anchor: Vec3,
-    elbow: Vec3,
-    beam_len: f32,
-}
-
-fn leg_structure(parent_radius: f32, off: f32, frame: &GearFrame) -> LegStructure {
-    let lat_max = parent_radius * MAX_ANCHOR_LATERAL_FRAC;
-    let anchor_lat = off.clamp(-lat_max, lat_max);
-    let anchor_radial = (parent_radius * parent_radius - anchor_lat * anchor_lat)
-        .max(0.0)
-        .sqrt();
-    LegStructure {
-        anchor: frame.r_hat * anchor_radial + frame.lateral * anchor_lat,
-        elbow: frame.r_hat * anchor_radial + frame.lateral * off,
-        beam_len: (off - anchor_lat).abs(),
-    }
-}
-
-/// Build the **airframe-structure** half of a gearbox — the horizontal gear
-/// beam and diagonal side-stay that carry a wide-track leg's elbow out from
-/// the hull. Split from [`build_gear_mesh`] so callers render it in **hull
-/// material**: on a real aircraft this structure is wing/fairing, not the
-/// matte-black oleo/wheel assembly, and drawing it dark read as scaffolding
-/// hanging under the belly (user-rejected 2026-07-30). `None` when every leg
-/// sits inside the hull silhouette (nose gear, narrow mains) — there is no
-/// beam to draw. Once a wing-body fairing encloses the junction these members
-/// are mostly hidden inside it; they remain for the sliver outboard of the
-/// fairing and for hulls without one.
-pub fn build_gear_struct_mesh(gear: &Gear, angle: f32, parent_radius: f32) -> Option<Mesh> {
-    let frame = gear_frame(angle);
-    let strut_half = (gear.wheel_radius * 0.28).max(0.05);
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-
-    for off in leg_offsets(gear, parent_radius) {
-        let leg = leg_structure(parent_radius, off, &frame);
-        if leg.beam_len <= 0.05 {
-            continue;
-        }
-        // Gear beam (slightly chunkier than the oleo, like the real spar).
-        append_box(
-            (leg.anchor + leg.elbow) * 0.5,
-            frame.lateral,
-            frame.fore,
-            frame.r_hat,
-            Vec3::new(
-                leg.beam_len * 0.5 + strut_half,
-                strut_half * 1.2,
-                strut_half * 1.2,
-            ),
-            &mut positions,
-            &mut indices,
-        );
-        // Side-stay: thin diagonal from the beam root to two-thirds down the
-        // oleo — the brace that makes a wide leg read as engineered rather
-        // than propped. Only worth drawing when there is a real beam to brace.
-        if leg.beam_len > 0.5 {
-            let hub = frame.r_hat * (parent_radius + gear.strut_length) + frame.lateral * off;
-            let stay_foot = leg.elbow + (hub - leg.elbow) * 0.65;
-            let stay_axis = stay_foot - leg.anchor;
-            let stay_len = stay_axis.length().max(1.0e-4);
-            let stay_dir = stay_axis / stay_len;
-            let stay_side = frame.fore.cross(stay_dir).normalize_or(frame.lateral);
-            append_box(
-                (leg.anchor + stay_foot) * 0.5,
-                stay_side,
-                frame.fore,
-                stay_dir,
-                Vec3::new(strut_half * 0.5, strut_half * 0.5, stay_len * 0.5),
-                &mut positions,
-                &mut indices,
-            );
-        }
-    }
-    if positions.is_empty() {
-        return None;
-    }
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    let uv = vec![[0.0_f32, 0.0]; positions.len()];
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh.compute_smooth_normals();
-    crate::part_mesh::add_raytracing_tangents(&mut mesh);
-    Some(mesh)
 }
 
 /// Build the **stow bay** box for a gearbox: the volume *inside* the host that
@@ -397,12 +281,22 @@ fn append_box(
         (1, 2, 6, 5), // +x
         (0, 4, 7, 3), // −x
     ];
+    // The gear frame is intentionally allowed to be left-handed (for belly
+    // gear, lateral × fore points opposite the outward radial). The original
+    // helper silently assumed a right-handed basis, which inverted every box
+    // face in the struts while the cylinders remained correct. Flip the
+    // triangle order when the supplied basis does.
+    let right_handed = x_axis.cross(y_axis).dot(z_axis) >= 0.0;
     for (a, b, c, d) in faces {
         let base = positions.len() as u32;
         for v in [p[a], p[b], p[c], p[d]] {
             positions.push([v.x, v.y, v.z]);
         }
-        indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        if right_handed {
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        } else {
+            indices.extend_from_slice(&[base, base + 2, base + 1, base, base + 3, base + 2]);
+        }
     }
 }
 
@@ -519,6 +413,34 @@ mod tests {
             max = max.max(p);
         }
         (min, max)
+    }
+
+    #[test]
+    fn box_faces_remain_outward_in_a_left_handed_gear_frame() {
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        let center = Vec3::new(2.0, -1.0, 0.5);
+        append_box(
+            center,
+            Vec3::X,
+            Vec3::Y,
+            -Vec3::Z,
+            Vec3::new(1.0, 0.75, 0.5),
+            &mut positions,
+            &mut indices,
+        );
+
+        for tri in indices.chunks_exact(3) {
+            let a = Vec3::from_array(positions[tri[0] as usize]);
+            let b = Vec3::from_array(positions[tri[1] as usize]);
+            let c = Vec3::from_array(positions[tri[2] as usize]);
+            let normal = (b - a).cross(c - a);
+            let face_center = (a + b + c) / 3.0;
+            assert!(
+                normal.dot(face_center - center) > 0.0,
+                "inward box triangle: {tri:?}"
+            );
+        }
     }
 
     #[test]
@@ -654,11 +576,10 @@ mod tests {
     }
 
     #[test]
-    fn wide_track_wheels_outboard_with_hull_anchored_struts() {
-        // `track_fraction > 1` (the airliner stance): the wheels sit outboard
-        // of the hull silhouette, but every strut still roots on the skin —
-        // its topmost vertices stay within the host cross-section radius
-        // instead of floating in mid-air beside the fuselage.
+    fn wide_track_wheels_have_straight_buried_struts() {
+        // `track_fraction > 1` (the airliner stance): wheels stay at their
+        // authored outboard track and the plain vertical posts extend inward
+        // far enough for the opaque aircraft mesh to hide their upper ends.
         let parent_radius = 1.65_f32;
         let wide = Gear {
             track_fraction: 2.2,
@@ -680,22 +601,10 @@ mod tests {
                 "suspension line stays over the wheel"
             );
         }
-        // The carrying structure (beam + stay) exists for a wide leg and
-        // anchors on the hull: at least one vertex lies within the skin
-        // radius of the body axis (cross-section distance).
-        let s = build_gear_struct_mesh(&wide, std::f32::consts::PI, parent_radius)
-            .expect("wide track has a beam");
-        let pos = s
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .unwrap()
-            .as_float3()
-            .unwrap();
-        let anchored = pos
-            .iter()
-            .any(|p| (p[0] * p[0] + p[2] * p[2]).sqrt() <= parent_radius + 1e-3);
-        assert!(anchored, "gear structure roots on the hull skin");
-        // A narrow-track gearbox has no beam and therefore no structure mesh.
-        assert!(build_gear_struct_mesh(&main_gear(), std::f32::consts::PI, parent_radius).is_none());
+        assert!(
+            max.z > -parent_radius * 0.5,
+            "struts begin inside the aircraft silhouette ({max:?})"
+        );
     }
 
     #[test]

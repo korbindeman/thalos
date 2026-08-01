@@ -1,20 +1,18 @@
 //! Bottom-left HUD panel cluster: orbital velocity above the navball and
 //! a vector throttle arc along the navball's left side.
 
-use thalos_game_state::flight::ThrottleState;
-use crate::HudPanel;
 use crate::format;
+use crate::navball::ui::{FRAME_SIZE_PX, NAVBALL_SIZE_PX, NavballFrameRoot};
 use crate::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
-use crate::navball::ui::{
-    FRAME_SIZE_PX, NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX, NavballFrameRoot,
-};
-use thalos_game_state::{SimulationState, SolarSystemState};
-use thalos_game_state::nav::TargetBody;
-use thalos_game_state::units::UnitDomain;
 use crate::velocity_frame::{VelocityFrameState, next_frame};
+use crate::{BottomLeftFlightStackAnchor, HudPanel};
 use bevy::prelude::*;
 use bevy::render::render_resource::AsBindGroup;
 use bevy::shader::ShaderRef;
+use thalos_game_state::flight::ThrottleState;
+use thalos_game_state::nav::TargetBody;
+use thalos_game_state::units::UnitDomain;
+use thalos_game_state::{SimulationState, SolarSystemState};
 use thalos_physics_canonical::velocity_frame::nav_basis;
 
 /// The navball cluster sits at the bottom-left (navball at x=40,
@@ -102,29 +100,30 @@ pub fn setup(
     mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
     theme: Res<HudTheme>,
     navball_frame_q: Query<Entity, With<NavballFrameRoot>>,
+    stack: Res<BottomLeftFlightStackAnchor>,
 ) {
     let mut root = panel_node();
-    // Sit immediately above the navball, aligned with its left edge.
-    root.left = Val::Px(NAVBALL_LEFT_PX);
-    root.bottom = Val::Px(NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 8.0);
+    root.position_type = PositionType::Relative;
     root.min_width = Val::Px(NAVBALL_SIZE_PX);
 
     let (bg, border) = panel_frame(&theme);
-    commands
-        .spawn((
-            Button,
-            root,
-            bg,
-            border,
-            Interaction::None,
-            VelocityPanel,
-            HudPanel,
-            Name::new("HudFlight"),
-        ))
-        .with_children(|p| {
-            p.spawn((label(&theme, "ORBITAL VELOCITY"), VelocityLabel));
-            p.spawn((emphasis(&theme, "—"), VelocityText));
-        });
+    commands.entity(stack.0).with_children(|stack| {
+        stack
+            .spawn((
+                Button,
+                root,
+                bg,
+                border,
+                Interaction::None,
+                VelocityPanel,
+                HudPanel,
+                Name::new("HudFlight"),
+            ))
+            .with_children(|p| {
+                p.spawn((label(&theme, "ORBITAL VELOCITY"), VelocityLabel));
+                p.spawn((emphasis(&theme, "—"), VelocityText));
+            });
+    });
 
     let throttle_material = throttle_materials.add(ThrottleArcMaterial::new(0.0, 0.0, &theme));
     let Ok(navball_frame) = navball_frame_q.single() else {

@@ -4,9 +4,9 @@
 //! uses (bundled in `assets/fonts/`). All HUD colours and the panel
 //! frame look live here so a future styling pass touches a single file.
 
+use crate::GlassMaterial;
 use bevy::prelude::*;
 use bevy::ui_render::prelude::MaterialNode;
-use crate::GlassMaterial;
 
 #[derive(Resource, Clone)]
 pub struct HudTheme {

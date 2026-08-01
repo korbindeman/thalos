@@ -9,8 +9,8 @@ use thalos_physics_canonical::types::{BodyState, TrajectorySample};
 use thalos_world::{BodyId, SolarSystemDefinition};
 
 use super::state::{GameNode, ManeuverPlan, NodeId, RailFrame, TrajectoryRail};
-use thalos_game_state::coords::{RenderOrigin, WorldScale, sample_render_pos};
 use crate::flight_plan_view::FlightPlanView;
+use thalos_game_state::coords::{RenderOrigin, WorldScale, sample_render_pos};
 
 pub(super) struct ClosestTrailPoint {
     pub time: f64,

@@ -9304,6 +9304,7 @@ dependencies = [
  "bevy_egui",
  "image",
  "resvg",
+ "serde",
  "thalos_control",
  "thalos_game_state",
  "thalos_input",

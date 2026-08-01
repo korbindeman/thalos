@@ -40,8 +40,8 @@ use thalos_physics_canonical::trajectory::{FlightPlan, Trajectory};
 use thalos_physics_canonical::types::BodyState;
 use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
-use thalos_game_state::coords::{RenderFrame, RenderGhostFocus};
 use crate::map_view::MapSnapshot;
+use thalos_game_state::coords::{RenderFrame, RenderGhostFocus};
 
 // ---------------------------------------------------------------------------
 // Types

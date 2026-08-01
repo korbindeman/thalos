@@ -24,13 +24,13 @@ use bevy::prelude::*;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::LocalCraftBody;
 
-use thalos_game_state::flight::ShipAero;
-use thalos_game_state::flight::{FLAP_DETENTS, FlightConfig};
 use crate::HudPanel;
 use crate::nav_panel::{apply_button_colors, nav_button_colors};
 use crate::theme::HudTheme;
-use thalos_game_state::flight::{GearState, ParkingBrake, WeightOnWheels, WheelSet, set_gear_down};
 use thalos_game_state::SimulationState;
+use thalos_game_state::flight::ShipAero;
+use thalos_game_state::flight::{FLAP_DETENTS, FlightConfig};
+use thalos_game_state::flight::{GearState, ParkingBrake, WeightOnWheels, WheelSet, set_gear_down};
 
 #[derive(Component)]
 pub(super) struct FlightConfigRow;

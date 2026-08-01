@@ -10,9 +10,7 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 
-use crate::core::{
-    EditorPart, EditorState, inspector_params, symmetry_edit_target,
-};
+use crate::core::{EditorPart, EditorState, inspector_params, symmetry_edit_target};
 use thalos_game_state::units::UnitSystem;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, CatalogRef, CommandPod, Decoupler, Engine, FuelTank, Fuselage,

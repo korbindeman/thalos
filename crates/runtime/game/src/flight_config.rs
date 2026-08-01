@@ -30,9 +30,9 @@ use crate::SimStage;
 use crate::local_physics::ParkingBrake;
 use crate::sim_clock::SimClock;
 
-pub use thalos_game_state::flight::{FLAP_DETENTS, FlightConfig};
 #[cfg(test)]
 use thalos_game_state::flight::TAKEOFF_FLAP_DETENT;
+pub use thalos_game_state::flight::{FLAP_DETENTS, FlightConfig};
 
 /// Full flap travel time (UP → LANDING), seconds.
 const FLAP_TRAVEL_S: f64 = 6.0;
@@ -48,8 +48,6 @@ const SPOILER_DEPLOY_AIRSPEED_M_S: f64 = 30.0;
 /// [`SPOILER_DEPLOY_AIRSPEED_M_S`] so the panels don't flap around one
 /// threshold as the rollout decays through it.
 const SPOILER_STOW_AIRSPEED_M_S: f64 = 20.0;
-
-
 
 pub struct FlightConfigPlugin;
 

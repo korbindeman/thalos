@@ -49,14 +49,12 @@ pub use engine_mesh::{
     JetNacelleMount, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
     jet_nacelle_centers, jet_nacelle_length,
 };
-pub use fairing_mesh::{build_wing_fairing_mesh, wants_wing_fairing};
+pub use fairing_mesh::{FuselageFairing, wants_wing_fairing};
 pub use fuselage_mesh::{
-    build_fuselage_mesh, host_mount_geometry, skin_radius as fuselage_skin_radius,
-    v_offset_at as fuselage_v_offset_at,
+    build_fuselage_mesh, build_fuselage_mesh_with_fairing, host_mount_geometry,
+    skin_radius as fuselage_skin_radius, v_offset_at as fuselage_v_offset_at,
 };
-pub use gear_mesh::{
-    GearLegFrame, build_gear_bay_mesh, build_gear_mesh, build_gear_struct_mesh, gear_leg_frames,
-};
+pub use gear_mesh::{GearLegFrame, build_gear_bay_mesh, build_gear_mesh, gear_leg_frames};
 pub use part::{
     Adapter, AirIntake, CommandPod, ControlSurface, ControlSurfaceRole, Decoupler, Engine,
     EngineActivation, EngineThrust, EngineValidationError, FuelCrossfeed, FuelTank, Fuselage, Gear,

@@ -95,7 +95,10 @@ fn main() {
         nose_share * 100.0,
         (1.0 - nose_share) * 100.0
     );
-    println!("CoM->mains margin {:>6.2} m (must stay > 0 or it sits on its tail)", com.y - main_y);
+    println!(
+        "CoM->mains margin {:>6.2} m (must stay > 0 or it sits on its tail)",
+        com.y - main_y
+    );
     println!("effective half-track at CoM {eff_half_track:>5.2} m, CoM height {com_height:.2} m");
     println!(
         "roll-over threshold {:>5.2} g lateral (tire grip mu = 0.8: {})",

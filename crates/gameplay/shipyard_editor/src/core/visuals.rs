@@ -23,9 +23,9 @@ use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CatalogEntry, CommandPod, Decoupler, Engine,
     EngineGeometry, FuelTank, Fuselage, Gear, JetNacelleMount, MaterialKind, Part, PartCatalog,
     PartMaterial, PodGeometry, Ship, SurfaceMount, SurfaceMountKind, Wing, build_cockpit_mesh,
-    build_control_surface_mesh, build_fuselage_mesh, build_gear_bay_mesh, build_gear_mesh,
-    build_gear_struct_mesh, build_jet_nacelle_body_mesh, build_jet_nacelle_pylon_mesh,
-    build_wing_fairing_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
+    build_control_surface_mesh, build_fuselage_mesh, build_fuselage_mesh_with_fairing,
+    build_gear_bay_mesh, build_gear_mesh, build_jet_nacelle_body_mesh,
+    build_jet_nacelle_pylon_mesh, build_wing_mesh, host_mount_geometry, jet_nacelle_length,
     pod_visual_profile, wants_wing_fairing,
 };
 
@@ -110,6 +110,25 @@ pub struct VisualSpec {
     pub height: f32,
 }
 
+/// Fairing profile currently baked into an editor fuselage body. Wings are
+/// separate parts, so their edits do not mark the host's attach nodes changed;
+/// this key drives a narrow host-mesh rebuild only when the derived input moves.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AppliedFuselageFairing(Option<FairingKey>);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FairingKey {
+    station_bits: u32,
+    root_chord_bits: u32,
+}
+
+fn fairing_key(fairing: Option<(&Wing, f32)>) -> Option<FairingKey> {
+    fairing.map(|(wing, station)| FairingKey {
+        station_bits: station.to_bits(),
+        root_chord_bits: wing.root_chord.to_bits(),
+    })
+}
+
 /// `top` node diameter of a host part, or a sensible default. Single source
 /// for the surface-mount radius lookups so they stay consistent.
 pub fn host_top_diameter(nodes: &Query<&AttachNodes>, host: Entity) -> f32 {
@@ -127,6 +146,7 @@ pub fn visual_spec(
     adapter: Option<&Adapter>,
     tank: Option<&FuelTank>,
     fuselage: Option<&Fuselage>,
+    fairing: Option<(&Wing, f32)>,
     engine: Option<&Engine>,
     intake: Option<&AirIntake>,
 ) -> Option<VisualSpec> {
@@ -190,7 +210,10 @@ pub fn visual_spec(
         // a tank; the loft generator scales the rest to it.
         let d = nodes.get("top").map(|n| n.diameter).unwrap_or(f.max_width);
         Some(VisualSpec {
-            mesh: build_fuselage_mesh(f, d),
+            mesh: fairing.map_or_else(
+                || build_fuselage_mesh(f, d),
+                |(wing, station)| build_fuselage_mesh_with_fairing(f, d, wing, station),
+            ),
             height: f.length,
         })
     } else if let Some(e) = engine {
@@ -266,6 +289,7 @@ pub(super) fn rebuild_visuals(
     assets: Res<EditorAssets>,
     state: Res<EditorState>,
     parts: VisualQuery,
+    wings: Query<(&Wing, &SurfaceMount), With<EditorPart>>,
     stale: Query<(), Or<(With<PartVisual>, With<AttachNodePin>)>>,
 ) {
     for (
@@ -299,7 +323,22 @@ pub(super) fn rebuild_visuals(
         }
 
         // ---- Body visual --------------------------------------------------
-        if let Some(spec) = visual_spec(nodes, pod, dec, adapter, tank, fuselage, engine, intake) {
+        let fairing = fuselage.and_then(|fus| {
+            wings
+                .iter()
+                .find(|(wing, mount)| {
+                    mount.parent == e && wants_wing_fairing(wing, mount.angle, fus)
+                })
+                .map(|(wing, mount)| (wing, mount.station))
+        });
+        if fuselage.is_some() {
+            commands
+                .entity(e)
+                .insert(AppliedFuselageFairing(fairing_key(fairing)));
+        }
+        if let Some(spec) = visual_spec(
+            nodes, pod, dec, adapter, tank, fuselage, fairing, engine, intake,
+        ) {
             let mesh = meshes.add(spec.mesh);
 
             // Parts carrying `PartMaterial` render with `ShipPartMaterial`
@@ -378,6 +417,56 @@ pub(super) fn rebuild_visuals(
     }
 }
 
+/// Keep the integrated host loft current when an editor wing is added,
+/// resized, moved, or removed. The flight craft is immutable after blueprint
+/// spawn; only the editor needs this cross-part change detector.
+pub(super) fn rebuild_changed_fuselage_fairings(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    hosts: Query<
+        (
+            Entity,
+            &Fuselage,
+            &AttachNodes,
+            Option<&AppliedFuselageFairing>,
+        ),
+        With<EditorPart>,
+    >,
+    wings: Query<(&Wing, &SurfaceMount), With<EditorPart>>,
+    mut bodies: Query<(&PartBody, &mut Mesh3d)>,
+) {
+    for (host, fus, nodes, applied) in &hosts {
+        let fairing = wings
+            .iter()
+            .find(|(wing, mount)| {
+                mount.parent == host && wants_wing_fairing(wing, mount.angle, fus)
+            })
+            .map(|(wing, mount)| (wing, mount.station));
+        let desired_key = fairing_key(fairing);
+        if applied.is_some_and(|applied| applied.0 == desired_key) {
+            continue;
+        }
+
+        let diameter = nodes
+            .get("top")
+            .map(|node| node.diameter)
+            .unwrap_or(fus.max_width);
+        let mesh = fairing.map_or_else(
+            || build_fuselage_mesh(fus, diameter),
+            |(wing, station)| build_fuselage_mesh_with_fairing(fus, diameter, wing, station),
+        );
+        let handle = meshes.add(mesh);
+        for (body, mut body_mesh) in &mut bodies {
+            if body.0 == host {
+                body_mesh.0 = handle.clone();
+            }
+        }
+        commands
+            .entity(host)
+            .insert(AppliedFuselageFairing(desired_key));
+    }
+}
+
 /// Build (or rebuild) the mesh child for each wing whose shape, mount, or
 /// host diameter just changed. Wings are surface-mounted lifting surfaces,
 /// not bodies of revolution, so they live outside `rebuild_visuals`: the
@@ -442,33 +531,6 @@ pub(super) fn rebuild_wing_visuals(
                 world.entity_mut(body).despawn();
             }
         });
-
-        // Wing-body junction fairing (derived geometry; see the ship-view
-        // twin in `ship_view::rebuild_ship_wing_visuals`). Rendered like the
-        // wing body so the editor previews the merged junction.
-        if let Ok(fus) = hosts.get(mount.parent)
-            && wants_wing_fairing(wing, mount.angle, fus)
-        {
-            let fairing = commands
-                .spawn((
-                    Mesh3d(meshes.add(build_wing_fairing_mesh(fus, top_d, wing, mount.station))),
-                    MeshMaterial3d(material.clone()),
-                    Transform::IDENTITY,
-                    Visibility::default(),
-                    WingVisual,
-                    PartBody(e),
-                    Pickable::default(),
-                ))
-                .observe(on_body_click)
-                .id();
-            commands.queue(move |world: &mut World| {
-                if world.get_entity(parent).is_ok() {
-                    world.entity_mut(fairing).insert(ChildOf(parent));
-                } else {
-                    world.entity_mut(fairing).despawn();
-                }
-            });
-        }
 
         // Control surfaces, shown deflected to a small angle so they read as
         // distinct hinged panels in the editor (no flight sim here).
@@ -646,40 +708,14 @@ pub(super) fn rebuild_gear_visuals(
                 Pickable::IGNORE,
             ))
             .id();
-        // Wide-track carrying structure (gear beam + side-stay): hull finish,
-        // not gear black — it is airframe, and dark it reads as scaffolding.
-        let structure = build_gear_struct_mesh(gear, mount.angle, parent_radius).map(|m| {
-            commands
-                .spawn((
-                    Mesh3d(meshes.add(m)),
-                    MeshMaterial3d(if Some(e) == state.selected {
-                        assets.selected_material.clone()
-                    } else {
-                        assets.part_material.clone()
-                    }),
-                    Transform::IDENTITY,
-                    Visibility::default(),
-                    GearVisual,
-                    PartBody(e),
-                    Pickable::default(),
-                ))
-                .observe(on_body_click)
-                .id()
-        });
         let parent = e;
         commands.queue(move |world: &mut World| {
             if world.get_entity(parent).is_ok() {
                 world.entity_mut(body).insert(ChildOf(parent));
                 world.entity_mut(bay).insert(ChildOf(parent));
-                if let Some(s) = structure {
-                    world.entity_mut(s).insert(ChildOf(parent));
-                }
             } else {
                 world.entity_mut(body).despawn();
                 world.entity_mut(bay).despawn();
-                if let Some(s) = structure {
-                    world.entity_mut(s).despawn();
-                }
             }
         });
     }

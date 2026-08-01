@@ -14,6 +14,7 @@ bevy = { version = "0.19", features = ["wayland", "jpeg"] }
 bevy_egui = "0.41.1"
 ab_glyph = "0.2"
 resvg = { version = "0.47", default-features = false }
+serde = { version = "1.0", features = ["derive"] }
 thalos_control = { path = "../../simulation/control" }
 thalos_game_state = { path = "../state" }
 thalos_input = { path = "../../interface/input" }

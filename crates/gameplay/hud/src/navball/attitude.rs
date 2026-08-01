@@ -17,9 +17,9 @@
 //!    marker projection.
 
 use crate::navball::render::NavballSphere;
-use thalos_game_state::{SimulationState, SolarSystemState};
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
+use thalos_game_state::{SimulationState, SolarSystemState};
 
 /// Body axis pointing out of the nose. Matches `SHIP_NOSE_BODY` in
 /// `navigation.rs`.
