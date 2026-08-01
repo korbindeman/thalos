@@ -14,18 +14,18 @@
 //! centre — by construction the craft's nose always points there, so
 //! it doesn't need projection.
 
-use thalos_game_state::maneuver_plan::ManeuverPlan;
 use crate::navball::attitude::NavballFrame;
 use crate::navball::ui::NavballUiRoot;
-use thalos_game_state::nav::maneuver_burn_direction;
-use thalos_game_state::{SimulationState, SolarSystemState};
-use thalos_game_state::nav::TargetBody;
 use crate::velocity_frame::VelocityFrameState;
 use bevy::asset::RenderAssetUsages;
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use resvg::{tiny_skia, usvg};
+use thalos_game_state::maneuver_plan::ManeuverPlan;
+use thalos_game_state::nav::TargetBody;
+use thalos_game_state::nav::maneuver_burn_direction;
+use thalos_game_state::{SimulationState, SolarSystemState};
 use thalos_physics_canonical::velocity_frame::{VelocityReferenceFrame, nav_basis};
 
 const ICON_SIZE: u32 = 32;

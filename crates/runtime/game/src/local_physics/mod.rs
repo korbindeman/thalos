@@ -18,7 +18,6 @@ use crate::sim_clock::SimClock;
 
 pub use thalos_game_state::flight::PHYSICS_QUERY_TILE_LOD_M;
 
-
 const THALOS_NAME: &str = "Thalos";
 const DEBUG_DROP_KEY: KeyCode = KeyCode::F9;
 

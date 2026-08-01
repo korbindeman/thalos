@@ -2018,6 +2018,7 @@ const CAPTURE_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_TIME",
     "THALOS_SCREENSHOT_WARMUP",
     "THALOS_SCREENSHOT_HUD",
+    "THALOS_SCREENSHOT_WIDGETS",
     "THALOS_SCREENSHOT_CAMERA_ALTITUDE",
     "THALOS_SCREENSHOT_LOOK_ELEVATION",
     "THALOS_SCREENSHOT_SUN_ELEVATION",
@@ -2691,7 +2692,8 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
                 .iter()
                 .filter(|viewpoint| {
                     viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
-                        && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn) == boot.spawn_situation()
+                        && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn)
+                            == boot.spawn_situation()
                         && viewpoint.boots_hub == boot.boots_hub()
                         && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
                             == [boot.width, boot.height]
@@ -2700,7 +2702,8 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
         );
         if catalog.latest().is_some_and(|viewpoint| {
             viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
-                && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn) == boot.spawn_situation()
+                && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn)
+                    == boot.spawn_situation()
                 && viewpoint.boots_hub == boot.boots_hub()
                 && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
                     == [boot.width, boot.height]
@@ -3014,7 +3017,8 @@ fn apply_capture_time(
     // ignoring it.
     let Some((time_s, source)) = requested else {
         if let Some(server) = server.as_deref_mut() {
-            server.active_sim_time = Some((sim.simulation.sim_time(), CaptureTimeSource::HostClock));
+            server.active_sim_time =
+                Some((sim.simulation.sim_time(), CaptureTimeSource::HostClock));
         }
         warn!(
             target: "thalos::screenshot",
@@ -3496,12 +3500,17 @@ fn retarget_ship_camera(
 fn hide_overlays(
     cfg: Res<ScreenshotConfig>,
     mut photo: ResMut<crate::photo_mode::PhotoMode>,
+    mut orbit_widget: ResMut<thalos_hud::OrbitWidgetState>,
     mut overlays: ParamSet<(
         Query<&mut Visibility, With<crate::hud::HudPanel>>,
         Query<&mut Visibility, With<crate::photo_mode::HideInPhotoMode>>,
     )>,
 ) {
     if cfg.keep_hud {
+        // `interstage` is the deterministic launch-stack framing. In HUD mode
+        // it doubles as the orbit-editor visual probe, closing the old gap
+        // where only the collapsed panel could be captured headlessly.
+        orbit_widget.expanded = cfg.preset == ScreenshotPreset::Interstage;
         return;
     }
     if !photo.active {
@@ -3652,6 +3661,7 @@ fn drive_headless_screenshot(
         ScreenshotPreset::PlumeSkyline => {
             plume_skyline_context(&sim, &solar).map(CaptureFocus::from)
         }
+        ScreenshotPreset::CraftStance => craft_stance_context(&sim, &solar).map(CaptureFocus::from),
         ScreenshotPreset::Interstage => {
             craft_context_at(&sim, INTERSTAGE_FOCUS_OFFSET_M).map(CaptureFocus::from)
         }

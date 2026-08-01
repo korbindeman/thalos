@@ -1714,7 +1714,8 @@ impl SurfaceQuery for ProceduralSurface {
         (
             SurfaceSample {
                 height_m: height_m as f32,
-                albedo_linear: self.riparian_albedo(dir, self.albedo_from_bands(&bands, self.macro_tone(p))),
+                albedo_linear: self
+                    .riparian_albedo(dir, self.albedo_from_bands(&bands, self.macro_tone(p))),
                 roughness: 0.92,
                 moisture: moisture as f32,
             },
@@ -2156,4 +2157,3 @@ fn massif_erosion_offset(seed: u32) -> Vec2 {
     let h = hash3(seed as i64, 0x517E, 0x4D54, seed ^ 0xA53F);
     Vec2::new((h & 0xffff) as f32 * 13.0, (h >> 16) as f32 * 13.0)
 }
-

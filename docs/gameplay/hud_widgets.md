@@ -1,64 +1,108 @@
-# HUD widgets — the MFD slot
+# HUD widgets — permanent launcher and floating workspace
 
-The ship-view HUD has one **Multi-Function Display (MFD)** slot (top-right):
-a single panel that hosts exactly one *widget* at a time and, by default,
-auto-selects the widget most relevant to the current flight context. A small
-tab row lets the pilot pin a specific widget or hide the slot.
+## Target direction: instruments are always within reach
 
-This replaced the old single hardcoded "TRAJECTORY" panel (`system_map_panel`),
-whose show-gate (`throttle > 0.02` ⇒ "recently burning") popped an orbital
-schematic up during atmospheric flight — useless in an airplane. The MFD makes
-"which instrument is relevant right now" a first-class, data-driven decision and
-gives a home to future cockpit displays (navigation display, docking, transfer
-plotting, …) without another bespoke panel each time.
+The flight HUD has one compact, **permanent widget launcher panel**. It is the
+catalogue for ND, TRAJ, DOCK, transfer plotting, and later instruments: selecting
+an entry opens or focuses that widget as a separate floating window on the HUD.
+The launcher itself stays fixed and cannot be closed. It hides only when the
+flight HUD as a whole hides (photo mode, map/editor/non-flight contexts).
 
-Code: `crates/runtime/game/src/hud/mfd/` (`mod.rs` + `widgets/`). Added by `MfdPlugin`
+Floating widgets are immediately manipulable during normal flight. A header
+drags the window, a close control removes it from the current workspace, and
+resizing is constrained by the widget's declared minimum/maximum size and aspect
+policy. No edit mode is required for these essential operations. Closing does
+not forget placement; reopening restores the last position. Selecting an
+already-open launcher entry focuses it rather than creating accidental copies;
+an explicit duplicate action may create a second instance of the same kind.
+
+The three separate concepts are:
+
+- **widget kind** — ND, TRAJ, DOCK, transfer, and so on;
+- **widget instance** — a stable ID with its own position, size, binding, and
+  view state (for example its own ND range);
+- **HUD workspace** — the persisted collection and stacking order of instances.
+
+Several kinds, and deliberately several instances of one kind, may coexist.
+Context and craft capability choose the first-run defaults and what the launcher
+offers; they never rearrange an explicit pilot workspace. An optional AUTO
+instance may switch its own content without spawning, closing, or moving other
+windows.
+
+All launcher and window actions route through one `HudLayoutRequest` command
+path (`Add`, `Focus`, `Move`, `Resize`, `Duplicate`, `Close`, `Reset`) with one
+layout owner. Widget state is per instance, not a resource that encodes "the one
+ND" or "the active widget". Widgets remain projections: ND still reads the one
+navigation authority and emits `RouteRequest`; TRAJ reads the canonical
+prediction and maneuver state. The workspace owns presentation, never flight
+truth.
+
+Placement is free screen-space layout rather than a mandatory docking grid.
+Saved placement is normalised to the usable viewport, clamped into the screen on
+load and after resolution/UI-scale changes. Gentle edge/widget snapping belongs
+to the responsive-layout follow-up. The workspace persists through the unified
+`settings.ron` seam, with a draft during dragging and one settings commit when
+the interaction ends.
+
+Decision: [ADR-20260801T070234Z](../adr/20260801T070234Z-permanent-widget-launcher-and-floating-workspace.md).
+
+### Workspace boundary
+
+Self-contained boxed instruments belong in the workspace: ND, TRAJ, DOCK,
+transfer plotting, and later staging/orbit/system panels where that improves the
+flight deck. Camera-aligned PFD ladders/tapes, flight-director and world
+symbology, global time/view controls, and transient safety annunciations remain
+fixed overlays.
+
+## Current implementation: launcher plus floating windows
+
+The permanent **WIDGETS** launcher sits at the top-right of the ship-view HUD.
+Its craft-filtered buttons open or focus TRAJ, ND, DOCK, and XFER. Each kind is
+an independent floating window with an always-available drag header and close
+button, so ND and TRAJ can remain on screen together. Closing retains its last
+position; selecting the launcher entry restores it there.
+
+The old contextual MFD selection remains only as first-run policy: the initial
+workspace opens ND for a winged craft and TRAJ for a rocket/capsule. After that,
+context never closes, opens, or moves a pilot-arranged window.
+
+Code: `crates/gameplay/hud/src/mfd/` (`mod.rs` + `widgets/`). Added by `MfdPlugin`
 from `HudPlugin`.
 
-## Shape
+### Current shape
 
-- **Slot container** (`mfd/mod.rs`) owns the panel frame, the selector tab row,
-  and a *widget area* that the widget roots parent into. It is built in one
-  system (`setup_mfd`) so widget roots never race a deferred parent insert.
-- **Widgets** (`mfd/widgets/<kind>.rs`) each expose:
-  - `build(area, theme, …)` — spawn the widget's root (a `MfdWidgetRoot { kind }`
-    node, `Visibility::Hidden`) and children under the area.
-  - `relevance(&FlightContext) -> Option<i32>` — a pure priority. `None` =
-    "not applicable now"; higher number wins auto-selection.
-  - `update(...)` (optional) — a system, gated on being the active widget, that
-    refreshes the widget's contents.
-- **`FlightContext`** (`Resource`, sole writer `update_flight_context`) — the
-  per-frame situation the `relevance` functions read. Derived only from
-  always-available signals (no dependency on the regime bubble, which can be
-  absent): `in_atmosphere` (`AeroReadout.density_kgm3`), `prediction_shown`,
-  `recently_burning`, `has_nodes`, `altitude_m`, `nearest_runway_m`.
-- **`MfdSelection`** (`Resource`, Reflect): `Auto`,
-  `Pinned(WidgetKind)`, or `Hidden`. Sole writer `handle_tab_clicks`.
-- **`ActiveWidget`** (`Resource`) — the resolved widget. Sole writer
-  `select_active_widget`.
+- **`HudWorkspaceSettings`** is the persisted `settings.ron` section: stable
+  window IDs, open state, normalised placement, and stacking order. Loaded
+  positions are repaired/clamped before use.
+- **`HudWorkspaceRuntime`** is the drag draft. Pointer motion changes it only;
+  release commits the final position to settings, so a drag does not write the
+  file every frame.
+- **`HudLayoutRequest`** is the one mutation path: initialise, open/focus, move,
+  and close. `apply_layout_requests` is the sole layout reducer.
+- **`ActiveWidgets`** is the derived visibility set consumed by the widget
+  update/input systems. It replaces the scalar `ActiveWidget`, allowing several
+  kinds to update in one frame.
+- **Widgets** (`mfd/widgets/<kind>.rs`) still expose `build`, pure contextual
+  `relevance` for the first-run default, and optional live update/input systems.
+- **`FlightContext`** remains one derived answer for craft capability and the
+  first-run choice; it no longer owns ongoing workspace selection.
 
 ## Invariants
 
-- **`HudPanel` lives on the slot container only**, never on widget roots.
-  `hide_in_photo_mode` flips every `HudPanel`'s visibility; container-only
-  tagging means photo mode hides the whole slot through inheritance while the
-  selector keeps sole ownership of which widget shows (no one-frame flashes).
-- **One pass, one visible.** `select_active_widget` resolves the selection,
-  then in a single pass sets the chosen root `Inherited` and every other root
-  (and the slot container, when nothing is active) — all diff-writes so it
-  coexists with the photo-mode / shipyard-editor visibility writers without
-  ordering constraints.
-- **The selector bezel stays reachable.** In ship view the slot container (the
-  selector tab row) is always visible, even when no widget is shown (`Hidden`,
-  or `Auto` with nothing relevant) — otherwise turning the slot off would make
-  it impossible to turn back on. Only the widget content below the tabs
-  collapses. The whole slot hides only in map view (the map already draws the
-  full 3D trajectory) and in photo mode / the editor (via the container's
-  `HudPanel`).
-- **Auto-pick priority.** `Auto` chooses the highest-`relevance` widget, ties
-  broken by `WidgetKind::ALL` order (earlier wins). `Pinned(k)` always shows
-  `k` (its own "no data" state if `k` wouldn't otherwise be picked). `Hidden`
-  shows no widget (but keeps the selector).
+- **The launcher is permanent, windows are optional.** The launcher is fixed
+  and cannot close; every instrument can. All carry `HudPanel`, so photo mode
+  and non-flight contexts suppress the complete workspace through the existing
+  visibility contract.
+- **Opening is additive.** Selecting ND cannot close TRAJ. Selecting an already
+  open entry focuses it; close is the only ordinary removal path.
+- **Unavailable is dormant, not deleted.** ND is absent from a rocket's
+  launcher and its saved window is hidden, but the arrangement returns intact
+  when a winged craft is active again.
+- **Dragging owns the pointer.** Headers are native interactive UI, so the one
+  `UiPointerGate` prevents the same motion from steering the craft or camera.
+- **One pass derives visibility.** `sync_workspace_visuals` projects runtime
+  layout, craft capability, and ship/map view into launcher/window/content
+  visibility and the `ActiveWidgets` set.
 
 ## Widgets (current)
 
@@ -71,13 +115,13 @@ from `HudPlugin`.
 
 ## Adding a widget
 
-1. Add a variant to `WidgetKind` (and its `ALL`, `tab_label`, `relevance`
-   dispatch).
+1. Add a variant to `WidgetKind` (and its catalogue label/title, default
+   placement, availability, and relevance dispatch).
 2. Create `mfd/widgets/<kind>.rs` with `build` + `relevance` (+ `update` if it
    has live content). Root carries `MfdWidgetRoot { kind }` and starts
    `Visibility::Hidden`.
 3. If the widget renders through a UI-material shader, register the material in
-   `MfdPlugin::build` (`UiMaterialPlugin::<…>`), build it in `setup_mfd`, and
+   `MfdPlugin::build` (`UiMaterialPlugin::<…>`), build it in `setup_workspace`, and
    add its `update` to the plugin's `Update` chain.
 4. Extend `FlightContext` if the widget needs a context signal not already
    present (single writer: `update_flight_context`).
@@ -133,11 +177,15 @@ form continues to show live AP/PE. Clicking the orbital half expands an editor
 in place for circular/elliptical altitude, inclination, direction, plane policy,
 plan/execute, and cancel.
 
-The default plane policy is `AUTO`: a ground launch selects the lowest
-inclination directly reachable from the current inertial site and launches
-prograde; an in-space retarget preserves the current plane. Pressing an
-inclination or direction control makes that choice explicit and switches the
-policy to `NEAREST`. The plane selector cycles `AUTO` → `NEAREST` → `PRESERVE`.
+`AUTO SET` is a button, not a value. It populates the visible inclination and
+direction from the live situation: the lowest directly reachable prograde
+plane on a ground/ascent start, or the current orbit's concrete values in
+space. The fields always show numbers/direction (`8°`, `PROGRADE`) afterward.
+The adjacent policy selector toggles `NEAREST` / `PRESERVE`.
+
+After deliberate pilot takeover, `EXEC ORBIT` becomes `RESUME ORBIT`. It keeps
+the target and continues from the live ascent phase; it does not restart the
+pad plan or test remaining fuel against the full original launch cost.
 
 It follows the ND selection architecture rather than copying its state:
 
@@ -155,19 +203,25 @@ readout. Full behavior and ground/ascent semantics:
 
 ## Verification
 
-- `just game cruise` (airliner in atmosphere) → the slot shows **ND**, not the
-  orbital plot (the headline bug fix).
+- `just game cruise` (airliner in atmosphere) → the launcher is permanent and
+  the first-run workspace opens **ND**, not the orbital plot.
+- A plane with no active route/burn starts on **ND**; a rocket or capsule starts
+  on **TRAJ**, including while sitting on the pad.
 - `just nd-preview` → eight ND panels from real approach plans (agent-runnable;
   covers scale, route drawing, and threshold marking, **not** ECS wiring).
 - `just game runway-approach` → ND shows the heading rose, craft centred, and both
   runways at true size; arm one and confirm the drawn route and the PFD's
   localizer/glideslope needles agree and track together as the aircraft
   maneuvers.
-- A vacuum burn / pending node (`just game orbit`) → the slot shows
-  **Trajectory**.
-- Orbit widget preview states are included in `just ui-preview`: compact,
-  expanded on the ground, expanded in space, planned, executing, infeasible,
-  and aborted.
-- Selector: pin each tab, confirm it stays regardless of context (DOCK/IPL show
-  "NO DATA"); OFF blanks the slot; AUTO resumes context picking. `MfdSelection`
-  is Reflect-registered.
+- A vacuum burn / pending node (`just game orbit`) → the first-run workspace
+  opens **Trajectory**.
+- `THALOS_SCREENSHOT_HUD=1 just screenshot interstage` captures the expanded
+  ground editor deterministically. The ordinary clean-scene shot keeps the HUD
+  hidden.
+- Workspace: open ND and TRAJ together; both launcher entries highlight and both
+  windows remain live. Drag each by its header, close/reopen it, and restart the
+  game; placement and open state must survive. A rocket hides ND without erasing
+  its saved placement. DOCK/XFER show their honest `NO DATA` stubs.
+- Deterministic multi-window evidence:
+  `THALOS_SCREENSHOT_HUD=1 THALOS_SCREENSHOT_WIDGETS=traj,nd just screenshot
+  runway-atmosphere`.

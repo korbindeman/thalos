@@ -19,18 +19,18 @@ use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
 use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
-use thalos_game_state::camera::{CameraFocus, CameraFocusTarget};
-use thalos_game_state::debug::{DebugMode, DebugSurfaceTeleport, low_orbit_state};
-use thalos_ui::hud_theme::{HudTheme, panel_frame};
 use crate::maneuver::{ManeuverPlan, SelectedNode};
+use thalos_game_state::SimulationState;
+use thalos_game_state::camera::{CameraFocus, CameraFocusTarget};
+use thalos_game_state::coords::RenderOrigin;
+use thalos_game_state::debug::{DebugMode, DebugSurfaceTeleport, low_orbit_state};
+use thalos_game_state::flight::EvaMode;
+use thalos_game_state::nav::ViewMode;
+use thalos_game_state::scene::{CelestialBody, ShipMarker};
 use thalos_game_state::ui::GamePause;
 use thalos_game_state::ui::PhotoMode;
-use thalos_game_state::flight::EvaMode;
-use thalos_game_state::coords::RenderOrigin;
-use thalos_game_state::scene::{CelestialBody, ShipMarker};
-use thalos_game_state::SimulationState;
 use thalos_game_state::ui::ScenarioMenu;
-use thalos_game_state::nav::ViewMode;
+use thalos_ui::hud_theme::{HudTheme, panel_frame};
 use thalos_ui::{ScrollableColumn, UiButton};
 
 /// Default framing distance (metres) when the ship row is clicked. Matches the

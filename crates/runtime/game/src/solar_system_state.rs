@@ -10,7 +10,6 @@ pub use thalos_game_state::solar_system::{
     BodyEnvironmentState, CloudBandEnvironmentState, SimulationState, SolarSystemState,
 };
 
-
 // The weather cube — `CloudWeatherField`, its derivation, and the coverage
 // trim — lives in `thalos_weather::cloud_cube` (Phase 5a move,
 // ADR-20260731T024003Z). Re-exported here so existing consumers (the spawn
@@ -22,7 +21,6 @@ pub use thalos_weather::cloud_cube::{
 
 /// The one coverage trim, owned by the producer (`thalos_weather::cloud_cube`).
 pub const CLOUD_COVERAGE_SCALE: f32 = thalos_weather::cloud_cube::COVERAGE_SCALE;
-
 
 pub fn sync_solar_system_state(
     sim: Res<SimulationState>,
@@ -48,8 +46,7 @@ pub struct SolarSystemStatePlugin;
 
 impl Plugin for SolarSystemStatePlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SolarSystemState>()
-            .add_systems(
+        app.init_resource::<SolarSystemState>().add_systems(
             Update,
             sync_solar_system_state
                 .in_set(SimStage::Sync)

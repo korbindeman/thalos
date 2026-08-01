@@ -19,30 +19,23 @@
 
 use bevy::prelude::*;
 
-
 use crate::SimStage;
 use crate::autopilot::{autopilot_system, lead_seconds_for};
 use crate::bridge::{advance_simulation, handle_warp_controls};
 use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 
-pub use thalos_game_state::nav::{WarpToManeuver, find_next_maneuver};
-#[cfg(test)]
-use thalos_game_state::nav::format_duration;
 #[cfg(test)]
 use thalos_game_state::nav::ManeuverTarget;
+#[cfg(test)]
+use thalos_game_state::nav::format_duration;
+pub use thalos_game_state::nav::{WarpToManeuver, find_next_maneuver};
 
 /// Worst-case real-frame budget — must match
 /// [`thalos_physics_canonical::simulation::SimulationConfig::max_real_delta`] so
 /// a single frame at the chosen level can't advance past the safe
 /// target.
 const FRAME_DT_BUDGET_S: f64 = 0.1;
-
-
-
-
-
-
 
 pub(crate) fn warp_to_maneuver_system(
     mut state: ResMut<WarpToManeuver>,

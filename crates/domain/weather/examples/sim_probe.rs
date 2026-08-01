@@ -32,7 +32,10 @@ fn stats(name: &str, values: &[f32]) {
     let var = values.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / n;
     let min = values.iter().copied().fold(f32::INFINITY, f32::min);
     let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    println!("  {name:<10} mean {mean:+.4}  std {:.4}  min {min:+.3}  max {max:+.3}", var.sqrt());
+    println!(
+        "  {name:<10} mean {mean:+.4}  std {:.4}  min {min:+.3}  max {max:+.3}",
+        var.sqrt()
+    );
 }
 
 fn main() {
@@ -71,11 +74,46 @@ fn main() {
     let div = sim.divergence();
     let t2 = Instant::now();
     save_gray(&format!("{out_dir}/cloud.png"), nx, ny, &cloud, 0.0, 1.0);
-    save_gray(&format!("{out_dir}/moisture.png"), nx, ny, sim.q_field(), 0.0, 1.1);
-    save_gray(&format!("{out_dir}/vorticity.png"), nx, ny, &vort, -8.0e-5, 8.0e-5);
-    save_gray(&format!("{out_dir}/divergence.png"), nx, ny, &div, -4.0e-5, 4.0e-5);
-    save_gray(&format!("{out_dir}/u_wind.png"), nx, ny, sim.u_field(), -30.0, 30.0);
-    save_gray(&format!("{out_dir}/h_anom.png"), nx, ny, sim.h_field(), -400.0, 400.0);
+    save_gray(
+        &format!("{out_dir}/moisture.png"),
+        nx,
+        ny,
+        sim.q_field(),
+        0.0,
+        1.1,
+    );
+    save_gray(
+        &format!("{out_dir}/vorticity.png"),
+        nx,
+        ny,
+        &vort,
+        -8.0e-5,
+        8.0e-5,
+    );
+    save_gray(
+        &format!("{out_dir}/divergence.png"),
+        nx,
+        ny,
+        &div,
+        -4.0e-5,
+        4.0e-5,
+    );
+    save_gray(
+        &format!("{out_dir}/u_wind.png"),
+        nx,
+        ny,
+        sim.u_field(),
+        -30.0,
+        30.0,
+    );
+    save_gray(
+        &format!("{out_dir}/h_anom.png"),
+        nx,
+        ny,
+        sim.h_field(),
+        -400.0,
+        400.0,
+    );
     println!("png:  {:?} -> {out_dir}", t2.elapsed());
 
     stats("cloud", &cloud);

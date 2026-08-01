@@ -6,10 +6,10 @@
 
 use bevy::prelude::*;
 
-use thalos_game_state::coords::screen_marker_radius;
-use thalos_game_state::{scene::CelestialBody, SimulationState, SolarSystemState};
 use thalos_game_state::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
+use thalos_game_state::coords::screen_marker_radius;
 use thalos_game_state::coords::{RenderOrigin, WorldScale, to_render_pos};
+use thalos_game_state::{SimulationState, SolarSystemState, scene::CelestialBody};
 
 /// Points sampled along each orbit for gizmo line drawing.
 const ORBIT_SAMPLES: usize = 256;
@@ -156,7 +156,11 @@ pub fn draw_orbits(
             .as_deref()
             .and_then(|state| state.active_position_m())
             .map(|position| {
-                thalos_game_state::camera::find_reference_body(position, sim.simulation.bodies(), states)
+                thalos_game_state::camera::find_reference_body(
+                    position,
+                    sim.simulation.bodies(),
+                    states,
+                )
             }),
         _ => None,
     };

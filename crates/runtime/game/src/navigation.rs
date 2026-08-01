@@ -21,8 +21,6 @@ pub use thalos_game_state::nav::{
     maneuver_node_burn_direction, safe_normalize,
 };
 
-
-
 pub struct NavigationPlugin;
 
 impl Plugin for NavigationPlugin {
@@ -44,7 +42,6 @@ impl Plugin for NavigationPlugin {
 /// saturates against `max_torque`. Read by the scheduled-burn autopilot
 /// in [`crate::autopilot`] to size its lead time before a maneuver.
 pub(crate) const AUTOPILOT_SETTLE_S: f64 = thalos_control::SETTLE_TIME_S;
-
 
 /// Resolve the active navigation mode into an [`AttitudeDemand`] for the
 /// fly-by-wire control bus ([`crate::control_bus`]).

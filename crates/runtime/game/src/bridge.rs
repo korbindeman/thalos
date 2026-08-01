@@ -157,8 +157,6 @@ fn update_prediction(
     sim.simulation.recompute_prediction();
 }
 
-
-
 /// Apply the regime record's warp policy (A4, `docs/simulation/regimes.md`): publish
 /// `CraftRegime.warp.max_level` as [`WarpLimits`] for the input handler and
 /// HUD, and clamp the current level down to it.

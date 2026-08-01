@@ -19,11 +19,11 @@ use thalos_physics_canonical::trajectory::{
 };
 use thalos_world::BodyId;
 
-use thalos_game_state::camera::ActiveCamera;
-use thalos_game_state::coords::{RenderOrigin, WorldScale, sample_render_pos};
 use crate::map_view::MapSnapshot;
-use thalos_game_state::ui::HideInPhotoMode;
+use thalos_game_state::camera::ActiveCamera;
 use thalos_game_state::coords::screen_marker_radius;
+use thalos_game_state::coords::{RenderOrigin, WorldScale, sample_render_pos};
+use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HideInShipView;
 
 use super::FlightPlanView;
@@ -739,8 +739,8 @@ mod tests {
     use thalos_physics_canonical::types::{BodyState, TrajectorySample};
     use thalos_world::StateVector;
 
-    use thalos_game_state::coords::RenderGhostFocus;
     use crate::map_view::ProjectedBodyState;
+    use thalos_game_state::coords::RenderGhostFocus;
 
     use super::super::view::{Ghost, GhostPhase, TrajectoryWindow};
     use super::*;

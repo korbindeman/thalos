@@ -166,7 +166,6 @@ impl MapSurface {
     }
 }
 
-
 /// Attach the baked drainage raster when one is installed for this backing
 /// (NTR-X2q). Absent is fine — rivers are an optional landcover channel — but a
 /// raster baked from the *other* backing is a hard error, because rivers that
@@ -175,10 +174,7 @@ fn attach_rivers(surface: ProceduralSurface, backing: &str) -> ProceduralSurface
     let dir = std::path::Path::new("assets/terrain_packages/thalos_rivers");
     match thalos_terrain::RiverField::load(dir, backing) {
         Ok(Some(r)) => {
-            println!(
-                "world_map: rivers attached ({} backing)",
-                r.backing
-            );
+            println!("world_map: rivers attached ({} backing)", r.backing);
             surface.with_rivers(std::sync::Arc::new(r))
         }
         Ok(None) => surface,
@@ -218,11 +214,17 @@ fn main() {
             }
             Err(e) => {
                 eprintln!("THALOS_TERRAIN=diffusion: {e}; falling back to procedural");
-                MapSurface::Procedural(attach_rivers(ProceduralSurface::new(radius_m as f32, seed), "procedural"))
+                MapSurface::Procedural(attach_rivers(
+                    ProceduralSurface::new(radius_m as f32, seed),
+                    "procedural",
+                ))
             }
         }
     } else {
-        MapSurface::Procedural(attach_rivers(ProceduralSurface::new(radius_m as f32, seed), "procedural"))
+        MapSurface::Procedural(attach_rivers(
+            ProceduralSurface::new(radius_m as f32, seed),
+            "procedural",
+        ))
     };
 
     // Zoom mode: WORLD_ZOOM="lat,lon,half_km" renders a tangent-plane crop

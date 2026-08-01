@@ -299,11 +299,11 @@ fn local_system_root(mut body_id: BodyId, bodies: &[BodyDefinition]) -> BodyId {
 // `thalos_game_state::surface_frame` (Phase 5a, ADR-20260731T024003Z):
 // one frame family shared by runtime drivers, capture framings, and any
 // future feature crate, with the tidal-lock rule beside it.
+#[cfg(test)]
+use thalos_game_state::scene::TidallyLocked;
 pub use thalos_game_state::surface_frame::{
     authored_lock_parent, surface_body_to_world_orientation_f64, surface_orientation_authored,
 };
-#[cfg(test)]
-use thalos_game_state::scene::TidallyLocked;
 #[cfg(test)]
 use thalos_game_state::surface_frame::{
     surface_body_to_world_orientation, tidal_lock_world_to_body_orientation,

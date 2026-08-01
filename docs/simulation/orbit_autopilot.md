@@ -42,16 +42,17 @@ pub enum TargetPlane {
 
 The current UI presents a circular-altitude field and expands it to equal
 periapsis/apoapsis values. An elliptical target exposes both altitudes.
-`Auto` is the default. On the surface it selects the minimum directly reachable
-inclination from the craft's current inertial position and launches prograde,
-which preserves the body's rotational boost. In space it preserves the current
-plane, avoiding an unnecessary plane-change burn. Editing inclination or
-direction switches to `Nearest`, so an explicit request remains explicit.
+`AUTO SET` is a one-shot suggestion action, not a displayed target value. On
+the surface it writes the minimum directly reachable inclination plus
+`PROGRADE` into the draft, preserving the body's rotational boost. In space it
+writes the live orbit's inclination and direction. The fields therefore always
+show the concrete values that will be planned; editing either keeps the choice
+explicit.
 `Nearest` means the cheapest plane with the requested inclination; it does not
 pretend that the longitude of ascending node is fixed. `Fixed` remains in the
 canonical contract for launch-window-sensitive contracts, but the first
-planner rejects it explicitly; the orbit widget currently offers `AUTO`,
-`NEAREST`, and `PRESERVE`.
+planner rejects it explicitly; the orbit widget currently offers `AUTO SET`
+plus `NEAREST` / `PRESERVE`.
 
 The first ground MVP supports the current dominant body, prograde/retrograde,
 target periapsis and apoapsis, and a reachable inclination. A direct ascent
@@ -164,13 +165,17 @@ decay is the *confirmation* rather than the trigger:
 - the staging topology and next-stage transaction remain owned by
   `StagingPlan`, and `activate_stage` is still the one canonical separation
   operation for both the space bar and automation;
+- a cold stack is activated through that same acknowledged transaction before
+  live TWR is checked, so `EXEC ORBIT` owns first-stage ignition as well as
+  later separation;
 - `StageSequencer` predicts burnout from the active stage's remaining
   propellant and its full-throttle mass flow, re-evaluated every frame so a
   throttle change re-predicts rather than lying;
 - it arms and annunciates a countdown, commands cutoff a short lead before
   depletion, waits out thrust tail-off, and only then checks the separation
-  interlocks — thrust decayed below threshold, angular rate below the
-  re-contact limit;
+  interlocks — **actual throttle/fuel-gated thrust** decayed below threshold,
+  angular rate below the re-contact limit. The engine rating is not a thrust
+  measurement and never enters this interlock;
 - separation is requested through the edge-triggered, acknowledged
   `StageDemand`, so a held condition cannot fire two stages;
 - **guidance keeps steering through the whole sequence.** Only throttle is
@@ -190,6 +195,13 @@ destruction, target invalidation, loss of control authority, unrecoverable
 guidance divergence, or propulsion exhaustion. Disengagement cuts commanded
 autoflight throttle to zero and records the reason. It never claims success
 until the live post-burn orbit is within tolerance.
+
+A deliberate pilot takeover leaves the target and original launch frame
+intact. The editor changes `EXEC ORBIT` to `RESUME ORBIT`; selecting it reruns
+the safety gate against the **live** position, velocity, remaining stages, and
+remaining loss reserve, then returns directly to `RISE`, `TURN`, or `ASCENT`
+for the altitude already reached. It never restarts the pad profile or charges
+the consumed pad-to-current-state delta-v a second time.
 
 Sandbox may expose ORBIT immediately. Programme mode gates target knowledge,
 node following, and autonomous staging through the existing guidance-technology
@@ -219,10 +231,10 @@ The expanded editor currently contains:
 - one altitude for a circular orbit, or periapsis and apoapsis for an
   elliptical orbit;
 - inclination and prograde/retrograde direction;
-- automatic most-efficient plane, explicit nearest plane, or preservation of
-  the current plane;
+- `AUTO SET`, which populates concrete inclination/direction values, plus
+  nearest-plane or preserve-current-plane policy;
 - target orbit, estimated delta-v, phase, and refusal/warning text;
-- `PLAN`, `EXEC ORBIT`, and `CLR`/`CANCEL`.
+- `PLAN`, `EXEC ORBIT` / `RESUME ORBIT`, and `CLR`/`CANCEL`.
 
 Fields use the same compact in-widget interaction vocabulary as the ND:
 clickable selectors and `−` / `+` adjustment. Direct numeric entry and a fixed
@@ -263,8 +275,12 @@ Preflight distinguishes at least:
 - target body not equal to the current dominant body in the MVP.
 
 Warnings may be conservative; false success is forbidden. Delta-v sufficiency
-uses the canonical staged vehicle data and includes a named gravity/drag reserve
-until the ascent model can predict those losses accurately.
+uses the canonical staged vehicle data against a live remaining-energy
+estimate: vis-viva departure energy to the target apoapsis, the remaining
+apsis burn, only velocity already aligned with the selected launch plane, and
+a named 1,200 m/s gravity/drag reserve that tapers to zero at the atmosphere
+boundary. Re-arm therefore judges the mission still ahead, not a second launch
+from the pad.
 
 `COMPLETE` requires a live, post-thrust dwell inside named tolerances for
 periapsis, apoapsis, inclination, and residual radial velocity. Merely consuming
@@ -308,6 +324,8 @@ User-verifiable gates:
 - launch a two-stage rocket from the ground, observe one action per stage, coast
   and circularise, then confirm the achieved orbit matches the configured
   target;
+- take over briefly during ascent, reopen the widget, select `RESUME ORBIT`,
+  and confirm guidance continues from the current phase with the same target;
 - cancel during ascent and during coast, confirm throttle returns to zero and
   manual control returns cleanly;
 - request an impossible orbit and confirm ignition is refused with a useful

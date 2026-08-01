@@ -548,6 +548,12 @@
       "driver": "cloud-sunset"
     },
     {
+      "id": "craft-stance",
+      "name": "Craft stance",
+      "description": "Whole parked Meridian from a low three-quarter angle: wing-body fairing, gear housing, and stance probe.",
+      "driver": "craft-stance"
+    },
+    {
       "id": "dry-belt",
       "name": "Dry belt",
       "description": "Search-driven low oblique survey of genuine dry low-latitude terrain.",

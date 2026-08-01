@@ -17,7 +17,6 @@
 //! part/loadout construction model is specced for M6 in `docs/gameplay/construction.md`
 //! and intentionally not built here. See `docs/simulation/surface_local.md` §6.
 
-
 use bevy::prelude::*;
 use thalos_terrain::{FlattenRegion, TerrainFlatten};
 use thalos_world::BodyId;
@@ -27,14 +26,6 @@ use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 pub use thalos_game_state::structures::{
     Facility, StructureId, StructureKind, StructurePlacement, StructureRegistry, StructureSite,
 };
-
-
-
-
-
-
-
-
 
 /// Install a structure's terrain modification into the body's shared flatten
 /// handle. The single "stick to the terrain" path: any `FlattenTo` structure

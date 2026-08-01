@@ -40,8 +40,8 @@ use thalos_input::shipyard::ShipyardInputPlugin;
 use self::core::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
 
 use thalos_game_state::coords::EDITOR_LAYER;
-use thalos_game_state::ui::HudPanel;
 use thalos_game_state::ui::HideInPhotoMode;
+use thalos_game_state::ui::HudPanel;
 
 /// Whether the in-game shipyard editor is open. A sim-clock pause source.
 ///
@@ -151,7 +151,10 @@ fn apply_open_state(
 /// Mirror the Bevy-UI hover gate into the editor core's [`EditorUiGate`], so its
 /// picking observers and the placement preview stand down while the cursor is
 /// over panels.
-fn sync_editor_ui_gate(ui_pointer: Res<thalos_game_state::ui::UiPointerGate>, mut gate: ResMut<EditorUiGate>) {
+fn sync_editor_ui_gate(
+    ui_pointer: Res<thalos_game_state::ui::UiPointerGate>,
+    mut gate: ResMut<EditorUiGate>,
+) {
     let busy = ui_pointer.hovered;
     if gate.pointer_busy != busy {
         gate.pointer_busy = busy;

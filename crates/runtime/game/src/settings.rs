@@ -1,8 +1,7 @@
-//! Unified application settings — one `settings.ron` file, three sections.
+//! Unified application settings — one `settings.ron` file, four sections.
 //!
-//! The window, graphics, and units preferences each keep their own Bevy
-//! resource (`WindowSettings` / `GraphicsSettings` / `UnitsSettings`) so every
-//! consumer is unchanged; this module owns only the on-disk aggregate
+//! The window, graphics, units, and HUD-workspace preferences each keep their
+//! own Bevy resource so every consumer is unchanged; this module owns only the on-disk aggregate
 //! ([`AppSettings`]) plus the single load/save seam that replaced the three
 //! per-domain files (`user/settings.ron` / `graphics.ron` / `units.ron`).
 //!
@@ -40,6 +39,7 @@ pub struct AppSettings {
     pub window: WindowSettings,
     pub graphics: GraphicsSettings,
     pub units: UnitsSettings,
+    pub hud: thalos_hud::mfd::HudWorkspaceSettings,
 }
 
 /// Resolve the unified settings file path — project-local in debug, OS app-data
@@ -88,7 +88,10 @@ pub fn load() -> AppSettings {
 /// substring check is robust enough to separate the new format from a legacy
 /// flat `WindowSettings` file.
 fn is_unified(text: &str) -> bool {
-    text.contains("window:") || text.contains("graphics:") || text.contains("units:")
+    text.contains("window:")
+        || text.contains("graphics:")
+        || text.contains("units:")
+        || text.contains("hud:")
 }
 
 /// First-run migration: fold the legacy per-domain RON files into one
@@ -136,10 +139,10 @@ pub fn save(settings: &AppSettings) {
     }
 }
 
-/// Owns the single unified-file persistence. The three domain resources are
+/// Owns the single unified-file persistence. The four domain resources are
 /// inserted in `main()` (the window section must exist before the initial
 /// [`Window`] is built); their plugins keep only their `register_type` + apply
-/// systems. This plugin adds the one autosave that watches all three.
+/// systems. This plugin adds the one autosave that watches all four.
 pub struct AppSettingsPlugin;
 
 impl Plugin for AppSettingsPlugin {
@@ -157,12 +160,14 @@ fn autosave_settings(
     window: Res<WindowSettings>,
     graphics: Res<GraphicsSettings>,
     units: Res<UnitsSettings>,
+    hud: Res<thalos_hud::mfd::HudWorkspaceSettings>,
     mut last: Local<Option<AppSettings>>,
 ) {
     let current = AppSettings {
         window: window.clone(),
         graphics: graphics.clone(),
         units: *units,
+        hud: hud.clone(),
     };
     if last.as_ref() != Some(&current) {
         save(&current);

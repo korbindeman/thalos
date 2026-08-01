@@ -11,6 +11,7 @@
 //! - **Top-middle (below the bar)**: on-foot (EVA) status pill
 //! - **Bottom-left (navball cluster)**: navball + throttle arc
 //! - **Bottom-left (above navball)**: orbital velocity
+//! - **Bottom-left (instrument stack)**: autopilot and conditional maneuver card
 //! - **Bottom-right**: per-stage staging stack (Δv + fuel per stage)
 //! - **Bottom-left (beside navball)**: circular navigation panel
 //! - **Screen centre (HUD mode)**: PFD overlay replacing the navball
@@ -24,26 +25,26 @@
 //! Each panel is one source file under this folder. Sub-modules share
 //! the [`theme::HudTheme`] resource for fonts and colours.
 
-pub mod navball;
-pub mod velocity_frame;
 mod atmo_panel;
 mod eva_panel;
 mod flight_config_panel;
 mod flight_panel;
 pub mod format;
-mod fps_overlay;
 mod geo;
 pub mod input_gate;
 pub mod mfd;
 mod nav_attitude;
 mod nav_panel;
+pub mod navball;
 mod orbital_panel;
 mod pfd_panel;
 mod staging_panel;
 pub mod theme;
+pub mod velocity_frame;
 mod view_mode_panel;
 mod warp_time_panel;
 
+pub use orbital_panel::OrbitWidgetState;
 pub use warp_time_panel::TimeDisplayMode;
 
 use bevy::prelude::*;
@@ -68,6 +69,12 @@ pub struct HudPlugin;
 #[derive(Resource, Clone, Copy)]
 pub(crate) struct TopLeftRowAnchor(pub Entity);
 
+/// Shared vertical lane above the navball. The velocity readout, autopilot,
+/// and conditional maneuver card parent here so dynamic content stacks instead
+/// of competing through independent absolute offsets.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct BottomLeftFlightStackAnchor(pub Entity);
+
 fn setup_top_left_row(mut commands: Commands) {
     let entity = commands
         .spawn((
@@ -86,6 +93,26 @@ fn setup_top_left_row(mut commands: Commands) {
     commands.insert_resource(TopLeftRowAnchor(entity));
 }
 
+fn setup_bottom_left_flight_stack(mut commands: Commands) {
+    use navball::ui::{NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX};
+
+    let entity = commands
+        .spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(NAVBALL_LEFT_PX),
+                bottom: Val::Px(NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 8.0),
+                flex_direction: FlexDirection::ColumnReverse,
+                row_gap: Val::Px(7.0),
+                align_items: AlignItems::FlexStart,
+                ..default()
+            },
+            Name::new("HudBottomLeftFlightStack"),
+        ))
+        .id();
+    commands.insert_resource(BottomLeftFlightStackAnchor(entity));
+}
+
 impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(UiMaterialPlugin::<flight_panel::ThrottleArcMaterial>::default())
@@ -99,7 +126,10 @@ impl Plugin for HudPlugin {
             .init_resource::<pfd_panel::NavDisplayMode>()
             .register_type::<pfd_panel::NavDisplayMode>()
             .add_systems(Startup, theme::init_theme.after(thalos_ui::init_ui_theme))
-            .add_systems(Startup, setup_top_left_row.after(theme::init_theme))
+            .add_systems(
+                Startup,
+                (setup_top_left_row, setup_bottom_left_flight_stack).after(theme::init_theme),
+            )
             .add_systems(
                 Startup,
                 (
@@ -113,20 +143,21 @@ impl Plugin for HudPlugin {
                     orbital_panel::setup,
                     staging_panel::setup,
                     flight_panel::setup.after(crate::navball::ui::setup_navball_ui),
-                    fps_overlay::setup,
                     eva_panel::setup,
                     atmo_panel::setup,
                     flight_config_panel::setup,
                     pfd_panel::setup,
                 )
                     .after(theme::init_theme)
-                    .after(setup_top_left_row),
+                    .after(setup_top_left_row)
+                    .after(setup_bottom_left_flight_stack),
             )
             .add_systems(
                 Startup,
                 nav_panel::setup
                     .after(theme::init_theme)
-                    .after(nav_attitude::setup),
+                    .after(nav_attitude::setup)
+                    .after(flight_panel::setup),
             )
             .add_systems(
                 Update,
@@ -146,7 +177,6 @@ impl Plugin for HudPlugin {
                     staging_panel::update,
                     flight_panel::update,
                     flight_panel::handle_velocity_frame_click,
-                    fps_overlay::update,
                     eva_panel::update,
                     (
                         atmo_panel::update,
@@ -181,7 +211,10 @@ impl Plugin for HudPlugin {
                     // over the god-view. `flight_or_no_context` also keeps HUD
                     // updates running during Loading / MainMenu, as the old
                     // `*_closed` chain did.
-                    .run_if(not_in_photo_mode.and_then(thalos_game_state::context::flight_or_no_context)),
+                    .run_if(
+                        not_in_photo_mode
+                            .and_then(thalos_game_state::context::flight_or_no_context),
+                    ),
             )
             .add_systems(Update, input_gate::update_ui_input_gates)
             .add_systems(Update, hide_in_photo_mode);

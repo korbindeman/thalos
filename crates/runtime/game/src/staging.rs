@@ -36,9 +36,9 @@ use thalos_physics_canonical::canonical::{AuthorityMode, CraftId};
 use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_shipyard::{
     Attachment, CommandPod, Decoupler, Engine, EngineActivation, Part, PartResources, PartRole,
-    Resource, ResourceTotals, SummaryEngine, SummaryPart, SummaryStageInput,
-    SurfaceMount, compute_stage_summaries, derive_stages, live_part_centroid_offset,
-    live_part_dry_mass_kg, live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
+    Resource, ResourceTotals, SummaryEngine, SummaryPart, SummaryStageInput, SurfaceMount,
+    compute_stage_summaries, derive_stages, live_part_centroid_offset, live_part_dry_mass_kg,
+    live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
 };
 use thalos_world::StateVector;
 
@@ -1027,7 +1027,6 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
 // ---------------------------------------------------------------------------
 // Per-stage Δv / fuel readout
 // ---------------------------------------------------------------------------
-
 
 /// Gather the live parts + plan into the pure summary inputs, compute, and
 /// publish [`StagingSummaries`] for the HUD. Per-part dry mass comes from the

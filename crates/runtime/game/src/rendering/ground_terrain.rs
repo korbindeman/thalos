@@ -35,12 +35,12 @@ use thalos_world::{BodyDefinition, BodyId};
 
 use std::collections::HashMap;
 
-use thalos_game_state::coords::SCREEN_MARKER_RADIUS;
 use super::ocean::BodyOcean;
 use super::tile_cache::TileCacheRegistry;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::player_controller::{EvaMode, PlayerControllerState};
+use thalos_game_state::coords::SCREEN_MARKER_RADIUS;
 
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
@@ -1500,7 +1500,12 @@ pub(super) fn update_body_terrain_atmosphere(
                     .0
                     .as_ref()
                     .map(|config| {
-                        Vec4::new(config.cell_evolution_s, config.render_resolution.x, 0.0, 0.0)
+                        Vec4::new(
+                            config.cell_evolution_s,
+                            config.render_resolution.x,
+                            0.0,
+                            0.0,
+                        )
                     })
                     .unwrap_or(Vec4::ZERO),
             },

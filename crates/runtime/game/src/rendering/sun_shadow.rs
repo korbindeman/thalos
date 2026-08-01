@@ -722,7 +722,10 @@ fn update_sun_shadow_camera(
         // god view, parking every ground cascade and erasing all structure and
         // tree shadows while the craft kept its own
         // (INC-20260731T004704Z-craft-local-gate-read-the-craft).
-        let camera_world = match view_anchor.resolved.filter(|a| states.get(a.body).is_some()) {
+        let camera_world = match view_anchor
+            .resolved
+            .filter(|a| states.get(a.body).is_some())
+        {
             Some(anchor) => anchor.cam_world(states),
             None => root_grid.grid_position_double(cam_cell, cam_xform),
         };
@@ -1032,8 +1035,7 @@ fn update_sun_shadow_camera(
         // CSM is off). Cascade 1's ±400 m brackets any craft this game can
         // build, so the hull keeps a complete self-shadow while cascade 0 gives
         // the near panels their detail.
-        let active_cascades =
-            (if craft_local { 2 } else { CASCADE_COUNT }).min(cascade_budget());
+        let active_cascades = (if craft_local { 2 } else { CASCADE_COUNT }).min(cascade_budget());
         let mut block = ShadowCascadeBlock::default();
         let mut looks = [Transform::IDENTITY; CASCADE_COUNT];
         let mut half_us = [0.0_f32; CASCADE_COUNT];

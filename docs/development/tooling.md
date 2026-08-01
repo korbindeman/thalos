@@ -66,6 +66,13 @@ tooling required). Bevy watches normal asset shaders and WGSL registered via
 `embedded_asset!`, so both shader forms reload in the same process (~3 s to a
 fresh PNG). `just compare` sends its variants to that exact process.
 
+HUD captures use `THALOS_SCREENSHOT_HUD=1`. To verify the floating widget
+workspace deterministically, `THALOS_SCREENSHOT_WIDGETS` accepts a
+comma-separated catalogue selection (`traj,nd,dock,xfer`); for example,
+`THALOS_SCREENSHOT_HUD=1 THALOS_SCREENSHOT_WIDGETS=traj,nd just screenshot
+interstage`. The headless layout is fixed and never reads or rewrites the
+player's saved workspace.
+
 Useful lifecycle commands:
 
 ```text
@@ -163,7 +170,7 @@ the file. (Vsync can also be toggled live from the settings menu's Window
 tab, which *does* persist.)
 
 For A/B attribution, have the user change one variable at a time and report
-the on-screen frame time (the FPS overlay) or capture a chrome trace
+the frame time from the F3 debug view or capture a chrome trace
 (`--features profile-chrome`, see below). Useful no-rebuild toggles: sim pause
 (`Escape`) subtracts simulation cost; the settings menu's graphics toggles
 (e.g. volumetric clouds) subtract a renderer subsystem; map view / freecam

@@ -91,7 +91,10 @@ fn main() {
     let h = w / 2;
     let (surface, backing) = load_surface();
     let surface = surface.as_ref();
-    println!("bake_rivers: {backing} backing, {w}x{h} @ {px_m:.0} m/px ({:.1} Mpx)", (w * h) as f64 / 1e6);
+    println!(
+        "bake_rivers: {backing} backing, {w}x{h} @ {px_m:.0} m/px ({:.1} Mpx)",
+        (w * h) as f64 / 1e6
+    );
 
     // --- 1. sample the surface -------------------------------------------
     let t0 = std::time::Instant::now();
@@ -196,7 +199,11 @@ fn main() {
     }
     println!(
         "  filled {raised} depressions (mean rise {:.1} m) in {:.1}s",
-        if raised > 0 { raised_sum / raised as f64 } else { 0.0 },
+        if raised > 0 {
+            raised_sum / raised as f64
+        } else {
+            0.0
+        },
         t_fill.elapsed().as_secs_f64()
     );
 
@@ -245,7 +252,9 @@ fn main() {
     // Processing in descending height guarantees every donor is resolved before
     // its receiver, so one pass suffices — no iteration to convergence.
     let t2 = std::time::Instant::now();
-    let mut order_idx: Vec<u32> = (0..(w * h) as u32).filter(|&i| height[i as usize] > 0.0).collect();
+    let mut order_idx: Vec<u32> = (0..(w * h) as u32)
+        .filter(|&i| height[i as usize] > 0.0)
+        .collect();
     order_idx.sort_unstable_by(|a, b| filled[*b as usize].total_cmp(&filled[*a as usize]));
     let mut accum_km2: Vec<f32> = vec![0.0; w * h];
     for &i in &order_idx {

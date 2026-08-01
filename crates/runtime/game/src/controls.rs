@@ -23,7 +23,6 @@ use crate::route_autopilot::{LandAutopilot, update_land_autopilot};
 
 pub use thalos_game_state::flight::ControlLocks;
 
-
 pub struct ControlLocksPlugin;
 
 impl Plugin for ControlLocksPlugin {

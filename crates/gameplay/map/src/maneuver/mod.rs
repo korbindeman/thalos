@@ -175,16 +175,20 @@ impl Plugin for ManeuverPlugin {
                     manage_arrow_handles
                         .after(update_selected_node_view)
                         .run_if(
-                            thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                            thalos_game_state::ui::not_in_photo_mode
+                                .and_then(thalos_game_state::nav::in_map_view),
                         ),
                     update_arrow_transforms.after(manage_arrow_handles).run_if(
-                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                        thalos_game_state::ui::not_in_photo_mode
+                            .and_then(thalos_game_state::nav::in_map_view),
                     ),
                     manage_node_markers.after(update_selected_node_view).run_if(
-                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                        thalos_game_state::ui::not_in_photo_mode
+                            .and_then(thalos_game_state::nav::in_map_view),
                     ),
                     update_snap_indicator.after(maneuver_input).run_if(
-                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                        thalos_game_state::ui::not_in_photo_mode
+                            .and_then(thalos_game_state::nav::in_map_view),
                     ),
                 )
                     .run_if(thalos_game_state::ui::not_game_paused)

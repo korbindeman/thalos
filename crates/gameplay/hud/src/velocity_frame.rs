@@ -17,9 +17,9 @@ use bevy::prelude::*;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::velocity_frame::VelocityReferenceFrame;
 
-use thalos_game_state::sched::SimStage;
 use thalos_game_state::SimulationState;
 use thalos_game_state::nav::TargetBody;
+use thalos_game_state::sched::SimStage;
 
 pub use thalos_game_state::nav::{VelocityFrameState, next_frame};
 
@@ -28,9 +28,6 @@ pub use thalos_game_state::nav::{VelocityFrameState, next_frame};
 /// explicit `surface_frame_ceiling_m`. ~0.5% of radius — a few km on a small
 /// moon, ~16 km on Thalos. Tunable per body via `surface_frame_ceiling_m`.
 const DEFAULT_CEILING_RADIUS_FRACTION: f64 = 0.005;
-
-
-
 
 pub struct VelocityFramePlugin;
 

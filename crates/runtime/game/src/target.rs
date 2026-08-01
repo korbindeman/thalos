@@ -11,7 +11,6 @@ use crate::rendering::SimulationState;
 
 pub use thalos_game_state::nav::TargetBody;
 
-
 pub struct TargetPlugin;
 
 impl Plugin for TargetPlugin {

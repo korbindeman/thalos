@@ -12,9 +12,9 @@ use super::super::state::{
     ArrowHitbox, InteractionMode, ManeuverEvent, ManeuverPlan, NodeDeltaV, NodeSlideSphere,
     SELECT_THRESHOLD_PX, SelectedNode, SlidePreview,
 };
+use crate::flight_plan_view::FlightPlanView;
 use thalos_game_state::camera::ActiveCamera;
 use thalos_game_state::coords::{RenderOrigin, WorldScale};
-use crate::flight_plan_view::FlightPlanView;
 use thalos_game_state::{SimulationState, SolarSystemState};
 
 /// Enforce the invariant **a drag mode implies the primary button is held**.

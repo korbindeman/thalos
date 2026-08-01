@@ -88,8 +88,6 @@ pub use thalos_game_state::coords::screen_marker_radius;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.
 pub use crate::coords::{RenderFrame, RenderOrigin};
 
-
-
 pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {

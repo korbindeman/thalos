@@ -11,11 +11,9 @@ use thalos_ui::{
     spawn_button, spawn_text_field,
 };
 
+use crate::core::{BuildOrientation, EditorPart, EditorState, PlacementSnap, SymmetryMode};
 use thalos_game_state::context::{ContextHistory, GameContext, back_out};
 use thalos_game_state::relaunch::{RelaunchRequest, RelaunchSpec};
-use crate::core::{
-    BuildOrientation, EditorPart, EditorState, PlacementSnap, SymmetryMode,
-};
 use thalos_game_state::scenario::SpawnSituation;
 
 use thalos_shipyard::flyability::{FlyabilitySeverity, blocks_launch};

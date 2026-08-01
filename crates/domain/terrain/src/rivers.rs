@@ -53,7 +53,8 @@ fn json_num(json: &str, key: &str) -> Option<f64> {
 }
 
 fn json_str(json: &str, key: &str) -> Option<String> {
-    let rest = json.split(&format!("\"{key}\""))
+    let rest = json
+        .split(&format!("\"{key}\""))
         .nth(1)?
         .trim_start_matches([':', ' ']);
     let rest = rest.strip_prefix('"')?;
@@ -87,7 +88,8 @@ impl RiverField {
         let Some((_, json_path)) = best else {
             return Ok(None);
         };
-        let json = std::fs::read_to_string(&json_path).map_err(|e| format!("rivers sidecar: {e}"))?;
+        let json =
+            std::fs::read_to_string(&json_path).map_err(|e| format!("rivers sidecar: {e}"))?;
         let width = json_num(&json, "width").ok_or("rivers sidecar: width")? as usize;
         let height = json_num(&json, "height").ok_or("rivers sidecar: height")? as usize;
         let log_decades = json_num(&json, "log_decades").unwrap_or(7.0);
@@ -127,9 +129,7 @@ impl RiverField {
             let m = self.width as i64;
             (((x0 as i64 + k) % m + m) % m) as usize
         };
-        let yi = |k: i64| -> usize {
-            (y0 as i64 + k).clamp(0, self.height as i64 - 1) as usize
-        };
+        let yi = |k: i64| -> usize { (y0 as i64 + k).clamp(0, self.height as i64 - 1) as usize };
         let at = |x: usize, y: usize| self.data[y * self.width + x] as f64;
         let (x_0, x_1, y_0, y_1) = (xi(0), xi(1), yi(0), yi(1));
         let a = at(x_0, y_0) + (at(x_1, y_0) - at(x_0, y_0)) * tx;
@@ -152,7 +152,8 @@ impl RiverField {
         if km2 <= lo_km2 {
             return 0.0;
         }
-        let t = ((km2.log10() - lo_km2.log10()) / (hi_km2.log10() - lo_km2.log10())).clamp(0.0, 1.0);
+        let t =
+            ((km2.log10() - lo_km2.log10()) / (hi_km2.log10() - lo_km2.log10())).clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 

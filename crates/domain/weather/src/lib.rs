@@ -502,7 +502,11 @@ impl WeatherSim {
                     let qs = qsat[j];
                     q_n += dt * evap_boost * (qs - q_n) / p.evap_s;
                     let excess = q_n - p.precip_knee * qs;
-                    let rain = if excess > 0.0 { excess / p.precip_s } else { 0.0 };
+                    let rain = if excess > 0.0 {
+                        excess / p.precip_s
+                    } else {
+                        0.0
+                    };
                     q_n -= dt * rain;
                     row_p[i] = rain;
                     // Subsidence drying / convergence moistening — the term
@@ -668,9 +672,7 @@ impl WeatherSim {
                 let base = smoothstep(0.55, 1.05, moist);
                 let lifted = smoothstep(0.25, 1.3, conv);
                 let raining = smoothstep(0.45, 1.2, self.precip[idx] / (rain_ref * qs));
-                out[idx] = (0.80 * base
-                    + 0.40 * lifted * (0.35 + 0.65 * base)
-                    + 0.55 * raining)
+                out[idx] = (0.80 * base + 0.40 * lifted * (0.35 + 0.65 * base) + 0.55 * raining)
                     .clamp(0.0, 1.0);
             }
         }
@@ -725,7 +727,10 @@ mod tests {
             frac * 100.0
         );
         for &q in sim.q_field() {
-            assert!(q.is_finite() && (0.0..=1.6).contains(&q), "moisture out of range: {q}");
+            assert!(
+                q.is_finite() && (0.0..=1.6).contains(&q),
+                "moisture out of range: {q}"
+            );
         }
     }
 }

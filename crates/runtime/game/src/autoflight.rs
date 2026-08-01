@@ -403,12 +403,7 @@ mod tests {
     use thalos_control::AttitudeDemand;
 
     fn guidance_demand() -> ControlDemand {
-        ControlDemand::autoflight(
-            AttitudeDemand::PointNose(DVec3::Y),
-            Some(0.85),
-            None,
-            None,
-        )
+        ControlDemand::autoflight(AttitudeDemand::PointNose(DVec3::Y), Some(0.85), None, None)
     }
 
     fn burn_demand() -> ControlDemand {

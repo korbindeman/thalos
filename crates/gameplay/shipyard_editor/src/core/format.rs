@@ -13,8 +13,8 @@
 use thalos_shipyard::blueprint::default_params_for;
 use thalos_shipyard::{CatalogEntry, PartParams};
 
-use thalos_game_state::units::format;
 use thalos_game_state::units::UnitSystem;
+use thalos_game_state::units::format;
 
 /// Stable ordering inside each palette category. Within each kind, callers
 /// sort by display name.

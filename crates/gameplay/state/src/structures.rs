@@ -220,4 +220,3 @@ impl StructureRegistry {
         None
     }
 }
-

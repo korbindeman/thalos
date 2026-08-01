@@ -25,11 +25,11 @@
 use bevy::prelude::*;
 use bevy::ui::Val2;
 
-use crate::HudPanel;
 use crate::nav_attitude::NavAttitudeRenderTarget;
 use crate::navball::markers::{MarkerIconState, MarkerKind, marker_icon_image};
 use crate::navball::ui::{NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX};
 use crate::theme::HudTheme;
+use crate::{BottomLeftFlightStackAnchor, HudPanel};
 use thalos_game_state::SimulationState;
 use thalos_game_state::autoflight::{
     AttitudeChannel, AutoflightAnnunciation, AutoflightPolicy, AutoflightRequest, FlightProgram,
@@ -65,8 +65,6 @@ const ASSIST_PANEL_HEIGHT: f32 = 33.0;
 const ASSIST_BUTTON_WIDTH: f32 = 64.0;
 const ASSIST_BUTTON_HEIGHT: f32 = 25.0;
 
-const TOP_RIGHT_PANEL_RIGHT_PX: f32 = 16.0;
-const AUTOPILOT_PANEL_TOP_PX: f32 = 52.0;
 /// Minimum height for the autopilot panel. The panel sizes to its content so
 /// the LAND reason line can appear and wrap without clipping; this only keeps
 /// it from shrinking below the two-chip layout when there is nothing to say.
@@ -75,11 +73,6 @@ const AUTOPILOT_BUTTON_WIDTH: f32 = 82.0;
 const AUTOPILOT_BUTTON_HEIGHT: f32 = 27.0;
 
 const MANEUVER_PANEL_HEIGHT: f32 = 92.0;
-/// The maneuver editor lives in the bottom-left flight cluster, stacked above
-/// the velocity readout (which itself sits above the navball). The velocity
-/// readout (`HudFlight`) is ~54 px tall; clear it with a small gap.
-const MANEUVER_PANEL_LEFT_PX: f32 = NAVBALL_LEFT_PX;
-const MANEUVER_PANEL_BOTTOM_PX: f32 = NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 8.0 + 54.0 + 7.0;
 const MANEUVER_BAR_HEIGHT: f32 = 7.0;
 const MANEUVER_WARP_BUTTON_WIDTH: f32 = 50.0;
 const MANEUVER_WARP_BUTTON_HEIGHT: f32 = 22.0;
@@ -210,6 +203,7 @@ pub fn setup(
     mut images: ResMut<Assets<Image>>,
     theme: Res<HudTheme>,
     center_image: Res<NavAttitudeRenderTarget>,
+    flight_stack: Res<BottomLeftFlightStackAnchor>,
 ) {
     let icons: Vec<(NavigationMode, f32, NavButtonIcon)> = MODE_LAYOUT
         .iter()
@@ -303,8 +297,10 @@ pub fn setup(
             spawn_assist_button(p, &theme, NavAssistKind::Sas);
         });
 
-    spawn_autopilot_panel(&mut commands, &theme);
-    spawn_maneuver_panel(&mut commands, &theme);
+    commands.entity(flight_stack.0).with_children(|stack| {
+        spawn_autopilot_panel(stack, &theme);
+        spawn_maneuver_panel(stack, &theme);
+    });
 
     commands
         .spawn((
@@ -432,13 +428,11 @@ fn utility_button_bundle(
     )
 }
 
-fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
-    commands
+fn spawn_autopilot_panel(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    parent
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                right: Val::Px(TOP_RIGHT_PANEL_RIGHT_PX),
-                top: Val::Px(AUTOPILOT_PANEL_TOP_PX),
+                position_type: PositionType::Relative,
                 width: Val::Px(PANEL_DIAMETER),
                 min_height: Val::Px(AUTOPILOT_PANEL_MIN_HEIGHT),
                 border: UiRect::all(Val::Px(1.0)),
@@ -546,13 +540,12 @@ fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
         });
 }
 
-fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
-    commands
+fn spawn_maneuver_panel(parent: &mut ChildSpawnerCommands<'_>, theme: &HudTheme) {
+    parent
         .spawn((
             Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(MANEUVER_PANEL_LEFT_PX),
-                bottom: Val::Px(MANEUVER_PANEL_BOTTOM_PX),
+                position_type: PositionType::Relative,
+                display: Display::None,
                 width: Val::Px(PANEL_DIAMETER),
                 height: Val::Px(MANEUVER_PANEL_HEIGHT),
                 border: UiRect::all(Val::Px(1.0)),
@@ -564,7 +557,6 @@ fn spawn_maneuver_panel(commands: &mut Commands, theme: &HudTheme) {
             },
             BackgroundColor(theme.panel_bg),
             BorderColor::all(theme.panel_border),
-            Visibility::Hidden,
             HudPanel,
             ManeuverPanelRoot,
             Name::new("HudManeuverPanel"),
@@ -1118,7 +1110,7 @@ pub fn update_maneuver_visuals(
     theme: Res<HudTheme>,
     units: Res<thalos_game_state::units::UnitsSettings>,
     mut panel_state: ResMut<ManeuverPanelState>,
-    mut panel_roots: Query<&mut Visibility, With<ManeuverPanelRoot>>,
+    mut panel_roots: Query<&mut Node, (With<ManeuverPanelRoot>, Without<ManeuverProgressFill>)>,
     mut burn_text: Query<
         (&mut Text, &mut TextColor),
         (
@@ -1146,7 +1138,7 @@ pub fn update_maneuver_visuals(
             Without<ManeuverWarpButtonText>,
         ),
     >,
-    mut progress_fill: Query<&mut Node, With<ManeuverProgressFill>>,
+    mut progress_fill: Query<&mut Node, (With<ManeuverProgressFill>, Without<ManeuverPanelRoot>)>,
     mut warp_buttons: Query<
         (&Interaction, &mut BorderColor, &mut BackgroundColor),
         With<ManeuverWarpButton>,
@@ -1199,11 +1191,11 @@ pub fn update_maneuver_visuals(
 
     let panel_visible =
         (has_node || directive.is_some() || panel_state.sticky) && !panel_state.dismissed;
-    for mut visibility in &mut panel_roots {
-        *visibility = if panel_visible {
-            Visibility::Inherited
+    for mut node in &mut panel_roots {
+        node.display = if panel_visible {
+            Display::Flex
         } else {
-            Visibility::Hidden
+            Display::None
         };
     }
 

@@ -45,8 +45,8 @@ use thalos_body_render::ScatterRegion;
 pub use thalos_structures::connection_geometry::PavedFootprints;
 use thalos_structures::connection_geometry::{
     CONNECTION_LIFT_BASE_M, ConnectionStyle, Node as SiteNode, PavedRect, build_apron_mesh,
-    build_path_mesh, build_strip_mesh, fillet_path, minimum_spanning_tree,
-    network_paved_rects, path_paved_rects, paved_regions, site_anchor,
+    build_path_mesh, build_strip_mesh, fillet_path, minimum_spanning_tree, network_paved_rects,
+    path_paved_rects, paved_regions, site_anchor,
 };
 
 // ── Paved footprints ────────────────────────────────────────────────────────
@@ -69,13 +69,6 @@ use thalos_structures::connection_geometry::{
 // building and runway footprints. Mesh and footprint come off the same
 // centreline and the same width, so they cannot drift apart.
 
-
-
-
-
-
-
-
 /// A kind of paved connection. Each carries its own width / colour / lift so the
 /// network reads as distinct facility types. New variants extend the base's
 /// infrastructure vocabulary (utility roads, rail, pipe runs, …).
@@ -91,8 +84,6 @@ pub(super) enum ConnectionKind {
     /// the future crawler-transporter route. Neutral gravel.
     Crawlerway,
 }
-
-
 
 impl ConnectionKind {
     fn style(self) -> ConnectionStyle {
@@ -285,12 +276,6 @@ fn rebuild_connections(
     );
 }
 
-
-
-
-
-
-
 /// Spawn a connection mesh entity anchored at the site centre. Shared by the
 /// editor rebuild and the authored spawners.
 #[allow(clippy::too_many_arguments)]
@@ -328,7 +313,6 @@ fn spawn_connection_entity(
         Name::new("Base Connection"),
     ));
 }
-
 
 /// Build a typed line network (taxiway / road / crawlerway) over authored nodes.
 /// `nodes` are `(along, across, bounding)` in the site tangent frame at

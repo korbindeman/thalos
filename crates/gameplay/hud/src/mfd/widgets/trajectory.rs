@@ -26,7 +26,7 @@ use thalos_world::BodyId;
 use crate::theme::{HudTheme, label};
 use thalos_game_state::{SimulationState, SolarSystemState};
 
-use super::super::{ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind};
+use super::super::{ActiveWidgets, FlightContext, MfdWidgetRoot, WidgetKind};
 
 /// Max orbit rings (dominant-body satellites) drawn. Mirror in the shader.
 const MAX_RINGS: usize = 8;
@@ -171,7 +171,6 @@ pub(crate) fn build(
         Name::new("MfdTrajectory"),
     ))
     .with_children(|p| {
-        p.spawn(label(theme, "TRAJECTORY"));
         p.spawn((
             Node {
                 width: Val::Px(MAP_SIZE_PX),
@@ -191,7 +190,7 @@ pub(crate) fn build(
 }
 
 pub(crate) fn update(
-    active: Res<ActiveWidget>,
+    active: Res<ActiveWidgets>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     theme: Res<HudTheme>,
@@ -200,7 +199,7 @@ pub(crate) fn update(
     mut scale_q: Query<&mut Text, With<SystemMapScale>>,
     mut zoom: Local<ZoomState>,
 ) {
-    if active.0 != Some(WidgetKind::Trajectory) {
+    if !active.contains(WidgetKind::Trajectory) {
         return;
     }
     let Ok(canvas) = canvas_q.single() else {
