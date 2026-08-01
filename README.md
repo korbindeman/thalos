@@ -6,13 +6,6 @@ Thalos (working title) is a spaceflight simulation game.
 
 I'm aiming for a more physically grounded take on the genre, with a realistic scaling, simulation that aims for physical plausibility while still being fun to play, and a solar system whose nature reveals itself through exploration.
 
-## Download a Build
-
-Prebuilt Windows x64 and macOS arm64 builds are available from the
-[GitHub Releases page](https://github.com/korbindeman/thalos/releases). Extract
-the whole archive before running it; the executable expects the packaged
-`assets/` and `ships/` directories beside it.
-
 ## Set Up a Development Checkout
 
 ### Prerequisites
