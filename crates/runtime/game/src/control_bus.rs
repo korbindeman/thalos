@@ -25,17 +25,21 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_control::{
-    AssistStatus, AttitudeController, AttitudeDemand, ControlDemand, DemandSource, FlightState,
+    AttitudeController, AttitudeDemand, ControlDemand, DemandSource, FlightState,
     allocate, arbitrate,
 };
 use thalos_input::game::GameInputIntent;
-use thalos_physics_canonical::aero::{ControlInputs, control_authority};
+use thalos_physics_canonical::aero::control_authority;
 use thalos_physics_canonical::types::ControlInput;
 use thalos_physics_local::{ActiveLocalBubble, LocalCraftBody, LocalCraftKinematics};
 
 use crate::SimStage;
 use crate::aero::{AeroTuning, ShipAero, resolved_aero_config};
-use crate::autopilot::{AutoflightMode, Autopilot, autopilot_system};
+use crate::autoflight::{
+    AttitudeChannel, AutoflightAnnunciation, BurnStatus, FlightProgram, ThrottleChannel,
+    armed_sequence_event, resolve_autoflight,
+};
+use crate::autopilot::{Autopilot, AutopilotBurnSchedule, autopilot_system};
 use crate::controls::ControlLocks;
 use crate::fuel::{PilotThrottleInput, ThrottleState};
 use crate::maneuver::ManeuverPlan;
@@ -46,6 +50,8 @@ use crate::route_autopilot::{LandAutopilot, update_land_autopilot};
 use crate::sim_clock::SimClock;
 use crate::target::TargetBody;
 use crate::velocity_frame::VelocityFrameState;
+
+pub use thalos_game_state::flight::{RealizedControl, SasState};
 
 /// Query for the player craft's authored aero config, used to size the
 /// dynamic-pressure authority split and build the flight-assist state in
@@ -63,55 +69,12 @@ const STICK_DEADZONE_SQ: f64 = 1.0e-6;
 /// the plain hold. Above it a winged craft in atmosphere flies fly-by-wire.
 const ASSIST_MIN_AIRSPEED_M_S: f64 = 15.0;
 
-/// Free-flight SAS toggle state (the `T` key / the HUD SAS button). When
-/// enabled and nothing higher-priority is engaged, the controller holds the
-/// current attitude — the "centered stick = hold current attitude" behaviour,
-/// and the arming switch for the plane fly-by-wire assist.
-///
-/// **Defaults on**: every craft spawns with SAS engaged (spaceships hold
-/// attitude, planes fly FBW with auto-trim + stall protection), and the flag
-/// survives destruction/respawn. Toggling off is the deliberate act.
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct SasState {
-    pub enabled: bool,
-}
 
-impl Default for SasState {
-    fn default() -> Self {
-        Self { enabled: true }
-    }
-}
 
 /// The stateful attitude controller (holds the captured SAS target).
 #[derive(Resource, Debug, Default)]
 pub struct AttitudeControllerState(pub AttitudeController);
 
-/// The realized control-surface command published each frame by
-/// [`realize_control`].
-///
-/// **Sole writer:** [`realize_control`]. Read by the aero force system
-/// ([`crate::aero::apply_aero_forces`]) for control-surface deflections. The
-/// matching reaction-wheel command lands directly in the simulation's
-/// `ControlInput::torque_command` (consumed by `apply_local_forces`), so it is
-/// not mirrored here.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct RealizedControl {
-    /// Aero control-surface deflections fed to `evaluate_aero`.
-    pub aero: ControlInputs,
-    /// The controller's normalized attitude command this frame, body frame
-    /// `[-1, 1]` (`x` pitch, `y` roll, `z` yaw) — the arbitrated pilot / SAS /
-    /// nav / autopilot effort *before* the reaction-wheel↔aero split. This is
-    /// what the control-surface visuals deflect to: it shows commanded control
-    /// effort at full scale, independent of how the allocator happens to divide
-    /// the torque (the allocated `aero` fraction collapses toward zero when aero
-    /// authority dwarfs the reaction-wheel torque, so it is not a usable visual
-    /// signal).
-    pub command: DVec3,
-    /// Flight-assist status this frame: whether the plane fly-by-wire law is
-    /// engaged and whether stall protection is actively clamping the pitch
-    /// command. Read by the HUD's SAS button.
-    pub assist: AssistStatus,
-}
 
 /// Ground-control winner published by the same arbiter as flight controls.
 /// Landing-gear physics is the sole effector reader.
@@ -133,6 +96,7 @@ impl Plugin for ControlBusPlugin {
                 Update,
                 realize_control
                     .in_set(SimStage::Physics)
+                    .in_set(thalos_game_state::sched::RealizeControlSet)
                     // Pilot setpoints, the autopilot state machine, and warp
                     // gating must settle before we arbitrate; the realized
                     // command must land before the canonical step and the
@@ -161,6 +125,9 @@ pub fn realize_control(
         Res<LandAutopilot>,
         Res<OrbitProgram>,
         Res<PilotThrottleInput>,
+        Res<FlightProgram>,
+        Res<AutopilotBurnSchedule>,
+        ResMut<AutoflightAnnunciation>,
     ),
     active: Res<ActiveLocalBubble>,
     tuning: Res<AeroTuning>,
@@ -181,7 +148,8 @@ pub fn realize_control(
     mut sas: ResMut<SasState>,
     mut realized: ResMut<RealizedControl>,
 ) {
-    let (autopilot, land, orbit, _pilot_throttle) = autoflight;
+    let (autopilot, land, orbit, _pilot_throttle, program, burn_schedule, mut annunciation) =
+        autoflight;
     let (mut sim, mut throttle, mut ground) = outputs;
     let (kin, weight_on_wheels, hull_ground) = kin_ground;
     // A destroyed craft accepts no attitude command: clear the hold target
@@ -223,28 +191,20 @@ pub fn realize_control(
         &sim.simulation,
     ));
 
-    // Exactly one selected programmatic mode may publish this source.
-    demands[2].1 = match autopilot.mode() {
-        AutoflightMode::Maneuver => autopilot.maneuver_demand(),
-        AutoflightMode::Land => land.demand(),
-        AutoflightMode::Orbit => {
-            let maneuver_demand = autopilot.maneuver_demand();
-            let orbit_demand = orbit.demand();
-            if maneuver_demand != ControlDemand::NONE {
-                maneuver_demand
-            } else if orbit_demand != ControlDemand::NONE {
-                orbit_demand
-            } else if orbit.active() {
-                // ORBIT owns throttle throughout coast and preparation too.
-                // With no active node demand, explicit idle prevents a stale
-                // pilot setpoint from leaking through the arbiter fallback.
-                ControlDemand::throttle(0.0)
-            } else {
-                ControlDemand::NONE
-            }
-        }
-        AutoflightMode::Off => ControlDemand::NONE,
+    // Exactly one source fills the autopilot slot. Which one is the
+    // strategic/tactical resolution — see `crate::autoflight`.
+    let guidance = match *program {
+        FlightProgram::Ascent => orbit.guidance_active().then(|| orbit.demand()),
+        FlightProgram::Landing => land.active().then(|| land.demand()),
+        FlightProgram::None => None,
     };
+    let resolution = resolve_autoflight(
+        *program,
+        BurnStatus::of(&autopilot),
+        autopilot.demand(),
+        guidance,
+    );
+    demands[2].1 = resolution.demand;
 
     // Pilot stick (highest priority) — unless a programmatic system holds the
     // attitude lock, in which case the player can't fight it (KSP behaviour).
@@ -288,6 +248,32 @@ pub fn realize_control(
     });
     ground.steer = arb.ground_steer.unwrap_or(0.0);
     ground.brake = arb.wheel_brake.unwrap_or(0.0);
+
+    // --- Annunciate what actually won. ---
+    // Read from the *arbitration outcome*, never from a source's intent: a
+    // pilot stick that overrode the autopilot must annunciate `MAN`. This is
+    // the use `arbitrate` documents for its `*_owner` fields — UI gating
+    // derived from the same decision that resolved control, rather than from
+    // a parallel flag. No panel may infer engagement from its own button.
+    let now_s = sim.simulation.sim_time();
+    let attitude_channel = match arb.attitude_owner {
+        Some(DemandSource::Pilot) => AttitudeChannel::Pilot,
+        Some(DemandSource::Autopilot) => resolution.attitude,
+        Some(DemandSource::NavMode) => AttitudeChannel::NavMode,
+        Some(DemandSource::Sas) => AttitudeChannel::Sas,
+        None => AttitudeChannel::Free,
+    };
+    let throttle_channel = match arb.throttle_owner {
+        Some(DemandSource::Autopilot) => resolution.throttle,
+        _ => ThrottleChannel::Pilot,
+    };
+    annunciation.set(
+        *program,
+        attitude_channel,
+        throttle_channel,
+        armed_sequence_event(&orbit, &autopilot, &burn_schedule, now_s),
+        now_s,
+    );
 
     // --- One controller, one torque. ---
     // The controller normalizes its PD output by the *total* available

@@ -323,20 +323,26 @@ fn aggregate_stage_engines(
 // Blueprint preview
 // ---------------------------------------------------------------------------
 
+/// A blueprint resolved against the catalog: entries, attach parents, and
+/// stage-derivation roles.
+///
+/// Extracted so every design-time analysis starts from the *same* topology.
+/// Two callers deriving `parent` independently is how an editor preview comes
+/// to disagree with the gate that refuses launch.
+pub(crate) struct ResolvedBuild<'a> {
+    pub(crate) entries: Vec<&'a CatalogEntry>,
+    pub(crate) parent: Vec<Option<usize>>,
+    pub(crate) roles: Vec<PartRole>,
+}
+
 impl ShipBlueprint {
-    /// Per-stage vacuum Δv / fuel breakdown for this blueprint, resolving
-    /// every part against `catalog`. Returns [`CatalogError`] on the first
-    /// unknown ID, mirroring [`ShipBlueprint::stats`].
-    ///
-    /// This is the design-time preview: tanks are full (the blueprint's
-    /// stored amounts, defaulting full when omitted) and no stage is marked
-    /// active. Stage boundaries come from [`derive_stages`] over the same
-    /// decoupler topology the live staging plan uses, so the editor preview
-    /// and the in-flight HUD never disagree.
-    pub fn stage_summaries(
+    /// Resolve every part against `catalog` and build the attach topology.
+    /// Returns [`CatalogError`] on the first unknown ID or mismatched params,
+    /// mirroring [`ShipBlueprint::stats`].
+    pub(crate) fn resolve_build<'a>(
         &self,
-        catalog: &PartCatalog,
-    ) -> Result<Vec<StageSummary>, CatalogError> {
+        catalog: &'a PartCatalog,
+    ) -> Result<ResolvedBuild<'a>, CatalogError> {
         let entries: Vec<&CatalogEntry> = self
             .parts
             .iter()
@@ -373,6 +379,32 @@ impl ShipBlueprint {
                 _ => PartRole::Other,
             })
             .collect();
+
+        Ok(ResolvedBuild {
+            entries,
+            parent,
+            roles,
+        })
+    }
+
+    /// Per-stage vacuum Δv / fuel breakdown for this blueprint, resolving
+    /// every part against `catalog`. Returns [`CatalogError`] on the first
+    /// unknown ID, mirroring [`ShipBlueprint::stats`].
+    ///
+    /// This is the design-time preview: tanks are full (the blueprint's
+    /// stored amounts, defaulting full when omitted) and no stage is marked
+    /// active. Stage boundaries come from [`derive_stages`] over the same
+    /// decoupler topology the live staging plan uses, so the editor preview
+    /// and the in-flight HUD never disagree.
+    pub fn stage_summaries(
+        &self,
+        catalog: &PartCatalog,
+    ) -> Result<Vec<StageSummary>, CatalogError> {
+        let ResolvedBuild {
+            entries,
+            parent,
+            roles,
+        } = self.resolve_build(catalog)?;
 
         let stages: Vec<SummaryStageInput> = derive_stages(&roles, &parent)
             .into_iter()

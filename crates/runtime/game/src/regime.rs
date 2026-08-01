@@ -34,7 +34,7 @@ use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, BodyFixedPose, EntityRef, Epoch};
 use thalos_physics_canonical::regime::{
-    AuthorityKind, CraftRegime, PredictionDisplay, RegimeInputs, RegimeMemory, TranslationOwner,
+    AuthorityKind, CraftRegime, PredictionDisplay, RegimeInputs, TranslationOwner,
     WalkingInputs, WarpLevel, expected_authority, resolve,
 };
 use thalos_physics_canonical::surface_local::{SurfaceLocalState, surface_local_to_body_fixed};
@@ -55,18 +55,9 @@ use crate::player_controller::{EvaMode, PlayerControllerState};
 use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
 
-/// Per-craft regime record + resolver memory. **Sole writer:**
-/// [`resolve_regime`]. Shadow-only in Phase A2 — downstream systems start
-/// reading it in Phase A3.
-#[derive(Component, Debug, Clone)]
-pub struct CraftRegimeState {
-    pub regime: CraftRegime,
-    pub memory: RegimeMemory,
-    /// Canonical authority the record projects for end of frame
-    /// (`regime::expected_authority`), captured at resolve time so the
-    /// drift checker compares against exactly what the resolver decided.
-    pub expected_authority: AuthorityKind,
-}
+// Moved to `thalos_game_state::regime` (Phase 5a); `resolve_regime` (the
+// sole writer) stays below.
+pub use thalos_game_state::regime::CraftRegimeState;
 
 /// Reflect-registered drift observability (in-process; for a future debug
 /// overlay). `*_blips` count one-frame mismatches

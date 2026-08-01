@@ -9,21 +9,26 @@ use thalos_control::{AttitudeDemand, ControlDemand};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::orbit_planner::{
-    OrbitDirection, OrbitPlan, OrbitPlanError, OrbitPlanRequest, TargetOrbit, TargetPlane,
+    OrbitDirection, OrbitPlan, OrbitPlanError, OrbitPlanRequest,
     plan_target_orbit,
 };
 use thalos_world::StateVector;
 
-use crate::autopilot::{AutoflightMode, Autopilot};
 use crate::fuel::{ActivePropulsion, PilotThrottleInput, ThrottleState};
 use crate::maneuver::{GameNode, ManeuverPlan, NodeBurnPhase, NodeSource};
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::sim_clock::SimClock;
+use crate::stage_sequencer::{StageCommand, StageSequencer, StageSequencerInput};
 use crate::staging::{StageDemand, StagingSummaries};
 
+pub use thalos_game_state::autoflight::SequenceEvent;
+pub use thalos_game_state::nav::{
+    MIN_ORBIT_ALTITUDE_M,
+    OrbitDraft, OrbitPlanSummary, OrbitPlaneChoice, OrbitProgram, OrbitProgramPhase,
+    OrbitShape, OrbitTargetRequest,
+};
+
 const ALTITUDE_STEP_M: f64 = 10_000.0;
-const MIN_ORBIT_ALTITUDE_M: f64 = 10_000.0;
-const MAX_ORBIT_ALTITUDE_M: f64 = 50_000_000.0;
 const INCLINATION_STEP_RAD: f64 = 5.0_f64.to_radians();
 const PILOT_OVERRIDE_DEADZONE_SQ: f32 = 0.05 * 0.05;
 const MIN_LAUNCH_TWR: f64 = 1.05;
@@ -40,203 +45,17 @@ const PREFLIGHT_POINTING_TIMEOUT_S: f64 = 5.0;
 /// inclination is measured in the canonical XZ reference plane.
 const ORBIT_REFERENCE_NORMAL: DVec3 = DVec3::Y;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OrbitShape {
-    #[default]
-    Circular,
-    Elliptical,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OrbitPlaneChoice {
-    /// Cheapest direct-ascent plane from the current site. On orbit this
-    /// becomes `PreserveCurrent`, avoiding an unnecessary plane change.
-    #[default]
-    Auto,
-    Preserve,
-    Nearest,
-}
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct OrbitDraft {
-    pub shape: OrbitShape,
-    pub periapsis_altitude_m: f64,
-    pub apoapsis_altitude_m: f64,
-    pub inclination_rad: f64,
-    pub direction: OrbitDirection,
-    pub plane: OrbitPlaneChoice,
-}
 
-impl Default for OrbitDraft {
-    fn default() -> Self {
-        Self {
-            shape: OrbitShape::Circular,
-            periapsis_altitude_m: 200_000.0,
-            apoapsis_altitude_m: 200_000.0,
-            inclination_rad: 0.0,
-            direction: OrbitDirection::Prograde,
-            plane: OrbitPlaneChoice::Auto,
-        }
-    }
-}
 
-impl OrbitDraft {
-    fn target(self, reference_body: usize) -> TargetOrbit {
-        let periapsis_altitude_m = self.periapsis_altitude_m.min(self.apoapsis_altitude_m);
-        let apoapsis_altitude_m = self.apoapsis_altitude_m.max(periapsis_altitude_m);
-        TargetOrbit {
-            reference_body,
-            periapsis_altitude_m,
-            apoapsis_altitude_m,
-            plane: match self.plane {
-                OrbitPlaneChoice::Auto | OrbitPlaneChoice::Preserve => TargetPlane::PreserveCurrent,
-                OrbitPlaneChoice::Nearest => TargetPlane::Nearest {
-                    inclination_rad: self.inclination_rad,
-                    direction: self.direction,
-                },
-            },
-        }
-    }
 
-    fn normalize(&mut self) {
-        self.periapsis_altitude_m = self
-            .periapsis_altitude_m
-            .clamp(MIN_ORBIT_ALTITUDE_M, MAX_ORBIT_ALTITUDE_M);
-        self.apoapsis_altitude_m = self
-            .apoapsis_altitude_m
-            .clamp(MIN_ORBIT_ALTITUDE_M, MAX_ORBIT_ALTITUDE_M);
-        self.inclination_rad = self.inclination_rad.clamp(0.0, 90.0_f64.to_radians());
-        if self.shape == OrbitShape::Circular {
-            self.periapsis_altitude_m = self.apoapsis_altitude_m;
-        } else if self.periapsis_altitude_m > self.apoapsis_altitude_m {
-            std::mem::swap(
-                &mut self.periapsis_altitude_m,
-                &mut self.apoapsis_altitude_m,
-            );
-        }
-    }
-}
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum OrbitProgramPhase {
-    #[default]
-    Idle,
-    Planned,
-    Preflight,
-    Wait,
-    Rise,
-    Turn,
-    Ascent,
-    MainEngineCutoff,
-    Coast,
-    Circularize,
-    Trim,
-    Complete,
-    Abort,
-}
 
-impl OrbitProgramPhase {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Idle => "IDLE",
-            Self::Planned => "PLANNED",
-            Self::Preflight => "PREFLT",
-            Self::Wait => "WAIT",
-            Self::Rise => "RISE",
-            Self::Turn => "TURN",
-            Self::Ascent => "ASCENT",
-            Self::MainEngineCutoff => "MECO",
-            Self::Coast => "COAST",
-            Self::Circularize => "CIRC",
-            Self::Trim => "TRIM",
-            Self::Complete => "COMPLETE",
-            Self::Abort => "ABORT",
-        }
-    }
-}
 
-#[derive(Debug, Clone)]
-pub struct OrbitPlanSummary {
-    pub node_count: usize,
-    pub total_delta_v_m_s: f64,
-    pub predicted_periapsis_altitude_m: f64,
-    pub predicted_apoapsis_altitude_m: f64,
-    pub predicted_inclination_rad: f64,
-}
 
-#[derive(Resource, Debug)]
-pub struct OrbitProgram {
-    pub draft: OrbitDraft,
-    pub phase: OrbitProgramPhase,
-    pub target_body: Option<usize>,
-    pub summary: Option<OrbitPlanSummary>,
-    pub error: Option<String>,
-    pub program_id: u64,
-    pub surface_program: bool,
-    demand: ControlDemand,
-    launch_altitude_m: f64,
-    phase_started_s: f64,
-    resume_phase: OrbitProgramPhase,
-    stage_request_id: Option<u64>,
-    stage_settle_frames: u8,
-    diagnostic_s: f64,
-    within_tolerance_s: f64,
-    target_plane_normal: DVec3,
-    idle_handoff_pending: bool,
-}
 
-impl Default for OrbitProgram {
-    fn default() -> Self {
-        Self {
-            draft: OrbitDraft::default(),
-            phase: OrbitProgramPhase::Idle,
-            target_body: None,
-            summary: None,
-            error: None,
-            program_id: 1,
-            surface_program: false,
-            demand: ControlDemand::NONE,
-            launch_altitude_m: 0.0,
-            phase_started_s: 0.0,
-            resume_phase: OrbitProgramPhase::Preflight,
-            stage_request_id: None,
-            stage_settle_frames: 0,
-            diagnostic_s: 0.0,
-            within_tolerance_s: 0.0,
-            target_plane_normal: DVec3::ZERO,
-            idle_handoff_pending: false,
-        }
-    }
-}
 
-impl OrbitProgram {
-    pub(crate) fn demand(&self) -> ControlDemand {
-        self.demand
-    }
-
-    pub(crate) fn active(&self) -> bool {
-        !matches!(
-            self.phase,
-            OrbitProgramPhase::Idle
-                | OrbitProgramPhase::Planned
-                | OrbitProgramPhase::Complete
-                | OrbitProgramPhase::Abort
-        )
-    }
-}
-
-#[derive(Debug, Clone, Copy, Message)]
-pub enum OrbitTargetRequest {
-    ToggleShape,
-    AdjustPeriapsis(i8),
-    AdjustApoapsis(i8),
-    AdjustInclination(i8),
-    ToggleDirection,
-    TogglePlane,
-    Plan,
-    Execute,
-    Cancel,
-}
 
 pub struct OrbitProgramPlugin;
 
@@ -271,24 +90,22 @@ fn handle_orbit_target_requests(
     mut requests: MessageReader<OrbitTargetRequest>,
     mut program: ResMut<OrbitProgram>,
     mut maneuver_plan: ResMut<ManeuverPlan>,
-    mut autopilot: ResMut<Autopilot>,
     mut stage_demand: ResMut<StageDemand>,
+    mut sequencer: ResMut<StageSequencer>,
     mut throttle: ResMut<ThrottleState>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
 ) {
     for request in requests.read().copied() {
-        let was_active = autopilot.mode() == AutoflightMode::Orbit && program.active();
-        if let Some(request_id) = program.stage_request_id.take() {
-            stage_demand.cancel(request_id);
-        }
+        let was_active = program.active();
+        sequencer.cancel(&mut stage_demand);
         match request {
             OrbitTargetRequest::ToggleShape => {
                 program.draft.shape = match program.draft.shape {
                     OrbitShape::Circular => OrbitShape::Elliptical,
                     OrbitShape::Elliptical => OrbitShape::Circular,
                 };
-                invalidate_preview(&mut program, &mut maneuver_plan, &mut autopilot);
+                invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::AdjustPeriapsis(direction) => {
                 program.draft.periapsis_altitude_m += f64::from(direction) * ALTITUDE_STEP_M;
@@ -296,7 +113,7 @@ fn handle_orbit_target_requests(
                     program.draft.apoapsis_altitude_m = program.draft.periapsis_altitude_m;
                 }
                 program.draft.normalize();
-                invalidate_preview(&mut program, &mut maneuver_plan, &mut autopilot);
+                invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::AdjustApoapsis(direction) => {
                 program.draft.apoapsis_altitude_m += f64::from(direction) * ALTITUDE_STEP_M;
@@ -304,13 +121,13 @@ fn handle_orbit_target_requests(
                     program.draft.periapsis_altitude_m = program.draft.apoapsis_altitude_m;
                 }
                 program.draft.normalize();
-                invalidate_preview(&mut program, &mut maneuver_plan, &mut autopilot);
+                invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::AdjustInclination(direction) => {
                 program.draft.plane = OrbitPlaneChoice::Nearest;
                 program.draft.inclination_rad += f64::from(direction) * INCLINATION_STEP_RAD;
                 program.draft.normalize();
-                invalidate_preview(&mut program, &mut maneuver_plan, &mut autopilot);
+                invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::ToggleDirection => {
                 program.draft.plane = OrbitPlaneChoice::Nearest;
@@ -318,7 +135,7 @@ fn handle_orbit_target_requests(
                     OrbitDirection::Prograde => OrbitDirection::Retrograde,
                     OrbitDirection::Retrograde => OrbitDirection::Prograde,
                 };
-                invalidate_preview(&mut program, &mut maneuver_plan, &mut autopilot);
+                invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::TogglePlane => {
                 program.draft.plane = match program.draft.plane {
@@ -326,13 +143,12 @@ fn handle_orbit_target_requests(
                     OrbitPlaneChoice::Nearest => OrbitPlaneChoice::Preserve,
                     OrbitPlaneChoice::Preserve => OrbitPlaneChoice::Auto,
                 };
-                invalidate_preview(&mut program, &mut maneuver_plan, &mut autopilot);
+                invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::Plan => {
                 plan_current_target(
                     &mut program,
                     &mut maneuver_plan,
-                    &mut autopilot,
                     &sim,
                     &solar,
                     false,
@@ -342,7 +158,6 @@ fn handle_orbit_target_requests(
                 plan_current_target(
                     &mut program,
                     &mut maneuver_plan,
-                    &mut autopilot,
                     &sim,
                     &solar,
                     true,
@@ -350,20 +165,18 @@ fn handle_orbit_target_requests(
             }
             OrbitTargetRequest::Cancel => {
                 clear_program_nodes(&program, &mut maneuver_plan);
-                autopilot.select_mode(AutoflightMode::Off);
                 program.phase = OrbitProgramPhase::Idle;
                 program.summary = None;
                 program.error = None;
                 program.surface_program = false;
                 program.demand = ControlDemand::NONE;
-                program.stage_request_id = None;
-                program.stage_settle_frames = 0;
+                program.sequence = SequenceEvent::None;
                 program.within_tolerance_s = 0.0;
                 program.target_plane_normal = DVec3::ZERO;
                 program.program_id = program.program_id.wrapping_add(1).max(1);
             }
         }
-        if was_active && autopilot.mode() != AutoflightMode::Orbit {
+        if was_active && !program.active() {
             throttle.selected = 0.0;
             throttle.hold_idle_until_pilot_move = true;
             program.idle_handoff_pending = false;
@@ -371,22 +184,14 @@ fn handle_orbit_target_requests(
     }
 }
 
-fn invalidate_preview(
-    program: &mut OrbitProgram,
-    maneuver_plan: &mut ManeuverPlan,
-    autopilot: &mut Autopilot,
-) {
+fn invalidate_preview(program: &mut OrbitProgram, maneuver_plan: &mut ManeuverPlan) {
     clear_program_nodes(program, maneuver_plan);
-    if autopilot.mode() == AutoflightMode::Orbit {
-        autopilot.select_mode(AutoflightMode::Off);
-    }
     program.phase = OrbitProgramPhase::Idle;
     program.summary = None;
     program.error = None;
     program.surface_program = false;
     program.demand = ControlDemand::NONE;
-    program.stage_request_id = None;
-    program.stage_settle_frames = 0;
+    program.sequence = SequenceEvent::None;
     program.within_tolerance_s = 0.0;
     program.target_plane_normal = DVec3::ZERO;
 }
@@ -394,13 +199,11 @@ fn invalidate_preview(
 fn plan_current_target(
     program: &mut OrbitProgram,
     maneuver_plan: &mut ManeuverPlan,
-    autopilot: &mut Autopilot,
     sim: &SimulationState,
     solar: &SolarSystemState,
     execute: bool,
 ) {
     clear_program_nodes(program, maneuver_plan);
-    autopilot.select_mode(AutoflightMode::Off);
     program.idle_handoff_pending = false;
     program.error = None;
     program.summary = None;
@@ -439,16 +242,13 @@ fn plan_current_target(
         let launch_direction = launch_direction(program.draft);
         program.launch_altitude_m = altitude_m;
         program.phase_started_s = sim.simulation.sim_time();
-        program.stage_request_id = None;
-        program.stage_settle_frames = 0;
+        program.sequence = SequenceEvent::None;
         program.diagnostic_s = 0.0;
         program.within_tolerance_s = 0.0;
         program.target_plane_normal = DVec3::ZERO;
         program.phase = if execute {
-            autopilot.select_mode(AutoflightMode::Orbit);
             OrbitProgramPhase::Preflight
         } else {
-            autopilot.select_mode(AutoflightMode::Off);
             OrbitProgramPhase::Planned
         };
         program.summary = Some(OrbitPlanSummary {
@@ -474,7 +274,6 @@ fn plan_current_target(
         Ok(plan) => install_orbit_plan(
             program,
             maneuver_plan,
-            autopilot,
             body.radius_m,
             plan,
             execute,
@@ -496,7 +295,6 @@ fn plan_current_target(
 fn install_orbit_plan(
     program: &mut OrbitProgram,
     maneuver_plan: &mut ManeuverPlan,
-    autopilot: &mut Autopilot,
     body_radius_m: f64,
     plan: OrbitPlan,
     execute: bool,
@@ -521,10 +319,8 @@ fn install_orbit_plan(
         predicted_inclination_rad: plan.predicted_elements.inclination_rad,
     });
     program.phase = if execute {
-        autopilot.select_mode(AutoflightMode::Orbit);
         OrbitProgramPhase::Coast
     } else {
-        autopilot.select_mode(AutoflightMode::Off);
         OrbitProgramPhase::Planned
     };
     info!(
@@ -538,11 +334,11 @@ fn install_orbit_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_surface_orbit_program(
+pub(crate) fn update_surface_orbit_program(
     mut program: ResMut<OrbitProgram>,
-    mut autopilot: ResMut<Autopilot>,
     mut maneuver_plan: ResMut<ManeuverPlan>,
     mut stage_demand: ResMut<StageDemand>,
+    mut sequencer: ResMut<StageSequencer>,
     propulsion: Res<ActivePropulsion>,
     staging: Res<StagingSummaries>,
     input: Res<GameInputIntent>,
@@ -551,29 +347,30 @@ fn update_surface_orbit_program(
     solar: Res<SolarSystemState>,
     clock: Res<SimClock>,
 ) {
-    if autopilot.mode() != AutoflightMode::Orbit || !program.surface_program {
+    if !program.guidance_active() {
         program.demand = ControlDemand::NONE;
+        program.sequence = SequenceEvent::None;
         return;
     }
     if input.attitude.length_squared() > PILOT_OVERRIDE_DEADZONE_SQ || pilot_throttle.moved {
-        cancel_stage_request(&mut program, &mut stage_demand);
-        abort_surface_program(&mut program, &mut autopilot, "pilot_override");
+        sequencer.cancel(&mut stage_demand);
+        abort_surface_program(&mut program, "pilot_override");
         return;
     }
     if sim.simulation.is_destroyed() {
-        cancel_stage_request(&mut program, &mut stage_demand);
-        abort_surface_program(&mut program, &mut autopilot, "craft_destroyed");
+        sequencer.cancel(&mut stage_demand);
+        abort_surface_program(&mut program, "craft_destroyed");
         return;
     }
 
     let Some(body_id) = program.target_body else {
-        cancel_stage_request(&mut program, &mut stage_demand);
-        abort_surface_program(&mut program, &mut autopilot, "target_body_unavailable");
+        sequencer.cancel(&mut stage_demand);
+        abort_surface_program(&mut program, "target_body_unavailable");
         return;
     };
     let Some(body) = sim.system.bodies.get(body_id) else {
-        cancel_stage_request(&mut program, &mut stage_demand);
-        abort_surface_program(&mut program, &mut autopilot, "target_body_unavailable");
+        sequencer.cancel(&mut stage_demand);
+        abort_surface_program(&mut program, "target_body_unavailable");
         return;
     };
     let Some(body_state) = solar
@@ -588,7 +385,7 @@ fn update_surface_orbit_program(
     let relative_position = ship.position - body_state.position;
     let radius_m = relative_position.length();
     if radius_m <= body.radius_m * 0.5 {
-        abort_surface_program(&mut program, &mut autopilot, "invalid_surface_position");
+        abort_surface_program(&mut program, "invalid_surface_position");
         return;
     }
     let up = relative_position / radius_m;
@@ -607,7 +404,7 @@ fn update_surface_orbit_program(
             .as_ref()
             .map_or(0.0, |atmosphere| atmosphere.karman_line_m as f64);
         if program.draft.periapsis_altitude_m <= atmosphere_top_m.max(MIN_ORBIT_ALTITUDE_M) {
-            abort_surface_program(&mut program, &mut autopilot, "target_orbit_not_safe");
+            abort_surface_program(&mut program, "target_orbit_not_safe");
             return;
         }
         if launch_inclination_rad + 1.0e-6 < latitude_rad.abs() {
@@ -622,21 +419,20 @@ fn update_surface_orbit_program(
             );
             abort_surface_program(
                 &mut program,
-                &mut autopilot,
                 "inclination_unreachable_from_launch_site",
             );
             return;
         }
         if staging.0.is_empty() {
             if sim.simulation.sim_time() - program.phase_started_s > 1.0 {
-                abort_surface_program(&mut program, &mut autopilot, "no_staging_plan");
+                abort_surface_program(&mut program, "no_staging_plan");
             } else {
                 program.demand = ControlDemand::NONE;
             }
             return;
         }
         let Some(first_powered_stage) = staging.0.iter().find(|stage| stage.has_engine) else {
-            abort_surface_program(&mut program, &mut autopilot, "no_powered_stage");
+            abort_surface_program(&mut program, "no_powered_stage");
             return;
         };
         let staged_twr = first_powered_stage.thrust_n
@@ -644,7 +440,6 @@ fn update_surface_orbit_program(
         if staged_twr < MIN_LAUNCH_TWR {
             abort_surface_program(
                 &mut program,
-                &mut autopilot,
                 "insufficient_thrust_to_weight",
             );
             return;
@@ -652,7 +447,7 @@ fn update_surface_orbit_program(
         let available_delta_v_m_s: f64 = staging.0.iter().map(|stage| stage.delta_v_m_s).sum();
         let required_delta_v_m_s = estimate_surface_delta_v(body.gm, body.radius_m, program.draft);
         if available_delta_v_m_s < required_delta_v_m_s * 0.9 {
-            abort_surface_program(&mut program, &mut autopilot, "insufficient_delta_v");
+            abort_surface_program(&mut program, "insufficient_delta_v");
             return;
         }
         let params = sim.simulation.ship_params();
@@ -660,7 +455,7 @@ fn update_surface_orbit_program(
         let yaw_authority = params.max_torque.z + params.gimbal_torque_full.z;
         if pitch_authority <= 0.0 || yaw_authority <= 0.0 {
             if sim.simulation.sim_time() - program.phase_started_s > 1.0 {
-                abort_surface_program(&mut program, &mut autopilot, "no_attitude_authority");
+                abort_surface_program(&mut program, "no_attitude_authority");
             } else {
                 program.demand = ControlDemand::NONE;
             }
@@ -671,60 +466,58 @@ fn update_surface_orbit_program(
             program.demand =
                 ControlDemand::autoflight(AttitudeDemand::PointNose(up), Some(0.0), None, None);
             if sim.simulation.sim_time() - program.phase_started_s > PREFLIGHT_POINTING_TIMEOUT_S {
-                abort_surface_program(&mut program, &mut autopilot, "unable_to_align_for_launch");
+                abort_surface_program(&mut program, "unable_to_align_for_launch");
             }
             return;
         }
     }
 
-    if let Some(request_id) = program.stage_request_id {
-        match stage_demand.outcome(request_id) {
-            Some(true) => {
-                program.stage_request_id = None;
-                program.stage_settle_frames = 1;
-                let resume_phase = program.resume_phase;
-                set_orbit_phase(&mut program, resume_phase, sim.simulation.sim_time());
-            }
-            Some(false) => {
-                abort_surface_program(&mut program, &mut autopilot, "no_stage_available");
-                return;
-            }
-            None => {
-                program.demand =
-                    ControlDemand::autoflight(AttitudeDemand::PointNose(up), Some(0.0), None, None);
-                return;
-            }
-        }
-    }
-    if program.stage_settle_frames > 0 {
-        program.stage_settle_frames -= 1;
-        program.demand =
-            ControlDemand::autoflight(AttitudeDemand::PointNose(up), Some(0.0), None, None);
+    // --- Staging sequence ---
+    //
+    // Advanced every guidance frame, and it only ever takes *throttle*.
+    // Guidance keeps steering through cutoff, separation, and ignition,
+    // which is the substantive change from the path this replaces: that one
+    // waited for thrust to collapse, then pointed the vehicle at local up
+    // and held zero throttle until an acknowledgement arrived, throwing the
+    // ascent off its gravity turn at every staging event.
+    //
+    // Burnout is predicted from the throttle guidance commanded *last*
+    // frame. That is the honest available value here — this frame's throttle
+    // is computed below, from the atmosphere and the apoapsis error — and at
+    // 60 Hz a one-frame-old throttle tracks a changing setting far inside
+    // the cutoff lead.
+    let commanded_throttle = program.demand.throttle.unwrap_or(0.0);
+    let active_stage_fuel_kg = staging
+        .0
+        .iter()
+        .find(|stage| stage.active)
+        .map_or(0.0, |stage| stage.fuel_kg);
+    let stage_command = sequencer.update(
+        StageSequencerInput {
+            now_s: sim.simulation.sim_time(),
+            active_stage_fuel_kg,
+            mass_flow_full_kg_per_s: propulsion.mass_flow_kg_per_s,
+            commanded_throttle,
+            total_thrust_n: propulsion.total_thrust_n,
+            angular_rate_rad_s: sim.simulation.attitude().angular_velocity.length(),
+            stage_available: staging.0.iter().any(|stage| !stage.active),
+        },
+        &mut stage_demand,
+    );
+    if stage_command == StageCommand::Exhausted {
+        abort_surface_program(&mut program, "no_stage_available");
         return;
     }
-
-    if propulsion.total_thrust_n <= 1.0 || propulsion.mass_flow_kg_per_s <= 1.0e-6 {
-        program.resume_phase = match program.phase {
-            OrbitProgramPhase::Wait => program.resume_phase,
-            phase => phase,
-        };
-        program.stage_request_id = Some(stage_demand.request());
-        set_orbit_phase(
-            &mut program,
-            OrbitProgramPhase::Wait,
-            sim.simulation.sim_time(),
-        );
-        program.demand =
-            ControlDemand::autoflight(AttitudeDemand::PointNose(up), Some(0.0), None, None);
-        return;
-    }
+    program.sequence = match sequencer.armed_in_s(sim.simulation.sim_time()) {
+        Some(in_s) => SequenceEvent::Staging {
+            stage_index: sequencer.completed_events as usize + 1,
+            in_s,
+        },
+        None => SequenceEvent::None,
+    };
 
     if launch_inclination_rad + 1.0e-6 < latitude_rad.abs() {
-        abort_surface_program(
-            &mut program,
-            &mut autopilot,
-            "inclination_unreachable_from_launch_site",
-        );
+        abort_surface_program(&mut program, "inclination_unreachable_from_launch_site");
         return;
     }
     let Some(launch_heading) = launch_heading(
@@ -734,7 +527,7 @@ fn update_surface_orbit_program(
         launch_inclination_rad,
         launch_direction,
     ) else {
-        abort_surface_program(&mut program, &mut autopilot, "launch_heading_undefined");
+        abort_surface_program(&mut program, "launch_heading_undefined");
         return;
     };
     if program.target_plane_normal.length_squared() <= 1.0e-12 {
@@ -752,7 +545,6 @@ fn update_surface_orbit_program(
         if live_twr < MIN_LAUNCH_TWR {
             abort_surface_program(
                 &mut program,
-                &mut autopilot,
                 "insufficient_live_thrust_to_weight",
             );
             return;
@@ -809,7 +601,6 @@ fn update_surface_orbit_program(
                 install_orbit_plan(
                     &mut program,
                     &mut maneuver_plan,
-                    &mut autopilot,
                     body.radius_m,
                     plan,
                     true,
@@ -820,7 +611,6 @@ fn update_surface_orbit_program(
             Err(error) => {
                 abort_surface_program(
                     &mut program,
-                    &mut autopilot,
                     &format!("circularization_plan_failed:{}", plan_error_label(&error)),
                 );
             }
@@ -871,7 +661,15 @@ fn update_surface_orbit_program(
         .unwrap_or(0.0);
     let dynamic_pressure_pa = 0.5 * density_kg_m3 * surface_relative_velocity.length_squared();
     let full_acceleration_m_s2 = propulsion.total_thrust_n / propulsion.wet_mass_kg.max(1.0);
-    let throttle = ascent_throttle(dynamic_pressure_pa, full_acceleration_m_s2);
+    let guidance_throttle = ascent_throttle(dynamic_pressure_pa, full_acceleration_m_s2);
+    // The staging sequence takes throttle and nothing else. Attitude stays
+    // with guidance throughout, so the vehicle holds its pitch program
+    // across cutoff, separation, and ignition instead of pitching to local
+    // up and losing the turn.
+    let throttle = match stage_command {
+        StageCommand::HoldThrottleClosed => 0.0,
+        StageCommand::Free | StageCommand::Exhausted => guidance_throttle,
+    };
     program.demand = ControlDemand::autoflight(
         AttitudeDemand::PointNose(attitude_target),
         Some(throttle),
@@ -968,13 +766,12 @@ fn ascent_throttle(dynamic_pressure_pa: f64, full_acceleration_m_s2: f64) -> f64
     q_throttle.min(acceleration_throttle).clamp(0.0, 1.0)
 }
 
-fn abort_surface_program(program: &mut OrbitProgram, autopilot: &mut Autopilot, reason: &str) {
+fn abort_surface_program(program: &mut OrbitProgram, reason: &str) {
     program.phase = OrbitProgramPhase::Abort;
     program.error = Some(reason.replace('_', " "));
     program.demand = ControlDemand::NONE;
-    program.stage_request_id = None;
+    program.sequence = SequenceEvent::None;
     program.idle_handoff_pending = true;
-    autopilot.select_mode(AutoflightMode::Off);
     warn!(
         target: "thalos::diagnostic::orbit_autoflight",
         event = "orbit_autoflight_abort",
@@ -995,21 +792,18 @@ fn apply_orbit_idle_handoff(
     program.idle_handoff_pending = false;
 }
 
-fn cancel_stage_request(program: &mut OrbitProgram, stage_demand: &mut StageDemand) {
-    if let Some(request_id) = program.stage_request_id.take() {
-        stage_demand.cancel(request_id);
-    }
-}
-
 fn monitor_orbit_maneuver_program(
     mut program: ResMut<OrbitProgram>,
-    mut autopilot: ResMut<Autopilot>,
     maneuver_plan: Res<ManeuverPlan>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     clock: Res<SimClock>,
 ) {
-    if autopilot.mode() != AutoflightMode::Orbit || program.surface_program {
+    // Gated on the program's own phase, not on a selected mode. The mode
+    // check this replaces early-returned whenever anything else touched the
+    // autopilot selection - leaving the program stranded in COAST forever
+    // while its widget still claimed to be running.
+    if !program.active() || program.surface_program {
         return;
     }
     let relevant: Vec<_> = maneuver_plan
@@ -1043,7 +837,6 @@ fn monitor_orbit_maneuver_program(
             program.phase = OrbitProgramPhase::Complete;
             program.error = None;
             program.idle_handoff_pending = true;
-            autopilot.select_mode(AutoflightMode::Off);
             info!(
                 target: "thalos::diagnostic::orbit_autoflight",
                 event = "orbit_autoflight_complete",
@@ -1058,7 +851,6 @@ fn monitor_orbit_maneuver_program(
             program.phase = OrbitProgramPhase::Abort;
             program.error = Some("final orbit is outside tolerance".to_string());
             program.idle_handoff_pending = true;
-            autopilot.select_mode(AutoflightMode::Off);
             warn!(
                 target: "thalos::diagnostic::orbit_autoflight",
                 event = "orbit_autoflight_abort",

@@ -80,6 +80,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
     "THALOS_TILE_BUDGET_MB",
+    "THALOS_SHADOW_CASCADES",
     "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",
@@ -95,6 +96,9 @@ const STARTUP_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
     "THALOS_TILE_BUDGET_MB",
+    // Cascade budget: a boot `OnceLock`, so a warm host would serve any value
+    // at whatever count it booted with — silently, and with a plausible PNG.
+    "THALOS_SHADOW_CASCADES",
     "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",

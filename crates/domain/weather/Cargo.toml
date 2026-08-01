@@ -9,6 +9,9 @@ edition.workspace = true
 # PNG) compiles in seconds instead of rebuilding the runtime crate.
 [dependencies]
 rayon = "1.12"
+glam = "0.32"
+thalos_terrain = { path = "../terrain" }
+thalos_world = { path = "../world" }
 
 [dev-dependencies]
 # The sim probe renders diagnostic PNGs. Not Bevy, so the no-Bevy CI guard is

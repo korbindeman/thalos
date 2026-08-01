@@ -44,53 +44,10 @@ use bevy::prelude::*;
 
 use crate::spawn::SpawnSituation;
 
-/// Top-level app state. Starts in [`Loading`] so the very first frame is
-/// covered by the loading screen; finishes into [`MainMenu`] (bare launch)
-/// or [`Running`] (`just game <scenario>`), per [`LoadDestination`]. The
-/// start screen re-enters [`Loading`] for scenarios that need a deferred
-/// placement pass (runway).
-#[derive(States, Default, Clone, Copy, Eq, PartialEq, Debug, Hash)]
-pub enum AppState {
-    #[default]
-    Loading,
-    MainMenu,
-    Running,
-}
-
-/// Whether the game world — celestial-body entities, the player ship
-/// visuals, the procedural sky — has been spawned. A bare menu boot starts
-/// [`Absent`]: the start screen is a lightweight UI over an empty scene
-/// (nothing simulates or streams behind it), and the world is built only
-/// when the player picks PLAY / a scenario — the menu flips this to
-/// [`Live`], and the world-spawn systems (registered on
-/// `OnEnter(WorldState::Live)` across `rendering`, `ship_view`,
-/// `sky_render`) run behind that action's loading pass. A `just game
-/// <scenario>` boot inserts [`Live`] directly, so the same `OnEnter` fires
-/// on the first frame and the boot is unchanged.
-///
-/// One-way: nothing ever sets it back to `Absent` (the world is never torn
-/// down; returning to the menu from flight keeps the world live and the
-/// menu routes through the existing live-world paths).
-#[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
-pub enum WorldState {
-    /// No world entities exist (bare menu boot, before the first start).
-    #[default]
-    Absent,
-    /// The world has been (or is being) spawned.
-    Live,
-}
-
-/// Where the current loading pass goes when it completes. Inserted by
-/// `main.rs` (start screen for a bare launch, `Running` otherwise); the
-/// start screen sets it to `Running` before re-entering `Loading`.
-#[derive(Resource, Debug, Clone, Copy)]
-pub struct LoadDestination(pub AppState);
-
-impl Default for LoadDestination {
-    fn default() -> Self {
-        Self(AppState::Running)
-    }
-}
+// `AppState` / `WorldState` / `LoadDestination` moved to the game-state
+// blackboard (Phase 5a, ADR-20260731T024003Z); re-exported so every
+// existing path keeps working.
+pub use thalos_game_state::app::{AppState, LoadDestination, WorldState};
 
 /// Well-known step ids. Plain strings so future systems can add their own
 /// steps without touching this module.

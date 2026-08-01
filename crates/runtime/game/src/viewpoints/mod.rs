@@ -111,35 +111,34 @@ pub fn viewpoint_scene_name(viewpoint: &Viewpoint) -> String {
     format!("viewpoint:{}", viewpoint.id)
 }
 
-impl From<SpawnSituation> for ViewpointSpawn {
-    fn from(value: SpawnSituation) -> Self {
-        match value {
-            SpawnSituation::ShipOrbit => Self::Orbit,
-            SpawnSituation::PolarOrbit => Self::Polar,
-            SpawnSituation::Eva => Self::Eva,
-            SpawnSituation::Landing => Self::Landing,
-            SpawnSituation::FinalApproach => Self::Final,
-            SpawnSituation::Runway => Self::Runway,
-            SpawnSituation::RunwayApproach => Self::RunwayApproach,
-            SpawnSituation::Launch => Self::Launch,
-            SpawnSituation::Cruise => Self::Cruise,
-        }
+// Free-function conversions: both types are now foreign here (the scenario
+// enum lives in `thalos_game_state`, the wire enum in the capture protocol),
+// so `From` impls hit the orphan rule.
+pub(crate) fn viewpoint_spawn_of(value: SpawnSituation) -> ViewpointSpawn {
+    match value {
+        SpawnSituation::ShipOrbit => ViewpointSpawn::Orbit,
+        SpawnSituation::PolarOrbit => ViewpointSpawn::Polar,
+        SpawnSituation::Eva => ViewpointSpawn::Eva,
+        SpawnSituation::Landing => ViewpointSpawn::Landing,
+        SpawnSituation::FinalApproach => ViewpointSpawn::Final,
+        SpawnSituation::Runway => ViewpointSpawn::Runway,
+        SpawnSituation::RunwayApproach => ViewpointSpawn::RunwayApproach,
+        SpawnSituation::Launch => ViewpointSpawn::Launch,
+        SpawnSituation::Cruise => ViewpointSpawn::Cruise,
     }
 }
 
-impl From<ViewpointSpawn> for SpawnSituation {
-    fn from(value: ViewpointSpawn) -> Self {
-        match value {
-            ViewpointSpawn::Orbit => Self::ShipOrbit,
-            ViewpointSpawn::Polar => Self::PolarOrbit,
-            ViewpointSpawn::Eva => Self::Eva,
-            ViewpointSpawn::Landing => Self::Landing,
-            ViewpointSpawn::Final => Self::FinalApproach,
-            ViewpointSpawn::Runway => Self::Runway,
-            ViewpointSpawn::RunwayApproach => Self::RunwayApproach,
-            ViewpointSpawn::Launch => Self::Launch,
-            ViewpointSpawn::Cruise => Self::Cruise,
-        }
+pub(crate) fn situation_of_viewpoint(value: ViewpointSpawn) -> SpawnSituation {
+    match value {
+        ViewpointSpawn::Orbit => SpawnSituation::ShipOrbit,
+        ViewpointSpawn::Polar => SpawnSituation::PolarOrbit,
+        ViewpointSpawn::Eva => SpawnSituation::Eva,
+        ViewpointSpawn::Landing => SpawnSituation::Landing,
+        ViewpointSpawn::Final => SpawnSituation::FinalApproach,
+        ViewpointSpawn::Runway => SpawnSituation::Runway,
+        ViewpointSpawn::RunwayApproach => SpawnSituation::RunwayApproach,
+        ViewpointSpawn::Launch => SpawnSituation::Launch,
+        ViewpointSpawn::Cruise => SpawnSituation::Cruise,
     }
 }
 
@@ -761,7 +760,7 @@ pub(crate) fn capture_current_viewpoint(
         description,
         saved_unix_ms: crate::screenshot::timestamp_millis(),
         body: body.name.clone(),
-        spawn: situation.into(),
+        spawn: viewpoint_spawn_of(situation),
         boots_hub: space_center.is_some_and(|hub| hub.open),
         sim_time_s: sim.simulation.sim_time(),
         camera_position_body_m: camera_body.to_array(),

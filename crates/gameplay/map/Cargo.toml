@@ -1,0 +1,20 @@
+[package]
+name = "thalos_map"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Gameplay feature crate (ADR-20260731T024003Z, Phase 5b): the map/planning
+# surface — the map-view snapshot writer, orbit trails, the flight-plan ghost
+# display, maneuver-node interaction, and the body tree panel. Reads the
+# game-state blackboard; sole writer of `MapSnapshot`. Depends only downward —
+# NEVER on another feature crate or thalos_runtime.
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+thalos_control = { path = "../../simulation/control" }
+thalos_game_state = { path = "../state" }
+thalos_input = { path = "../../interface/input" }
+thalos_physics_canonical = { path = "../../simulation/physics_canonical" }
+thalos_physics_local = { path = "../../simulation/physics_local" }
+thalos_ui = { path = "../../interface/ui" }
+thalos_world = { path = "../../domain/world" }

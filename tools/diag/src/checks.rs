@@ -56,6 +56,7 @@ pub fn run(stream: &Stream) -> Vec<Finding> {
     findings.extend(gear_ground_health(stream));
     findings.extend(approach_autopilot_health(stream));
     findings.extend(orbit_autoflight_health(stream));
+    findings.extend(staging_sequence_health(stream));
     findings.extend(gpu_health(stream));
     findings.extend(memory_health(stream));
     findings.extend(silent_sessions(stream));
@@ -207,6 +208,64 @@ fn orbit_autoflight_health(stream: &Stream) -> Vec<Finding> {
                 ORBIT_DYNAMIC_PRESSURE_PA_ATTENTION,
             ),
             format!("runtime.jsonl session={session} event=orbit_autoflight_guidance"),
+        ));
+    }
+    findings
+}
+
+/// Staging-sequence health.
+///
+/// The sequencer commands separation on a predicted burnout and keeps thrust
+/// collapse only as a backup. Both events this reads exist to falsify that
+/// design rather than to decorate it: `stage_unpredicted` says the prediction
+/// missed and the vehicle staged late, `stage_refused` says the interlocks and
+/// the canonical staging op disagreed. A healthy ascent emits neither.
+fn staging_sequence_health(stream: &Stream) -> Vec<Finding> {
+    let mut unpredicted: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("stage_unpredicted")
+        .filter(|record| record.target.ends_with("::staging"))
+    {
+        *unpredicted.entry(record.session.as_str()).or_default() += 1;
+    }
+
+    let mut refused: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("stage_refused")
+        .filter(|record| record.target.ends_with("::staging"))
+    {
+        *refused.entry(record.session.as_str()).or_default() += 1;
+    }
+
+    let mut findings = Vec::new();
+    if let Some((session, count)) = unpredicted
+        .iter()
+        .filter(|(_, count)| **count >= STAGE_UNPREDICTED_ATTENTION)
+        .max_by_key(|(_, count)| **count)
+    {
+        findings.push(Finding::new(
+            Severity::Attention,
+            "stage_prediction_missed",
+            format!(
+                "{count} staging event{} fired on thrust collapse instead of a predicted burnout — the vehicle staged late",
+                if *count == 1 { "" } else { "s" },
+            ),
+            format!("runtime.jsonl session={session} event=stage_unpredicted"),
+        ));
+    }
+    if let Some((session, count)) = refused
+        .iter()
+        .filter(|(_, count)| **count >= STAGE_REFUSED_ATTENTION)
+        .max_by_key(|(_, count)| **count)
+    {
+        findings.push(Finding::new(
+            Severity::Attention,
+            "stage_request_refused",
+            format!(
+                "{count} staging request{} passed the sequencer's interlocks and were refused by activate_stage",
+                if *count == 1 { "" } else { "s" },
+            ),
+            format!("runtime.jsonl session={session} event=stage_refused"),
         ));
     }
     findings
@@ -398,6 +457,12 @@ fn shadow_mode_strobe(samples: &[&thalos_diagnostics::Record]) -> Vec<Finding> {
 /// Both are invisible in a screenshot — a hull reflecting a flat disc and one
 /// reflecting continents differ subtly at a glance — which is exactly why the
 /// `planet_reflection` event exists and why it needs a reader.
+///
+/// The spread half is only meaningful when enough ground is in view for real
+/// terrain to vary across it — see [`REFLECTION_VISIBLE_CAP_MIN_DEG`]. Paints
+/// below that are counted and reported as the finding's denominator rather than
+/// dropped silently. The missing-bake half is altitude-independent and is
+/// judged on every paint.
 fn planet_reflection_health(stream: &Stream) -> Vec<Finding> {
     let samples: Vec<_> = stream.events("planet_reflection").collect();
     if samples.is_empty() {
@@ -406,6 +471,8 @@ fn planet_reflection_health(stream: &Stream) -> Vec<Finding> {
 
     let mut missing = 0usize;
     let mut flat = 0usize;
+    let mut judged = 0usize;
+    let mut near_surface = 0usize;
     let mut session = "";
     let mut worst_spread = f64::INFINITY;
     for record in &samples {
@@ -420,6 +487,15 @@ fn planet_reflection_health(stream: &Stream) -> Vec<Finding> {
             session = &record.session;
             continue;
         }
+        // `planet_ang_deg` is the disc's angular RADIUS, so the visible surface
+        // cap is its complement. An absent field reads 0 and is judged, which
+        // keeps older records on the pre-2026-07-31 behaviour.
+        let visible_cap_deg = 90.0 - record.f64("planet_ang_deg").unwrap_or_default();
+        if visible_cap_deg < REFLECTION_VISIBLE_CAP_MIN_DEG {
+            near_surface += 1;
+            continue;
+        }
+        judged += 1;
         let spread = record.f64("albedo_spread").unwrap_or_default();
         if spread < REFLECTION_ALBEDO_SPREAD_FLAT {
             flat += 1;
@@ -448,19 +524,25 @@ fn planet_reflection_health(stream: &Stream) -> Vec<Finding> {
         );
     }
     if flat > 0 {
-        findings.push(
-            Finding::new(
-                Severity::Attention,
-                "reflection_bake_flat",
-                format!(
-                    "{flat} reflection paints sampled a bound bake that does not vary (spread {worst_spread:.4})"
-                ),
-                format!("runtime.jsonl session={session} event=planet_reflection albedo_spread"),
-            )
-            .with_detail(
-                "a bound-but-constant bake is a blank cube or a wrong body-fixed rotation, not a bland planet",
+        let mut finding = Finding::new(
+            Severity::Attention,
+            "reflection_bake_flat",
+            format!(
+                "{flat} of {judged} orbital reflection paints sampled a bound bake that does not vary (spread {worst_spread:.4})"
             ),
+            format!("runtime.jsonl session={session} event=planet_reflection albedo_spread"),
+        )
+        .with_detail(
+            "a bound-but-constant bake is a blank cube or a wrong body-fixed rotation, not a bland planet",
         );
+        if near_surface > 0 {
+            finding = finding.with_detail(format!(
+                "{near_surface} near-surface paints excluded — under a \
+                 {REFLECTION_VISIBLE_CAP_MIN_DEG:.0}° visible cap the reflected ground is one \
+                 landscape and a low spread is the correct reading"
+            ));
+        }
+        findings.push(finding);
     }
     findings
 }
@@ -1497,6 +1579,55 @@ mod tests {
     }
 
     #[test]
+    fn commanded_staging_is_quiet_but_a_missed_prediction_fires() {
+        // A healthy ascent: separation commanded on the prediction and
+        // acknowledged. The lane must stay silent.
+        let healthy = vec![
+            record(
+                "stage-ok",
+                1_000,
+                "INFO",
+                "thalos::diagnostic::staging",
+                json!({ "event": "stage_cutoff", "predicted_remaining_s": 0.18 }),
+            ),
+            record(
+                "stage-ok",
+                1_400,
+                "INFO",
+                "thalos::diagnostic::staging",
+                json!({ "event": "stage_separated", "request_id": 1, "completed_events": 1 }),
+            ),
+        ];
+        assert!(!finding_ids(healthy).contains(&"stage_prediction_missed"));
+
+        // Thrust collapsed with no armed prediction: the vehicle staged late.
+        let missed = record(
+            "stage-miss",
+            2_000,
+            "WARN",
+            "thalos::diagnostic::staging",
+            json!({
+                "event": "stage_unpredicted",
+                "active_stage_fuel_kg": 4_800.0,
+                "commanded_throttle": 1.0
+            }),
+        );
+        assert!(finding_ids(vec![missed]).contains(&"stage_prediction_missed"));
+    }
+
+    #[test]
+    fn a_refused_staging_request_is_reported() {
+        let refused = record(
+            "stage-refused",
+            3_000,
+            "WARN",
+            "thalos::diagnostic::staging",
+            json!({ "event": "stage_refused", "request_id": 7 }),
+        );
+        assert!(finding_ids(vec![refused]).contains(&"stage_request_refused"));
+    }
+
+    #[test]
     fn orbit_max_q_requires_sustained_same_session_overshoot() {
         let sample = |session: &str, ts: u128, q: f64| {
             record(
@@ -1548,6 +1679,17 @@ mod tests {
     }
 
     fn reflection(session: &str, impostor: bool, disc_frac: f64, spread: f64) -> Record {
+        // 70.2° is the measured 200 km orbital framing (`orbit-hull`).
+        reflection_at(session, impostor, disc_frac, spread, 70.2)
+    }
+
+    fn reflection_at(
+        session: &str,
+        impostor: bool,
+        disc_frac: f64,
+        spread: f64,
+        ang_deg: f64,
+    ) -> Record {
         record(
             session,
             1_000,
@@ -1563,7 +1705,7 @@ mod tests {
                 "albedo_mean_g": 0.105,
                 "albedo_mean_b": 0.067,
                 "albedo_spread": spread,
-                "planet_ang_deg": 70.2,
+                "planet_ang_deg": ang_deg,
                 "surface_blend": 0.5,
             }),
         )
@@ -1593,6 +1735,53 @@ mod tests {
         let findings = planet_reflection_health(&stream(vec![reflection("s", true, 0.36, 0.0004)]));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "reflection_bake_flat");
+    }
+
+    /// The false positive this gate exists for, at the measured values: a ~7 km
+    /// view (`planet_ang_deg` 87.4 → a 2.6° visible cap) reads spread 0.0018
+    /// because the reflected ground genuinely is one landscape. Triage
+    /// 2026-07-31 saw this on 168 of 373 paints across ~30 sessions; judging it
+    /// makes the check fire on every low-altitude session.
+    #[test]
+    fn a_flat_spread_under_a_near_surface_view_is_not_judged() {
+        let findings = planet_reflection_health(&stream(vec![reflection_at(
+            "s", true, 0.482, 0.0018, 87.4,
+        )]));
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
+    /// …and the exclusion must not blind the check: the same session climbing
+    /// to the orbital framing with a genuinely constant bake still reports, and
+    /// says how many paints it set aside so the exclusion is never silent.
+    #[test]
+    fn a_near_surface_exclusion_still_reports_a_flat_orbital_paint() {
+        let findings = planet_reflection_health(&stream(vec![
+            reflection_at("s", true, 0.482, 0.0018, 87.4),
+            reflection_at("s", true, 0.482, 0.0018, 87.4),
+            reflection_at("s", true, 0.36, 0.0004, 70.2),
+        ]));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "reflection_bake_flat");
+        assert!(findings[0].headline.contains("1 of 1"), "{findings:?}");
+        assert!(
+            findings[0]
+                .detail
+                .iter()
+                .any(|line| line.contains("2 near-surface paints excluded")),
+            "{findings:?}"
+        );
+    }
+
+    /// A missing bake is a wiring failure at any altitude — the visible-cap gate
+    /// covers only the spread test, so a near-surface paint with no bake bound
+    /// is still reported.
+    #[test]
+    fn a_missing_bake_is_reported_even_near_the_surface() {
+        let findings = planet_reflection_health(&stream(vec![reflection_at(
+            "s", false, 0.482, 0.0, 87.4,
+        )]));
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].id, "reflection_bake_missing");
     }
 
     /// A framing pointed away from the planet is not a defect, whatever the

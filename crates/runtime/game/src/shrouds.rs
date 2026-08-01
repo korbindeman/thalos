@@ -70,14 +70,9 @@ pub struct Shroud {
     top_radius: f32,
 }
 
-/// Marker on the shroud entity's body. Kept distinct from
-/// [`crate::shipyard_editor::core::state::PartBody`] so part-level highlight
-/// systems (tint, material swap) don't fire on hovered shrouds — the shroud
-/// manages its own hover feedback (transparency) in
-/// [`update_shroud_transparency`]. Editor shrouds only; flight shrouds are not
-/// interactive.
-#[derive(Component, Debug, Clone, Copy)]
-pub struct ShroudBody;
+// Moved to `thalos_game_state::scene` (Phase 5b) — the editor tags and
+// reads it too; the reconcile pass stays here.
+pub use thalos_game_state::scene::ShroudBody;
 
 /// Stamped on a shroud when its provider fires, in the same transaction that
 /// cuts the attach graph. A fired decoupler has no `Attachment` left, so it can

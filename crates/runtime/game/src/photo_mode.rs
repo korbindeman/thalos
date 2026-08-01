@@ -12,16 +12,8 @@
 use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 
-/// Global photo-mode state.
-#[derive(Resource, Default, Debug)]
-pub struct PhotoMode {
-    pub active: bool,
-}
-
-/// Marker: entities with this component are hidden while photo mode is active.
-/// Attach to the root of any overlay mesh (children inherit visibility).
-#[derive(Component)]
-pub struct HideInPhotoMode;
+// Moved to `thalos_game_state::ui` (Phase 5b); the toggle system stays here.
+pub use thalos_game_state::ui::{HideInPhotoMode, PhotoMode, not_in_photo_mode};
 
 pub struct PhotoModePlugin;
 
@@ -41,11 +33,6 @@ impl Plugin for PhotoModePlugin {
     }
 }
 
-/// Run condition: true when photo mode is inactive. Use to gate HUD panels,
-/// gizmo draws, and the per-frame update systems of overlay mesh entities.
-pub fn not_in_photo_mode(photo_mode: Res<PhotoMode>) -> bool {
-    !photo_mode.active
-}
 
 fn toggle_photo_mode_input(
     input: Res<GameInputIntent>,

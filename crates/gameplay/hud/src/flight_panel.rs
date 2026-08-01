@@ -1,0 +1,240 @@
+//! Bottom-left HUD panel cluster: orbital velocity above the navball and
+//! a vector throttle arc along the navball's left side.
+
+use thalos_game_state::flight::ThrottleState;
+use crate::HudPanel;
+use crate::format;
+use crate::theme::{HudTheme, emphasis, label, panel_frame, panel_node};
+use crate::navball::ui::{
+    FRAME_SIZE_PX, NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX, NavballFrameRoot,
+};
+use thalos_game_state::{SimulationState, SolarSystemState};
+use thalos_game_state::nav::TargetBody;
+use thalos_game_state::units::UnitDomain;
+use crate::velocity_frame::{VelocityFrameState, next_frame};
+use bevy::prelude::*;
+use bevy::render::render_resource::AsBindGroup;
+use bevy::shader::ShaderRef;
+use thalos_physics_canonical::velocity_frame::nav_basis;
+
+/// The navball cluster sits at the bottom-left (navball at x=40,
+/// nav panel just to its right). The flight readouts sit ABOVE the
+/// navball with a small gap.
+const THROTTLE_FRAME_RADIUS: f32 = FRAME_SIZE_PX * 0.5;
+const THROTTLE_INNER_RADIUS: f32 = THROTTLE_FRAME_RADIUS - 14.0;
+const THROTTLE_OUTER_RADIUS: f32 = THROTTLE_FRAME_RADIUS + 16.0;
+const THROTTLE_NODE_PADDING: f32 = THROTTLE_OUTER_RADIUS - THROTTLE_FRAME_RADIUS + 4.0;
+const THROTTLE_NODE_SIZE: f32 = FRAME_SIZE_PX + THROTTLE_NODE_PADDING * 2.0;
+const THROTTLE_HALF_ANGLE: f32 = std::f32::consts::FRAC_PI_2;
+const THROTTLE_BORDER_WIDTH: f32 = 1.6;
+
+#[derive(Component)]
+pub(super) struct VelocityText;
+
+#[derive(Component)]
+pub(super) struct VelocityLabel;
+
+/// Marker on the clickable velocity-readout panel (cycles the speed mode).
+#[derive(Component)]
+pub(super) struct VelocityPanel;
+
+#[derive(Component)]
+pub(super) struct ThrottleBar {
+    commanded: f32,
+    effective: f32,
+}
+
+#[derive(Asset, AsBindGroup, TypePath, Clone)]
+pub(super) struct ThrottleArcMaterial {
+    /// x = logical node size; y/z = logical inner/outer radii.
+    #[uniform(0)]
+    geometry: Vec4,
+    /// x = commanded; y = effective; z = half-angle; w = border width.
+    #[uniform(1)]
+    levels: Vec4,
+    #[uniform(2)]
+    track_color: Vec4,
+    #[uniform(3)]
+    fill_color: Vec4,
+    #[uniform(4)]
+    warn_color: Vec4,
+    #[uniform(5)]
+    tick_color: Vec4,
+    #[uniform(6)]
+    tick_major_color: Vec4,
+    #[uniform(7)]
+    border_color: Vec4,
+}
+
+impl ThrottleArcMaterial {
+    fn new(commanded: f32, effective: f32, theme: &HudTheme) -> Self {
+        Self {
+            geometry: Vec4::new(
+                THROTTLE_NODE_SIZE,
+                THROTTLE_INNER_RADIUS,
+                THROTTLE_OUTER_RADIUS,
+                0.0,
+            ),
+            levels: Vec4::new(
+                commanded,
+                effective,
+                THROTTLE_HALF_ANGLE,
+                THROTTLE_BORDER_WIDTH,
+            ),
+            track_color: with_alpha(theme.panel_bg_alt, 0.95),
+            fill_color: Color::srgba(0.42, 0.74, 0.36, 0.95).to_linear().to_vec4(),
+            warn_color: theme.text_warn.to_linear().to_vec4(),
+            tick_color: with_alpha(theme.text_subtitle, 0.62),
+            tick_major_color: with_alpha(theme.text_subtitle, 0.88),
+            border_color: with_alpha(theme.panel_border, 0.95),
+        }
+    }
+}
+
+impl UiMaterial for ThrottleArcMaterial {
+    fn fragment_shader() -> ShaderRef {
+        "shaders/throttle_arc.wgsl".into()
+    }
+}
+
+pub fn setup(
+    mut commands: Commands,
+    mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
+    theme: Res<HudTheme>,
+    navball_frame_q: Query<Entity, With<NavballFrameRoot>>,
+) {
+    let mut root = panel_node();
+    // Sit immediately above the navball, aligned with its left edge.
+    root.left = Val::Px(NAVBALL_LEFT_PX);
+    root.bottom = Val::Px(NAVBALL_BOTTOM_PX + NAVBALL_SIZE_PX + 8.0);
+    root.min_width = Val::Px(NAVBALL_SIZE_PX);
+
+    let (bg, border) = panel_frame(&theme);
+    commands
+        .spawn((
+            Button,
+            root,
+            bg,
+            border,
+            Interaction::None,
+            VelocityPanel,
+            HudPanel,
+            Name::new("HudFlight"),
+        ))
+        .with_children(|p| {
+            p.spawn((label(&theme, "ORBITAL VELOCITY"), VelocityLabel));
+            p.spawn((emphasis(&theme, "—"), VelocityText));
+        });
+
+    let throttle_material = throttle_materials.add(ThrottleArcMaterial::new(0.0, 0.0, &theme));
+    let Ok(navball_frame) = navball_frame_q.single() else {
+        warn!("navball frame missing; throttle arc not spawned");
+        return;
+    };
+
+    commands.entity(navball_frame).with_children(|p| {
+        p.spawn((
+            Node {
+                position_type: PositionType::Absolute,
+                left: Val::Px(-THROTTLE_NODE_PADDING),
+                top: Val::Px(-THROTTLE_NODE_PADDING),
+                width: Val::Px(THROTTLE_NODE_SIZE),
+                height: Val::Px(THROTTLE_NODE_SIZE),
+                ..default()
+            },
+            MaterialNode(throttle_material),
+            ThrottleBar {
+                commanded: 0.0,
+                effective: 0.0,
+            },
+            HudPanel,
+            ZIndex(2),
+            Name::new("HudThrottleBar"),
+        ));
+    });
+}
+
+pub fn update(
+    sim: Res<SimulationState>,
+    solar_system: Res<SolarSystemState>,
+    throttle: Res<ThrottleState>,
+    velocity_frame: Res<VelocityFrameState>,
+    target: Res<TargetBody>,
+    units: Res<thalos_game_state::units::UnitsSettings>,
+    flight_ctx: Res<crate::mfd::FlightContext>,
+    mut throttle_materials: ResMut<Assets<ThrottleArcMaterial>>,
+    mut vel_q: Query<&mut Text, (With<VelocityText>, Without<VelocityLabel>)>,
+    mut label_q: Query<&mut Text, (With<VelocityLabel>, Without<VelocityText>)>,
+    mut throttle_q: Query<(&mut ThrottleBar, &MaterialNode<ThrottleArcMaterial>)>,
+) {
+    let ship = sim.simulation.ship_state();
+    let body_id = sim.simulation.dominant_body();
+    let Some(states) = solar_system.states.as_deref() else {
+        return;
+    };
+    let Some(body_state) = states.get(body_id) else {
+        return;
+    };
+    let target_state = target.target.and_then(|id| states.get(id));
+    let basis = nav_basis(velocity_frame.active, ship, body_state, target_state);
+
+    // Shared readout: this same box shows orbital velocity on a transfer and
+    // approach speed on final, so the situation picks the unit.
+    let system = units.system_for(UnitDomain::shared(flight_ctx.airplane_flight()));
+
+    if let Ok(mut t) = vel_q.single_mut() {
+        let s = match basis {
+            Some(b) => format::speed(b.speed, system),
+            None => "—".to_string(),
+        };
+        if t.0 != s {
+            t.0 = s;
+        }
+    }
+    if let Ok(mut t) = label_q.single_mut() {
+        let s = format!("{} VELOCITY", velocity_frame.active.label());
+        if t.0 != s {
+            t.0 = s;
+        }
+    }
+
+    if let Ok((mut bar, material_node)) = throttle_q.single_mut() {
+        let commanded = throttle.commanded.clamp(0.0, 1.0) as f32;
+        let effective = throttle.effective.clamp(0.0, 1.0) as f32;
+        if (bar.commanded - commanded).abs() > 0.002 || (bar.effective - effective).abs() > 0.002 {
+            if let Some(mut material) = throttle_materials.get_mut(material_node) {
+                material.levels.x = commanded;
+                material.levels.y = effective;
+            }
+            bar.commanded = commanded;
+            bar.effective = effective;
+        }
+    }
+}
+
+/// Cycle the navball speed mode when the readout panel is clicked:
+/// Orbit → Surface → Target → Orbit, skipping Target when none is set.
+pub fn handle_velocity_frame_click(
+    interactions: Query<&Interaction, (With<VelocityPanel>, Changed<Interaction>)>,
+    target: Res<TargetBody>,
+    mut velocity_frame: ResMut<VelocityFrameState>,
+) {
+    for interaction in &interactions {
+        if matches!(interaction, Interaction::Pressed) {
+            let next = next_frame(velocity_frame.active, target.target.is_some());
+            velocity_frame.set_override(next);
+        }
+    }
+}
+
+fn with_alpha(color: Color, alpha_scale: f32) -> Vec4 {
+    let srgba = color.to_srgba();
+    Color::srgba(
+        srgba.red,
+        srgba.green,
+        srgba.blue,
+        srgba.alpha * alpha_scale,
+    )
+    .to_linear()
+    .to_vec4()
+}

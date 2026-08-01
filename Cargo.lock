@@ -9281,6 +9281,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "thalos_game_state"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "serde",
+ "thalos_control",
+ "thalos_navigation",
+ "thalos_physics_canonical",
+ "thalos_shipyard",
+ "thalos_terrain",
+ "thalos_weather",
+ "thalos_world",
+]
+
+[[package]]
+name = "thalos_hud"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "bevy",
+ "bevy_egui",
+ "image",
+ "resvg",
+ "thalos_control",
+ "thalos_game_state",
+ "thalos_input",
+ "thalos_navigation",
+ "thalos_physics_canonical",
+ "thalos_physics_local",
+ "thalos_shipyard",
+ "thalos_ui",
+ "thalos_world",
+]
+
+[[package]]
 name = "thalos_input"
 version = "0.1.0"
 dependencies = [
@@ -9289,6 +9324,20 @@ dependencies = [
  "gilrs",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "thalos_map"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "thalos_control",
+ "thalos_game_state",
+ "thalos_input",
+ "thalos_physics_canonical",
+ "thalos_physics_local",
+ "thalos_ui",
+ "thalos_world",
 ]
 
 [[package]]
@@ -9346,15 +9395,21 @@ dependencies = [
  "serde",
  "serde_json",
  "thalos_body_render",
+ "thalos_body_shading",
  "thalos_capture_protocol",
  "thalos_celestial",
  "thalos_control",
  "thalos_diagnostics",
+ "thalos_game_state",
+ "thalos_hud",
  "thalos_input",
+ "thalos_map",
  "thalos_navigation",
  "thalos_physics_canonical",
  "thalos_physics_local",
  "thalos_shipyard",
+ "thalos_shipyard_editor",
+ "thalos_structures",
  "thalos_terrain",
  "thalos_ui",
  "thalos_weather",
@@ -9371,6 +9426,34 @@ dependencies = [
  "glam 0.32.1",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "thalos_shipyard_editor"
+version = "0.1.0"
+dependencies = [
+ "bevy",
+ "ron",
+ "serde",
+ "thalos_body_render",
+ "thalos_body_shading",
+ "thalos_diagnostics",
+ "thalos_game_state",
+ "thalos_input",
+ "thalos_shipyard",
+ "thalos_ui",
+]
+
+[[package]]
+name = "thalos_structures"
+version = "0.1.0"
+dependencies = [
+ "ab_glyph",
+ "bevy",
+ "thalos_body_render",
+ "thalos_game_state",
+ "thalos_terrain",
+ "thalos_world",
 ]
 
 [[package]]
@@ -9463,8 +9546,11 @@ dependencies = [
 name = "thalos_weather"
 version = "0.1.0"
 dependencies = [
+ "glam 0.32.1",
  "image",
  "rayon",
+ "thalos_terrain",
+ "thalos_world",
 ]
 
 [[package]]

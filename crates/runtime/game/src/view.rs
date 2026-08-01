@@ -28,19 +28,10 @@ use crate::game_context::GameContext;
 use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
 use crate::shipyard_editor::scene::EditorCamera;
 
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ViewMode {
-    Map,
-    #[default]
-    Ship,
-}
+pub use thalos_game_state::nav::{ViewMode, in_map_view};
+pub use thalos_game_state::ui::HideInShipView;
 
-/// Marker: entities with this component are hidden while the view is
-/// [`ViewMode::Ship`]. Attach to overlays that only make sense in the
-/// far-scale map view (planet icons, impostor billboards, maneuver arrows,
-/// ghost bodies, the flat ship marker).
-#[derive(Component)]
-pub struct HideInShipView;
+
 
 /// Marker: entities with this component are hidden while the view is
 /// [`ViewMode::Map`]. Attach to the 3D ship mesh and the real-scale body
@@ -215,9 +206,6 @@ fn apply_active_camera(
     }
 }
 
-pub fn in_map_view(view: Res<ViewMode>) -> bool {
-    *view == ViewMode::Map
-}
 
 fn toggle_view_input(
     input: Res<GameInputIntent>,

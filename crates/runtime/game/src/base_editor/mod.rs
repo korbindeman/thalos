@@ -32,7 +32,6 @@ mod pick;
 mod place;
 mod ui;
 
-pub use launch_select::SpaceportLaunchRequest;
 pub(crate) use place::place_on_launchpad;
 
 use bevy::math::{DQuat, DVec2, DVec3};

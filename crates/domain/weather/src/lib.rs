@@ -44,6 +44,8 @@
 
 use rayon::prelude::*;
 
+pub mod cloud_cube;
+
 const TAU: f32 = std::f32::consts::TAU;
 const PI: f32 = std::f32::consts::PI;
 

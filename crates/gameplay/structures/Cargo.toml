@@ -1,0 +1,24 @@
+[package]
+name = "thalos_structures"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Gameplay feature crate (ADR-20260731T024003Z, Phase 5b): the **geometry
+# layer** for terrain-anchored structures — runway frame/paving/markings/
+# designators and the taxiway/apron connection network. Frames and site params
+# in, meshes and materials out.
+#
+# The structure *drivers* (deferred placement, Avian colliders, per-frame f64
+# anchoring, spaceport orchestration, the base-editor state machine) stay in
+# thalos_runtime: they read canonical craft state and mutate the world. That
+# is the same state-in/pixels-out line the render crate holds.
+#
+# Depends only downward — NEVER on another feature crate or thalos_runtime.
+[dependencies]
+ab_glyph = "0.2"
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+thalos_body_render = { path = "../../rendering/render" }
+thalos_game_state = { path = "../state" }
+thalos_terrain = { path = "../../domain/terrain" }
+thalos_world = { path = "../../domain/world" }

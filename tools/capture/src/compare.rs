@@ -133,6 +133,35 @@ const TERRAIN_REGOLITH_FILTER_VARIANTS: &[Variant] = &[
 /// in the harness rather than in two hand-run screenshots
 /// (ADR-20260721T192218Z). Structural: the gate is read once at boot and decides
 /// which ground streams, so this axis always runs cold.
+/// Cascade budget, full set first. Unlike every other axis here this one is a
+/// COST ladder rather than a look comparison: each step removes one ortho view
+/// with its own cull, queue, depth pass and depth copy, so the `frame_gauge`
+/// deltas between neighbouring variants are the marginal price of that cascade.
+/// Read the perf lane, not just the contact sheet — though the sheet is what
+/// shows what the cascade was buying (BL-20260731T202656Z).
+const SHADOW_CASCADE_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "4-full",
+        value: "4",
+    },
+    Variant {
+        label: "3-no-near",
+        value: "3",
+    },
+    Variant {
+        label: "2",
+        value: "2",
+    },
+    Variant {
+        label: "1",
+        value: "1",
+    },
+    Variant {
+        label: "0-off",
+        value: "0",
+    },
+];
+
 /// Default first: `tiles` is the production ground renderer, `udlod` the
 /// legacy baseline it replaced.
 const RENDERER_VARIANTS: &[Variant] = &[
@@ -283,6 +312,11 @@ const AXES: &[Axis] = &[
         variants: TERRAIN_REGOLITH_FILTER_VARIANTS,
     },
     Axis {
+        name: "shadow-cascades",
+        env_key: "THALOS_SHADOW_CASCADES",
+        variants: SHADOW_CASCADE_VARIANTS,
+    },
+    Axis {
         name: "renderer",
         env_key: "THALOS_TILE_RENDERER",
         variants: RENDERER_VARIANTS,
@@ -392,9 +426,15 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
     // exists, so this structural axis cannot be changed safely in-process.
     // Structural axes decide something before (or instead of) a material
     // pipeline, so they cannot be flipped inside the persistent host: terrain
-    // culling specializes a pipeline at first use, and the renderer gate is a
-    // boot-time `OnceLock` that decides which ground streams at all.
-    let structural = matches!(args.axis.name, "terrain-culling" | "renderer");
+    // culling specializes a pipeline at first use, the renderer gate is a
+    // boot-time `OnceLock` that decides which ground streams at all, and the
+    // cascade budget is the same shape of `OnceLock` — a warm host would serve
+    // every variant at whatever count it booted with, which for a COST ladder
+    // means five identical numbers and a wrong conclusion.
+    let structural = matches!(
+        args.axis.name,
+        "terrain-culling" | "renderer" | "shadow-cascades"
+    );
     let cold = args.cold || structural;
     if structural && !args.cold {
         println!(

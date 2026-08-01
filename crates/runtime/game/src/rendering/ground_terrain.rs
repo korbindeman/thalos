@@ -35,7 +35,7 @@ use thalos_world::{BodyDefinition, BodyId};
 
 use std::collections::HashMap;
 
-use super::SCREEN_MARKER_RADIUS;
+use thalos_game_state::coords::SCREEN_MARKER_RADIUS;
 use super::ocean::BodyOcean;
 use super::tile_cache::TileCacheRegistry;
 use crate::camera::ShipCamera;

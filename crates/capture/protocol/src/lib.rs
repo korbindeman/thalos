@@ -728,6 +728,29 @@ impl CaptureTerrainResidency {
     }
 }
 
+/// Where a shot's canonical simulation time came from.
+///
+/// Recorded per shot because the lighting of a capture is entirely a function of
+/// it, and because the failure this enum exists to expose is silent: see
+/// [`CaptureClock::sim_time_s`].
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureTimeSource {
+    /// The spawn scenario's authored boot epoch — what an untimed shot resolves
+    /// to, and what makes repeat shots of one preset comparable.
+    PresetBootEpoch,
+    /// A saved viewpoint's recorded `sim_time_s`.
+    ViewpointMetadata,
+    /// An explicit `--time` / `THALOS_SCREENSHOT_TIME` from the caller.
+    CallerOverride,
+    /// Nothing pinned the time: the scenario authors no epoch and the caller
+    /// asked for none, so the image was rendered at whatever the host's clock
+    /// had reached. **The image is not reproducible** — a rerun on a warm host,
+    /// or after any other shot, can light it differently. Treated as a defect
+    /// to be closed by giving the scenario an epoch, not as a normal mode.
+    HostClock,
+}
+
 /// The clock the renderer produced this image under.
 ///
 /// A **wall** clock advances the world by however long each frame took, so the
@@ -737,26 +760,60 @@ impl CaptureTerrainResidency {
 /// `driven_dt_s` regardless of render cost, which is what makes a rerun
 /// comparable and what lets frame *n* of a sequence land at *n · dt*.
 ///
-/// `None` means the wall clock. That is also what a host predating the driven
-/// mode reports, and it is the truth for it — so an absent block is never
-/// ambiguous.
+/// `driven_dt_s = None` means the wall clock. That is also what a host predating
+/// the driven mode reports, and it is the truth for it — so an absent field is
+/// never ambiguous.
+///
+/// `driven_dt_s` is a **boot** property of the host; `sim_time_s` /
+/// `sim_time_source` are **per request**.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Serialize)]
 pub struct CaptureClock {
     #[serde(default)]
     pub driven_dt_s: Option<f64>,
+    /// Canonical simulation time (s) the world was seated to for this shot —
+    /// i.e. the time of day the image is lit by.
+    ///
+    /// Recorded because a wrong value here is otherwise undetectable from the
+    /// artifact: a resident host serves many requests, and until
+    /// BL-20260731T202657Z every request without an explicit `--time` simply
+    /// left the clock wherever the previous request had put it. That produced a
+    /// correct-looking PNG at another shot's sun, exit 0, and no way for the
+    /// agent reading the image to tell. Compare it against the preset's epoch
+    /// (or against the sibling shots of a comparison) before trusting a matched
+    /// pair.
+    ///
+    /// `None` only from a host predating the field.
+    #[serde(default)]
+    pub sim_time_s: Option<f64>,
+    #[serde(default)]
+    pub sim_time_source: Option<CaptureTimeSource>,
 }
 
 impl CaptureClock {
-    pub const WALL: Self = Self { driven_dt_s: None };
+    pub const WALL: Self = Self {
+        driven_dt_s: None,
+        sim_time_s: None,
+        sim_time_source: None,
+    };
 
     pub fn driven(dt_s: f64) -> Self {
         Self {
             driven_dt_s: Some(dt_s),
+            ..Self::WALL
         }
     }
 
     pub fn is_driven(&self) -> bool {
         self.driven_dt_s.is_some()
+    }
+
+    /// This shot's time was pinned by the preset, a viewpoint, or the caller —
+    /// so a rerun reproduces its lighting.
+    pub fn sim_time_pinned(&self) -> bool {
+        !matches!(
+            self.sim_time_source,
+            Some(CaptureTimeSource::HostClock) | None
+        )
     }
 }
 

@@ -120,118 +120,19 @@ impl AutoRun {
     }
 }
 
-/// Which scenario the player is dropped into. Selected once at startup in
-/// `main.rs`; inserted as a resource so deferred spawn finishers (today only
-/// [`refine_descent_spawn`]) can tell which path they belong to.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SpawnSituation {
-    /// Ship in the low equatorial parking orbit (default).
-    ShipOrbit,
-    /// Ship in a low polar parking orbit (same altitude as [`Self::ShipOrbit`],
-    /// inclination ≈ 90°).
-    PolarOrbit,
-    /// Player on foot at the sub-stellar point.
-    Eva,
-    /// Ship descending toward a landing site over land.
-    Landing,
-    /// Ship already low and slow over a flat dry patch.
-    FinalApproach,
-    /// Aircraft parked at rest on the Thalos surface runway, lined up on the
-    /// centerline ready for a takeoff roll. Placed by [`crate::runway`].
-    Runway,
-    /// Aircraft airborne on short final, lined up with the runway centerline
-    /// and descending toward it. Placed by [`crate::runway`].
-    RunwayApproach,
-    /// Saturn rocket standing vertically on a default-spaceport launchpad.
-    /// Placed by [`crate::runway`] through the shared launchpad placement core.
-    Launch,
-    /// Meridian aircraft at ~15,000 ft (~4,600 m AGL), flying level at cruise
-    /// speed over dry land. Placed by [`refine_descent_spawn`].
-    Cruise,
-}
+// `SpawnSituation` moved to `thalos_game_state::scenario` (Phase 5b);
+// placement, site search, and descent tuning stay in this module.
+pub use thalos_game_state::scenario::SpawnSituation;
 
-impl SpawnSituation {
-    /// Parse the `just game [mode]` argument / `THALOS_SPAWN` value. Unknown
-    /// values warn and fall back to the ship orbit.
-    pub fn from_request(request: &str) -> Self {
-        match request.trim().to_ascii_lowercase().as_str() {
-            "eva" => Self::Eva,
-            "land" | "landing" | "descent" => Self::Landing,
-            "final" | "final-approach" | "final_approach" | "approach" => Self::FinalApproach,
-            "runway" | "rwy" => Self::Runway,
-            "runway-approach" | "runway_approach" | "rwy-approach" | "approach-runway" => {
-                Self::RunwayApproach
-            }
-            "launch" | "launchpad" | "pad" => Self::Launch,
-            "cruise" | "cruising" => Self::Cruise,
-            "polar" | "polar-orbit" | "polar_orbit" => Self::PolarOrbit,
-            "" | "orbit" | "ship" => Self::ShipOrbit,
-            other => {
-                eprintln!("  Unknown spawn mode '{other}'; defaulting to ship orbit.");
-                Self::ShipOrbit
-            }
-        }
-    }
-
-    pub fn descent_label(self) -> Option<&'static str> {
-        self.descent_profile().map(|profile| profile.label)
-    }
-
-    /// True for the scenarios placed by the deferred descent finisher
-    /// ([`refine_descent_spawn`]): the two descents and cruise.
-    pub fn is_descent(self) -> bool {
-        self.descent_profile().is_some()
-    }
-
-    /// True for the two runway scenarios, which `crate::runway` finishes once
-    /// terrain is resident (and which load the aircraft blueprint instead of
-    /// the default rocket).
-    pub fn is_runway(self) -> bool {
-        matches!(self, Self::Runway | Self::RunwayApproach)
-    }
-
-    /// True for starts that build the canonical spaceport before placing the
-    /// craft: the two runway starts and the launchpad rocket start.
-    pub fn is_spaceport(self) -> bool {
-        self.is_runway() || matches!(self, Self::Launch)
-    }
-
-    /// True for scenarios that fly the Meridian aircraft (runway + cruise).
-    pub fn is_aircraft(self) -> bool {
-        matches!(self, Self::Runway | Self::RunwayApproach | Self::Cruise)
-    }
-
-    /// True when the surface state is installed by a *deferred*, terrain-aware
-    /// placement system ([`crate::runway`] for the runway scenarios,
-    /// [`refine_descent_spawn`] for the descents and cruise) rather than seeded
-    /// directly in `main.rs`. The settle gate must wait for that placement
-    /// before judging whether tiles at the (then-known) site have settled.
-    pub fn has_deferred_placement(self) -> bool {
-        self.is_spaceport() || self.descent_profile().is_some()
-    }
-
-    /// Ship blueprint to load for this scenario. Aircraft scenarios fly the
-    /// Meridian jetliner; everything else flies the default rocket.
-    pub fn ship_blueprint_path(self) -> &'static str {
-        match self {
-            Self::Launch => "ships/saturn.ron",
-            _ if self.is_aircraft() => "ships/meridian.ron",
-            _ => "ships/apollo.ron",
-        }
-    }
-
-    fn descent_profile(self) -> Option<DescentProfile> {
-        match self {
-            Self::Landing => Some(LANDING_PROFILE),
-            Self::FinalApproach => Some(FINAL_APPROACH_PROFILE),
-            Self::Cruise => Some(CRUISE_PROFILE),
-            Self::ShipOrbit
-            | Self::PolarOrbit
-            | Self::Eva
-            | Self::Runway
-            | Self::RunwayApproach
-            | Self::Launch => None,
-        }
+/// Descent tuning for the scenarios the deferred descent finisher places.
+/// (Was a private method on `SpawnSituation`; the enum moved to the
+/// blackboard and the tuning stayed here with its consumer.)
+fn descent_profile(situation: SpawnSituation) -> Option<DescentProfile> {
+    match situation {
+        SpawnSituation::Landing => Some(LANDING_PROFILE),
+        SpawnSituation::FinalApproach => Some(FINAL_APPROACH_PROFILE),
+        SpawnSituation::Cruise => Some(CRUISE_PROFILE),
+        _ => None,
     }
 }
 
@@ -706,7 +607,7 @@ fn refine_descent_spawn(
     mut tracker: ResMut<crate::loading::LoadingTracker>,
     height_sources: Res<HeightSourceRegistry>,
 ) {
-    if !placement.pending || situation.descent_profile().is_none() {
+    if !placement.pending || descent_profile(*situation).is_none() {
         return;
     }
     let Some((state, attitude)) = compute_descent_state(*situation, &sim, &height_sources) else {
@@ -737,7 +638,7 @@ pub(crate) fn compute_descent_state(
     sim: &SimulationState,
     height_sources: &HeightSourceRegistry,
 ) -> Option<(StateVector, AttitudeState)> {
-    let profile = situation.descent_profile()?;
+    let profile = descent_profile(situation)?;
     let body_id = sim.simulation.dominant_body();
     let height_source = height_sources.get(body_id)?;
 

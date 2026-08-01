@@ -30,10 +30,10 @@ use crate::SimStage;
 use crate::local_physics::ParkingBrake;
 use crate::sim_clock::SimClock;
 
-/// Number of flap lever detents past UP (1 = TAKEOFF, 2 = LANDING).
-pub const FLAP_DETENTS: u8 = 2;
-/// Flap lever detent used for a runway-ready takeoff configuration.
-pub const TAKEOFF_FLAP_DETENT: u8 = 1;
+pub use thalos_game_state::flight::{FLAP_DETENTS, FlightConfig};
+#[cfg(test)]
+use thalos_game_state::flight::TAKEOFF_FLAP_DETENT;
+
 /// Full flap travel time (UP → LANDING), seconds.
 const FLAP_TRAVEL_S: f64 = 6.0;
 /// Spoiler travel time, seconds.
@@ -49,48 +49,7 @@ const SPOILER_DEPLOY_AIRSPEED_M_S: f64 = 30.0;
 /// threshold as the rollout decays through it.
 const SPOILER_STOW_AIRSPEED_M_S: f64 = 20.0;
 
-/// Flap lever + spoiler state. The lever detent is written by
-/// [`update_flight_config`] (the `F`/`R` keys) and the HUD flap gate
-/// (`hud::flight_config_panel::handle_clicks`, click a segment to set that
-/// detent directly); the actuator fractions are solely
-/// [`update_flight_config`]'s. Read by the aero force
-/// system ([`crate::aero::apply_aero_forces`]), the control-surface visuals
-/// (`ship_view`), and the HUD flight-config pills.
-#[derive(Resource, Reflect, Clone, Copy, Default)]
-#[reflect(Resource)]
-pub struct FlightConfig {
-    /// Flap lever detent, `0..=FLAP_DETENTS` (0 = UP).
-    pub flap_setting: u8,
-    /// Actual flap actuator position in `[0, 1]` (chases the lever).
-    pub flap_fraction: f64,
-    /// Actual spoiler position in `[0, 1]` (chases the brakes toggle).
-    pub spoiler_fraction: f64,
-}
 
-impl FlightConfig {
-    /// Configuration for an aircraft already parked on a runway and ready to
-    /// begin its takeoff roll.
-    ///
-    /// The actuator starts at the commanded detent rather than travelling from
-    /// UP after the loading screen clears.
-    pub fn runway_takeoff() -> Self {
-        let flap_fraction = TAKEOFF_FLAP_DETENT as f64 / FLAP_DETENTS as f64;
-        Self {
-            flap_setting: TAKEOFF_FLAP_DETENT,
-            flap_fraction,
-            spoiler_fraction: 0.0,
-        }
-    }
-
-    /// HUD label for a flap lever detent (0 = UP, `FLAP_DETENTS` = LANDING).
-    pub fn detent_label(detent: u8) -> &'static str {
-        match detent {
-            0 => "UP",
-            1 => "T/O",
-            _ => "LDG",
-        }
-    }
-}
 
 pub struct FlightConfigPlugin;
 

@@ -32,6 +32,8 @@ use crate::rendering::SimulationState;
 use crate::sim_clock::SimClock;
 use crate::warp_to_maneuver::{WarpToManeuver, find_next_maneuver};
 
+pub use thalos_game_state::nav::WarpLimits;
+
 pub fn advance_simulation(clock: Res<SimClock>, mut sim: ResMut<SimulationState>) {
     let _span = tracing::info_span!("advance_simulation").entered();
 
@@ -155,27 +157,7 @@ fn update_prediction(
     sim.simulation.recompute_prediction();
 }
 
-/// Per-frame cap on warp level imposed by altitude above the dominant
-/// body. Computed by [`enforce_warp_altitude_limits`] each frame and read
-/// by [`handle_warp_controls`] to refuse manual escalation past the cap.
-///
-/// `max_level` is an index into `Simulation::warp.levels()`. The default
-/// `usize::MAX` means "no constraint" — used on the first frame before
-/// enforcement runs and whenever the craft is in a regime where canonical
-/// step does not propagate translation (landed, in the local-rigid-body
-/// bubble), so terrain phasing is impossible.
-#[derive(Resource, Debug, Clone)]
-pub struct WarpLimits {
-    pub max_level: usize,
-}
 
-impl Default for WarpLimits {
-    fn default() -> Self {
-        Self {
-            max_level: usize::MAX,
-        }
-    }
-}
 
 /// Apply the regime record's warp policy (A4, `docs/simulation/regimes.md`): publish
 /// `CraftRegime.warp.max_level` as [`WarpLimits`] for the input handler and
@@ -320,55 +302,9 @@ fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<Simulation
 // CraftStateMirror — Reflect-friendly snapshot of canonical ship state
 // ---------------------------------------------------------------------------
 
-/// Reflect-registered mirror of the canonical `CraftState`, refreshed
-/// once per frame by [`refresh_craft_state_mirror`]. The canonical
-/// state lives in `thalos_physics_canonical` (no Bevy dependency), so it cannot
-/// derive `Reflect` directly; this resource is a read-only Reflect-registered
-/// projection (for the HUD / a future debug overlay).
-#[derive(Resource, Reflect, Default, Clone, Debug)]
-#[reflect(Resource)]
-pub struct CraftStateMirror {
-    pub sim_time_s: f64,
-    pub warp_speed: f64,
-    pub position_m: [f64; 3],
-    pub velocity_m_s: [f64; 3],
-    /// World-frame angular velocity of the craft (rad/s). In the local
-    /// bubble this is the live Avian body rate (written back to canonical by
-    /// `local_physics::readback_local_craft`); a diagnostic for attitude /
-    /// control-stability work — a steady non-decaying oscillation here is
-    /// SAS chatter. See `docs/simulation/control.md`.
-    pub angular_velocity_rad_s: [f64; 3],
-    pub mass_kg: f64,
-    pub dominant_body_id: u32,
-    /// Discriminant name of `AuthorityMode` (variant fields elided).
-    pub authority: String,
-    /// Whole-craft structural failure from a terrain impact. See
-    /// `docs/simulation/surface.md`.
-    pub destroyed: bool,
-    /// Surface-relative approach speed (m/s) of the destroying impact;
-    /// `0.0` unless `destroyed`.
-    pub last_impact_speed_m_s: f64,
-    /// Aggregate thrust currently pushed into the propagator (N). Zero
-    /// means no engine is producing thrust this frame (e.g. air-breathing
-    /// jets with no intake air). Diagnostic mirror of
-    /// `ship_params().thrust_n`.
-    pub thrust_n: f64,
-    /// Altitude above the dominant body's reference radius (m).
-    pub altitude_m: f64,
-    /// Whether the dominant body has a `terrestrial_atmosphere` block.
-    pub has_atmosphere: bool,
-    /// Kármán line of the dominant body's atmosphere (m); 0 if none.
-    pub karman_line_m: f64,
-    /// Whether the ship is currently inside the breathable column (the
-    /// gate air-breathing jets check). Diagnostic mirror of
-    /// `fuel::ship_in_atmosphere`.
-    pub in_atmosphere: bool,
-    /// Number of engines that passed every propulsion gate this frame
-    /// (enabled, positive thrust/isp, atmosphere ok, intake satisfied,
-    /// reactants present). Zero with `in_atmosphere == true` means the
-    /// gate that killed thrust is *not* the atmosphere.
-    pub propulsion_engine_count: u32,
-}
+// Moved to `thalos_game_state::craft` (Phase 5a); the sole writer stays
+// below.
+pub use thalos_game_state::craft::CraftStateMirror;
 
 fn refresh_craft_state_mirror(
     sim: Res<SimulationState>,
@@ -436,7 +372,7 @@ impl Plugin for BridgePlugin {
                     handle_warp_controls,
                     advance_simulation,
                     sync_maneuver_plan,
-                    update_prediction,
+                    update_prediction.in_set(thalos_game_state::sched::PredictionSet),
                     refresh_craft_state_mirror,
                 )
                     .chain()

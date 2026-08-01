@@ -11,7 +11,13 @@ thalos_navigation = { path = "../../simulation/navigation" }
 thalos_world = { path = "../../domain/world" }
 thalos_input = { path = "../../interface/input" }
 thalos_ui = { path = "../../interface/ui" }
+thalos_game_state = { path = "../../gameplay/state" }
+thalos_hud = { path = "../../gameplay/hud" }
+thalos_map = { path = "../../gameplay/map" }
+thalos_structures = { path = "../../gameplay/structures" }
+thalos_shipyard_editor = { path = "../../gameplay/shipyard_editor" }
 thalos_body_render = { path = "../../rendering/render" }
+thalos_body_shading = { path = "../../rendering/shading" }
 thalos_terrain = { path = "../../domain/terrain" }
 thalos_weather = { path = "../../domain/weather" }
 thalos_physics_local = { path = "../../simulation/physics_local" }

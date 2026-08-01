@@ -34,7 +34,6 @@ pub(crate) mod ssao;
 pub(crate) mod sun_shadow;
 pub(crate) mod terrain_residency;
 pub(crate) mod tile_terrain;
-mod trails;
 pub(crate) mod transforms;
 mod types;
 mod vapor_cone;
@@ -45,16 +44,9 @@ pub(crate) mod view_anchor;
 /// shadows (the world `SunLight`, the shipyard editor's key light, and the
 /// otherwise-shadowless `MoonLight`).
 ///
-/// Bevy 0.19's `check_dir_light_mesh_visibility` reuses one
-/// `Local<Parallel<Vec<Vec<Entity>>>>` thread-queue across frames *and* across
-/// lights, resizing each participating worker's slot to the current light's
-/// cascade count. If two shadow-casting directional lights disagree on that
-/// count, a worker truncated by the smaller-cascade light and then skipped by
-/// the larger-cascade light's `par_iter` gets over-indexed at collection —
-/// panicking with `index out of bounds` (observed as a 2-vs-4 mismatch between
-/// `SunLight` and the shipyard key light). Keeping one count everywhere makes
-/// the thread-queue slots uniform so the over-index can never happen.
-pub const SHADOW_CASCADE_COUNT: usize = 2;
+// `SHADOW_CASCADE_COUNT` moved to `thalos_body_shading` (Phase 5b) so
+// feature crates spawning lights can pin it without a runtime dep.
+pub use thalos_body_shading::SHADOW_CASCADE_COUNT;
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, sync_body_icons};
@@ -80,7 +72,7 @@ use real_space::{
 use scene_depth::SceneDepthPlugin;
 use spawn::spawn_bodies;
 use terrain_residency::TerrainResidencyPlugin;
-use trails::{draw_orbits, recompute_orbit_trails};
+use thalos_map::trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_ship_position};
 pub use transforms::{update_render_frame, update_render_origin};
 pub use types::{
@@ -91,21 +83,12 @@ pub use types::{
 use crate::SimStage;
 use crate::solar_system_state::sync_solar_system_state;
 use bevy::prelude::*;
+
+pub use thalos_game_state::coords::screen_marker_radius;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.
 pub use crate::coords::{RenderFrame, RenderOrigin};
 
-/// Radius of screen-stable marker billboards as a fraction of camera distance
-/// (in render units). Bodies whose rendered sphere is smaller than this get
-/// replaced by a fixed-size circle billboard, and map-view marker overlays
-/// use the same value so every marker family has the same screen size.
-pub(crate) const SCREEN_MARKER_RADIUS: f32 = 0.006;
 
-/// Render-space radius for a marker that should keep the same screen size as
-/// the body icon billboards.
-#[inline]
-pub(crate) fn screen_marker_radius(world_pos: Vec3, camera_pos: Vec3) -> f32 {
-    (world_pos - camera_pos).length().max(1.0) * SCREEN_MARKER_RADIUS
-}
 
 pub struct RenderingPlugin;
 
@@ -195,7 +178,9 @@ impl Plugin for RenderingPlugin {
                     // gets at Startup; no-op once attached (see the fn docs).
                     attach_player_ship_to_big_space,
                     update_render_origin.after(sync_solar_system_state),
-                    update_render_frame.after(sync_solar_system_state),
+                    update_render_frame
+                        .after(sync_solar_system_state)
+                        .in_set(thalos_game_state::sched::RenderFrameSet),
                     update_body_positions
                         .after(update_render_origin)
                         .after(crate::map_view::update_map_snapshot),

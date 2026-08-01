@@ -36,7 +36,7 @@ use thalos_physics_canonical::canonical::{AuthorityMode, CraftId};
 use thalos_physics_canonical::types::{ShipParameters, VesselKind};
 use thalos_shipyard::{
     Attachment, CommandPod, Decoupler, Engine, EngineActivation, Part, PartResources, PartRole,
-    Resource, ResourceTotals, StageSummary, SummaryEngine, SummaryPart, SummaryStageInput,
+    Resource, ResourceTotals, SummaryEngine, SummaryPart, SummaryStageInput,
     SurfaceMount, compute_stage_summaries, derive_stages, live_part_centroid_offset,
     live_part_dry_mass_kg, live_part_self_inertia, live_part_total_mass_kg, parallel_axis_inertia,
 };
@@ -47,6 +47,8 @@ use crate::rendering::{PlayerShip, SimulationState};
 use crate::ship_view::{CraftIdentity, CraftPart, CraftRoot, PartVisual};
 use crate::shrouds::{Shroud, ShroudFired};
 use crate::view::HideInMapView;
+
+pub use thalos_game_state::flight::StagingSummaries;
 
 pub struct StagingPlugin;
 
@@ -125,14 +127,14 @@ impl StagingPlan {
 /// engine or decoupler state. [`activate_stage`] remains the one canonical
 /// staging operation for both the space-bar and automation.
 #[derive(Resource, Debug, Default)]
-pub(crate) struct StageDemand {
+pub struct StageDemand {
     next_id: u64,
     pending: Option<u64>,
     completed: Option<(u64, bool)>,
 }
 
 impl StageDemand {
-    pub(crate) fn request(&mut self) -> u64 {
+    pub fn request(&mut self) -> u64 {
         if let Some(id) = self.pending {
             return id;
         }
@@ -141,17 +143,24 @@ impl StageDemand {
         self.next_id
     }
 
-    pub(crate) fn outcome(&self, id: u64) -> Option<bool> {
+    pub fn outcome(&self, id: u64) -> Option<bool> {
         self.completed
             .filter(|(completed_id, _)| *completed_id == id)
             .map(|(_, ok)| ok)
     }
 
-    pub(crate) fn cancel(&mut self, id: u64) {
+    pub fn cancel(&mut self, id: u64) {
         if self.pending == Some(id) {
             self.pending = None;
             self.completed = Some((id, false));
         }
+    }
+
+    /// Test-only acknowledgement, standing in for [`activate_stage`] so the
+    /// staging sequencer's state machine can be driven without a World.
+    #[cfg(test)]
+    pub(crate) fn test_complete(&mut self, ok: bool) {
+        self.complete(ok);
     }
 
     fn complete(&mut self, ok: bool) {
@@ -1019,15 +1028,6 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
 // Per-stage Δv / fuel readout
 // ---------------------------------------------------------------------------
 
-/// Per-stage readout, published each frame from the live parts and the
-/// [`StagingPlan`] and consumed by the bottom-right HUD panel. Empty when
-/// there is no staged vessel (e.g. EVA). Each [`StageSummary`] is the shared
-/// type from [`thalos_shipyard::staging`], so the HUD and the shipyard
-/// editor's preview render the same shape.
-///
-/// **Sole writer:** [`publish_staging_summaries`].
-#[derive(Resource, Default)]
-pub struct StagingSummaries(pub Vec<StageSummary>);
 
 /// Gather the live parts + plan into the pure summary inputs, compute, and
 /// publish [`StagingSummaries`] for the HUD. Per-part dry mass comes from the

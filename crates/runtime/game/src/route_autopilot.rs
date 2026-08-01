@@ -13,13 +13,14 @@ use thalos_navigation::{ApproachPhase, GS_FULL_SCALE_RAD, LOC_FULL_SCALE_RAD};
 use thalos_physics_local::LocalCraftKinematics;
 
 use crate::SimStage;
-use crate::autopilot::{AutoflightMode, Autopilot};
 use crate::flight_config::{FLAP_DETENTS, FlightConfig};
 use crate::fuel::{PilotThrottleInput, ThrottleState};
 use crate::local_physics::{GearState, ParkingBrake, WeightOnWheels};
 use crate::rendering::SimulationState;
 use crate::route::RouteState;
 use crate::sim_clock::SimClock;
+
+pub use thalos_game_state::nav::{LandAutopilot, LandPhase};
 
 const PILOT_OVERRIDE_DEADZONE_SQ: f32 = 0.05 * 0.05;
 const FLARE_HEIGHT_M: f64 = 18.0;
@@ -32,95 +33,9 @@ const APPROACH_ALPHA_BIAS_RAD: f64 = 4.0_f64.to_radians();
 const FLARE_PITCH_RAD: f64 = 7.0_f64.to_radians();
 const GO_AROUND_PITCH_RAD: f64 = 10.0_f64.to_radians();
 
-/// Public phase for the HUD and diagnostics.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum LandPhase {
-    #[default]
-    Off,
-    Enroute,
-    TerminalCapture,
-    Final,
-    Flare,
-    Rollout,
-    GoAround,
-    Stopped,
-    Unable,
-}
 
-/// Stateful LAND executor. `demand` is private to keep this module the sole
-/// state-machine writer; the control bus reads it through [`demand`].
-#[derive(Resource, Debug)]
-pub struct LandAutopilot {
-    phase: LandPhase,
-    demand: ControlDemand,
-    speed_integral: f64,
-    contact_s: f64,
-    airborne_s: f64,
-    stopped_s: f64,
-    go_arounds: u8,
-    go_around_s: f64,
-    diagnostic_s: f64,
-}
 
-impl Default for LandAutopilot {
-    fn default() -> Self {
-        Self {
-            phase: LandPhase::Off,
-            demand: ControlDemand::NONE,
-            speed_integral: 0.0,
-            contact_s: 0.0,
-            airborne_s: 0.0,
-            stopped_s: 0.0,
-            go_arounds: 0,
-            go_around_s: 0.0,
-            diagnostic_s: 0.0,
-        }
-    }
-}
 
-impl LandAutopilot {
-    pub fn phase(&self) -> LandPhase {
-        self.phase
-    }
-
-    pub(crate) fn demand(&self) -> ControlDemand {
-        self.demand
-    }
-
-    pub(crate) fn active(&self) -> bool {
-        !matches!(
-            self.phase,
-            LandPhase::Off | LandPhase::Stopped | LandPhase::Unable
-        )
-    }
-
-    fn reset_for_engagement(&mut self, phase: LandPhase) {
-        self.phase = phase;
-        self.demand = ControlDemand::NONE;
-        self.speed_integral = 0.0;
-        self.contact_s = 0.0;
-        self.airborne_s = 0.0;
-        self.stopped_s = 0.0;
-        self.go_arounds = 0;
-        self.go_around_s = 0.0;
-        self.diagnostic_s = 0.0;
-    }
-
-    fn set_phase(&mut self, next: LandPhase) {
-        if self.phase == next {
-            return;
-        }
-        info!(
-            target: "thalos::diagnostic::approach_ap",
-            event = "land_phase",
-            from = ?self.phase,
-            to = ?next,
-            go_arounds = self.go_arounds,
-            "LAND phase transition"
-        );
-        self.phase = next;
-    }
-}
 
 pub struct RouteAutopilotPlugin;
 
@@ -139,7 +54,6 @@ impl Plugin for RouteAutopilotPlugin {
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_land_autopilot(
-    mut autopilot: ResMut<Autopilot>,
     mut land: ResMut<LandAutopilot>,
     mut route: ResMut<RouteState>,
     input: Res<GameInputIntent>,
@@ -153,7 +67,8 @@ pub(crate) fn update_land_autopilot(
     sim: Res<SimulationState>,
     clock: Res<SimClock>,
 ) {
-    if autopilot.mode() != AutoflightMode::Land {
+    // The program's own selection flag, not a shared mode slot.
+    if !land.engaged {
         land.demand = ControlDemand::NONE;
         if !matches!(land.phase, LandPhase::Stopped | LandPhase::Unable) {
             land.phase = LandPhase::Off;
@@ -174,14 +89,14 @@ pub(crate) fn update_land_autopilot(
             phase = ?land.phase,
             "LAND disengaged by pilot"
         );
-        autopilot.select_mode(AutoflightMode::Off);
+        land.engaged = false;
         land.phase = LandPhase::Off;
         land.demand = ControlDemand::NONE;
         return;
     }
 
     if sim.simulation.is_destroyed() {
-        autopilot.select_mode(AutoflightMode::Off);
+        land.engaged = false;
         land.phase = LandPhase::Unable;
         land.demand = ControlDemand::NONE;
         return;
@@ -202,7 +117,7 @@ pub(crate) fn update_land_autopilot(
                 reason = "no_runway_guidance",
                 "LAND unavailable"
             );
-            autopilot.select_mode(AutoflightMode::Off);
+            land.engaged = false;
             land.phase = LandPhase::Unable;
             return;
         };
@@ -266,7 +181,7 @@ pub(crate) fn update_land_autopilot(
                 phase = ?land.phase,
                 "LAND unable to recover"
             );
-            autopilot.select_mode(AutoflightMode::Off);
+            land.engaged = false;
             land.set_phase(LandPhase::Unable);
             land.demand = ControlDemand::NONE;
             return;
@@ -405,7 +320,7 @@ pub(crate) fn update_land_autopilot(
                     go_arounds = land.go_arounds,
                     "LAND complete: aircraft stopped"
                 );
-                autopilot.select_mode(AutoflightMode::Off);
+                land.engaged = false;
             }
         }
         LandPhase::GoAround => {

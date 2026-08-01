@@ -16,6 +16,7 @@ pub mod catalog;
 pub mod cockpit_mesh;
 pub mod engine_mesh;
 pub mod fairing_mesh;
+pub mod flyability;
 pub mod fuselage_mesh;
 pub mod gear_mesh;
 pub mod part;

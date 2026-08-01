@@ -9,11 +9,8 @@ use bevy::prelude::*;
 
 use crate::rendering::SimulationState;
 
-/// Currently selected target body (world ID, not entity id).
-#[derive(Resource, Default, Debug, Clone, Copy)]
-pub struct TargetBody {
-    pub target: Option<usize>,
-}
+pub use thalos_game_state::nav::TargetBody;
+
 
 pub struct TargetPlugin;
 

@@ -1,0 +1,25 @@
+[package]
+name = "thalos_game_state"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# The game-state blackboard (ADR-20260731T024003Z, Phase 5a): the shared
+# resource/component vocabulary every gameplay feature crate reads and the
+# runtime writes. TYPES ONLY — accessors and single-writer doc comments live
+# here; the systems that write these resources stay with the runtime (or the
+# feature crate that owns them). Append-biased: reshaping a type here rebuilds
+# every feature crate, so batch reshapes.
+#
+# Depends only downward: bevy + pure domain crates. NEVER add a rendering or
+# feature-crate dependency here.
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+serde = { version = "1.0", features = ["derive"] }
+thalos_control = { path = "../../simulation/control" }
+thalos_navigation = { path = "../../simulation/navigation" }
+thalos_physics_canonical = { path = "../../simulation/physics_canonical" }
+thalos_shipyard = { path = "../../domain/construction" }
+thalos_terrain = { path = "../../domain/terrain" }
+thalos_weather = { path = "../../domain/weather" }
+thalos_world = { path = "../../domain/world" }

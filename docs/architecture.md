@@ -134,14 +134,13 @@ crates/
     input/
     ui/
   gameplay/
-    state/                      # (planned, Phase 5a) thalos_game_state: the
-                                #   types-only blackboard feature crates share
-    hud/                        # (planned, Phase 5b) flight HUD + navball + MFD
-    map/                        # (planned, Phase 5b) map view, maneuver
-                                #   planning, flight-plan display
-    shipyard_editor/            # (planned, Phase 5b) the in-game VAB editor
-    structures/                 # (planned, Phase 5b w/ cleanup pkg D) terrain-
-                                #   anchored structures, runway geometry, bases
+    state/                      # thalos_game_state: the types-only blackboard
+                                #   every feature crate shares
+    hud/                        # flight HUD + navball + MFD + input gates
+    map/                        # map view, maneuver planning, trails, ghosts
+    shipyard_editor/            # the in-game VAB editor
+    structures/                 # runway + connection GEOMETRY (the placement
+                                #   drivers stay in runtime)
   runtime/
     game/                       # lib: thalos_runtime, sole app composition
   capture/
@@ -293,28 +292,56 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
   sequenced as backlog Track 1 rows). Measured baseline 2026-07-31:
   `thalos_runtime` is ~93 kLOC, ~43% of workspace Rust; the blocker is that
   the shared game-state resources are defined inside runtime modules.
-  - **5a — the state seam (prerequisite).** Extract **`thalos_game_state`**
-    (`crates/gameplay/state`): `SolarSystemState`/`SimulationState`,
-    `CraftStateMirror`, `ViewAnchor`, `GameContext` + `ContextHistory`,
-    `SimClock`, `MapSnapshot`, `UnitsSettings`, `ActiveCraft`,
-    regime/authority resources, and the small shared component vocabulary
-    (`PlayerShip`/`CraftRoot`, `CelestialBody`, …). Types, accessors, and
-    single-writer doc comments only — no systems. Pure move, compile-neutral.
-    Single-writer invariants move with their doc comments; the sole writers
-    stay in runtime (or in the feature crate that owns them after a peel).
-  - **5b — peel the leaves** (each independent once 5a lands; runtime lands at
-    ~50 kLOC of drivers, spawn/scenario machinery, and glue):
-    - `thalos_shipyard_editor` (~6 kLOC) — cheapest, most self-contained;
-      partner of `thalos_shipyard`.
-    - `thalos_hud` (hud/ + navball + velocity_frame + units display,
-      ~12 kLOC) — biggest single win; also the natural home for the
-      nav-display preview harness.
-    - `thalos_map` (maneuver/, flight_plan_view/, map_view,
-      body_tree_panel, trails, ~8 kLOC) — already hard-bounded by the
-      `MapSnapshot` invariant.
-    - `thalos_structures` (base_editor/ + structures + runway geometry,
-      ~7 kLOC) — this is cleanup package D wearing a crate boundary; do D as
-      an extraction and get both for one price.
+  - **5a — the state seam (prerequisite). Landed 2026-07-31 (verify).**
+    **`thalos_game_state`** (`crates/gameplay/state`) exists: 12 modules
+    holding `AppState`/`WorldState`, `GameContext` + `ContextHistory`,
+    `SimClock`/`SimClockDrive`, `UnitsSettings`, the coords vocabulary, the
+    scene vocabulary (`PlayerShip`, `CelestialBody`, `ActiveCraft`,
+    `TidallyLocked`, `CameraExposure`, …), the **surface-orientation
+    authority** (`surface_frame`, moved from `rendering/transforms` —
+    `authored_lock_parent` / `surface_orientation_authored` and kin),
+    `SimulationState`/`SolarSystemState`/`BodyEnvironmentState`,
+    `MapSnapshot`, `CraftStateMirror`, `CraftRegimeState`/`AvianAuthority`,
+    and `ViewAnchor`/`AnchorBody`. Types, accessors, and single-writer doc
+    comments only — every sole writer stayed in runtime; every old path kept
+    via transitional re-exports (the Phase-1 precedent), so no call site
+    changed. Two enabling moves landed with it: the **cloud weather cube**
+    (`CloudWeatherField`, its derivation, and the one `COVERAGE_SCALE` trim)
+    moved to `thalos_weather::cloud_cube` — weather iteration no longer
+    rebuilds the runtime — and `CLOUD_BAND_COUNT` moved down to
+    `thalos_world::atmosphere` (re-exported from `thalos_body_shading`) so
+    the state crate carries no rendering dependency.
+  - **5b — peel the leaves.** Three landed 2026-07-31 (verify); runtime went
+    **93.4 kLOC → 63.6 kLOC**:
+    - **`thalos_shipyard_editor`** (~6.2 kLOC) — the VAB editor.
+    - **`thalos_hud`** (~11.2 kLOC) — panels, navball, MFD, velocity frame,
+      UI input gates. Also the natural home for the nav-display preview.
+    - **`thalos_map`** (~7.1 kLOC) — maneuver interaction, flight-plan
+      ghosts, map view, body tree panel, orbit trails.
+
+    Each keeps a `mod <name> { pub use thalos_<name>::*; }` shim in the
+    runtime, so no call site changed. Their extraction grew the blackboard to
+    ~4.4 kLOC across 20 modules — notably `flight`, `nav`, `structures`,
+    `camera`, `debug`, `ui`, `scenario`, `relaunch`, `maneuver_plan`, and
+    **`sched`**. `sched` is the pattern worth copying: a feature crate orders
+    against a published **`SystemSet`** (`SimStage`, `RealizeControlSet`,
+    `SolarSystemSyncSet`, `PredictionSet`, `RenderFrameSet`), never against
+    another crate's function item.
+
+    - **`thalos_structures`** (~1.1 kLOC) — runway + connection **geometry**
+      only. Measuring the cluster before moving it changed the plan: most of
+      `runway.rs` + `base_editor/` is *sim-coupled driver* (deferred
+      placement, Avian collider, per-frame f64 anchoring, spaceport
+      orchestration, the editor state machine), which stays in the runtime on
+      the same state-in/pixels-out line the render crate holds. **This is the
+      bar working as intended** — a peel is worth what the boundary buys, not
+      what the directory contains, and the honest boundary here was narrow.
+      The semantic half of cleanup package D (connections into
+      `StructureRegistry`, the shared `snap_to_body_surface`) is deliberately
+      *not* bundled: it is behaviour work, and mixing it into a pure move
+      would make the visual diff meaningless (backlog CL-D2).
+
+    Still queued:
     - Capture presets (`screenshot.rs` + viewpoints, ~7 kLOC) — wants to move
       toward `capture/`, but is scenario-coupled; last in line, possibly
       staying in runtime.
@@ -352,6 +379,33 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   and its bodies: `BodyDefinition`, `OrbitalElements`, `StateVector`, the RON
   loader (`parsing`), and the body subsystem-config aggregate. Pure Rust, no
   Bevy. Consumed by physics, terrain gen, and rendering.
+- **`thalos_hud`** — *(Phase 5b, new)* the flight HUD feature crate: panels,
+  the navball, the MFD widget slot, the velocity-frame selector, and the UI
+  input gates (its `update_ui_input_gates` is the sole writer of the gate
+  resources). `crates/gameplay/hud`.
+- **`thalos_structures`** — *(Phase 5b, new)* terrain-anchored structure
+  **geometry**: the runway frame, paving/skirt/marking meshes, the ICAO
+  designator rasterizer, posts and materials, authored site math, and the
+  taxiway/apron connection network (including `PavedFootprints`, which scatter
+  clears against). Frames in, meshes out; the drivers stay in the runtime.
+  `crates/gameplay/structures`.
+- **`thalos_map`** — *(Phase 5b, new)* the map/planning surface: sole writer
+  of `MapSnapshot`, plus orbit trails, flight-plan ghosts, maneuver-node
+  interaction, and the body tree panel. Never touches real-space entities.
+  `crates/gameplay/map`.
+- **`thalos_shipyard_editor`** — *(Phase 5b, new)* the in-game VAB editor
+  application (UI-agnostic core + native Bevy-UI front-end) over the
+  `thalos_shipyard` construction model. `crates/gameplay/shipyard_editor`.
+- **`thalos_game_state`** — *(Phase 5a, new)* the game-state **blackboard**:
+  the shared resource/component vocabulary every gameplay feature crate reads
+  and the runtime writes (`AppState`/`WorldState`, `GameContext`, `SimClock`,
+  `UnitsSettings`, coords, the scene vocabulary, the surface-orientation
+  authority, `SolarSystemState`/`SimulationState`, `MapSnapshot`,
+  `CraftStateMirror`, regime/authority records, `ViewAnchor`). Types +
+  accessors + single-writer doc comments only — systems stay with their
+  owners; depends only on bevy + pure domain crates, never on rendering or a
+  feature crate. Append-biased: reshaping a type here rebuilds every feature
+  crate. See ADR-20260731T024003Z and *Phase 5* above.
 - **`thalos_physics_canonical`** — pure Rust orbital-mechanics algorithms +
   runtime simulation state; depends on `thalos_world`. (Name contrasts with
   `physics_local`/Avian, not a claim of being the foundation.) Also hosts the

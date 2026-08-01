@@ -473,15 +473,51 @@ Read the other fields before blaming the framing:
 - `brake_wait_s` above zero with `split_scale` back at 1.0 is the readback gate
   working: it waited, the brake let go, the image is good.
 
-### 6.2 Clock — wall or driven
+### 6.2 Clock — wall or driven, and the shot's time of day
 
 Every receipt carries a `clock` block:
 
 ```json
-"clock": { "driven_dt_s": 0.016666666666666666 }
+"clock": {
+  "driven_dt_s": 0.016666666666666666,
+  "sim_time_s": 59100.0,
+  "sim_time_source": "preset_boot_epoch"
+}
 ```
 
-`null` (the default) is the **wall** clock: every warmup frame advances the
+`driven_dt_s` is a **boot** property of the host; `sim_time_s` and
+`sim_time_source` are **per request**.
+
+#### The shot's canonical time is absolute, and the receipt says where it came from
+
+`sim_time_s` is the canonical simulation time the world was seated to — i.e. the
+time of day the image is lit by. It is resolved for **every** request, in this
+precedence:
+
+| `sim_time_source` | Meaning |
+|---|---|
+| `caller_override` | `--time <s>` / `THALOS_SCREENSHOT_TIME` |
+| `viewpoint_metadata` | a saved viewpoint's recorded `sim_time_s` |
+| `preset_boot_epoch` | the spawn scenario's authored epoch (`runway::canonical_epoch_s`) — what an untimed shot pins to |
+| `host_clock` | **nothing pinned it.** The scenario authors no epoch and no `--time` was given, so the image was rendered at whatever the resident host's clock had reached. **Not reproducible** — see below. |
+
+The fallback is the load-bearing part. A resident host serves many requests but
+the scenario seats the clock only once, at placement, so before
+BL-20260731T202657Z a request that specified no time silently inherited the
+previous request's: `just screenshot spaceport-aerial --time 69000` followed by
+`just screenshot spaceport-aerial` rendered the second shot at 69000. Exit 0,
+plausible PNG, wrong sun, and no field in the receipt to catch it — the BL-20
+class. **Check `sim_time_source` before trusting a matched pair**, and check that
+the sibling shots of a comparison agree on `sim_time_s`.
+
+`host_clock` is a defect to be closed by giving the scenario an authored epoch,
+not a supported mode; today only the spaceport scenarios (the two runway starts
+and the launchpad) author one, so the other presets still report it and log a
+`warn!` per shot saying so.
+
+#### Wall or driven
+
+`driven_dt_s: null` (the default) is the **wall** clock: every warmup frame advances the
 world by however long that frame took, so the same preset settles to a
 different world state on a busy machine than on an idle one — visible wherever
 anything is time-dependent (cloud advection, plumes, the settle gate). A number

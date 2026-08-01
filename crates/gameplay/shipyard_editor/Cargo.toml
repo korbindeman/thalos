@@ -1,0 +1,23 @@
+[package]
+name = "thalos_shipyard_editor"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Gameplay feature crate (ADR-20260731T024003Z, Phase 5b): the in-game VAB /
+# shipyard editor application — UI-agnostic core (EditorState command/state
+# hub, placement, live mesh rebuilds, shrouds, blueprint save/load) plus the
+# native Bevy-UI front-end. Depends only downward (construction model, UI kit,
+# rendering libraries, the game-state blackboard) — NEVER on another feature
+# crate or on thalos_runtime.
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+ron = "0.12"
+serde = { version = "1.0", features = ["derive"] }
+thalos_diagnostics = { workspace = true }
+thalos_body_render = { path = "../../rendering/render" }
+thalos_body_shading = { path = "../../rendering/shading" }
+thalos_game_state = { path = "../state" }
+thalos_input = { path = "../../interface/input" }
+thalos_shipyard = { path = "../../domain/construction" }
+thalos_ui = { path = "../../interface/ui" }

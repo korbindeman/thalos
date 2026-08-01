@@ -48,6 +48,8 @@ use std::sync::{Arc, RwLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::RenderLayers;
+use bevy::camera::primitives::Aabb;
+use bevy::camera::visibility::NoAutoAabb;
 use bevy::math::{DQuat, DVec3};
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -573,6 +575,9 @@ struct BuiltTile {
     /// range, so "heights sampled" vs "heights in the mesh" separate in the
     /// telemetry.
     mesh_h: (f32, f32),
+    /// Culling box over the surface band only, excluding the skirt curtain —
+    /// see where it is built in [`build_tile_mesh`].
+    surface_aabb: Aabb,
 }
 
 /// Debug relief exaggeration (`THALOS_TILE_HEIGHT_SCALE`, default 1.0) —
@@ -728,6 +733,29 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64, relief_m: f64) -> BuiltTil
     };
     let down = -key.center_dir();
     let base = positions.len() as u32;
+    // The SURFACE band, measured before the skirt curtain is appended below.
+    //
+    // Bevy derives a mesh's culling `Aabb` from all of its positions, and the
+    // curtain hangs every border vertex down to the body-wide floor sphere —
+    // `relief_m` below the datum, ~10 km on Thalos. So the automatic box for a
+    // 300 m tile is ~10 km TALL: a 35:1 slab that intersects almost any frustum
+    // pointed anywhere near the body, which makes frustum culling nearly
+    // inoperative for tiles. That is invisible in the main view (one camera,
+    // and the tiles were going to be drawn anyway) and expensive in the shadow
+    // rig, where it put 122 terrain tiles inside a cascade covering 64 m of
+    // ground. Handing the caster twin this tight box instead restores real
+    // culling; the curtain still rasterizes whenever the surface is in frame,
+    // which is the only time it is anything but buried (BL-20260731T202656Z).
+    let surface_aabb = positions[..base as usize].iter().fold(
+        ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
+        |(mut lo, mut hi), p| {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(p[axis]);
+                hi[axis] = hi[axis].max(p[axis]);
+            }
+            (lo, hi)
+        },
+    );
     for &idx in &border {
         let p = positions[idx as usize];
         let abs = origin + DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64);
@@ -764,6 +792,10 @@ fn build_tile_mesh(tile: &SurfaceTile, radius_m: f64, relief_m: f64) -> BuiltTil
         mesh,
         origin,
         mesh_h,
+        surface_aabb: Aabb::from_min_max(
+            Vec3::from_array(surface_aabb.0),
+            Vec3::from_array(surface_aabb.1),
+        ),
     }
 }
 
@@ -840,6 +872,19 @@ struct StreamedTile {
     /// [`height_mirror`]).
     heights_m: Arc<Vec<f32>>,
 }
+
+/// Marks the shadow-caster twin spawned beside every resident tile (see
+/// [`TileTerrainRoot::caster`]).
+///
+/// Exists purely so the shadow rig's `stability_gauge` can split its per-cascade
+/// mesh counts into "terrain caster twins" and "everything else". Those two
+/// classes want opposite remedies — twins are few, huge meshes (fewer triangles
+/// each is the lever), props and scatter are many, tiny meshes (fewer draws is
+/// the lever) — and a single post-cull count cannot tell them apart, so the
+/// choice between them was being made by argument instead of measurement
+/// (BL-20260731T202656Z).
+#[derive(Component, Clone, Copy)]
+pub struct TileShadowCaster;
 
 /// One streaming tile terrain on a body grid entity. Insert on the body's
 /// `RealSpaceBody` grid; tiles spawn as its co-rotating children.
@@ -1734,6 +1779,21 @@ fn stream_tile_terrain(
                 MeshMaterial3d(caster_mat.clone()),
                 Transform::IDENTITY,
                 caster_layers.clone(),
+                TileShadowCaster,
+                // Explicit tight box, overriding the ~10 km-tall one Bevy would
+                // compute from the skirt curtain (see `surface_aabb`). This is
+                // the whole of "terrain stops flooding the near cascades".
+                done.built.surface_aabb,
+                // REQUIRED, and the reason the first attempt at this changed
+                // nothing: `calculate_bounds` does not merely fill in a missing
+                // `Aabb`, it also has an `update_aabb` query that OVERWRITES an
+                // existing one from `mesh.compute_aabb()` whenever `Mesh3d` is
+                // `Changed` — which is true on the frame the component is
+                // inserted. So a hand-authored box is silently replaced by the
+                // derived one on the first visibility pass after spawn, and the
+                // post-cull counts do not move by a single entity. `NoAutoAabb`
+                // excludes the entity from both queries.
+                NoAutoAabb,
             ));
         }
         let entity = tile.id();
@@ -2653,6 +2713,83 @@ mod skirt_tests {
                     r <= floor + 0.01,
                     "skirt vertex {n} floats {:.1} m above the floor sphere",
                     r - floor
+                );
+            }
+        }
+    }
+
+    /// The culling box handed to the shadow-caster twin must describe the
+    /// SURFACE, not the curtain. Bevy's own `calculate_bounds` derives an `Aabb`
+    /// from every position in the mesh, so with the floor-sphere skirt that box
+    /// is `relief` deep — kilometres — for a tile a few hundred metres across,
+    /// and a slab that shape intersects nearly any frustum aimed at the body.
+    /// This asserts the two boxes actually differ, so a regression that lets the
+    /// skirt back into the caster's bounds fails here rather than silently
+    /// reinstating the flood (BL-20260731T202656Z).
+    /// Deliberately a FINE tile. The curtain is a fixed `relief`-deep drop while
+    /// a tile's own width halves every level, so the slab only becomes
+    /// pathological at depth: at level 6 the tile is ~78 km across and a 2.5 km
+    /// curtain is noise (the two boxes agree to 0.4 %), while at level 14 it is
+    /// ~300 m across and the curtain is an order of magnitude deeper than the
+    /// tile is wide. The near cascades are packed with exactly these fine tiles,
+    /// which is why the flood showed up there first.
+    #[test]
+    fn caster_bounds_describe_the_surface_not_the_curtain() {
+        const RELIEF: f64 = 2_500.0;
+        let key = TileKey {
+            face: 0,
+            level: 14,
+            x: 6_400,
+            y: 10_752,
+        };
+        let side = SurfaceTile::grid_side();
+        let step = 1.0 / (TILE_RES - 1) as f64;
+        let mut heights = Vec::with_capacity(side * side);
+        for j in 0..side {
+            for i in 0..side {
+                let s = (i as f64 - TILE_HALO as f64) * step;
+                let t = (j as f64 - TILE_HALO as f64) * step;
+                heights.push(h(key.dir_at(s, t)) as f32);
+            }
+        }
+        let tile = SurfaceTile {
+            key,
+            sample_spacing_m: key.sample_spacing_m(R),
+            heights_m: heights,
+            albedo_linear: vec![[0.4, 0.4, 0.4]; side * side],
+            bands: vec![[0.0, 0.0]; side * side],
+        };
+        use bevy::camera::primitives::MeshAabb;
+        let built = build_tile_mesh(&tile, R, RELIEF);
+        let whole = built
+            .mesh
+            .compute_aabb()
+            .expect("a freshly built tile still carries CPU positions");
+
+        // Deepest axis of each box — the curtain runs radially, and the tile's
+        // own orientation on the cube face decides which axis that lands on.
+        let surface_depth = built.surface_aabb.half_extents.max_element();
+        let whole_depth = whole.half_extents.max_element();
+        assert!(
+            surface_depth * 4.0 < whole_depth,
+            "the caster box is not meaningfully tighter than the full mesh box \
+             (surface {surface_depth:.1} m vs whole {whole_depth:.1} m half-extent) — \
+             either the skirt is inside `surface_aabb` or the curtain stopped hanging"
+        );
+        // And it must still CONTAIN the surface: a box that culls correctly but
+        // clips its own tile is the other way to fail this.
+        let positions = built
+            .mesh
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|a| a.as_float3())
+            .expect("tile meshes carry positions");
+        let lo = built.surface_aabb.min();
+        let hi = built.surface_aabb.max();
+        for (n, p) in positions.iter().take(TILE_RES * TILE_RES).enumerate() {
+            for axis in 0..3 {
+                assert!(
+                    p[axis] >= lo[axis] - 1.0e-3 && p[axis] <= hi[axis] + 1.0e-3,
+                    "surface vertex {n} falls outside the caster box on axis {axis}"
                 );
             }
         }

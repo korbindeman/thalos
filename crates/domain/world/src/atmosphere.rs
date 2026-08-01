@@ -69,6 +69,18 @@
 
 use serde::Deserialize;
 
+/// Number of latitudinal cloud rotation bands on a banded (gas/ice giant)
+/// atmosphere. Each band has its own rigid rotation speed
+/// `ω_i = scroll_rate × (1 − diff × sin²(lat_i))` where
+/// `sin²(lat_i) = i / (CLOUD_BAND_COUNT − 1)`. Per-band phases are
+/// accumulated on the CPU, mod `TAU` in f64, and consumed by the impostor
+/// shader; because each phase wraps independently mod TAU, rotation never
+/// seams. Lives here — not in the renderer — because it is a property of the
+/// authored banded-atmosphere model that both simulation state
+/// (`CloudBandEnvironmentState`) and rendering share; `thalos_body_shading`
+/// re-exports it for shader-side consumers.
+pub const CLOUD_BAND_COUNT: usize = 16;
+
 /// Top-level atmosphere definition for a gas or ice giant.
 ///
 /// Every field except the cloud deck has a sensible default so body files

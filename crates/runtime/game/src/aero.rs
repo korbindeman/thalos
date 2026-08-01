@@ -34,6 +34,8 @@ use thalos_shipyard::{ControlSurfaceRole, WingAeroPanel, WingRole};
 
 use crate::rendering::{PlayerShip, SimulationState};
 
+pub use thalos_game_state::flight::{AeroReadout, ShipAero, ShipAeroLayout};
+
 // --- Airfoil / stability / control constants ---------------------------------
 /// Lift-curve slope, per radian (3-D, below the 2-D 2π for finite AR).
 const LIFT_SLOPE_PER_RAD: f64 = 5.0;
@@ -119,26 +121,8 @@ const GROUND_AERO_AIRSPEED_FLOOR_M_S: f64 = 5.0;
 const MAX_LIN_ACCEL_M_S2: f64 = 100.0; // ~10 g (covers steep reentry drag)
 const MAX_ANG_ACCEL_RAD_S2: f64 = 4.0;
 
-/// The aircraft's aerodynamic config, computed from its blueprint by `ship_view`
-/// and consumed when the Avian body spawns. Replaced on each spawn.
-#[derive(Resource)]
-pub struct ShipAeroLayout {
-    pub config: AeroConfig,
-}
 
-impl Default for ShipAeroLayout {
-    fn default() -> Self {
-        Self {
-            config: AeroConfig::default(),
-        }
-    }
-}
 
-/// The live aero config attached to the player's Avian body.
-#[derive(Component)]
-pub struct ShipAero {
-    pub config: AeroConfig,
-}
 
 /// Apply the live-tunable winged-aircraft moment coefficients to a base config,
 /// exactly as [`apply_aero_forces`] does before evaluating. The control
@@ -201,18 +185,6 @@ impl Default for AeroTuning {
     }
 }
 
-/// Flight readout for the HUD.
-#[derive(Component, Default, Clone, Copy, Reflect)]
-#[reflect(Component)]
-pub struct AeroReadout {
-    pub airspeed_ms: f64,
-    pub dynamic_pressure_pa: f64,
-    pub mach: f64,
-    pub density_kgm3: f64,
-    /// Net aero force magnitude (N) and the angle of attack (deg), for debug.
-    pub force_n: f64,
-    pub alpha_deg: f64,
-}
 
 /// Debug snapshot for the F3 overlay: net force + relative wind, body frame.
 #[derive(Component, Default)]

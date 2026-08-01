@@ -89,16 +89,11 @@ impl Default for AtmosphereBlock {
     }
 }
 
-/// Number of latitudinal cloud rotation bands. Each band has its own
-/// rigid rotation speed `ω_i = scroll_rate × (1 − diff × sin²(lat_i))`
-/// where `sin²(lat_i) = i / (CLOUD_BAND_COUNT − 1)`. Per-band phases are
-/// accumulated on the CPU, mod `TAU` in f64, uploaded as four `Vec4`s
-/// into `AtmosphereBlock`, and consumed by `sample_cloud_banded` in
-/// `planet_impostor.wgsl`. Because each per-band phase wraps
-/// independently mod TAU, there is no latitude at which rotation seams —
-/// rotation is seamless forever. State persists trivially as 16 × f64
-/// per body.
-pub const CLOUD_BAND_COUNT: usize = 16;
+/// Band count for the banded-atmosphere model — authored-data constant, owned
+/// by `thalos_world` (see its doc). Re-exported here because the shader-side
+/// consumers (`AtmosphereBlock`'s four `Vec4` phase uploads,
+/// `sample_cloud_banded` in `planet_impostor.wgsl`) size against it.
+pub use thalos_world::CLOUD_BAND_COUNT;
 
 impl AtmosphereBlock {
     /// Build from a `TerrestrialAtmosphere` and the body's

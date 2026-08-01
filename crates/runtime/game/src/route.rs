@@ -39,9 +39,8 @@ use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 
 use thalos_navigation::{
-    ApproachParams, ApproachPhase, ApproachPlan, DestinationGuidance, DestinationInput,
-    DestinationParams, Guidance, GuidanceInput, LateralPath, Pose2, RejoinParams, RouteFrame,
-    RunwayEnd, RunwayStrip, VnavParams, WaypointKind, angular_distance_rad,
+    ApproachParams, ApproachPhase, ApproachPlan, DestinationInput,
+    DestinationParams, GuidanceInput, LateralPath, Pose2, RejoinParams, RouteFrame, RunwayStrip, VnavParams, angular_distance_rad,
     compute_destination_guidance, compute_guidance, plan_approach, plan_rejoin, theta_of,
 };
 use thalos_physics_canonical::body_fixed::inertial_to_body_fixed;
@@ -51,13 +50,14 @@ use thalos_world::BodyId;
 use crate::GameTerrainRegistry;
 use crate::aero::ShipAero;
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::structures::{StructureId, StructureKind, StructureRegistry};
+use crate::structures::{StructureKind, StructureRegistry};
 
-/// Maximum bank the planner may require and the guidance may command (rad).
-/// 25° is the airliner standard for maneuvering in the terminal area — steep
-/// enough to turn in reasonable airspace, shallow enough to be comfortable and
-/// to leave stall margin at approach speed.
-pub const BANK_LIMIT_RAD: f64 = 0.436_332_313; // 25°
+pub use thalos_game_state::nav::{
+    ArmedEnd, BANK_LIMIT_RAD, RouteDisplay, RouteRequest, RouteSelection, RouteState,
+    RouteStatus, RunwayEndEntry,
+};
+
+ // 25°
 
 /// Never plan a turn tighter than this (m), whatever the speed suggests.
 const MIN_TURN_RADIUS_M: f64 = 400.0;
@@ -107,158 +107,17 @@ const BODY_NOSE: DVec3 = DVec3::Y;
 // Selection
 // ---------------------------------------------------------------------------
 
-/// A specific landable runway direction: a strip plus which way you land on it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ArmedEnd {
-    pub strip: StructureId,
-    /// `true` = landing against the strip's `heading_tangent`.
-    pub reciprocal: bool,
-}
 
-/// The pilot's armed destination. `None` = nothing selected, guidance idle.
-///
-/// **Sole writer:** [`apply_route_requests`]. Everything that wants to change
-/// the selection sends a [`RouteRequest`] instead of writing here, so the two
-/// selection paths (clicking the ND plot, the selector buttons) cannot race.
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
-pub struct RouteSelection {
-    pub armed: Option<ArmedEnd>,
-}
 
-/// A request to change the selection. Both selection paths speak this.
-#[derive(Debug, Clone, Copy, Message)]
-pub enum RouteRequest {
-    /// Pick a strip (a click on the ND): arms the end you would more sensibly
-    /// land on given where the craft is, and **flips** the end if that strip is
-    /// already armed — so repeated clicks toggle the landing direction.
-    Pick(StructureId),
-    /// Step through every landable end on the body, nearest first.
-    Cycle(i32),
-    /// Land the other way on the currently armed strip.
-    Flip,
-    /// Disarm.
-    Clear,
-}
 
 // ---------------------------------------------------------------------------
 // Published state
 // ---------------------------------------------------------------------------
 
-/// Why there is no active guidance, for the display to say so plainly rather
-/// than showing a blank plot.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum RouteStatus {
-    /// Runways are available, none armed.
-    #[default]
-    Idle,
-    /// A plan and live guidance exist.
-    Armed,
-    /// No runway on the dominant body.
-    NoRunways,
-    /// Body/craft state not available this frame (loading, no dominant body).
-    Unavailable,
-}
 
-/// One selectable runway end, as the selector and the ND see it.
-#[derive(Debug, Clone, Copy)]
-pub struct RunwayEndEntry {
-    pub armed_end: ArmedEnd,
-    /// Navigation-crate view of the end (carries the strip geometry).
-    pub end: RunwayEnd,
-    /// Designator, `1..=36`.
-    pub designator: u8,
-    /// Compass heading of the landing direction (rad).
-    pub landing_heading_rad: f64,
-    /// Straight-line distance from the craft to this end's threshold (m).
-    pub threshold_range_m: f64,
-}
 
-/// Display-ready geometry of the active plan, in **body-fixed metres** — the
-/// same frame the ND already projects runways from, so a display never has to
-/// know about route frames.
-#[derive(Debug, Default, Clone)]
-pub struct RouteDisplay {
-    /// The planned lateral path, tessellated (arcs included).
-    pub path_points: Vec<DVec3>,
-    /// Along-path distance of each point (m), same length as `path_points`.
-    ///
-    /// Earns its place by answering "which of these points are still ahead of
-    /// me": the plan freezes once established on final, so the points behind the
-    /// craft would otherwise keep the ND framed on an intercept that was flown
-    /// twenty kilometres ago.
-    pub path_along_m: Vec<f64>,
-    /// Named waypoints with their kind, in fly order.
-    pub waypoints: Vec<(DVec3, WaypointKind)>,
-    /// Index into `path_points` of the first point on the final approach leg.
-    ///
-    /// Carried as an **index**, not derived by comparing `path_along_m` against
-    /// `final_start_along_m`: the polyline accumulates *chord* lengths while the
-    /// plan measures *arc* length, so the two disagree by metres over a curved
-    /// transition and the comparison lands on the wrong side of the boundary.
-    /// That silently dropped the final-approach highlight on straight-in
-    /// approaches, where the boundary is an exact tie.
-    pub final_start_index: usize,
-    /// The flyable path back onto the route from where the craft actually is,
-    /// tessellated like `path_points`. Empty while the craft tracks the route
-    /// closely enough that drawing it would only thicken the line.
-    ///
-    /// This is **guidance, not a re-plan** — the route itself is untouched. See
-    /// `thalos_navigation::rejoin`.
-    pub rejoin_points: Vec<DVec3>,
-}
 
-/// Everything downstream reads: the plan, the live guidance, the selectable
-/// ends, and display-ready geometry.
-///
-/// **Sole writer:** [`update_route_state`].
-#[derive(Resource, Default)]
-pub struct RouteState {
-    pub status: RouteStatus,
-    /// The active approach plan, if one is armed and plannable.
-    pub plan: Option<ApproachPlan>,
-    /// Live guidance against that plan.
-    pub guidance: Option<Guidance>,
-    /// Spherical guidance while the selected runway is outside the terminal
-    /// approach region. Exactly one of this and `guidance` is populated.
-    pub destination_guidance: Option<DestinationGuidance>,
-    /// Body-fixed arrival fix for the destination leg.
-    pub destination_arrival_dir: Option<DVec3>,
-    /// Every landable end on the dominant body, **nearest threshold first**.
-    pub ends: Vec<RunwayEndEntry>,
-    pub display: RouteDisplay,
-    /// Approach speed the plan was built with (m/s) — shown as the speed target
-    /// and used by the speed gates.
-    pub approach_speed_m_s: f64,
-    /// Which end the current plan belongs to, so a selection change is detected.
-    planned_for: Option<ArmedEnd>,
-    /// Real time of the last (re)plan.
-    planned_at_s: f32,
-    /// Latched once the craft reaches the final segment: freezes the plan (see
-    /// the module docs — re-planning on final flies you away from the runway).
-    established: bool,
-    /// Where along the route the rejoin captured last frame. Fed back as a hint
-    /// so the capture point holds still while the craft flies toward it —
-    /// `plan_rejoin` is pure, so this frame-to-frame memory lives here
-    /// (ADR-20260730T005746Z).
-    rejoin_hint_along_m: Option<f64>,
-    /// Recovery asks the destination leg to carry the craft back behind the
-    /// runway even when that arrival fix is already inside the ordinary
-    /// terminal-capture radius.
-    force_destination_ingress: bool,
-}
 
-impl RouteState {
-    /// Invalidate a frozen final after a go-around and require a fresh ingress
-    /// to the selected runway's arrival fix.
-    pub(crate) fn recover_to_destination_ingress(&mut self) {
-        self.plan = None;
-        self.guidance = None;
-        self.established = false;
-        self.rejoin_hint_along_m = None;
-        self.display = RouteDisplay::default();
-        self.force_destination_ingress = true;
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Plugin

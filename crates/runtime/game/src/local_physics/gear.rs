@@ -18,6 +18,10 @@ use thalos_shipyard::{AttachNodes, Gear, Part, SurfaceMount, SurfaceMountKind, g
 
 use crate::rendering::SimulationState;
 
+pub use thalos_game_state::flight::{
+    GearState, ParkingBrake, WeightOnWheels, Wheel, WheelSet, set_gear_down,
+};
+
 /// The landing-gear parts of the *flight* craft (editor builds excluded) —
 /// the one query shape every gear consumer uses ([`build_wheel_set`],
 /// [`gear_contact_geometry`], spawn, runway/launchpad placement).
@@ -31,39 +35,7 @@ pub(crate) type GearPartQuery<'w, 's> = Query<
     ),
 >;
 
-/// One landing-gear wheel as a **raycast suspension**, in the craft body frame.
-///
-/// All directions/points are craft-local (`X=right, Y=nose, Z=dorsal`) — the
-/// same frame `gear_mesh` authors in — so `Rotation.0 * p` maps them into the
-/// body-centered inertial frame the Avian rigid body lives in. Built once at
-/// spawn from the gear parts ([`build_wheel_set`]) and cached so the per-frame
-/// system does no part-tree walking.
-#[derive(Clone, Copy, Debug, Reflect)]
-pub struct Wheel {
-    /// The gear part entity this leg belongs to, so per-gearbox state (the
-    /// visual compression offset) can be keyed back to its rendered mesh.
-    pub source: Entity,
-    /// Strut top at the host skin — the suspension ray origin.
-    pub strut_top_local: DVec3,
-    /// Suspension axis (belly-ward `r̂`): the ray direction and spring line.
-    pub susp_dir_local: DVec3,
-    /// Roll axis (`fore`): brake / rolling resistance act along this.
-    pub roll_dir_local: DVec3,
-    /// Axle axis (`lateral`): lateral grip resists slip along this.
-    pub axle_dir_local: DVec3,
-    pub strut_length: f64,
-    pub wheel_radius: f64,
-    /// Nose (single-leg) gear steers; main pairs do not.
-    pub steerable: bool,
-}
 
-/// Every wheel on a craft, attached to its Avian rigid body so
-/// [`apply_landing_gear_forces`] can find them.
-#[derive(Component, Clone, Debug, Default, Reflect)]
-#[reflect(Component)]
-pub struct WheelSet {
-    pub wheels: Vec<Wheel>,
-}
 
 /// Landing-gear suspension/grip coefficients. Reflect-registered (for a future
 /// debug UI); edit the defaults and rebuild to tune them. Forces are computed
@@ -177,23 +149,6 @@ impl Default for GearTuning {
     }
 }
 
-/// Latched brakes (KSP-style, the B key). When engaged,
-/// [`apply_landing_gear_forces`] replaces free rolling with a high-gain
-/// fore/aft hold (clamped to the tyre friction circle), so the craft stays
-/// put under gravity, slopes, and the residual settle — though full takeoff
-/// thrust still overpowers it — and the spoilers deploy
-/// ([`crate::flight_config`]), so the same latch is the in-air speedbrake
-/// and the rollout lift dump.
-///
-/// Defaults **off** (most spawns are airborne and must not start with
-/// spoilers out); the parked runway placement engages it explicitly so a
-/// freshly-spawned aircraft holds on the strip
-/// (`runway::finish_runway_spawn`). Reflect-registered (for a future debug UI).
-#[derive(Resource, Clone, Copy, Debug, Default, Reflect)]
-#[reflect(Resource)]
-pub struct ParkingBrake {
-    pub engaged: bool,
-}
 
 /// Per-gear-part suspension state for the **visual** gear-mesh offset:
 /// `(susp_dir_local, compression_m)` of the deepest-compressed wheel of that
@@ -241,41 +196,8 @@ pub fn wheel_torque_ground_mask(weight_on_wheels: bool, hull_grounded: bool) -> 
     }
 }
 
-/// Whether any landing-gear wheel is currently bearing load on the ground
-/// ("weight on wheels"). Set each frame by [`apply_landing_gear_forces`] from
-/// its per-wheel suspension raycast, and read in the aero pass
-/// ([`crate::aero::apply_aero_forces`]) to drop all aero on a grounded craft
-/// below the taxi airspeed floor, where the AoA is degenerate (the velocity is
-/// suspension settle, not flow). Above that floor a grounded craft flies the
-/// full aero model — rotation authority and ground-roll damping are real
-/// aerodynamics. Reflect-registered (for a future debug UI).
-#[derive(Resource, Default, Debug, Clone, Copy, Reflect)]
-#[reflect(Resource)]
-pub struct WeightOnWheels {
-    pub grounded: bool,
-}
 
-/// Landing-gear up/down latch (KSP-style, the G key). When `down`,
-/// [`apply_landing_gear_forces`] runs the suspension; when up it stands down
-/// entirely (no contact, no weight on wheels) and the gear meshes are hidden
-/// (`ship_view::sync_gear_visibility`). Binary — there is no retraction
-/// animation, so a half-deployed load state never exists.
-///
-/// Defaults **down**: every ground/approach spawn (runway, final, descent) needs
-/// gear extended, and orbit/EVA craft have no wheels so the state is moot.
-/// Retraction is interlocked against weight-on-wheels (see [`toggle_gear`]).
-/// Reflect-registered (for a future debug UI).
-#[derive(Resource, Clone, Copy, Debug, Reflect)]
-#[reflect(Resource)]
-pub struct GearState {
-    pub down: bool,
-}
 
-impl Default for GearState {
-    fn default() -> Self {
-        Self { down: true }
-    }
-}
 
 /// Flip the parking brake on the toggle edge (B). Runs before the gear forces.
 pub(crate) fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResMut<ParkingBrake>) {
@@ -302,14 +224,6 @@ pub(crate) fn toggle_gear(
     }
 }
 
-/// Apply a requested gear position through the weight-on-wheels interlock.
-/// Shared by the key ([`toggle_gear`]) and the HUD pill so both honour the same
-/// rule: extending is always allowed; retracting is refused while grounded.
-pub(crate) fn set_gear_down(gear: &mut GearState, weight_on_wheels: &WeightOnWheels, down: bool) {
-    if down || !weight_on_wheels.grounded {
-        gear.down = down;
-    }
-}
 
 /// Build the cached [`WheelSet`] for a craft from its landing-gear parts,
 /// reusing [`gear_leg_frames`] (the same per-leg geometry the visual mesh

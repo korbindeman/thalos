@@ -47,6 +47,18 @@ INC-20260731T011523Z). Call
 `CameraProjection::update(w, h)` (exact for `ScalingMode::Fixed`; arguments
 ignored) before storing the projection.
 
+**A hand-authored `Aabb` needs `NoAutoAabb` beside it, or Bevy takes it back.**
+`calculate_bounds` reads as "fill in a missing box" because its first query is
+`Without<Aabb>` — but it carries a *second* query,
+`Query<(&Mesh3d, &mut Aabb), Or<(AssetChanged<Mesh3d>, Changed<Mesh3d>)>>`, that
+**overwrites** an existing box from `mesh.compute_aabb()`. `Changed<Mesh3d>` is
+true on the frame the component is inserted, so a box authored at spawn is
+replaced on the first `VisibilitySystems::CalculateBounds` pass and the change
+reads as a perfect no-op (INC-20260731T223731Z). This matters wherever a mesh
+carries geometry far outside its visible surface — the tile skirt curtain hangs
+~10 km below a ~300 m tile, so the derived box is a 33:1 slab that defeats
+frustum culling. `NoAutoAabb` excludes the entity from both queries.
+
 **Resources are components now.** `#[derive(Resource)]` also implements
 `Component`. Broad `EntityRef` / `Query<Entity>`-style queries can conflict with
 resource access — our `PartQuery` (fuel.rs / staging.rs) filters

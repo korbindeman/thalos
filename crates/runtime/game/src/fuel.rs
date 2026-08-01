@@ -51,6 +51,8 @@ use crate::rendering::SimulationState;
 use crate::ship_view::CraftPart;
 use crate::sim_clock::SimClock;
 
+pub use thalos_game_state::flight::ThrottleState;
+
 /// Per-engine flow recipe for an enabled engine. Stored separately from
 /// [`Engine`] so the drain reconciliation can use the recipe that was in
 /// force during the previous physics step, even if activation changes
@@ -98,24 +100,6 @@ pub(crate) struct LastBurnRecipe {
     engines: Vec<ActiveEngineFlow>,
 }
 
-/// Player throttle state, persisted across frames so Shift/Ctrl can ramp
-/// continuously and absolute HOTAS axes can publish a stable command.
-///
-/// `commanded` is the pilot's persistent setpoint, `selected` is the winner of
-/// control-bus arbitration for this frame, and `effective` is what was actually
-/// applied after the fuel-availability cap. HUD keeps reading the pilot
-/// setpoint/effective pair; an autothrottle never overwrites the setpoint.
-#[derive(Resource, Debug, Default)]
-pub struct ThrottleState {
-    pub commanded: f64,
-    pub selected: f64,
-    pub effective: f64,
-    /// A completed autoflight mode may hand the channel back only after
-    /// forcing idle. The hold prevents a stale non-zero pilot setpoint from
-    /// surging the craft after automatic disengagement; the next deliberate
-    /// throttle movement clears it.
-    pub hold_idle_until_pilot_move: bool,
-}
 
 /// One-frame pilot takeover edge produced while sampling throttle input.
 ///

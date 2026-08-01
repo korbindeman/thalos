@@ -52,18 +52,10 @@ pub(super) struct BodyClouds {
 // ── Tunable appearance ───────────────────────────────────────────────────────
 /// Global scale on the planet-fixed weather coverage map (which carries the
 /// local overcast fraction, mean ≈ `CloudWeatherField::coverage_mean`).
-/// 1.0 = trust the weather field; global trim.
-///
-/// This is the ONE definition. The CPU strata producer
-/// (`solar_system_state::cloud_surface_density_cpu`) and the fill-calibration
-/// input both read it from here — it used to be hand-copied into four places,
-/// so trimming coverage moved the near tier and the far tier by different
-/// amounts and the two stopped agreeing on how cloudy the planet was.
-///
-/// Held at 1.0: the producer's own occupancy already means areal cloud
-/// fraction, so boosting it here just re-inflated coverage after the
-/// distribution was fixed (2026-07-25).
-pub(crate) const COVERAGE_SCALE: f32 = 1.0;
+/// The ONE coverage trim, owned by the producer since the Phase 5a move —
+/// see `thalos_weather::cloud_cube::COVERAGE_SCALE` for why it is 1.0 and why
+/// there must be exactly one definition.
+pub(crate) use thalos_weather::cloud_cube::COVERAGE_SCALE;
 /// Extinction density multiplier. Some core contrast, but not so high that the
 /// flat deck base reads as a hard sliced edge.
 const DENSITY: f32 = 0.0026;

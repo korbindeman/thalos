@@ -34,7 +34,6 @@ use bevy::prelude::*;
 
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
-use thalos_shipyard::ShipBlueprint;
 
 use crate::SimStage;
 use crate::maneuver::{ManeuverPlan, SelectedNode};
@@ -46,21 +45,9 @@ use crate::spawn::{
 };
 use crate::view::ViewMode;
 
-/// A pending relaunch: the design to fly and the scenario to drop it into.
-pub struct RelaunchSpec {
-    pub blueprint: ShipBlueprint,
-    /// Scenario placement. Today: [`SpawnSituation::Cruise`] for aircraft
-    /// (flown airborne over land) or [`SpawnSituation::ShipOrbit`] for
-    /// everything else. Other situations fall back to orbit.
-    pub situation: SpawnSituation,
-}
-
-/// Editor → relaunch request slot. The shipyard editor's Launch button writes
-/// a [`RelaunchSpec`] here; [`begin_relaunch`] consumes it.
-///
-/// **Sole writer:** `shipyard_editor::ui::top_bar::handle_actions`.
-#[derive(Resource, Default)]
-pub struct RelaunchRequest(pub Option<RelaunchSpec>);
+// Moved to `thalos_game_state::relaunch` (Phase 5b); `begin_relaunch`
+// (the consumer) stays below.
+pub use thalos_game_state::relaunch::{RelaunchRequest, RelaunchSpec};
 
 /// Internal hand-off between the two relaunch phases: holds the blueprint
 /// after teardown until the old craft has despawned and the new one can build.

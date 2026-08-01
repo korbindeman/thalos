@@ -52,8 +52,8 @@ use thalos_body_render::{
 use thalos_capture_protocol::{
     CAPTURE_PROTOCOL_SCHEMA, CameraOptics as CameraOpticsSpec, CaptureAction,
     CaptureCameraOverride, CaptureClock, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
-    CaptureServerState, CaptureSourceSnapshot, CaptureTerrainResidency, CapturedCameraState,
-    Viewpoint,
+    CaptureServerState, CaptureSourceSnapshot, CaptureTerrainResidency, CaptureTimeSource,
+    CapturedCameraState, Viewpoint,
 };
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
@@ -1829,6 +1829,7 @@ impl ScreenshotConfig {
         cfg.validate_output_aspect()
             .unwrap_or_else(|error| panic!("invalid capture framing: {error}"));
         resolve_capture_time_s(
+            cfg.canonical_epoch_s(),
             cfg.viewpoint.as_ref().map(|viewpoint| viewpoint.sim_time_s),
             overrides.get("THALOS_SCREENSHOT_TIME").map(String::as_str),
         )
@@ -1986,8 +1987,16 @@ impl ScreenshotConfig {
     pub fn spawn_situation(&self) -> SpawnSituation {
         self.viewpoint
             .as_ref()
-            .map(|viewpoint| SpawnSituation::from(viewpoint.spawn))
+            .map(|viewpoint| crate::viewpoints::situation_of_viewpoint(viewpoint.spawn))
             .unwrap_or_else(|| self.preset.spawn_situation())
+    }
+
+    /// The canonical boot epoch this shot's scenario authors, if any — the
+    /// absolute fallback [`resolve_capture_time_s`] pins an untimed request to,
+    /// so repeat shots of one preset are lit identically no matter what the
+    /// resident host rendered before them.
+    pub fn canonical_epoch_s(&self) -> Option<f64> {
+        crate::runway::canonical_epoch_s(self.spawn_situation())
     }
 
     /// Whether the boot should build the no-craft space-center hub route.
@@ -2074,12 +2083,32 @@ fn parse_bool(raw: &str) -> Option<bool> {
     }
 }
 
+/// Resolve the canonical sim time this shot must be seated to, **absolutely** —
+/// never "leave the clock where it is".
+///
+/// Precedence: caller override → viewpoint metadata → the spawn scenario's
+/// authored boot epoch. The last fallback is the load-bearing one and it is why
+/// this returns an absolute answer instead of an optional nudge: a resident
+/// capture host serves many requests but the scenario seats the clock only once,
+/// at placement, so a request that specified no time used to inherit whatever
+/// the previous request had set. `just screenshot X --time 69000` followed by
+/// `just screenshot X` rendered the second shot at 69000 — exit 0, plausible
+/// PNG, wrong sun, and nothing in the receipt to catch it
+/// (BL-20260731T202657Z).
+///
+/// `Ok(None)` means nothing pinned the time at all (a scenario with no authored
+/// epoch and no caller override). That is *recorded*, not silently accepted —
+/// [`CaptureTimeSource::HostClock`] rides into the receipt so the reader knows
+/// the image is not reproducible.
 fn resolve_capture_time_s(
+    preset_epoch_s: Option<f64>,
     viewpoint_time_s: Option<f64>,
     override_raw: Option<&str>,
-) -> Result<Option<f64>, String> {
+) -> Result<Option<(f64, CaptureTimeSource)>, String> {
     let Some(raw) = override_raw else {
-        return Ok(viewpoint_time_s);
+        return Ok(viewpoint_time_s
+            .map(|t| (t, CaptureTimeSource::ViewpointMetadata))
+            .or_else(|| preset_epoch_s.map(|t| (t, CaptureTimeSource::PresetBootEpoch))));
     };
     let time = raw
         .trim()
@@ -2090,7 +2119,7 @@ fn resolve_capture_time_s(
             "THALOS_SCREENSHOT_TIME expects a finite value, got {raw:?}"
         ));
     }
-    Ok(Some(time))
+    Ok(Some((time, CaptureTimeSource::CallerOverride)))
 }
 
 /// Parse a `WIDTHxHEIGHT` string (`x` or `*` separator).
@@ -2160,28 +2189,81 @@ mod capture_time_tests {
     };
     use crate::camera::ShipCamera;
     use bevy::prelude::*;
+    use thalos_capture_protocol::CaptureTimeSource;
 
     #[test]
     fn viewpoint_time_is_the_default_and_caller_time_wins() {
         assert_eq!(
-            resolve_capture_time_s(Some(59_100.0), None).unwrap(),
-            Some(59_100.0)
+            resolve_capture_time_s(None, Some(59_100.0), None).unwrap(),
+            Some((59_100.0, CaptureTimeSource::ViewpointMetadata))
         );
         assert_eq!(
-            resolve_capture_time_s(Some(59_100.0), Some("72000")).unwrap(),
-            Some(72_000.0)
+            resolve_capture_time_s(None, Some(59_100.0), Some("72000")).unwrap(),
+            Some((72_000.0, CaptureTimeSource::CallerOverride))
         );
         assert_eq!(
-            resolve_capture_time_s(None, Some("-120.5")).unwrap(),
-            Some(-120.5)
+            resolve_capture_time_s(None, None, Some("-120.5")).unwrap(),
+            Some((-120.5, CaptureTimeSource::CallerOverride))
         );
+    }
+
+    /// The regression this whole path exists for (BL-20260731T202657Z): a preset
+    /// with no viewpoint and no `--time` must still resolve to an ABSOLUTE time,
+    /// or a resident host serves it at whatever the previous request left behind.
+    #[test]
+    fn an_untimed_preset_shot_pins_the_scenario_boot_epoch() {
+        assert_eq!(
+            resolve_capture_time_s(Some(59_100.0), None, None).unwrap(),
+            Some((59_100.0, CaptureTimeSource::PresetBootEpoch))
+        );
+        // The caller and a viewpoint both still outrank it.
+        assert_eq!(
+            resolve_capture_time_s(Some(59_100.0), None, Some("69000")).unwrap(),
+            Some((69_000.0, CaptureTimeSource::CallerOverride))
+        );
+        assert_eq!(
+            resolve_capture_time_s(Some(59_100.0), Some(12_000.0), None).unwrap(),
+            Some((12_000.0, CaptureTimeSource::ViewpointMetadata))
+        );
+        // Only a scenario that authors no epoch, with no override, is unpinned —
+        // and that case is recorded as `HostClock`, not silently accepted.
+        assert_eq!(resolve_capture_time_s(None, None, None).unwrap(), None);
     }
 
     #[test]
     fn caller_time_must_be_finite_canonical_seconds() {
-        assert!(resolve_capture_time_s(None, Some("dawn")).is_err());
-        assert!(resolve_capture_time_s(None, Some("NaN")).is_err());
-        assert!(resolve_capture_time_s(None, Some("inf")).is_err());
+        assert!(resolve_capture_time_s(None, None, Some("dawn")).is_err());
+        assert!(resolve_capture_time_s(None, None, Some("NaN")).is_err());
+        assert!(resolve_capture_time_s(None, None, Some("inf")).is_err());
+    }
+
+    /// A receipt from a host predating the field deserializes to "unpinned", and
+    /// an unpinned shot must not read as reproducible.
+    #[test]
+    fn only_a_pinned_source_counts_as_reproducible() {
+        use thalos_capture_protocol::CaptureClock;
+        assert!(!CaptureClock::WALL.sim_time_pinned());
+        assert!(
+            !CaptureClock {
+                sim_time_source: Some(CaptureTimeSource::HostClock),
+                ..CaptureClock::WALL
+            }
+            .sim_time_pinned()
+        );
+        for source in [
+            CaptureTimeSource::PresetBootEpoch,
+            CaptureTimeSource::ViewpointMetadata,
+            CaptureTimeSource::CallerOverride,
+        ] {
+            assert!(
+                CaptureClock {
+                    sim_time_source: Some(source),
+                    ..CaptureClock::WALL
+                }
+                .sim_time_pinned(),
+                "{source:?} pins the time"
+            );
+        }
     }
 
     #[test]
@@ -2255,6 +2337,11 @@ struct PersistentCaptureServer {
     /// (it changes how local physics steps), so it is fixed for every request
     /// this host serves — same shape as `THALOS_TILE_RENDERER`.
     clock: CaptureClock,
+    /// Canonical sim time this request was seated to, and where it came from,
+    /// folded into the receipt's `clock` block by [`Self::respond`]. Per
+    /// request, unlike [`Self::clock`]: reset when a request is accepted and
+    /// written by `apply_capture_time`.
+    active_sim_time: Option<(f64, CaptureTimeSource)>,
     /// Last requested render state. The normal camera authority reasserts the
     /// active gameplay camera in `Update`; the persistent host overrides that
     /// decision in `Last`, immediately before extraction.
@@ -2297,7 +2384,11 @@ impl PersistentCaptureServer {
             camera: self.active_camera,
             graphics: self.active_graphics,
             terrain: self.active_terrain,
-            clock: self.clock,
+            clock: CaptureClock {
+                sim_time_s: self.active_sim_time.map(|(time_s, _)| time_s),
+                sim_time_source: self.active_sim_time.map(|(_, source)| source),
+                ..self.clock
+            },
         };
         if let Err(error) = write_json(capture_response_path(), &response) {
             warn!(target: "thalos::screenshot", "could not publish capture response: {error}");
@@ -2600,7 +2691,7 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
                 .iter()
                 .filter(|viewpoint| {
                     viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
-                        && SpawnSituation::from(viewpoint.spawn) == boot.spawn_situation()
+                        && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn) == boot.spawn_situation()
                         && viewpoint.boots_hub == boot.boots_hub()
                         && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
                             == [boot.width, boot.height]
@@ -2609,7 +2700,7 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
         );
         if catalog.latest().is_some_and(|viewpoint| {
             viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
-                && SpawnSituation::from(viewpoint.spawn) == boot.spawn_situation()
+                && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn) == boot.spawn_situation()
                 && viewpoint.boots_hub == boot.boots_hub()
                 && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
                     == [boot.width, boot.height]
@@ -2776,6 +2867,7 @@ fn poll_capture_requests(
         return;
     }
     if let Err(error) = resolve_capture_time_s(
+        next.canonical_epoch_s(),
         next.viewpoint
             .as_ref()
             .map(|viewpoint| viewpoint.sim_time_s),
@@ -2849,6 +2941,10 @@ fn poll_capture_requests(
     *cfg = next;
     driver.running_frames = 0;
     driver.capture_time_applied = false;
+    // Resolved fresh by `apply_capture_time` below; a stale value would report
+    // the PREVIOUS shot's time on this shot's receipt, which is the exact
+    // failure the field exists to expose.
+    server.active_sim_time = None;
     driver.captured = false;
     driver.tail = 0;
     // Residency is judged per request, not per host: a brake that bit during
@@ -2893,11 +2989,13 @@ fn apply_capture_time(
     runtime: Res<CaptureRuntimeOverrides>,
     mut driver: ResMut<ScreenshotDriver>,
     mut sim: ResMut<SimulationState>,
+    mut server: Option<ResMut<PersistentCaptureServer>>,
 ) {
     if driver.capture_time_applied {
         return;
     }
     let requested = match resolve_capture_time_s(
+        cfg.canonical_epoch_s(),
         cfg.viewpoint.as_ref().map(|viewpoint| viewpoint.sim_time_s),
         runtime.get("THALOS_SCREENSHOT_TIME"),
     ) {
@@ -2909,18 +3007,39 @@ fn apply_capture_time(
         }
     };
     driver.capture_time_applied = true;
-    let Some(time_s) = requested else {
+
+    // Nothing pinned the time. Record that in the receipt rather than let the
+    // image pass as reproducible — this is the residual of
+    // BL-20260731T202657Z and it closes by giving the scenario an epoch, not by
+    // ignoring it.
+    let Some((time_s, source)) = requested else {
+        if let Some(server) = server.as_deref_mut() {
+            server.active_sim_time = Some((sim.simulation.sim_time(), CaptureTimeSource::HostClock));
+        }
+        warn!(
+            target: "thalos::screenshot",
+            "{} authors no boot epoch and no --time was given: this shot is lit by \
+             whatever the host clock had reached and will not reproduce",
+            cfg.scene_name(),
+        );
         return;
     };
+
+    // Unconditional, even when it equals the current time: on a resident host
+    // this is what rewinds the clock a previous request advanced or overrode.
     sim.simulation.set_sim_time(time_s);
+    if let Some(server) = server.as_deref_mut() {
+        server.active_sim_time = Some((time_s, source));
+    }
     info!(
         target: "thalos::diagnostic::capture",
         event = "capture_time_applied",
         sim_time_s = time_s,
-        source = if runtime.get("THALOS_SCREENSHOT_TIME").is_some() {
-            "caller_override"
-        } else {
-            "viewpoint_metadata"
+        source = match source {
+            CaptureTimeSource::CallerOverride => "caller_override",
+            CaptureTimeSource::ViewpointMetadata => "viewpoint_metadata",
+            CaptureTimeSource::PresetBootEpoch => "preset_boot_epoch",
+            CaptureTimeSource::HostClock => "host_clock",
         },
         "capture time applied"
     );

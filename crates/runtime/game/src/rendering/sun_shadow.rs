@@ -81,6 +81,38 @@ pub const SHADOW_CASTER_LAYER: usize = 8;
 /// for the near cascade and ~2.0 m for the far one.
 const SHADOW_MAP_SIZE: u32 = 4096;
 
+/// Ceiling on the number of live cascades, from `THALOS_SHADOW_CASCADES`
+/// (0 = shadows off). Unset means no ceiling.
+///
+/// A **measurement** knob, not a quality setting, and the reason it exists is
+/// that "how much does the shadow rig cost" was previously unanswerable without
+/// a recompile. Each cascade is a separate ortho view with its own cull, queue,
+/// depth pass and depth copy, so stepping this 0→4 over one preset gives the
+/// MARGINAL cost of each cascade directly, in the real scene, read off the perf
+/// lane's `frame_gauge` — which is what ranks the levers in
+/// BL-20260731T202656Z. Drives the `shadows` compare axis.
+///
+/// Read once: a `OnceLock`, so it needs a cold run / capture-host restart, same
+/// as `THALOS_TILE_RENDERER`.
+fn cascade_budget() -> usize {
+    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *BUDGET.get_or_init(|| {
+        let Ok(raw) = std::env::var("THALOS_SHADOW_CASCADES") else {
+            return CASCADE_COUNT;
+        };
+        match raw.trim().parse::<usize>() {
+            Ok(n) if n <= CASCADE_COUNT => {
+                warn!("THALOS_SHADOW_CASCADES={n} — shadow cascades capped (measurement mode)");
+                n
+            }
+            _ => {
+                warn!("THALOS_SHADOW_CASCADES={raw:?} is not 0..={CASCADE_COUNT}; ignoring");
+                CASCADE_COUNT
+            }
+        }
+    })
+}
+
 /// BASELINE half-width (m) of each cascade's box **on the ground**, near→far,
 /// at/below [`SHADOW_REFERENCE_ALTITUDE_M`]. Centred on the craft; cascade 0 is
 /// tight + crisp, the last reaches out to cover the whole mesh-tree band
@@ -152,11 +184,31 @@ const SHADOW_NEAR_M: f32 = 0.5;
 /// MSFS-style shadow-map / terrain-shadow split.)
 const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 0.0, 3_000.0, 6_500.0];
 
-/// Depth margin (m) bracketing terrain relief above/below the centre's tangent
-/// plane. With band-wide boxes, casters on hills inside the box sit well above
-/// the plane and would otherwise fall in front of the near plane at high sun —
-/// the vertical cousin of the up-sun ground slack.
+/// CAP on the depth margin (m) bracketing terrain relief above/below the
+/// centre's tangent plane. With band-wide boxes, casters on hills inside the box
+/// sit well above the plane and would otherwise fall in front of the near plane
+/// at high sun — the vertical cousin of the up-sun ground slack.
+///
+/// This used to be applied FLAT to every cascade, which is the wrong shape: the
+/// relief a cascade must bracket is the relief inside *its own* ground box, and
+/// that box ranges from 128 m across to 13 km. A 64 m box cannot contain 4 km of
+/// terrain relief, so the near cascade was carrying a depth range of **8.59 km**
+/// for a footprint of 64 m — a ~130:1 slab. It is now scaled by the box (see
+/// [`SHADOW_RELIEF_SLOPE`]) with this value surviving as the ceiling, which is
+/// what the outermost cascade genuinely wants.
 const SHADOW_RELIEF_MARGIN_M: f32 = 4_000.0;
+
+/// Relief a cascade brackets, as a fraction of its own ground half-extent — i.e.
+/// the steepest average grade the box is assumed to span. 0.5 is a 27° mean
+/// slope across the whole footprint, which is well past any terrain that stays
+/// inside one cascade; genuine cliffs are local and are covered by the floor.
+const SHADOW_RELIEF_SLOPE: f32 = 0.5;
+
+/// Floor on that margin (m), for the near cascades whose ground box is small
+/// enough that the proportional term underestimates the things standing ON it —
+/// a hangar, a launch tower, a tree. Sized to
+/// `CASCADE_MAX_CASTER_M`'s near entries rather than to terrain.
+const SHADOW_RELIEF_MIN_M: f32 = 120.0;
 
 /// Lower clamp on sin(sun elevation) for the up-sun ground-slack term. Below
 /// this (~4°) the along-sun ground reach diverges toward the horizon; shadows
@@ -451,6 +503,30 @@ impl Plugin for SunShadowPlugin {
                     // inside `TransformSystems::Propagate`, so an `.after(set)`
                     // here would form a cycle with the `.before` below.
                     .after(CellCoord::recenter_large_transforms)
+                    // MUST also run before Bevy's `camera_system`
+                    // (`CameraUpdateSystems`), which is the ONLY writer of
+                    // `Camera.computed.clip_from_view` — and that cached matrix,
+                    // not the live `Projection`, is what `extract_cameras` hands
+                    // the render world. `camera_system` is registered plain in
+                    // `PostUpdate` with only `.before(AssetEventSystems)` and
+                    // `.before(update_frusta)`, so it was completely unordered
+                    // against this chain. On the frames it won the race, the
+                    // cascade depth map was RENDERED with the previous frame's
+                    // extents while every receiver sampled it through
+                    // `block.view_proj` built from THIS frame's extents. The
+                    // extents move with `footprint_scale`, which tracks camera
+                    // altitude — so the mismatch appeared exactly while the
+                    // camera moved (scale swings of 1.1 → 2.9 within a second
+                    // are ordinary) and vanished when it was parked, the tell
+                    // being shadows that lag their casters and grid-shaped
+                    // banding over the caster tiles. Ordering BEFORE it (not
+                    // after) is the fix: `camera_system` then caches the clip
+                    // matrix from the projection written this frame.
+                    //
+                    // The `ortho.update()` call at the write site stays — it
+                    // keeps `update_frusta` correct on its own terms
+                    // (INC-20260731T011523Z) and costs nothing here.
+                    .before(bevy::camera::CameraUpdateSystems)
                     .before(TransformSystems::Propagate),
             )
             .add_systems(Last, sync_shadow_receivers);
@@ -620,6 +696,8 @@ fn update_sun_shadow_camera(
         ),
         Without<ShipCamera>,
     >,
+    // Post-cull caster census for the gauge (1 Hz — see `census` below).
+    caster_census: Query<Has<thalos_body_render::tiles::TileShadowCaster>, With<Mesh3d>>,
     mut state: ResMut<SunShadowState>,
     mut memory: Local<SunShadowMemory>,
 ) {
@@ -954,7 +1032,8 @@ fn update_sun_shadow_camera(
         // CSM is off). Cascade 1's ±400 m brackets any craft this game can
         // build, so the hull keeps a complete self-shadow while cascade 0 gives
         // the near panels their detail.
-        let active_cascades = if craft_local { 2 } else { CASCADE_COUNT };
+        let active_cascades =
+            (if craft_local { 2 } else { CASCADE_COUNT }).min(cascade_budget());
         let mut block = ShadowCascadeBlock::default();
         let mut looks = [Transform::IDENTITY; CASCADE_COUNT];
         let mut half_us = [0.0_f32; CASCADE_COUNT];
@@ -1015,7 +1094,32 @@ fn update_sun_shadow_camera(
             // azimuth is now `half`, not `half / sin(elev)`, so the slack — and
             // with it the ortho depth range, and every bias derived from it —
             // collapses by that same factor at a low sun.
-            let slack = ground_slack_ground_reach(half) + SHADOW_RELIEF_MARGIN_M;
+            // Relief scaled to THIS cascade's ground box, not a flat 4 km (see
+            // `SHADOW_RELIEF_MARGIN_M`). The outer cascades are unaffected —
+            // they hit the cap — while cascade 0's depth range collapses from
+            // 8.59 km to a few hundred metres, which is both fewer casters
+            // swept into a 64 m box and a far better-conditioned
+            // `1/(far − near)` for every bias derived from it.
+            let relief_margin =
+                (half * SHADOW_RELIEF_SLOPE).clamp(SHADOW_RELIEF_MIN_M, SHADOW_RELIEF_MARGIN_M);
+            // Up-sun DEPTH reach to the top of the tallest caster this cascade
+            // must catch. The V axis already budgets `h · cos(elev)` for the
+            // same casters (see the box note); the depth axis needs `h /
+            // sin(elev)` — a caster `h` tall stands `h / tan(elev)` up-sun AND
+            // `h` above the ground, and both legs project onto the sun axis,
+            // summing to the length of the light ray itself.
+            //
+            // The flat 4 km margin covered this by accident, and only at
+            // moderate sun: at 13° a 60 m caster needs 301 m of reach and got
+            // 4 km, while at the 4° clamp it needs 858 m — so the near cascade
+            // would have started dropping tall casters exactly at the golden
+            // hour the rig exists to render well. Bounded by caster height, not
+            // by the cascade's reach, so it stays affordable; the tight caster
+            // bounds (INC-20260731T223731Z) mean extra depth no longer sweeps
+            // terrain in, which is what makes paying it honestly cheap.
+            let caster_depth_reach =
+                (CASCADE_MAX_CASTER_M[i] * footprint / sin_elev).min(SHADOW_SLACK_MAX_M);
+            let slack = ground_slack_ground_reach(half) + relief_margin + caster_depth_reach;
             let back = SHADOW_BACK_DISTANCE_M * footprint + slack;
             let far = CASCADE_FARS_M[i] * footprint + 2.0 * slack;
             half_us[i] = half_u;
@@ -1064,7 +1168,15 @@ fn update_sun_shadow_camera(
         // fully lit and the contact term is moot along with them — the rig-off
         // cases (orbital map terrain, inactive pass) want no shadow at all.
         block.gate = Vec4::new(
-            SHADOW_STRENGTH * night_fade,
+            // `THALOS_SHADOW_CASCADES=0` must read as "no cascade rig at all",
+            // not "a rig whose matrices are all zero" — the samplers would
+            // limp to lit through the `clip.w <= 0` guard, but only by
+            // accident, and the contact tier rides inside this gate.
+            if active_cascades == 0 {
+                0.0
+            } else {
+                SHADOW_STRENGTH * night_fade
+            },
             active_cascades as f32,
             contact.shadow_gate(),
             0.0,
@@ -1073,11 +1185,35 @@ fn update_sun_shadow_camera(
         block.sun_dir = Vec4::new(sun_dir.x, sun_dir.y, sun_dir.z, 0.0);
         state.block = block;
 
+        // The post-cull census is O(visible) per cascade — ~3 k entities across
+        // the set — so it runs only on the frames the gauge actually emits.
+        let census = memory.diagnostic_elapsed_s >= 1.0;
         let mut dbg_visible = [0usize; CASCADE_COUNT];
+        let mut dbg_tiles = [0usize; CASCADE_COUNT];
         for (mut tf, mut cam, mut proj, cascade, visible) in &mut shadow_cams {
             if let Some(visible) = visible {
-                dbg_visible[cascade.index as usize] =
-                    visible.len(core::any::TypeId::of::<bevy::mesh::Mesh3d>());
+                let idx = cascade.index as usize;
+                let meshes_of = visible.get(core::any::TypeId::of::<bevy::mesh::Mesh3d>());
+                dbg_visible[idx] = meshes_of.len();
+                if census {
+                    // Split the count by caster CLASS. The two classes want
+                    // opposite remedies — terrain twins are a few hundred
+                    // meshes of thousands of triangles each, props and scatter
+                    // are many tiny ones — and a bare total cannot choose
+                    // between them.
+                    //
+                    // Deliberately NOT a triangle sum: tile meshes are
+                    // `RenderAssetUsages::RENDER_WORLD`, so their CPU data is
+                    // gone after extraction and `Mesh::indices()` PANICS on
+                    // exactly the meshes worth counting. The cascade ladder
+                    // (`THALOS_SHADOW_CASCADES`, the `shadow-cascades` compare
+                    // axis) measures the cost those triangles represent
+                    // directly, which is better evidence than a proxy.
+                    dbg_tiles[idx] = meshes_of
+                        .iter()
+                        .filter(|&&entity| caster_census.get(entity).is_ok_and(|is_tile| is_tile))
+                        .count();
+                }
             }
             let idx = cascade.index as usize;
             let on = idx < active_cascades;
@@ -1155,6 +1291,17 @@ fn update_sun_shadow_camera(
                 cascade1_visible = dbg_visible[1] as u32,
                 cascade2_visible = dbg_visible[2] as u32,
                 cascade3_visible = dbg_visible[3] as u32,
+                // Of those meshes, how many are terrain caster twins.
+                // `visible − tiles` is the prop/scatter half. A draw count
+                // alone cannot separate "few huge meshes" from "many tiny
+                // ones", and those have opposite remedies — a coarser caster
+                // LOD vs. culling small casters — so the two levers were being
+                // ranked by argument rather than measurement
+                // (BL-20260731T202656Z).
+                cascade0_tiles = dbg_tiles[0] as u32,
+                cascade1_tiles = dbg_tiles[1] as u32,
+                cascade2_tiles = dbg_tiles[2] as u32,
+                cascade3_tiles = dbg_tiles[3] as u32,
                 "shadow stability gauge"
             );
         }

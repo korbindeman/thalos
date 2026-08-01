@@ -138,22 +138,51 @@ authority, or the maneuver handoff.
 
 ## 4. Staging and control authority
 
-ORBIT is another mutually exclusive mode of the one autoflight owner being
-introduced for MNVR and LAND. It publishes attitude and throttle through
-`ControlDemand`; it does not write the throttle setpoint behind the control bus
-and it does not treat the SAS toggle as a hidden prerequisite.
+ORBIT is a **flight program**, not a mode peer of MNVR. Autoflight is two
+layers (ADR-20260731T232619Z): the strategic `FlightProgram` owns targets,
+sequencing, and events, while the tactical channels — attitude and throttle —
+are resolved per frame by `thalos_control::arbitrate` among the pilot, SAS, nav
+modes, and one autopilot slot. ORBIT publishes guidance through `ControlDemand`
+like any other source; it does not write the throttle setpoint behind the
+control bus and does not treat the SAS toggle as a hidden prerequisite.
 
-Automatic staging also needs one canonical command path:
+Because it is a program rather than a mode, ORBIT *delegates* to the shared
+scheduled-burn executor for the circularisation nodes it installs at MECO. The
+handoff is expressed by yielding — surface guidance stops publishing, so
+`resolve_autoflight` falls through to the executor — never by changing a mode.
+
+Control locks are **declared** by each source (`required_locks()`) and unioned,
+never derived from a selection enum. That is what lets the program hold
+throttle and attitude through the ballistic coast while leaving **warp with the
+player**, so warp-to-node works during the wait for circularisation.
+
+Automatic staging is **commanded, not reactive** — the launch-vehicle
+convention, where guidance predicts depletion and commands cutoff, and thrust
+decay is the *confirmation* rather than the trigger:
 
 - the staging topology and next-stage transaction remain owned by
-  `StagingPlan`;
-- ORBIT may issue a typed `StageDemand` through autoflight arbitration;
-- the normal staging executor performs the same separation/activation
-  transaction used by the player;
-- stage demand is edge-triggered and acknowledged, so a held condition cannot
-  fire two stages;
-- staging waits for any required throttle-down/separation condition and fails
-  explicitly if no usable propulsion remains.
+  `StagingPlan`, and `activate_stage` is still the one canonical separation
+  operation for both the space bar and automation;
+- `StageSequencer` predicts burnout from the active stage's remaining
+  propellant and its full-throttle mass flow, re-evaluated every frame so a
+  throttle change re-predicts rather than lying;
+- it arms and annunciates a countdown, commands cutoff a short lead before
+  depletion, waits out thrust tail-off, and only then checks the separation
+  interlocks — thrust decayed below threshold, angular rate below the
+  re-contact limit;
+- separation is requested through the edge-triggered, acknowledged
+  `StageDemand`, so a held condition cannot fire two stages;
+- **guidance keeps steering through the whole sequence.** Only throttle is
+  surrendered, and only for the few hundred milliseconds the sequence needs;
+  the vehicle holds its pitch program across separation instead of pitching to
+  local up;
+- thrust collapse remains a **backup trigger**: it still stages, and it logs
+  `stage_unpredicted`, which `just diag` reports as `stage_prediction_missed`.
+  The healthy count is zero — a nonzero one falsifies the prediction and is the
+  reason the backup path logs rather than silently covering for it;
+- the sequence fails explicitly (`stage_exhausted` / `stage_refused`) if no
+  usable stage remains, rather than waiting forever on an acknowledgement that
+  will not come.
 
 The mode disengages on explicit cancel, deliberate pilot takeover,
 destruction, target invalidation, loss of control authority, unrecoverable

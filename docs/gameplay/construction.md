@@ -32,6 +32,27 @@ tank-resize handle, the placement-preview ghost, and blueprint save/load against
 `ships/*.ron`. It reads the `thalos_shipyard` construction model (parts,
 blueprints, geometry, sizing/stats/staging) — which carries no editor or UI.
 
+**A build that cannot work is refused at the VAB.** `flyability.rs` is the one
+definition of "unflyable", pure and index-based like `staging.rs`, reached via
+`ShipBlueprint::flyability`. It shares `resolve_build` with `stage_summaries`,
+so the topology it judges is the topology the panel displays — two independent
+`parent` derivations is how a preview comes to disagree with the gate. Findings
+appear under the stage cards as they are made, and `LAUNCH` refuses while any
+is `Blocking`; the ORBIT preflight remains the second gate in flight.
+
+Blocking today: **no engine on any stage**, and an **engine whose crossfeed
+component holds no capacity for a reactant** — the case where the tank is
+visibly right there but a decoupler sits between, since propellant crosses an
+attach edge only when *both* endpoints permit crossfeed (mirroring
+`fuel.rs::crossfeed_components`). A powered stage with no propellant warns
+rather than blocks: a mid-build stack passes through that state constantly.
+
+The bar is deliberately **"impossible", never "suboptimal"** — Δv margin, TWR,
+and staging efficiency stay the player's call, and a stricter gate would turn a
+construction toy into a spreadsheet. The regression guard is that every shipped
+vehicle (`ships/*.ron`) must pass its own gate; that test is what decides
+whether a proposed new rule is too strict.
+
 **Interstage shrouds are not editor-owned.** A `ShroudProvider` (decoupler)
 whose `top` mates with a `Shroudable`'s `bottom` grows a shroud sized to cover
 that part's silhouette — and that is true of the flight craft as much as the

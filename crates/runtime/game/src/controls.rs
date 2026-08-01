@@ -17,40 +17,12 @@
 use bevy::prelude::*;
 
 use crate::SimStage;
-use crate::autopilot::{AutoflightMode, Autopilot, autopilot_system};
+use crate::autopilot::{Autopilot, autopilot_system};
 use crate::orbit_program::OrbitProgram;
 use crate::route_autopilot::{LandAutopilot, update_land_autopilot};
 
-/// Per-control-surface lockout flags. `true` = a programmatic system
-/// is currently driving this surface and human input should be
-/// dropped. Defaults are all `false` (everything free).
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct ControlLocks {
-    /// Throttle setting — HOTAS absolute axis, Z/X snap, Shift/Ctrl ramp,
-    /// future throttle slider. Gated in [`crate::fuel::handle_throttle_input`].
-    pub throttle: bool,
-    /// Attitude torque commands — W/A/S/D/Q/E. Gated in
-    /// [`crate::bridge::handle_attitude_controls`] (player_torque is
-    /// zeroed; the autopilot's pointing target still runs through
-    /// `compute_attitude_control`). The T (SAS toggle) key is not
-    /// gated — it just flips a state bool that's irrelevant while the
-    /// autopilot owns attitude.
-    pub attitude: bool,
-    /// Warp level changes — `.` / `,` / `\` keys, HUD `<` / `>` /
-    /// `→ Next` buttons. Pause (Space, HUD pause if added) stays
-    /// available unconditionally; that exemption lives in the warp
-    /// handler itself rather than as a separate flag here.
-    pub warp: bool,
-    /// Navigation mode buttons in the side panel (Stability, Prograde,
-    /// …, Maneuver). The autopilot checkbox at the top of the same
-    /// panel is *not* gated — it's the only override path while the
-    /// autopilot is engaged.
-    pub navigation_mode: bool,
-    /// Nosewheel / tiller steering.
-    pub ground_steer: bool,
-    /// Wheel braking.
-    pub wheel_brake: bool,
-}
+pub use thalos_game_state::flight::ControlLocks;
+
 
 pub struct ControlLocksPlugin;
 
@@ -78,15 +50,29 @@ pub(crate) fn update_control_locks(
     orbit: Res<OrbitProgram>,
     mut locks: ResMut<ControlLocks>,
 ) {
-    let maneuver = autopilot.maneuver_active();
-    let landing = autopilot.mode() == AutoflightMode::Land && land.active();
-    let orbiting = autopilot.mode() == AutoflightMode::Orbit && orbit.active();
+    // Each source answers for itself; the union is the policy. Nothing here
+    // pattern-matches a mode enum, which is what makes it impossible to
+    // reintroduce the defect this replaced: the old table read
+    // `warp: maneuver || landing || orbiting`, where `orbiting` was true for
+    // the *whole* ascent program — including the ballistic coast, which is
+    // nothing but waiting. That killed warp-to-node for the minutes it was
+    // most wanted, and `warp_to_maneuver_system` cancels itself on sight of
+    // the flag, so the HUD's WARP button silently did nothing.
+    //
+    // A source knows whether it is time-critical this instant; a mode enum
+    // cannot. Adding an executor now means adding a `required_locks` to it,
+    // not editing a table that has to know about every executor.
+    let required = autopilot
+        .required_locks()
+        .union(land.required_locks())
+        .union(orbit.required_locks());
+
     *locks = ControlLocks {
-        throttle: maneuver || landing || orbiting,
-        attitude: maneuver || landing || orbiting,
-        warp: maneuver || landing || orbiting,
-        navigation_mode: maneuver || landing || orbiting,
-        ground_steer: landing,
-        wheel_brake: landing,
+        throttle: required.throttle,
+        attitude: required.attitude,
+        warp: required.warp,
+        navigation_mode: required.navigation_mode,
+        ground_steer: required.ground_steer,
+        wheel_brake: required.wheel_brake,
     };
 }

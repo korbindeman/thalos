@@ -22,12 +22,14 @@
 #![allow(clippy::type_complexity)]
 
 pub mod glass;
+pub mod hud_theme;
 pub mod tokens;
 pub mod widgets;
 
 use bevy::prelude::*;
 
 pub use glass::{GlassMaterial, UiBackdrop, UiBackdropSource};
+pub use hud_theme::HudTheme;
 pub use tokens::*;
 pub use widgets::*;
 

@@ -21,10 +21,8 @@ use crate::maneuver::InteractionMode;
 use crate::settings_menu::SettingsMenu;
 use crate::target::TargetBody;
 
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct GamePause {
-    pub active: bool,
-}
+pub use thalos_game_state::ui::{GamePause, not_game_paused};
+
 
 #[derive(Component)]
 struct PauseMenuRoot;
@@ -60,12 +58,6 @@ impl Plugin for PauseMenuPlugin {
     }
 }
 
-pub fn not_game_paused(
-    pause: Res<GamePause>,
-    scenario: Res<crate::scenario_menu::ScenarioMenu>,
-) -> bool {
-    !pause.active && !scenario.open
-}
 
 fn setup(mut commands: Commands, theme: Res<UiTheme>) {
     commands

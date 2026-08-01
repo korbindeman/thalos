@@ -81,7 +81,6 @@
 //!
 //! [`is_active`]: Autopilot::is_active
 
-use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use crate::SimStage;
@@ -90,244 +89,26 @@ use crate::maneuver::{InteractionMode, ManeuverPlan, NodeBurnPhase};
 use crate::navigation::{AUTOPILOT_SETTLE_S, SHIP_NOSE_BODY, maneuver_node_burn_direction};
 use crate::rendering::SimulationState;
 
+pub use thalos_game_state::autoflight::BurnArm;
+pub use thalos_game_state::nav::{
+    Autopilot, AutopilotBurnCompleted, AutopilotBurnDirective, AutopilotBurnSchedule,
+    AutopilotBurnStarted, AutopilotDirectiveId, AutopilotState,
+};
+
 const MANEUVER_DIRECTIVE_NAMESPACE: &str = "maneuver";
 
-/// Opaque id for an autopilot directive.
-///
-/// `namespace` lets each producer keep its own local id space without
-/// making the core autopilot depend on producer-specific enums. The
-/// maneuver directive adapter uses `"maneuver"` and the UI node id.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct AutopilotDirectiveId {
-    namespace: &'static str,
-    local_id: u64,
-}
 
-impl AutopilotDirectiveId {
-    pub const fn new(namespace: &'static str, local_id: u64) -> Self {
-        Self {
-            namespace,
-            local_id,
-        }
-    }
 
-    pub const fn namespace(self) -> &'static str {
-        self.namespace
-    }
 
-    pub const fn local_id(self) -> u64 {
-        self.local_id
-    }
-}
 
-/// A scheduled burn request for the autopilot.
-///
-/// This is deliberately not a maneuver node: producers resolve their own
-/// domain data into timing, direction, and scalar burn size before the
-/// executor sees it.
-#[derive(Debug, Clone, Copy)]
-pub struct AutopilotBurnDirective {
-    pub id: AutopilotDirectiveId,
-    /// Nominal burn center time, seconds from simulation epoch.
-    pub center_time: f64,
-    /// World-frame unit vector for the burn.
-    pub direction: DVec3,
-    /// Planned Δv magnitude, m/s.
-    pub delta_v_magnitude: f64,
-    /// Estimated finite-burn duration, seconds.
-    pub duration_s: f64,
-}
 
-impl AutopilotBurnDirective {
-    fn burn_start(self) -> f64 {
-        self.center_time - self.duration_s / 2.0
-    }
-}
 
-/// The next burn directive visible to the autopilot.
-///
-/// Today this is populated from the next maneuver node. Keeping it as a
-/// separate resource makes the maneuver-to-autopilot adapter replaceable
-/// by later guidance systems without touching the executor.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct AutopilotBurnSchedule {
-    next: Option<AutopilotBurnDirective>,
-}
 
-impl AutopilotBurnSchedule {
-    pub fn clear(&mut self) {
-        self.next = None;
-    }
 
-    pub fn set_next(&mut self, directive: AutopilotBurnDirective) {
-        self.next = Some(directive);
-    }
 
-    pub fn next(&self) -> Option<AutopilotBurnDirective> {
-        self.next
-    }
 
-    fn get(&self, id: AutopilotDirectiveId) -> Option<AutopilotBurnDirective> {
-        self.next.filter(|directive| directive.id == id)
-    }
-}
 
-/// The one selected programmatic flight mode. Executors keep separate internal
-/// state, but only this owner may publish the autopilot demand and locks.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub enum AutoflightMode {
-    Off,
-    #[default]
-    Maneuver,
-    Land,
-    Orbit,
-}
 
-#[derive(Resource, Debug)]
-pub struct Autopilot {
-    mode: AutoflightMode,
-    pub(crate) state: AutopilotState,
-}
-
-impl Default for Autopilot {
-    fn default() -> Self {
-        Self {
-            mode: AutoflightMode::Maneuver,
-            state: AutopilotState::Idle,
-        }
-    }
-}
-
-impl Autopilot {
-    pub fn mode(&self) -> AutoflightMode {
-        self.mode
-    }
-
-    pub fn select_mode(&mut self, mode: AutoflightMode) {
-        if self.mode != mode {
-            self.mode = mode;
-            if !matches!(mode, AutoflightMode::Maneuver | AutoflightMode::Orbit) {
-                self.state = AutopilotState::Idle;
-            }
-        }
-    }
-
-    pub fn toggle_mode(&mut self, mode: AutoflightMode) {
-        if self.mode == mode {
-            self.select_mode(AutoflightMode::Off);
-        } else {
-            self.select_mode(mode);
-        }
-    }
-
-    /// Snapshot of the current executor state for UI/read-only systems.
-    pub(crate) fn state(&self) -> AutopilotState {
-        self.state
-    }
-
-    /// `true` when the autopilot is actively driving the ship — i.e.
-    /// state is `Engaging` or `Burn`. Consumed by
-    /// [`crate::controls::update_control_locks`] which translates it
-    /// into the per-surface flags that input handlers actually read.
-    pub(crate) fn maneuver_active(&self) -> bool {
-        matches!(self.mode, AutoflightMode::Maneuver | AutoflightMode::Orbit)
-            && matches!(
-                self.state,
-                AutopilotState::Engaging { .. } | AutopilotState::Burn { .. }
-            )
-    }
-
-    /// Direct world-frame attitude target while the autopilot owns
-    /// pointing. This bypasses `NavigationMode::ManeuverNode` so the
-    /// executor can fly any directive producer, not only maneuver nodes.
-    pub(crate) fn attitude_target(&self) -> Option<DVec3> {
-        match self.state {
-            AutopilotState::Engaging { direction, .. } | AutopilotState::Burn { direction, .. } => {
-                Some(direction)
-            }
-            AutopilotState::Idle | AutopilotState::Armed { .. } => None,
-        }
-    }
-
-    /// The autopilot's attitude request for the fly-by-wire control bus
-    /// ([`crate::control_bus`]). `PointNose` at the burn direction while
-    /// engaging/burning, otherwise `Free` (it yields attitude to lower-
-    /// priority sources). The arbiter ranks this above nav modes and the SAS
-    /// hold but below an unlocked pilot stick.
-    pub(crate) fn maneuver_demand(&self) -> thalos_control::ControlDemand {
-        if !matches!(self.mode, AutoflightMode::Maneuver | AutoflightMode::Orbit) {
-            return thalos_control::ControlDemand::NONE;
-        }
-        match self.state {
-            AutopilotState::Engaging { direction, .. } => {
-                thalos_control::ControlDemand::autoflight(
-                    thalos_control::AttitudeDemand::PointNose(direction),
-                    Some(0.0),
-                    None,
-                    None,
-                )
-            }
-            AutopilotState::Burn { direction, .. } => thalos_control::ControlDemand::autoflight(
-                thalos_control::AttitudeDemand::PointNose(direction),
-                Some(1.0),
-                None,
-                None,
-            ),
-            AutopilotState::Idle | AutopilotState::Armed { .. } => {
-                thalos_control::ControlDemand::NONE
-            }
-        }
-    }
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub enum AutopilotState {
-    #[default]
-    Idle,
-    /// A valid directive exists. Player retains full control of
-    /// throttle, attitude, and nav mode; the autopilot defensively
-    /// clamps warp from above so a single sim-time advance can't
-    /// overshoot the lead window.
-    Armed { directive_id: AutopilotDirectiveId },
-    /// Within the lead window: ramping warp, pointing the ship, holding
-    /// throttle at zero. User input is locked out.
-    Engaging {
-        directive_id: AutopilotDirectiveId,
-        direction: DVec3,
-    },
-    /// Engine firing, integrating delivered Δv toward the planned
-    /// magnitude.
-    Burn {
-        directive_id: AutopilotDirectiveId,
-        direction: DVec3,
-        /// Magnitude of the planned Δv, m/s.
-        planned_dv: f64,
-        /// Value of [`thalos_physics_canonical::simulation::Simulation::delivered_dv`]
-        /// captured at the moment the burn started; subtracted from the
-        /// live value each frame to get "Δv delivered since burn start."
-        anchor_delivered_dv: f64,
-    },
-}
-
-/// Emitted when a generic burn directive starts.
-///
-/// Producer adapters decide whether the id belongs to them. The
-/// maneuver adapter uses this to remove the executing node from future
-/// flight-plan input.
-#[derive(Debug, Clone, Copy, Message)]
-pub struct AutopilotBurnStarted {
-    pub id: AutopilotDirectiveId,
-}
-
-/// Emitted when a generic burn directive completes.
-///
-/// Producer adapters decide whether the id belongs to them. The
-/// maneuver adapter treats this as an idempotent cleanup fallback; the
-/// executing node is normally retired on [`AutopilotBurnStarted`].
-#[derive(Debug, Clone, Copy, Message)]
-pub struct AutopilotBurnCompleted {
-    pub id: AutopilotDirectiveId,
-}
 
 pub struct AutopilotPlugin;
 
@@ -594,15 +375,19 @@ pub(crate) fn autopilot_system(
     mut started: MessageWriter<AutopilotBurnStarted>,
     mut completed: MessageWriter<AutopilotBurnCompleted>,
 ) {
-    if !matches!(
-        autopilot.mode,
-        AutoflightMode::Maneuver | AutoflightMode::Orbit
-    ) {
+    if !autopilot.arm().armed() {
         autopilot.state = AutopilotState::Idle;
         return;
     }
-    if pilot_throttle.moved && autopilot.maneuver_active() {
-        autopilot.select_mode(AutoflightMode::Off);
+    // Pilot throttle movement disconnects the executor — but only when the
+    // *pilot* armed it. When a flight program did, the program owns the
+    // takeover decision: disarming here would strand it engaged with no way
+    // to fly the nodes it installed, which is precisely the half-connected
+    // state the strategic/tactical split exists to prevent. The programs
+    // handle pilot override themselves and disarm via the program
+    // transition in `crate::autoflight::update_flight_program`.
+    if pilot_throttle.moved && autopilot.is_active() && autopilot.arm() == BurnArm::Pilot {
+        autopilot.disarm();
         return;
     }
 
@@ -720,6 +505,7 @@ pub(crate) fn autopilot_system(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::math::DVec3;
 
     fn directive(center_time: f64) -> AutopilotBurnDirective {
         AutopilotBurnDirective {

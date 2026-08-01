@@ -54,6 +54,8 @@ use crate::rendering::{SimulationState, SolarSystemState};
 use crate::sim_clock::SimClock;
 use crate::view::{HideInMapView, ViewMode};
 
+pub use thalos_game_state::flight::{ActivePlayerController, EvaMode, PlayerControllerState};
+
 const PLAYER_HEIGHT_M: f64 = 1.8;
 const PLAYER_RADIUS_M: f64 = 0.32;
 const PLAYER_CAPSULE_SEGMENT_M: f64 = PLAYER_HEIGHT_M - PLAYER_RADIUS_M * 2.0;
@@ -121,65 +123,8 @@ impl Plugin for PlayerControllerPlugin {
     }
 }
 
-#[derive(Resource, Default, Debug, Clone)]
-pub struct PlayerControllerState {
-    active: Option<ActivePlayerController>,
-}
 
-impl PlayerControllerState {
-    pub fn is_active(&self) -> bool {
-        self.active.is_some()
-    }
 
-    pub fn active_position_m(&self) -> Option<DVec3> {
-        self.active.map(|active| active.inertial_position_m)
-    }
-
-    /// Whether the on-foot player is standing on the surface (vs airborne /
-    /// falling). `false` when there is no active EVA player.
-    pub fn is_grounded(&self) -> bool {
-        self.active.map(|a| a.grounded).unwrap_or(false)
-    }
-
-    /// Whether the on-foot player has been stationary on the surface long
-    /// enough to be warp-eligible. `false` when there is no active EVA player.
-    pub fn is_at_rest(&self) -> bool {
-        self.active.map(|a| a.at_rest).unwrap_or(false)
-    }
-
-    /// Surface-relative speed (m/s) of the on-foot player — walking + vertical,
-    /// excluding the body's co-rotation. `0.0` when there is no active player.
-    pub fn surface_speed_m_s(&self) -> f64 {
-        self.active.map(|a| a.surface_speed_m_s).unwrap_or(0.0)
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-struct ActivePlayerController {
-    body_entity: Entity,
-    visual_entity: Entity,
-    body_id: BodyId,
-    inertial_position_m: DVec3,
-    /// Player position relative to the body centre, in the **body-fixed**
-    /// (co-rotating) frame. `inertial_offset = body.orientation * pos_bf`.
-    /// `ZERO` is the "uninitialised" sentinel — re-seeded from the rigid body
-    /// on the first grounded frame and after any teleport.
-    pos_bf: DVec3,
-    /// Surface-relative velocity in the body-fixed frame (walking + vertical).
-    vel_bf: DVec3,
-    /// Horizontal facing direction in the body-fixed frame, slewed toward the
-    /// movement direction for a smooth third-person pivot.
-    facing_bf: DVec3,
-    /// The body-centred inertial offset this controller last wrote to Avian's
-    /// `Position`. Used to detect an *external* teleport (F9 drop / map plant)
-    /// — `Position` changing to something the controller didn't write — without
-    /// mistaking the body's normal per-frame co-rotation for one.
-    last_avian_offset: DVec3,
-    grounded: bool,
-    at_rest: bool,
-    rest_timer_s: f64,
-    surface_speed_m_s: f64,
-}
 
 #[derive(Component)]
 pub struct PlayerControllerBody;
@@ -187,36 +132,7 @@ pub struct PlayerControllerBody;
 #[derive(Component)]
 pub struct PlayerControllerVisual;
 
-/// Whether the EVA player is walking on terrain or coasting like a craft.
-///
-/// EVA is a full craft (KSP-style): it can stand on a surface or sit in
-/// orbit. The two regimes need opposite state flow, so this flag picks one:
-///
-/// - `Grounded`: [`step_eva_controller`] owns the capsule pose, running the
-///   body-fixed character physics, and the canonical→Avian snap stands down.
-/// - `Airborne`: Kepler owns canonical translation and the snap drives the
-///   capsule from canonical (exactly like a ship coasting in vacuum); the
-///   character controller stands down.
-///
-/// Set explicitly by the EVA teleport actions — surface teleports ground it,
-/// orbit teleports make it airborne. (Suborbital ballistic flight — jumping,
-/// walking off a cliff — stays *within* the grounded regime; this flag is the
-/// coarse surface↔orbit switch, not the per-frame grounded/airborne state,
-/// which lives in [`ActivePlayerController::grounded`].)
-/// Defaults to `Grounded` to match the startup surface spawn.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
-#[reflect(Resource)]
-pub enum EvaMode {
-    #[default]
-    Grounded,
-    Airborne,
-}
 
-impl EvaMode {
-    pub fn is_grounded(self) -> bool {
-        matches!(self, EvaMode::Grounded)
-    }
-}
 
 fn body_state_for(sim: &SimulationState, body_id: BodyId) -> BodyState {
     sim.ephemeris

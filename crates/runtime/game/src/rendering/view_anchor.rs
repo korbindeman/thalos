@@ -48,10 +48,9 @@
 //! camera's *look-at* ground intersection instead — nadir is the simple,
 //! robust standard clipmap choice.
 
-use bevy::math::{DQuat, DVec3};
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::CellCoord;
-use thalos_physics_canonical::types::BodyState;
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
@@ -80,77 +79,10 @@ const ANCHOR_SPEED_TAU_S: f64 = 0.4;
 /// speed (orbital velocity at Thalos is ~7.9 km/s).
 const ANCHOR_TELEPORT_SPEED_M_S: f64 = 20_000.0;
 
-/// Where the view is, resolved against the nearest terrain-backed body.
-/// `None` until a camera and body states exist (first frames of a boot, or a
-/// deferred-world menu).
-///
-/// **Sole writer:** [`update_view_anchor`].
-#[derive(Resource, Default, Clone, Copy)]
-pub struct ViewAnchor {
-    pub resolved: Option<AnchorBody>,
-}
-
-/// The view anchor resolved in the body-fixed frame of [`Self::body`]. All
-/// positions/directions are body-fixed metres, in the **surface frame** — the
-/// same `surface_body_to_world_orientation_f64` frame the real-space body grid,
-/// the udlod terrain, the tile terrain, and the height sources use. (For a
-/// tidally-locked moon that frame differs from the raw ephemeris
-/// `BodyState::orientation` by the full lock rotation — resolving with the
-/// ephemeris frame put the anchor ~130° of longitude away from the camera on
-/// Mira, see INC-20260723T232652Z's successor investigation.) Re-project to
-/// heliocentric with the *current* frame's states via [`Self::cam_world`]
-/// (see the module note on frame coherence).
-#[derive(Clone, Copy)]
-pub struct AnchorBody {
-    /// The nearest terrain-backed body (has a registered height source).
-    pub body: BodyId,
-    /// Camera position, body-fixed (surface frame).
-    pub cam_body: DVec3,
-    /// Unit nadir direction (`cam_body / |cam_body|`), body-fixed.
-    pub cam_dir: DVec3,
-    /// Body reference radius, metres.
-    pub radius_m: f64,
-    /// Terrain height at the nadir, metres above the reference radius
-    /// (datum fallback `0.0` while tiles are cold).
-    pub ground_h_m: f64,
-    /// Camera altitude above the sampled terrain, metres.
-    pub agl_m: f64,
-    /// Smoothed body-fixed camera speed (m/s) — how fast the view moves
-    /// through the surface frame, EMA-filtered over [`ANCHOR_SPEED_TAU_S`].
-    /// Co-rotation counts (a world-hovering camera over a spinning body IS
-    /// moving relative to the ground streaming under it). Detail systems use
-    /// this to trade fidelity for coverage while the view is in motion and
-    /// settle back to full fidelity where it lingers; zero after a teleport
-    /// (see [`ANCHOR_TELEPORT_SPEED_M_S`]).
-    pub speed_m_s: f64,
-    /// Tidal-lock parent (from the body entity's `TidallyLocked` tag), carried
-    /// so re-projection can rebuild the surface orientation at any epoch.
-    pub lock_parent: Option<BodyId>,
-}
-
-impl AnchorBody {
-    /// The body's surface (body-fixed → world) orientation at the epoch of
-    /// `states` — the one orientation authority every surface consumer shares.
-    pub fn surface_orientation(&self, states: &[BodyState]) -> DQuat {
-        let lock = self
-            .lock_parent
-            .map(|parent_id| TidallyLocked { parent_id });
-        surface_body_to_world_orientation_f64(self.body, lock.as_ref(), states)
-            .or_else(|| states.get(self.body).map(|s| s.orientation.normalize()))
-            .unwrap_or(DQuat::IDENTITY)
-    }
-
-    /// Heliocentric camera position at the epoch of `states`. (The ground
-    /// point below it is derivable by substituting
-    /// `cam_dir * (radius_m + ground_h_m)` for `cam_body`.)
-    pub fn cam_world(&self, states: &[BodyState]) -> DVec3 {
-        let position = states
-            .get(self.body)
-            .map(|s| s.position)
-            .unwrap_or(DVec3::ZERO);
-        position + self.surface_orientation(states) * self.cam_body
-    }
-}
+// `ViewAnchor` / `AnchorBody` moved to `thalos_game_state::view_anchor`
+// (Phase 5a); the sole writer (`update_view_anchor`) and its constants
+// stay in this module.
+pub use thalos_game_state::view_anchor::{AnchorBody, ViewAnchor};
 
 pub struct ViewAnchorPlugin;
 

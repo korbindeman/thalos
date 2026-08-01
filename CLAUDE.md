@@ -97,6 +97,19 @@ the exception; when you're unsure whether something earns a record, it doesn't.
   completing them outranks new features.
 - **Delete dead code on contact** — the superseded path you touch goes in the
   same change, not left "for reference".
+- **Crates split on payoff — don't be shy about creating one.** A crate is a
+  compile unit, an ownership boundary, and an iteration harness at once;
+  create or split one whenever the boundary buys a **cheaper edit loop**, a
+  **compiler-enforced dependency guarantee**, a **standalone preview
+  harness**, or **agent isolation** (ADR-20260731T024003Z; layers, guardrails,
+  and the Phase 5 runtime dismantling live in `docs/architecture.md`).
+  Feature crates depend only *downward* — domain crates and
+  `thalos_game_state` — never on each other; two feature crates wanting each
+  other means the shared thing belongs a layer down. New feature work goes in
+  a feature crate when it clears the bar; `thalos_runtime` accepts only
+  composition, sim-coupled drivers, and glue. Modules still handle ordinary
+  sub-feature size, and never split what's scheduled for demolition
+  (`thalos_udlod`, the procedural terrain chain).
 - **Size work in LLM tokens, not days.** The work is done by agents, so
   "two days" / "a week" / "a sprint" are meaningless units here — they describe
   a human workday nobody is spending. Estimate and compare in the currency that
@@ -490,10 +503,20 @@ Pure-Rust libraries (no Bevy) — `thalos_world` (authored body/system truth),
 `thalos_physics_canonical` (orbital mechanics, aero, surface-local frame),
 `thalos_control` (fly-by-wire), `thalos_terrain` (`SurfaceQuery` + generation),
 `thalos_celestial` (sky model), `thalos_texgen` (offline textures),
-`thalos_weather` (seeded shallow-water weather sim; the synoptic layer of the
-cloud weather cube — iterate via its `sim_probe` example, seconds per round).
+`thalos_weather` (seeded shallow-water weather sim **and** the cloud weather
+cube itself — `cloud_cube` owns `CloudWeatherField`, its derivation, and the
+one `COVERAGE_SCALE` trim; iterate via its `sim_probe` example, seconds per
+round, no runtime rebuild).
 
-Bevy consumers — `thalos_runtime` (`crates/runtime/game`, the sole app
+Bevy consumers — `thalos_game_state` (`crates/gameplay/state`, the game-state
+**blackboard**: shared resources/components + accessors + single-writer doc
+comments, no systems — what feature crates read and the runtime writes;
+ADR-20260731T024003Z), the **gameplay feature crates** that read it
+(`thalos_hud`, `thalos_map`, `thalos_shipyard_editor`, `thalos_structures` under
+`crates/gameplay/` — each depends only downward, **never on each other or on
+the runtime**, and orders against the published `thalos_game_state::sched`
+system sets rather than another crate's systems),
+`thalos_runtime` (`crates/runtime/game`, the sole app
 composition: gameplay, rendering integration, UI, scenarios, capture presets),
 `thalos_game` (`apps/game`, thin launcher), `thalos_body_render` +
 `thalos_body_shading` (celestial-body rendering; owns both the default
@@ -556,8 +579,17 @@ collection runs in `PreUpdate` before them.
   comment: `SolarSystemState` ← `sync_solar_system_state`, `MapSnapshot` ←
   `update_map_snapshot`, `CraftStateMirror` ← `refresh_craft_state_mirror`,
   `CraftRegimeState` ← `regime::resolve_regime`, `AvianAuthority` ←
-  `compute_avian_authority`, `ViewAnchor` ← `update_view_anchor`. Don't add a
+  `compute_avian_authority`, `ViewAnchor` ← `update_view_anchor`,
+  `FlightProgram` ← `autoflight::update_flight_program`,
+  `AutoflightAnnunciation` ← `control_bus::realize_control`. Don't add a
   second writer; route through an accessor or reconsider the ownership.
+- **Autoflight is two layers, and locks are declared** (ADR-20260731T232619Z).
+  Strategic `FlightProgram` (targets, sequencing, staging commands) is separate
+  from the tactical attitude/throttle channels that `thalos_control::arbitrate`
+  resolves. A new automation source declares `required_locks()` for itself —
+  never add a term to a lock table keyed on a mode enum, which is how warp came
+  to be locked through an entire ballistic coast. Panels emit
+  `AutoflightRequest` and never mutate a program or the burn executor.
 - **One height authority.** `BodySurfaceRegistry` builds one
   `Arc<dyn SurfaceQuery>` per body, and every consumer — ground LOD render, the
   near-surface `HeightSourceRegistry` (colliders, camera floor, HUD altitude,

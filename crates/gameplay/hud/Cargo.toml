@@ -1,0 +1,28 @@
+[package]
+name = "thalos_hud"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Gameplay feature crate (ADR-20260731T024003Z, Phase 5b): the flight HUD —
+# panels, the navball, the MFD widget slot, the velocity-frame selector, and
+# the UI input gates. Reads the game-state blackboard; writes only its own UI
+# state (plus the blackboard resources it solely owns, e.g. the input gates).
+# Depends only downward — NEVER on another feature crate or thalos_runtime.
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+bevy_egui = "0.41.1"
+ab_glyph = "0.2"
+resvg = { version = "0.47", default-features = false }
+thalos_control = { path = "../../simulation/control" }
+thalos_game_state = { path = "../state" }
+thalos_input = { path = "../../interface/input" }
+thalos_navigation = { path = "../../simulation/navigation" }
+thalos_physics_canonical = { path = "../../simulation/physics_canonical" }
+thalos_physics_local = { path = "../../simulation/physics_local" }
+thalos_shipyard = { path = "../../domain/construction" }
+thalos_ui = { path = "../../interface/ui" }
+thalos_world = { path = "../../domain/world" }
+
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }

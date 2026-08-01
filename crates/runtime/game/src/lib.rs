@@ -1,9 +1,12 @@
 #![allow(clippy::too_many_arguments, clippy::type_complexity)]
 
 mod aero;
+mod autoflight;
 mod autopilot;
 mod base_editor;
-mod body_tree_panel;
+mod body_tree_panel {
+    pub use thalos_map::body_tree_panel::*;
+}
 mod bridge;
 mod camera;
 mod camera_optics;
@@ -14,21 +17,33 @@ mod coords;
 mod debug;
 mod engine;
 mod flight_config;
-mod flight_plan_view;
+mod flight_plan_view {
+    pub use thalos_map::flight_plan_view::*;
+}
 mod freecam;
 mod fuel;
 mod game_context;
 mod god_view;
 mod graphics_settings;
-mod hud;
+/// The flight HUD, peeled into `thalos_hud` (Phase 5b); shim keeps
+/// `crate::hud::*` stable.
+mod hud {
+    pub use thalos_hud::*;
+}
 mod input;
 mod loading;
 mod local_physics;
 mod main_menu;
-mod maneuver;
-mod map_view;
+mod maneuver {
+    pub use thalos_map::maneuver::*;
+}
+mod map_view {
+    pub use thalos_map::map_view::*;
+}
 mod mem_diag;
-mod navball;
+mod navball {
+    pub use thalos_hud::navball::*;
+}
 mod navigation;
 mod orbit_program;
 mod pause_menu;
@@ -71,13 +86,19 @@ mod screenshot;
 mod settings;
 mod settings_menu;
 mod ship_view;
-mod shipyard_editor;
+/// The VAB / shipyard editor, peeled into `thalos_shipyard_editor`
+/// (Phase 5b, ADR-20260731T024003Z); this shim keeps every
+/// `crate::shipyard_editor::*` path stable.
+mod shipyard_editor {
+    pub use thalos_shipyard_editor::*;
+}
 mod shrouds;
 mod sim_clock;
 mod sky_render;
 pub mod solar_system_state;
 mod space_center;
 mod spawn;
+mod stage_sequencer;
 mod staging;
 mod star_flare;
 mod structures;
@@ -85,7 +106,9 @@ mod surface_settle;
 mod target;
 mod terrain_registry;
 mod units_settings;
-mod velocity_frame;
+mod velocity_frame {
+    pub use thalos_hud::velocity_frame::*;
+}
 mod view;
 pub mod viewpoints;
 mod vram_bar;
@@ -161,17 +184,9 @@ use warp_to_maneuver::WarpToManeuverPlugin;
 // System ordering
 // ---------------------------------------------------------------------------
 
-/// Execution stages within `Update`, ordered so that physics advances before
-/// positions are written, and positions are written before the camera reads them.
-#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
-pub enum SimStage {
-    /// Bridge: advance sim_time and ship state.
-    Physics,
-    /// Rendering: update body/ship transforms from sim state.
-    Sync,
-    /// Camera: compute camera transform from body transforms.
-    Camera,
-}
+// `SimStage` moved to `thalos_game_state::sched` (Phase 5b) so feature
+// crates can order against the stages without a runtime dep.
+pub use thalos_game_state::sched::SimStage;
 
 // ---------------------------------------------------------------------------
 // Runtime body-state provider
@@ -764,6 +779,7 @@ impl AppBuilder {
             .add_plugins(ManeuverPlugin)
             .add_plugins(NavigationPlugin)
             .add_plugins(AutopilotPlugin)
+            .add_plugins(autoflight::AutoflightPlugin)
             .add_plugins(OrbitProgramPlugin)
             .add_plugins(route_autopilot::RouteAutopilotPlugin)
             .add_plugins(ControlLocksPlugin)

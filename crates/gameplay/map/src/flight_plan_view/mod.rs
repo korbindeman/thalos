@@ -1,0 +1,54 @@
+//! Unified flight plan view: ghost bodies, trajectory rendering, and lifecycle
+//! management as a single coherent system.
+//!
+//! The physics crate produces a [`FlightPlan`] with legs, encounters, and
+//! segments. This module builds a game-side view on top of that:
+//!
+//! - **Ghost bodies** — translucent spheres at future SOI entry positions.
+//!   Ghost bodies serve as rendering pins for encounter-frame previews.
+//! - **Trajectory rendering** — continuous gizmo line through all legs, plus
+//!   local encounter-window overlays drawn relative to matching ghost bodies.
+//! - **Lifecycle** — ghosts spawn when encounters appear in the prediction,
+//!   persist stably across repredictions (diff-based, no churn), blend out
+//!   as the real body catches up, and hand off camera focus on retirement.
+
+mod ghost;
+mod markers;
+mod render;
+mod view;
+
+pub use ghost::GhostBody;
+pub use view::FlightPlanView;
+
+use bevy::prelude::*;
+
+pub struct FlightPlanViewPlugin;
+
+impl Plugin for FlightPlanViewPlugin {
+    fn build(&self, app: &mut App) {
+        // Lifecycle runs BEFORE sync_ghost_bodies so retired ghosts (either
+        // from sim-time advance or reconcile churn) get a chance to hand off
+        // camera focus before their entity is despawned.
+        app.init_resource::<FlightPlanView>()
+            .add_systems(Startup, markers::setup_trajectory_marker_assets)
+            .add_systems(
+                Update,
+                (
+                    view::rebuild_flight_plan_view,
+                    ghost::update_ghost_lifecycle,
+                    ghost::sync_ghost_bodies,
+                    ghost::update_ghost_transforms,
+                    render::render_trajectory.run_if(
+                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                    ),
+                    markers::manage_trajectory_markers.run_if(
+                        thalos_game_state::ui::not_in_photo_mode.and_then(thalos_game_state::nav::in_map_view),
+                    ),
+                )
+                    .chain()
+                    .after(thalos_game_state::sched::SolarSystemSyncSet)
+                    .after(thalos_game_state::sched::RenderFrameSet)
+                    .in_set(thalos_game_state::sched::SimStage::Sync),
+            );
+    }
+}

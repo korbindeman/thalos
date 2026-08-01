@@ -37,21 +37,13 @@ use thalos_ui::{self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, to
 use crate::maneuver::{ManeuverPlan, SelectedNode};
 use crate::player_controller::EvaMode;
 use crate::rendering::{PlayerShip, SimulationState};
+
+pub use thalos_game_state::ui::ScenarioMenu;
 use crate::spawn::{
     Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
     place_craft, polar_orbit_respawn_state,
 };
 
-/// Whether the destruction scenario picker is shown (and the game halted).
-///
-/// Mirrors `Simulation::is_destroyed()` via [`sync_menu_to_destruction`]; read
-/// as a pause source by [`crate::pause_menu`]. Default `false`; the resource is
-/// inserted at plugin build so the `not_game_paused` run condition can read it
-/// from the first frame.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub struct ScenarioMenu {
-    pub open: bool,
-}
 
 #[derive(Component)]
 struct ScenarioMenuRoot;

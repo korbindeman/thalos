@@ -52,13 +52,9 @@ use super::place::place_on_launchpad;
 use super::{BaseEditor, BaseEditorMode, cursor_body_dir};
 
 /// External trigger for the launch flow: the shipyard's LAUNCH sets `arm`.
-/// Consumed by [`begin_launch_flow`].
-///
-/// **Writer:** `shipyard_editor::ui::top_bar` (the LAUNCH button).
-#[derive(Resource, Default)]
-pub struct SpaceportLaunchRequest {
-    pub arm: bool,
-}
+// Moved to `thalos_game_state::relaunch` (Phase 5b); consumed by
+// [`begin_launch_flow`] below.
+pub use thalos_game_state::relaunch::SpaceportLaunchRequest;
 
 /// Armed by [`begin_launch_flow`] when the spaceport isn't built yet; consumed
 /// by [`finish_launch_spaceport`] during the loading pass.

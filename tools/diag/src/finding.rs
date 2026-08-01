@@ -120,6 +120,20 @@ pub const ORBIT_INCLINATION_ERROR_RAD_ATTENTION: f64 = 0.01;
 pub const ORBIT_DYNAMIC_PRESSURE_PA_ATTENTION: f64 = 42_000.0;
 pub const ORBIT_MAX_Q_SAMPLES_ATTENTION: usize = 3;
 
+/// Staging is *commanded* on a predicted burnout; thrust collapse survives only
+/// as a backup trigger. Every `stage_unpredicted` is therefore a prediction the
+/// sequencer got wrong, and one is already worth reading — the vehicle staged
+/// late, with a thrust dropout the guidance did not plan for. Set at 1 because
+/// the healthy count is exactly zero: any nonzero value falsifies the
+/// prediction, which is the whole reason the backup path still logs instead of
+/// silently covering for it.
+pub const STAGE_UNPREDICTED_ATTENTION: usize = 1;
+
+/// A refused staging request means the sequencer passed its interlocks and the
+/// canonical staging op still declined — a real contradiction between the two,
+/// not a tuning question. One is worth a look.
+pub const STAGE_REFUSED_ATTENTION: usize = 1;
+
 // ── Capture-lane thresholds ─────────────────────────────────────────────────
 //
 // The capture lane is the throughput floor for agent work, so its bar is the
@@ -206,6 +220,29 @@ pub const SHADOW_VIEW_ALT_PAIR_WINDOW_MS: u128 = 3_000;
 /// far above the 0.0 a genuine constant produces, so it separates the two
 /// without firing on a legitimately bland body.
 pub const REFLECTION_ALBEDO_SPREAD_FLAT: f64 = 0.005;
+/// Half-angle of the planet surface actually visible from the paint point,
+/// below which `albedo_spread` says nothing about the bake. The event publishes
+/// the disc's angular *radius* (`planet_ang_deg` = asin(R/(R+h))), so the
+/// visible spherical cap is `90° - planet_ang_deg` — a footprint of radius
+/// `R · cap` on the ground.
+///
+/// This exists because the spread test cannot be read without it. Triage
+/// 2026-07-31 measured two clean populations over 24 h: the 200 km orbital view
+/// (`planet_ang_deg` 70.2 → cap 19.8°, footprint ≈ 2,000 km on Thalos) reads
+/// spread 0.046 — continents against ocean; a ~7 km view (`planet_ang_deg` 87.4
+/// → cap 2.6°, footprint ≈ 270 km) reads 0.0018 across **168 of 373 paints**,
+/// with a different, brighter `albedo_mean`. The low reading there is the
+/// correct answer — from 7 km up the reflected ground is one landscape — so
+/// judging it flagged every low-altitude session and buried the defect the
+/// check exists for.
+///
+/// 10° (footprint radius ≈ 0.17 R, ≈ 1,050 km on Thalos) is set to span several
+/// biomes and coastline on any authored body, so a bound bake that reads
+/// constant across it really is blank or wrongly rotated. It leaves ~2× margin
+/// under the orbital framing this check was built for (`orbit-hull`, cap 19.8°)
+/// and ~4× over the near-surface population it must ignore. On a 6,000 km body
+/// it starts judging from roughly 90 km up.
+pub const REFLECTION_VISIBLE_CAP_MIN_DEG: f64 = 10.0;
 /// Share of the reflection cubemap the planet must cover before a missing bake
 /// is worth reporting. Below this the planet is a minor feature of the
 /// reflected sky; at and above it, reflecting a flat disc is a visible defect

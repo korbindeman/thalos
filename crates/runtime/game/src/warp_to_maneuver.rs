@@ -19,7 +19,6 @@
 
 use bevy::prelude::*;
 
-use thalos_physics_canonical::simulation::Simulation;
 
 use crate::SimStage;
 use crate::autopilot::{autopilot_system, lead_seconds_for};
@@ -27,88 +26,23 @@ use crate::bridge::{advance_simulation, handle_warp_controls};
 use crate::controls::ControlLocks;
 use crate::rendering::SimulationState;
 
+pub use thalos_game_state::nav::{WarpToManeuver, find_next_maneuver};
+#[cfg(test)]
+use thalos_game_state::nav::format_duration;
+#[cfg(test)]
+use thalos_game_state::nav::ManeuverTarget;
+
 /// Worst-case real-frame budget — must match
 /// [`thalos_physics_canonical::simulation::SimulationConfig::max_real_delta`] so
 /// a single frame at the chosen level can't advance past the safe
 /// target.
 const FRAME_DT_BUDGET_S: f64 = 0.1;
 
-#[derive(Clone, Copy, Debug)]
-pub struct ManeuverTarget {
-    pub epoch: f64,
-    /// Tsiolkovsky burn duration computed when the target was selected.
-    /// Lets the safe-target calculation reuse the autopilot's lead
-    /// formula without re-querying the simulation.
-    pub duration_s: f64,
-}
 
-impl ManeuverTarget {
-    /// Short label such as "Maneuver in 1h 23m".
-    #[cfg(test)]
-    fn label(&self, now: f64) -> String {
-        let remaining = (self.epoch - now).max(0.0);
-        format!("Maneuver in {}", format_duration(remaining))
-    }
-}
 
-#[cfg(test)]
-fn format_duration(seconds: f64) -> String {
-    if seconds < 60.0 {
-        format!("{:.0}s", seconds)
-    } else if seconds < 3600.0 {
-        let m = (seconds / 60.0).floor();
-        let s = seconds - m * 60.0;
-        format!("{:.0}m {:02.0}s", m, s)
-    } else if seconds < 86400.0 {
-        let h = (seconds / 3600.0).floor();
-        let m = ((seconds - h * 3600.0) / 60.0).floor();
-        format!("{:.0}h {:02.0}m", h, m)
-    } else {
-        let d = (seconds / 86400.0).floor();
-        let h = ((seconds - d * 86400.0) / 3600.0).floor();
-        format!("{:.0}d {:02.0}h", d, h)
-    }
-}
 
-#[derive(Resource, Default)]
-pub struct WarpToManeuver {
-    /// `true` while the auto-warp is engaged. Cleared on arrival, when
-    /// no upcoming maneuver remains, when an active burn takes over, or
-    /// when the player nudges warp manually (handled in
-    /// [`crate::bridge::handle_warp_controls`]).
-    pub active: bool,
-    /// Latest target as of the most recent system tick — drives the
-    /// HUD readout. `None` whenever auto-warp is off.
-    pub current: Option<ManeuverTarget>,
-}
 
-impl WarpToManeuver {
-    pub fn cancel(&mut self) {
-        self.active = false;
-        self.current = None;
-    }
-}
 
-/// Soonest scheduled maneuver after `sim_time`. Skips past zero-Δv
-/// nodes (placeholders that wouldn't fire). The strict `>` filter
-/// rejects a node sitting at the current epoch — that node is already
-/// mid-execution or stale.
-pub fn find_next_maneuver(sim_time: f64, simulation: &Simulation) -> Option<ManeuverTarget> {
-    for node in simulation.maneuvers().iter() {
-        if node.time <= sim_time {
-            continue;
-        }
-        let dv_mag = node.delta_v.length();
-        if dv_mag <= 0.0 {
-            continue;
-        }
-        return Some(ManeuverTarget {
-            epoch: node.time,
-            duration_s: simulation.estimated_burn_duration(dv_mag),
-        });
-    }
-    None
-}
 
 pub(crate) fn warp_to_maneuver_system(
     mut state: ResMut<WarpToManeuver>,
