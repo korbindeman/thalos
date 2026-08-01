@@ -179,7 +179,7 @@ impl Default for ApproachParams {
             maneuver_speed_m_s: 110.0,
             min_turn_radius_m: 400.0,
             final_length_m: 9_000.0,
-            aim_inset_m: 300.0,
+            aim_inset_m: 450.0,
             min_capture_run_m: 1_200.0,
             vnav: VnavParams::default(),
         }
@@ -243,6 +243,17 @@ impl ApproachPlan {
     /// Total route length (m), transition plus final.
     pub fn length_m(&self) -> f64 {
         self.path.length()
+    }
+
+    /// Distance-to-go (m) at which the straight final begins.
+    ///
+    /// The same boundary as [`Self::final_start_along_m`], expressed from the
+    /// aim point instead of from the route start — which is the form that
+    /// survives a rejoin being spliced onto the front of the route, because a
+    /// splice adds length ahead of the craft and shifts every along-track
+    /// distance while leaving every distance-to-go untouched.
+    pub fn final_dtg_m(&self) -> f64 {
+        (self.path.length() - self.final_start_along_m).max(0.0)
     }
 
     /// Distance-to-go at the threshold. `dtg = 0` is the **aim** point, so
@@ -512,6 +523,17 @@ mod tests {
             plan.length_m(),
             25_000.0 + params.aim_inset_m,
             epsilon = 1.0
+        );
+    }
+
+    #[test]
+    fn default_aim_point_leaves_threshold_crossing_margin() {
+        let params = ApproachParams::default();
+        let threshold_height_m = params.aim_inset_m * params.vnav.glideslope_rad.tan();
+        assert_abs_diff_eq!(params.aim_inset_m, 450.0, epsilon = 1e-9);
+        assert!(
+            threshold_height_m >= 20.0,
+            "threshold crossing margin only {threshold_height_m:.1} m"
         );
     }
 

@@ -12,18 +12,20 @@ but canonical translation was still pinned.
 
 ## Root cause
 
-The landed `BodyFixed` release gate read `ThrottleState::commanded`, the
-persistent **pilot** setpoint. After control-authority unification, ORBIT
-publishes a `ControlDemand` and the arbitration winner is
+At the time, the landed `BodyFixed` release gate read
+`ThrottleState::commanded`, then the persistent **pilot** setpoint. ORBIT
+published a `ControlDemand` whose winner lived separately in
 `ThrottleState::selected`; the pilot field correctly remained zero. The regime
 resolver therefore never released landed authority even though the engine
 received full autoflight throttle.
 
 ## Fix
 
-`RegimeInputs` now names and receives the selected, pre-fuel-gate throttle.
-Any control-bus winner above the release threshold, pilot or autoflight,
-hands translation back to live physics.
+The immediate fix made `RegimeInputs` consume the selected, pre-fuel-gate
+throttle. ADR-20260801T052037Z later removed that split: the control-bus winner
+now moves canonical `commanded`, and the regime consumes that same value. Any
+winner above the release threshold, pilot or autoflight, hands translation back
+to live physics.
 
 ## Recurrence signal
 

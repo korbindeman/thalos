@@ -134,8 +134,13 @@ design around procedural assumptions).
    rather than a parallel authored system.
 5. **Package emission.** Fine-tuned output bakes into the terrain-package
    schema (MIRA-0 lineage); producer identity records base-model version +
-   fine-tune dataset/config. Q10 (pixel vs latent storage) is still the open
-   schema fork and now gates this workstream too.
+   fine-tune dataset/config. Runtime-ready learned payloads too large for a
+   normal Git blob live under `assets/terrain_packages/` through Git LFS, beside
+   their tracked provenance/hash sidecars; `just terrain-assets` is the explicit
+   deferred-checkout/repair path. Training runs, checkpoints, and optimizer
+   state stay ignored because the runtime does not consume them. Q10 (pixel vs
+   latent storage) is still the open schema fork and now gates this workstream
+   too.
 
 **Candidate mechanism — one field kernel, two backends (CubeCL).** The model is
 not the whole terrain. Downstream of it sits a *field cascade* every band

@@ -1,0 +1,4 @@
+# Runtime-ready learned terrain is versioned with the repository, but stored
+# through Git LFS so ordinary Git history contains only the content-addressed
+# pointer. The sidecar's sha256_le_f32 is the same digest as the LFS object id.
+assets/terrain_packages/thalos_diffusion/thalos_site_detail_*.f32 filter=lfs diff=lfs merge=lfs -text

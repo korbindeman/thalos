@@ -50,9 +50,9 @@ use thalos_world::BodyId;
 
 use crate::format;
 use crate::theme::HudTheme;
-use thalos_game_state::{SimulationState, SolarSystemState};
 use thalos_game_state::nav::{RouteRequest, RouteState, RouteStatus};
 use thalos_game_state::units::{UnitDomain, UnitSystem};
+use thalos_game_state::{SimulationState, SolarSystemState};
 
 use super::super::{ActiveWidget, FlightContext, MfdWidgetRoot, WidgetKind};
 
@@ -1313,14 +1313,18 @@ pub(crate) fn update(
     }
 
     let guidance = route.guidance.as_ref();
-    let plan = route.plan.as_ref();
 
     // --- Header.
     if let Ok((mut text, mut color)) = widgets.header_runway.single_mut() {
-        let (line, tint) = match (route.status, plan) {
+        // Keyed on the *armed end*, not on `plan`. The terminal plan does not
+        // exist during the enroute leg or immediately after a go-around, and
+        // reading the header off it made the ND announce SELECT RWY while the
+        // autopilot was flying to a selected runway — the single most confusing
+        // thing on screen in the recorded flight.
+        let (line, tint) = match (route.status, route.armed.as_ref()) {
             (RouteStatus::NoRunways, _) => ("NO RUNWAY".to_string(), theme.text_dim),
             (RouteStatus::Unavailable, _) => ("NAV UNAVAIL".to_string(), theme.text_dim),
-            (_, Some(plan)) => (format!("RWY {:02}", plan.designator), theme.text_accent),
+            (_, Some(entry)) => (format!("RWY {:02}", entry.designator), theme.text_accent),
             _ => ("SELECT RWY".to_string(), theme.text_dim),
         };
         if text.0 != line {
@@ -1331,11 +1335,18 @@ pub(crate) fn update(
         }
     }
 
-    let phase_text = guidance.map(|g| match g.phase {
-        ApproachPhase::Transition => "INTC",
-        ApproachPhase::Final => "FNL",
-        ApproachPhase::Touchdown => "TDZ",
-    });
+    let phase_text = match (guidance, route.destination_guidance.is_some()) {
+        (Some(g), _) => Some(match g.phase {
+            ApproachPhase::Transition => "INTC",
+            ApproachPhase::Final => "FNL",
+            ApproachPhase::Touchdown => "TDZ",
+        }),
+        // The enroute leg is a real phase of the approach, not the absence of
+        // one. Blanking the badge here is what made a go-around look like the
+        // navigation had failed.
+        (None, true) => Some("ENRT"),
+        (None, false) => None,
+    };
     if let Ok((children, mut visibility)) = widgets.header_phase.single_mut() {
         let target = if phase_text.is_some() {
             Visibility::Inherited
@@ -1355,8 +1366,16 @@ pub(crate) fn update(
     }
 
     if let Ok(mut text) = widgets.header_distance.single_mut() {
+        // Straight-line range to the threshold, because the label beside it says
+        // `RWY 27` and that is the distance to RWY 27. It used to show route
+        // distance-to-go, which is a different quantity: it read 14.0 nmi with
+        // the runway 9 km away, then jumped whenever the route changed shape.
+        // Route distance still drives the profile — it is just not what "how far
+        // is the runway" means.
         let line = guidance
-            .map(|g| format::ground_distance(g.dtg_m, system))
+            .map(|g| g.threshold_range_m)
+            .or_else(|| route.destination_guidance.map(|d| d.distance_to_arrival_m))
+            .map(|m| format::ground_distance(m, system))
             .unwrap_or_default();
         if text.0 != line {
             text.0 = line;
@@ -1473,12 +1492,22 @@ pub(crate) fn update(
 
 /// Screen offsets (px) of the steering dot, from the box centre.
 ///
-/// **The dot is where to point the aircraft, and it follows the route — not the
-/// runway.** It reads the route-relative director
-/// ([`Guidance::director_lateral`] / [`Guidance::director_vertical`]), which
-/// steers along the planned *path* on whatever leg the craft is on, and along a
-/// flyable rejoin when the craft is off course. The runway is only where today's
-/// route happens to end; the identical cue will fly a waypoint route.
+/// **The dot is the autopilot's own command, shown to a human.** It reads
+/// ([`Guidance::director_lateral`] / [`Guidance::director_vertical`]) — the roll
+/// and flight-path angle the follower would fly, against what the craft has — so
+/// centring it by hand flies the trajectory LAND would have flown. Hand-flying
+/// and autoland are one law with two presentations, not two laws that happen to
+/// agree on straight legs.
+///
+/// It follows the **active path** (the route with any committed rejoin spliced
+/// in), which is also the line drawn beneath it, so the cue and the picture
+/// cannot disagree. The runway is only where today's route happens to end; the
+/// identical cue will fly a waypoint route.
+///
+/// The lateral half was a *heading*-error cue until INC-20260801T035551Z. That
+/// is a different law: holding a curved leg costs a standing bank before any
+/// heading error exists, so a pilot who kept the dot centred through a turn flew
+/// wings level and slid off the outside of it.
 ///
 /// This is deliberately **not** the ILS localizer/glideslope pair. Those are
 /// beam deviations measured against the final approach centreline: correct for
@@ -1931,14 +1960,12 @@ mod tests {
     }
 
     /// A `Guidance` carrying a steering answer: `lateral` in units of full-scale
-    /// heading error (+ = turn right), `vertical` in units of full-scale
+    /// bank error (+ = roll right), `vertical` in units of full-scale
     /// flight-path-angle error (+ = climb).
     fn guidance_steering(lateral: f64, vertical: f64) -> Guidance {
-        let track = 1.0_f64;
         Guidance {
-            desired_heading_rad: track
-                + lateral * thalos_navigation::guidance::DIRECTOR_HEADING_FULL_SCALE_RAD,
-            track_heading_rad: track,
+            bank_command_rad: lateral * thalos_navigation::guidance::DIRECTOR_BANK_FULL_SCALE_RAD,
+            bank_rad: 0.0,
             fpa_rad: 0.0,
             fpa_command_rad: vertical * thalos_navigation::guidance::DIRECTOR_FPA_FULL_SCALE_RAD,
             ..guidance_with(0.0, 0.0)
@@ -1966,6 +1993,7 @@ mod tests {
             loc_deviation_rad: loc_scale * thalos_navigation::guidance::LOC_FULL_SCALE_RAD,
             gs_deviation_rad: gs_scale * thalos_navigation::guidance::GS_FULL_SCALE_RAD,
             bank_command_rad: 0.0,
+            bank_rad: 0.0,
             vertical_speed_command_m_s: 0.0,
             established: true,
         }

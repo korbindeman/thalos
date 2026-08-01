@@ -155,6 +155,13 @@ compare-cold preset="spaceport-aerial" axis="ssao":
     cargo build -p thalos_capture_host --features dev-renderer
     cargo run -p thalos_capture --bin thalos_capture -- compare "{{preset}}" "{{axis}}" --cold
 
+# Materialize the runtime-ready learned terrain payloads in a clone where Git
+# LFS smudging was unavailable or deliberately skipped, then verify the store.
+terrain-assets:
+    git lfs install --local
+    git lfs pull --include="assets/terrain_packages/thalos_diffusion/thalos_site_detail_*.f32"
+    git lfs fsck --objects
+
 # Offline authored terrain package. The MVP producer is the deterministic
 # airless compiler; ADR-20260720T211046Z-offline-terrain-packages's diffusion producer will emit the same package
 # boundary. Output: assets/terrain_packages/<body>.bin.

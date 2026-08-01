@@ -70,6 +70,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Verify runtime assets
+        shell: bash
+        run: git lfs fsck --objects
 
       - name: Install Rust
         run: rustup toolchain install nightly --profile minimal --target ${{ matrix.target }}

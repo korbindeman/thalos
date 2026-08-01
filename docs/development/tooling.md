@@ -289,7 +289,9 @@ The runway-destination autopilot emits lifecycle records on
 `thalos::diagnostic::approach_ap`: `land_engaged`, `land_phase`,
 `land_disengaged`, and `land_completed`, plus the 1 Hz `appr_frame` gauge
 (`dtg_m`, lateral/vertical errors, actual/target speed, selected throttle,
-steering and braking, weight-on-wheels). `just diag` treats an autonomous
+steering and braking, weight-on-wheels, confirmed-touchdown contact dwell, and
+post-touchdown airborne dwell). A bounce-triggered `land_go_around` also records
+the airborne dwell that crossed the recovery gate. `just diag` treats an autonomous
 disengagement as `land_autonomous_disengage` and any completion above
 0.75 m/s as `land_completed_while_rolling`; deliberate `pilot_override`
 disengagements stay quiet.
@@ -594,6 +596,20 @@ worktrees outside the main checkout so their private `target/` trees are visible
 as separate storage costs. Before removing a worktree, verify both its dirty
 state and commits absent from `main`; unique research branches and their authored
 data are not caches.
+
+### Runtime content checkout
+
+Runtime-ready learned terrain is versioned beside its provenance sidecars under
+`assets/terrain_packages/`, with large `thalos_site_detail_*.f32` payloads stored
+through Git LFS. A clone made with Git LFS installed materializes them during
+checkout; `just terrain-assets` is the idempotent deferred-checkout/repair path.
+It installs repository-local LFS filters, pulls only the learned terrain
+payloads, and runs `git lfs fsck --objects`. The LFS object id is the payload's
+SHA-256 and must match `sha256_le_f32` in its JSON sidecar. This bootstrap action
+has no diagnostics lane: Git LFS's content-addressed object store and nonzero
+exit status are the machine-readable integrity contract, and it runs before any
+Thalos process exists. Training data, checkpoints, and optimizer state remain
+outside the runtime checkout.
 
 ### Fast build setup — see docs/development/build_speed.md
 

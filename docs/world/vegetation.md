@@ -234,6 +234,21 @@ async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 > "dark forest from orbit" paint belongs to the real canopy geometry, not the
 > ground under it.
 >
+> **Screen-space tree LOD (2026-08-01).** The fixed 260/620/1200 m mesh bands
+> were removed after an aerial final showed their failure mode: the nearest
+> selected mesh was darker, visibly thinner, and substantially slower than the
+> fuller impostor that preceded it, even though the extra cards/branches were
+> not resolvable from the air. Ring 0 now projects the largest authored tree's
+> representative bounding diameter through the live ship-camera viewport and
+> vertical FOV. LOD0/1/2 require at least 180/90/40 physical output pixels;
+> below 40 px the octahedral impostor wins. A 15% dead-band prevents tile
+> rebuild churn under camera bob/zoom. A view-based AGL floor excludes LOD0
+> above 30 m, LOD0–1 above 75 m, and every mesh LOD above 150 m; descending
+> crosses 20% lower exit boundaries before finer meshes return. This is not an
+> aircraft-mode special case: free cameras, saved viewpoints, and capture rigs
+> use the same render-camera rule. Tree geometry, lighting, density, placement,
+> clipmap reach, and shadows are unchanged.
+>
 > **Still interim (Slice 3+):** the depth/shadow pass is alpha-unaware, so trees
 > cast roughly-solid (un-dappled) shadows; lower mesh LODs read sparser than the
 > LOD0-baked impostor (a *fluffiness*/coverage gap distinct from the colour one —
@@ -601,9 +616,11 @@ the rest. From altitude, far grass is sub-pixel and the cascade costs nothing.
 **Shrub** — mesh LODs → fade out (too small to read as a billboard):
 0–120 m LOD0, 120–250 m LOD1, beyond → dithered fade to nothing.
 
-**Tree** — mesh LODs → octahedral impostor → terrain fold:
-0–150 m LOD0, 150–500 m LOD1, 500–1200 m LOD2, 1200 m–`TREE_IMPOSTOR_MAX`
-hemisphere octahedral impostor, beyond → culled (already in terrain albedo).
+**Tree** — projected-size mesh LODs → octahedral impostor → terrain fold:
+LOD0 at ≥180 px representative tree diameter, LOD1 at 90–180 px, LOD2 at
+40–90 px, below 40 px → hemisphere octahedral impostor, beyond the outer
+clipmap → culled (already in terrain albedo). AGL supplies the additional
+coarse-detail floor described in the 2026-08-01 status note above.
 
 **Rock (`Rock`)** — near-only, **no impostor, no clipmap** (landed 2026-06-29,
 runtime-unverified). Scattered pebbles / cobbles resolve only up close, so the
@@ -670,9 +687,11 @@ discard needed. (Landed 2026-06-25.)
   approach.
 - **No re-LOD vanish:** a tree tile's mesh LOD is swapped **in place**
   (`relod_veg_tiles`) as it approaches — no despawn/rebuild gap.
-- **Zoom-independent:** all fade/LOD distances are measured from the **craft
-  anchor** (`GrassParams.anchor`), never the camera, so camera zoom/orbit can't
-  change what's drawn.
+- **View-correct:** ring fade distances remain slant-distance based, but tree
+  mesh LOD deliberately reads the live render camera's FOV and physical
+  viewport. Zooming in can therefore request detail when the tree actually
+  occupies more output pixels; a 15% dead-band prevents boundary churn. The
+  anchor is the view, never the craft or a game-mode override.
 
 ---
 
@@ -732,8 +751,10 @@ mid-to-far forests.
 
 Engine side in `body_render/src/ground/tree_impostor.rs` (+ `tree_impostor.wgsl`,
 `tree_bake.wgsl`); driver + bake orchestration in
-`game/src/rendering/vegetation.rs`. The mesh-tree path is unchanged; the far
-band (`lod_for_dist` LOD3, ≥ ~1.2 km) swaps mesh → impostor.
+`game/src/rendering/vegetation.rs`. The far band is selected when a
+representative tree projects below 40 px, or whenever the view is above the
+150 m AGL mesh ceiling; that LOD3 slot swaps mesh → impostor once the atlas is
+ready.
 
 - **Atlas.** Per tree species, an `N×N` (default 8×8) grid of hemisphere views,
   species stacked vertically in **two** linear `Rgba16Float` atlases: albedo +
@@ -759,7 +780,7 @@ band (`lod_for_dist` LOD3, ≥ ~1.2 km) swaps mesh → impostor.
   blends the 4 surrounding captured views** (coverage-weighted, so silhouettes
   don't ghost), alpha-tests, rotates the blended object-frame normal to world,
   and lights it through `thalos::lighting` — matching the mesh trees and ground.
-- **Seamless / zoom-independent.** Both materials share one lighting + fade
+- **Seamless / view-correct.** Both materials share one lighting + fade
   parameter set; the fade band moves to the impostor far edge once baked, so mesh
   trees (all well inside) never fade and only the far impostors grow/shrink at the
   edge. The mesh→impostor swap is the existing in-place re-LOD (spawn new,

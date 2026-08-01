@@ -17,7 +17,10 @@
 //! gated on terrain residency so plants seat on the streamed mesh. Tiles are
 //! built a tile beyond the fade edge (invisible build → no pop-in), re-LOD'd by
 //! rebuilding the tile mesh at the new LOD (old kept until the new is ready → no
-//! vanish), and rebuilt when the height source revision advances.
+//! vanish), and rebuilt when the height source revision advances. Tree LOD is
+//! selected from projected canopy size, not fixed world-distance bands; an AGL
+//! floor prevents aerial views from paying for near meshes that do not improve
+//! the image.
 //!
 //! Dispatch policy: **coverage outranks refinement** (missing tiles beat re-LOD
 //! upgrades, `TREE_UPGRADE_PENALTY`), a cold fill builds cheap impostors first
@@ -55,6 +58,7 @@ use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
+use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
@@ -66,7 +70,7 @@ use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_sy
 /// One clipmap ring of the tree scatter: a cube-sphere lattice at `tile_size_m`,
 /// covering ground distances `[inner_m, outer_m]` from the player.
 ///
-/// **Ring 0** is the fine near/mid band — full mesh-LOD trees (`lod_for_dist`)
+/// **Ring 0** is the fine near/mid band — screen-selected mesh-LOD trees
 /// plus the natural-size octahedral impostor far band. **Rings ≥ 1** are
 /// **impostor-only** rings carrying the forest out to ~22 km, handing off
 /// (eventually) to the terrain albedo. Every ring draws trees at *natural size*
@@ -247,8 +251,8 @@ const TREE_DESPAWN_AGL_M: f64 = 16000.0;
 /// deep queue keeps the pool fed when individual builds are short (impostor
 /// combines), which is most of a cold fill under the coarse-first path below.
 const TREE_MAX_IN_FLIGHT: usize = 24;
-/// Motion look-ahead (s) folded into the slant distance the mesh-LOD pick is
-/// keyed on: at eye speed `v` a tile is treated as `v ×` this farther away, so
+/// Motion look-ahead (s) folded into the slant distance the projected-size LOD
+/// pick is keyed on: at eye speed `v` a tile is treated as `v ×` this farther away, so
 /// a fast view builds cheap impostor tiles it will actually pass instead of
 /// mesh tiles it out-runs before they land — and a settling view (speed → 0)
 /// re-LODs back to full mesh fidelity in place, nearest first. Uses the same
@@ -259,8 +263,8 @@ const TREE_MOTION_LEAD_S: f64 = 3.0;
 /// impostor-FIRST — the combine is a few quads per tree instead of a batched
 /// LOD mesh, so coverage lands in a fraction of the time — and the normal
 /// re-LOD pass upgrades them to meshes nearest-first afterwards. The innermost
-/// band (LOD0, < `TREE_LOD_BANDS_M[0]`) is exempt: a billboard 30 m from the
-/// eye reads worse than a short wait, and that band is only a handful of tiles.
+/// projected LOD0 band is exempt: a billboard filling hundreds of pixels reads
+/// worse than a short wait, and that band is only a handful of tiles.
 const TREE_COLD_FILL_MISSING: usize = 24;
 /// Distance multiplier penalizing re-LOD upgrades against missing tiles in the
 /// dispatch order: coverage outranks refinement (trees *existing* around the
@@ -280,9 +284,31 @@ const TREE_REBUILD_DELTA_M: f32 = 0.10;
 const TREE_MAX_REBUILDS_PER_TICK: usize = 2;
 /// LOD sample hint for the AGL ground probe.
 const TREE_GROUND_LOD_M: f32 = 2.0;
-/// Mesh-LOD band edges (ground distance, m): LOD0 < [0], LOD1 < [1], LOD2 < [2],
-/// else the minimal far LOD3.
-const TREE_LOD_BANDS_M: [f64; 3] = [260.0, 620.0, 1200.0];
+/// Projected tree-diameter thresholds in physical output pixels. LOD0 is kept
+/// only while a representative full tree is at least 180 px tall/wide, LOD1 at
+/// 90 px, and LOD2 at 40 px; below that the octahedral impostor has enough
+/// angular resolution and gives a fuller, more stable canopy than the sparse
+/// low-card mesh. These thresholds deliberately halve the old mesh footprint at
+/// the default lens: the highest-detail tree was both slower and visually worse
+/// than the impostor before its extra branch/card structure became resolvable.
+const TREE_LOD_PROJECTED_DIAMETER_PX: [f64; 3] = [180.0, 90.0, 40.0];
+/// Fractional dead-band around each projected-size boundary. Upgrades require
+/// `1 + h`; downgrades require `1 - h`, so camera bob, zoom noise, and tile-centre
+/// motion cannot continuously rebuild a tile on a boundary.
+const TREE_LOD_HYSTERESIS_FRAC: f64 = 0.15;
+/// AGL ceilings for mesh detail. Above 30 m LOD0 is never useful; above 75 m
+/// LOD0–1 are excluded; above 150 m every tree uses the impostor. The selector
+/// remains view-based rather than craft/regime-based, so free cameras and capture
+/// rigs obey the same rule.
+const TREE_AERIAL_LOD_FLOOR_M: [f64; 3] = [30.0, 75.0, 150.0];
+/// Descending must cross below 80% of an AGL boundary before finer detail may
+/// return. This prevents a whole annulus of tiles re-LODing repeatedly while an
+/// aircraft holds altitude near a boundary.
+const TREE_AERIAL_EXIT_FRAC: f64 = 0.80;
+/// Representative instance scale for projected-size selection. Placement uses
+/// a uniform 0.8–1.6 range, whose midpoint is 1.2; selecting from the largest
+/// possible tree would over-detail the whole forest for a small minority.
+const TREE_LOD_REFERENCE_SCALE: f32 = 1.2;
 /// Canopy wind sway amplitude at full weight, metres.
 const TREE_WIND_SWAY_M: f32 = 0.35;
 /// Number of mesh LODs per species.
@@ -291,17 +317,67 @@ const TREE_LOD_COUNT: usize = 4;
 /// bound). The impostor frustum-cull AABB pad uses it to bound the biggest card.
 const TREE_SCALE_MAX: f32 = 1.6;
 
-/// Mesh LOD index for a tile at ground distance `d`.
-fn lod_for_dist(d: f64) -> usize {
-    if d < TREE_LOD_BANDS_M[0] {
-        0
-    } else if d < TREE_LOD_BANDS_M[1] {
-        1
-    } else if d < TREE_LOD_BANDS_M[2] {
-        2
-    } else {
-        3
+/// Projected diameter of a world-space object under a perspective camera.
+fn projected_diameter_px(
+    diameter_m: f64,
+    distance_m: f64,
+    viewport_height_px: f64,
+    vertical_fov_rad: f64,
+) -> f64 {
+    if diameter_m <= 0.0 || viewport_height_px <= 0.0 || vertical_fov_rad <= 0.0 {
+        return 0.0;
     }
+    if distance_m <= 0.0 {
+        return f64::INFINITY;
+    }
+    let focal_length_px = viewport_height_px / (2.0 * (vertical_fov_rad * 0.5).tan());
+    diameter_m * focal_length_px / distance_m
+}
+
+/// Minimum numeric LOD allowed by altitude. Existing coarse tiles use a lower
+/// exit boundary while descending, independently of the screen-size dead-band.
+fn aerial_lod_floor(agl_m: f64, current_lod: Option<usize>) -> usize {
+    let mut floor = 0;
+    for (boundary, enter_m) in TREE_AERIAL_LOD_FLOOR_M.iter().copied().enumerate() {
+        let constrained_lod = boundary + 1;
+        let holding_coarse = current_lod.is_some_and(|lod| lod >= constrained_lod);
+        let threshold = if holding_coarse {
+            enter_m * TREE_AERIAL_EXIT_FRAC
+        } else {
+            enter_m
+        };
+        if agl_m >= threshold {
+            floor = constrained_lod;
+        }
+    }
+    floor
+}
+
+/// Select a mesh/impostor LOD from projected tree size, retaining the current
+/// LOD inside a 15% dead-band and then applying the aerial coarse-detail floor.
+fn tree_lod_for_view(projected_px: f64, agl_m: f64, current_lod: Option<usize>) -> usize {
+    let ideal = TREE_LOD_PROJECTED_DIAMETER_PX
+        .iter()
+        .position(|threshold| projected_px >= *threshold)
+        .unwrap_or(TREE_LOD_COUNT - 1);
+
+    let mut lod = current_lod.unwrap_or(ideal).min(TREE_LOD_COUNT - 1);
+    while lod > ideal {
+        let boundary_px = TREE_LOD_PROJECTED_DIAMETER_PX[lod - 1];
+        if projected_px < boundary_px * (1.0 + TREE_LOD_HYSTERESIS_FRAC) {
+            break;
+        }
+        lod -= 1;
+    }
+    while lod < ideal {
+        let boundary_px = TREE_LOD_PROJECTED_DIAMETER_PX[lod];
+        if projected_px >= boundary_px * (1.0 - TREE_LOD_HYSTERESIS_FRAC) {
+            break;
+        }
+        lod += 1;
+    }
+
+    lod.max(aerial_lod_floor(agl_m.max(0.0), current_lod))
 }
 
 /// The procedural species library, built once at startup. `placement` is also
@@ -325,6 +401,10 @@ struct SpeciesLibrary {
     /// to pad an impostor tile's (degenerate-mesh) AABB so frustum culling keeps
     /// tall cards near the frustum edge instead of clipping them.
     max_tree_extent_m: f32,
+    /// Full representative tree diameter used by the screen-space LOD picker.
+    /// Derived from authored LOD0 bounds, so changing the species updates LOD
+    /// selection without another hand-tuned distance cascade.
+    lod_reference_diameter_m: f32,
 }
 
 /// State of the one-shot startup impostor-atlas bake. Until `ready`, the far
@@ -593,10 +673,12 @@ fn setup_species_library(
     // from; index by atlas layer.
     let mut species_geo = [Vec4::ZERO; IMPOSTOR_MAX_SPECIES];
     let mut max_tree_extent_m = 0.0f32;
+    let mut max_tree_radius_m = 0.0f32;
     for (layer, &sp) in tree_species.iter().enumerate().take(IMPOSTOR_MAX_SPECIES) {
         let (center, radius) = tree_bounding_sphere(&lod_data[sp][0]);
         species_geo[layer] = Vec4::new(radius, center.y, 0.0, 0.0);
         max_tree_extent_m = max_tree_extent_m.max(center.y + radius);
+        max_tree_radius_m = max_tree_radius_m.max(radius);
     }
 
     let impostor_block = ImpostorParams {
@@ -642,6 +724,7 @@ fn setup_species_library(
         impostor_materials: ring_impostor_materials,
         atlas_species,
         max_tree_extent_m,
+        lod_reference_diameter_m: 2.0 * max_tree_radius_m * TREE_LOD_REFERENCE_SCALE,
     });
 }
 
@@ -829,6 +912,7 @@ fn drive_veg_tiles(
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     bake: Res<ImpostorBake>,
     anchor: Res<ViewAnchor>,
+    lod_camera: Query<(&Camera, &Projection), With<ShipCamera>>,
     mut commands: Commands,
     mut diag: Local<u32>,
 ) {
@@ -892,6 +976,24 @@ fn drive_veg_tiles(
     let cam_dir = view.cam_dir;
     let ground_h = view.ground_h_m;
     let agl = view.agl_m;
+    // Read the actual render projection. If the target has not reported its
+    // physical viewport yet (early startup), retain perspective FOV and use a
+    // conservative 1080 px reference until the real extent arrives.
+    let (viewport_height_px, vertical_fov_rad) = lod_camera
+        .single()
+        .ok()
+        .and_then(|(camera, projection)| {
+            let Projection::Perspective(perspective) = projection else {
+                return None;
+            };
+            Some((
+                camera
+                    .physical_viewport_size()
+                    .map_or(1080.0, |size| size.y.max(1) as f64),
+                perspective.fov as f64,
+            ))
+        })
+        .unwrap_or((1080.0, PerspectiveProjection::default().fov as f64));
     // Investigation trace, opt-in: this is an instrument for "why don't trees
     // build here", not a health gauge — nothing in `just diag` reads it, and at
     // ~1.5 s cadence it was 60 % of every record in the whole diagnostics lane.
@@ -995,7 +1097,7 @@ fn drive_veg_tiles(
 
     // Gather candidate tiles across every active ring, nearest first. A tile is a
     // candidate when it's missing, OR (ring 0) its baked LOD / impostor-ness no
-    // longer matches its distance — the rebuild keeps the old mesh until the new
+    // longer matches its projected size / AGL floor — the rebuild keeps the old mesh until the new
     // is ready (no vanish). Rings overlap by a fade band (cross-fade) and extend a
     // tile beyond their outer edge (invisible build).
     let speed = view.speed_m_s.max(0.0);
@@ -1035,19 +1137,25 @@ fn drive_veg_tiles(
                 // Ring 0 runs the mesh-LOD cascade + near impostor band; coarse
                 // rings are always impostor groves.
                 //
-                // LOD is keyed by the **slant** distance (ground arc + altitude),
-                // not the ground arc alone: from the air a tree directly below is
-                // ~0 m of ground distance but kilometres away, so a ground-only
-                // metric picks the close high-detail mesh and you see LOD0 meshes
-                // (which read worse than the impostor) straight down. Folding AGL
-                // in makes everything below the climbing craft fall back to the
-                // impostor band, while a low pass (agl ≈ 0) is unchanged.
-                // Plus the motion look-ahead: a fast view keys its LOD off
-                // where it is about to be, not where it is (TREE_MOTION_LEAD_S).
+                // Project the authored tree bounds from the **slant** distance
+                // (ground arc + altitude), then select by their output-pixel
+                // diameter. A tree directly below an aircraft is near in ground
+                // arc but small on screen; it therefore stays an impostor instead
+                // of exploding into the costly, visually thinner mesh cascade.
+                // The AGL floor is the budget guard for wide aerial footprints.
+                // Motion look-ahead keys the projection off where a fast view is
+                // about to be, not where it is (TREE_MOTION_LEAD_S).
                 let view_d =
                     (d * d + agl.max(0.0) * agl.max(0.0)).sqrt() + speed * TREE_MOTION_LEAD_S;
+                let current_lod = veg.tiles.get(&rk).map(|tile| tile.lod);
                 let (desired, want_impostor) = if ring_idx == 0 {
-                    let l = lod_for_dist(view_d);
+                    let projected_px = projected_diameter_px(
+                        library.lod_reference_diameter_m as f64,
+                        view_d,
+                        viewport_height_px,
+                        vertical_fov_rad,
+                    );
+                    let l = tree_lod_for_view(projected_px, agl, current_lod);
                     (l, l == far_lod && bake.ready)
                 } else {
                     (far_lod, true)
@@ -1477,8 +1585,8 @@ fn update_tree_material(
     let sky_tau = Vec4::new(tau.x, tau.y, tau.z, strength);
 
     // Fade reference = the VIEW (`view.world_position` in the shader, offset 0):
-    // the scale-fade is a per-instance LOD keyed by slant distance from the eye,
-    // matching the build driver's slant-keyed LOD pick. Offset 0 is inherently
+    // the scale-fade is keyed by slant distance from the eye, matching the
+    // distance projected by the build driver's screen-space LOD pick. Offset 0 is inherently
     // origin-invariant and this-frame-exact — the former craft-anchored offset
     // was a workaround for the main-world camera transform lagging a frame,
     // which the shader's own view position doesn't.
@@ -1615,4 +1723,55 @@ fn veg_diag_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("THALOS_VEG_DIAG").is_ok_and(|value| matches!(value.as_str(), "1" | "true"))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projection_responds_to_distance_fov_and_resolution() {
+        let base = projected_diameter_px(10.0, 500.0, 1080.0, 0.7);
+        assert!(base > 0.0);
+        assert!((projected_diameter_px(10.0, 1000.0, 1080.0, 0.7) - base * 0.5).abs() < 1.0e-9);
+        assert!(projected_diameter_px(10.0, 500.0, 2160.0, 0.7) > base);
+        assert!(projected_diameter_px(10.0, 500.0, 1080.0, 0.35) > base);
+    }
+
+    #[test]
+    fn projected_size_selects_the_cheapest_sufficient_representation() {
+        assert_eq!(tree_lod_for_view(220.0, 0.0, None), 0);
+        assert_eq!(tree_lod_for_view(120.0, 0.0, None), 1);
+        assert_eq!(tree_lod_for_view(60.0, 0.0, None), 2);
+        assert_eq!(tree_lod_for_view(30.0, 0.0, None), 3);
+    }
+
+    #[test]
+    fn projected_size_hysteresis_prevents_boundary_churn() {
+        // LOD1 does not upgrade at the nominal 180 px boundary; it must clear
+        // the +15% edge. Conversely LOD0 survives until below the -15% edge.
+        assert_eq!(tree_lod_for_view(190.0, 0.0, Some(1)), 1);
+        assert_eq!(tree_lod_for_view(210.0, 0.0, Some(1)), 0);
+        assert_eq!(tree_lod_for_view(160.0, 0.0, Some(0)), 0);
+        assert_eq!(tree_lod_for_view(150.0, 0.0, Some(0)), 1);
+    }
+
+    #[test]
+    fn aerial_floor_removes_near_meshes_from_wide_views() {
+        let huge_on_screen = 1000.0;
+        assert_eq!(tree_lod_for_view(huge_on_screen, 20.0, None), 0);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 50.0, None), 1);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 100.0, None), 2);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 200.0, None), 3);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 1_036.0, None), 3);
+    }
+
+    #[test]
+    fn aerial_floor_has_a_descending_dead_band() {
+        let huge_on_screen = 1000.0;
+        assert_eq!(tree_lod_for_view(huge_on_screen, 130.0, Some(3)), 3);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 110.0, Some(3)), 2);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 65.0, Some(2)), 2);
+        assert_eq!(tree_lod_for_view(huge_on_screen, 55.0, Some(2)), 1);
+    }
 }

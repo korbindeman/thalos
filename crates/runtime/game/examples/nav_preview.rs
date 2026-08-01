@@ -309,7 +309,7 @@ fn panel_drifted(
         })
         .unwrap_or_default();
 
-    let display = plan.as_ref().map(plan_display);
+    let display = plan.as_ref().map(|p| plan_display(p, &p.path));
     Panel {
         caption: caption.to_string(),
         scene_inputs: PanelInputs {

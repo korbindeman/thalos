@@ -143,8 +143,9 @@ layers (ADR-20260731T232619Z): the strategic `FlightProgram` owns targets,
 sequencing, and events, while the tactical channels — attitude and throttle —
 are resolved per frame by `thalos_control::arbitrate` among the pilot, SAS, nav
 modes, and one autopilot slot. ORBIT publishes guidance through `ControlDemand`
-like any other source; it does not write the throttle setpoint behind the
-control bus and does not treat the SAS toggle as a hidden prerequisite.
+like any other source; the control bus commits its winning throttle demand to
+the canonical throttle position, and ORBIT does not bypass that authority or
+treat the SAS toggle as a hidden prerequisite.
 
 Because it is a program rather than a mode, ORBIT *delegates* to the shared
 scheduled-burn executor for the circularisation nodes it installs at MECO. The

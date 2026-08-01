@@ -207,12 +207,13 @@ The bus now covers **attitude, throttle, ground steering, and wheel braking**
 for ships. Remaining controls are designed-in extension points wired the same
 way later:
 
-- **Throttle setpoint — implemented with LAND.** `ThrottleState::commanded`
-  remains the player's persistent setpoint; the bus writes `selected`, and the
-  fuel gate writes `effective`. Maneuver and LAND autoflight publish temporary
-  demands instead of mutating the pilot's setpoint. Successful LAND completion
-  holds selected idle until deliberate pilot movement, preventing a stale
-  physical lever/setpoint from surging after release.
+- **Throttle setpoint — implemented with LAND.** `ThrottleState::commanded` is
+  the one canonical throttle position; the control-bus winner, whether pilot or
+  autoflight, moves it. The fuel gate alone writes `effective`, which represents
+  constrained engine response rather than a second controller position.
+  Automatic release leaves the control where automation last moved it; modes
+  that must finish at idle command zero before release. See
+  ADR-20260801T052037Z.
 - **Ground steering and braking — implemented with LAND.** Nosewheel physics
   reads `ResolvedGroundControl`; it no longer reads raw yaw input. LAND owns
   steering/braking through rollout, then leaves the persistent parking brake

@@ -7,26 +7,46 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_control::AssistStatus;
 use thalos_physics_canonical::aero::{AeroConfig, ControlInputs};
-use thalos_world::BodyId;
 use thalos_shipyard::StageSummary;
+use thalos_world::BodyId;
 
-/// Player throttle state, persisted across frames so Shift/Ctrl can ramp
-/// continuously and absolute HOTAS axes can publish a stable command.
+use crate::autoflight::ThrottleChannel;
+
+/// Canonical throttle position, persisted across frames so every controller
+/// moves the same control surface.
 ///
-/// `commanded` is the pilot's persistent setpoint, `selected` is the winner of
-/// control-bus arbitration for this frame, and `effective` is what was actually
-/// applied after the fuel-availability cap. HUD keeps reading the pilot
-/// setpoint/effective pair; an autothrottle never overwrites the setpoint.
+/// `commanded` is the current throttle position: pilot input and the winning
+/// automatic throttle demand both write it. `effective` is what the engines
+/// actually receive after fuel and warp gating. Automatic control therefore
+/// leaves the throttle where it last moved it instead of revealing a hidden,
+/// stale pilot setpoint when it disengages.
 #[derive(Resource, Debug, Default)]
 pub struct ThrottleState {
     pub commanded: f64,
-    pub selected: f64,
     pub effective: f64,
-    /// A completed autoflight mode may hand the channel back only after
-    /// forcing idle. The hold prevents a stale non-zero pilot setpoint from
-    /// surging the craft after automatic disengagement; the next deliberate
-    /// throttle movement clears it.
-    pub hold_idle_until_pilot_move: bool,
+}
+
+impl ThrottleState {
+    /// Commit the control-bus winner to the canonical throttle position.
+    ///
+    /// A source that yields leaves the control where it last moved it.
+    /// Scheduled burns are the exception: ending a burn is itself a cutoff
+    /// command, so the `Burn -> non-automatic owner` edge closes the throttle
+    /// instead of leaving the engine firing at the burn setting. A deliberate
+    /// pilot movement on that edge remains authoritative.
+    pub fn apply_arbitration(
+        &mut self,
+        winner: Option<f64>,
+        automatic_winner: bool,
+        previous_channel: ThrottleChannel,
+        pilot_moved: bool,
+    ) {
+        if previous_channel == ThrottleChannel::Burn && !automatic_winner && !pilot_moved {
+            self.commanded = 0.0;
+        } else if let Some(winner) = winner {
+            self.commanded = winner.clamp(0.0, 1.0);
+        }
+    }
 }
 
 /// Per-control-surface lockout flags. `true` = a programmatic system
@@ -382,5 +402,62 @@ pub struct ShipAero {
 pub fn set_gear_down(gear: &mut GearState, weight_on_wheels: &WeightOnWheels, down: bool) {
     if down || !weight_on_wheels.grounded {
         gear.down = down;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn automatic_throttle_moves_the_canonical_control() {
+        let mut throttle = ThrottleState {
+            commanded: 0.22,
+            ..default()
+        };
+        throttle.apply_arbitration(Some(0.76), true, ThrottleChannel::Pilot, false);
+        assert_eq!(throttle.commanded, 0.76);
+    }
+
+    #[test]
+    fn automatic_release_keeps_the_last_position() {
+        let mut throttle = ThrottleState {
+            commanded: 0.76,
+            ..default()
+        };
+        throttle.apply_arbitration(None, false, ThrottleChannel::Guidance, false);
+        assert_eq!(throttle.commanded, 0.76);
+    }
+
+    #[test]
+    fn scheduled_burn_release_commands_cutoff() {
+        let mut throttle = ThrottleState {
+            commanded: 1.0,
+            ..default()
+        };
+        // The unlocked pilot source republishes the last value, but that must
+        // not hide the automatic burn-complete cutoff edge.
+        throttle.apply_arbitration(Some(1.0), false, ThrottleChannel::Burn, false);
+        assert_eq!(throttle.commanded, 0.0);
+    }
+
+    #[test]
+    fn pilot_movement_wins_during_burn_disconnect() {
+        let mut throttle = ThrottleState {
+            commanded: 1.0,
+            ..default()
+        };
+        throttle.apply_arbitration(Some(0.35), false, ThrottleChannel::Burn, true);
+        assert_eq!(throttle.commanded, 0.35);
+    }
+
+    #[test]
+    fn arbitration_clamps_the_canonical_control() {
+        let mut throttle = ThrottleState {
+            commanded: 0.5,
+            ..default()
+        };
+        throttle.apply_arbitration(Some(1.5), true, ThrottleChannel::Guidance, false);
+        assert_eq!(throttle.commanded, 1.0);
     }
 }

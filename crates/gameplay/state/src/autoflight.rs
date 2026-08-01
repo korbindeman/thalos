@@ -59,7 +59,10 @@ impl FlightProgram {
         match self {
             Self::None => "----",
             Self::Ascent => "ASCENT",
-            Self::Landing => "LAND",
+            // Not "LAND": the LAND button beside this chip annunciates the
+            // landing *phase*, and two adjacent chips both starting with LAND
+            // read as one broken readout rather than as two facts.
+            Self::Landing => "AUTOLAND",
         }
     }
 

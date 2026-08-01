@@ -92,17 +92,16 @@ resolves it by priority — the plumbing exists and is unused. Today
 `ThrottleState::commanded` is written directly by the player's input handler and
 *overwritten* by the maneuver autopilot during a burn.
 
-**Why this is worth doing first:** because the autopilot currently mutates the
-player's own setpoint, disengaging leaves the throttle wherever the autopilot
-left it rather than where the pilot set it. With the bus, `commanded` stays the
-pilot's persistent setpoint — storage, not a command path — and a programmatic
-source merely *outranks* it for as long as it is engaged.
+**Current throttle contract (superseded by ADR-20260801T052037Z):** arbitration
+still decides which source owns throttle, but the winner moves the one canonical
+control. There is no hidden pilot setpoint to restore after automatic flight.
 
 Shape:
 
-- `ThrottleState::commanded` remains the player's persistent setpoint.
-- Each source emits a throttle demand; `realize_control` writes the arbitrated
-  winner into the sim's control input. The fuel gate
+- `ThrottleState::commanded` is the current throttle position, regardless of
+  whether pilot or automation moved it.
+- Each source emits a throttle demand; `realize_control` commits the arbitrated
+  winner to `commanded`. The fuel gate
   (`gate_throttle_on_fuel_availability` → `effective`) stays *after*
   arbitration, unchanged.
 - The maneuver autopilot stops writing `ThrottleState` and emits a demand
@@ -259,8 +258,11 @@ rather than waiting to need them.
 Below a flare height (start with ~15 m over the runway, from
 `guidance.altitude_m − plan.frame.origin_altitude_m`):
 
-- blend the glideslope pitch target toward a nose-up flare attitude,
-- retard the throttle toward idle,
+- schedule vertical speed continuously from the final-path sink to a shallow,
+  still-descending touchdown target and feed achieved sink-rate error back into
+  pitch (a height-only pitch blend cannot arrest an aircraft that lags it),
+- retain approach power through the high flare, then retard progressively to
+  idle only over the final metres,
 - hold wings level (`bank_rad → 0`),
 - transition to rollout only after weight-on-wheels is stable long enough to
   reject a bounce.
@@ -349,9 +351,11 @@ The laws are pure functions if you write them that way — do, and test them:
   finite at zero airspeed.
 - **Speed law:** above target → throttle decreases; below → increases; the
   integrator does not wind up while saturated at idle.
-- **Flare:** above flare height the pitch target equals the glideslope target
-  exactly (no discontinuity at handover); at touchdown height the target is
-  nose-up and the throttle is at idle.
+- **Flare:** at flare height an on-profile aircraft retains the final pitch and
+  throttle exactly; a recorded excessive sink commands more pitch than an
+  on-schedule descent; at touchdown height the target remains a shallow descent
+  and throttle is idle. A post-touchdown wheel unload holds that touchdown
+  attitude rather than commanding a climb.
 - **Gate scheduling:** crossing the `GEAR` gate commands gear down and does not
   command it again; gates never fire in reverse when distance-to-go grows.
 - **Rollout:** a bounce does not enter rollout; rollout commands idle/brakes and
@@ -363,11 +367,11 @@ The laws are pure functions if you write them that way — do, and test them:
   on-profile frame does neither.
 - **Mode ownership:** MNVR and LAND cannot both own the autopilot demand or
   control locks in one frame.
-- **Throttle arbitration (work item A):** an engaged autothrottle wins over the
-  pilot's resting setpoint; a pilot throttle *movement* wins and disengages;
-  a manual disengagement restores the pilot's setpoint rather than leaving the
-  autopilot's, while successful stopped completion holds realized idle until
-  the pilot deliberately moves the throttle.
+- **Throttle arbitration (work item A):** an engaged autothrottle moves the
+  canonical throttle position; a pilot throttle *movement* disengages and moves
+  that same control; a manual disengagement leaves it at the last automatic
+  position, while successful stopped completion commands canonical idle before
+  release.
 - **Ground arbitration:** LAND steering/braking wins while active; deliberate
   pilot yaw/brake movement disconnects it and takes control; no raw-input side
   path bypasses the winner.
@@ -386,9 +390,11 @@ info!(target: "thalos::diagnostic::approach_ap", event = "appr_frame",
       phase = …, destination_id = …, dtg_m = …,
       loc_dev_rad = …, gs_dev_rad = …,
       bank_cmd_rad = …, pitch_cmd_rad = …, throttle_cmd = …,
+      sink_rate_m_s = …, target_sink_rate_m_s = …,
       airspeed_m_s = …, target_speed_m_s = …, height_over_rwy_m = …,
       ground_speed_m_s = …, runway_cross_track_m = …,
-      brake_cmd = …, ground_steer_cmd = …, retry_count = …)
+      brake_cmd = …, ground_steer_cmd = …, retry_count = …,
+      touchdown_contact_s = …, post_touchdown_airborne_s = …)
 ```
 
 at ≥ 1 s while engaged (allocation-free, and it must not dominate the lane), plus
@@ -407,6 +413,26 @@ With that in place, "the landing felt wrong" is answerable from the file.
 
 ## Traps
 
+- **Along-track distance must be continuous, and it is not free.**
+  `dtg` is the argument to the whole vertical profile, the speed gates, and the
+  phase. Resolve it with `LateralPath::closest_from`, carrying the previous
+  along-track position — the global `closest` hops legs wherever the route
+  doubles back, which teleports the profile under the aircraft
+  (INC-20260801T035551Z).
+- **Frozen ≠ established.** `RouteState::plan_frozen` says the plan may no
+  longer change; `RouteState::established` says the craft is inside both
+  needles *right now*. A stabilisation gate reads the second. Conflating them
+  froze an approach 1.8 km off the centreline and called it stable.
+- **The localizer and glideslope are meaningless during the join.** They are
+  measured against the runway centreline, which a bank-limited intercept is not
+  on and is not meant to be. Judge stability on `Final`/`Flare` only, and with a
+  dwell — a single frame is a transient, not a decision.
+- **Cross-track from the route is not "off course" while a rejoin is flying.**
+  The rejoin deliberately leaves the route to get back onto it. A re-plan
+  trigger reading raw cross-track will fight it and loop.
+- **A reason that only reaches `runtime.jsonl` did not reach the player.** Every
+  go-around, refusal, and disengagement carries a `LandNotice`, which feeds the
+  annunciator and the lane from one value so they cannot disagree.
 - **Do not re-derive navigation.** Bank, vertical speed, target speed, and
   distance-to-go all come from `RouteState`. An autopilot that computes its own
   cross-track error will disagree with the needle the pilot is watching

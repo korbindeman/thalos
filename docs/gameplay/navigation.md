@@ -164,9 +164,10 @@ memory lives with the caller, per ADR-20260730T005746Z.
   you pick is the most consequential choice in an approach — not a boolean buried
   in a plan.
 - The **final** is a straight segment aligned with the landing heading, 9 km by
-  default, ending at an **aim point 300 m past the threshold**. Aiming the
-  glideslope there sets the threshold crossing height at `300 · tan 3°` ≈ 16 m,
-  matching real ILS practice. Note that `dtg = 0` is the *aim* point, so the
+  default, ending at an **aim point 450 m past the threshold**. Aiming the
+  glideslope there sets the threshold crossing height at `450 · tan 3°` ≈ 24 m,
+  leaving tracking and flare margin before the touchdown zone. Note that
+  `dtg = 0` is the *aim* point, so the
   threshold is crossed with `aim_inset` still to go.
 - **Joining late is handled explicitly.** A craft already inside the final
   corridor is *not* sent back out to the nominal final approach point — a Dubins

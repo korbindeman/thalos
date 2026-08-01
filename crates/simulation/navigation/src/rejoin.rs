@@ -18,13 +18,22 @@
 //! and a large one produce a proper intercept, with no gain to tune between the
 //! two cases.
 //!
-//! # This is guidance, not a re-plan
+//! # This amends the route; it does not replace it
 //!
-//! A rejoin **never** modifies the route. The route is the commitment; the
-//! rejoin is advice about how to get back to it, recomputed as the craft moves.
-//! Keeping them separate is what lets the plan stay frozen on final (see
-//! `docs/gameplay/navigation.md` § Re-plan policy) while the steering cue still
-//! responds to being blown off the centreline.
+//! A rejoin never changes where the route *goes* — the destination, the final
+//! segment, and the vertical profile are untouched, which is what lets the plan
+//! stay frozen on final (see `docs/gameplay/navigation.md` § Re-plan policy).
+//! What it does change is the front of the route: the caller **splices** the
+//! rejoin in with `LateralPath::splice_rejoin`, so the craft flies it as
+//! ordinary route, and the ND draws it as ordinary route.
+//!
+//! It was originally fed to the guidance as a steering *cue* alongside an
+//! untouched route, and that was wrong twice over. The displayed path and the
+//! flown path disagreed, by design, with no way for a pilot to tell which was
+//! which. And because the cue was replanned every frame, its aim point advanced
+//! with the craft: a recorded approach flew 385 s at a steady 12° of bank,
+//! never capturing, while its distance from the drawn route grew to 2.7 km
+//! (INC-20260801T035551Z). A rejoin is a commitment, so it is committed.
 //!
 //! # Route-relative, not destination-relative
 //!

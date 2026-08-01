@@ -109,6 +109,36 @@ pub const MAX_DETAIL_LINES: usize = 4;
 /// physics step to straddle the boundary without hiding a rolling disengage.
 pub const LAND_COMPLETION_SPEED_M_S_ATTENTION: f64 = 0.75;
 
+/// Go-arounds per session that mean LAND is not converging on an approach.
+///
+/// One go-around is the mode working: an approach went out of tolerance and it
+/// repositioned. Two in a session is bad luck or a marginal aircraft. Three is
+/// the controller's own retry limit, so reaching it means the session ended in
+/// `UNABLE` and the player never landed — the outcome this check exists to
+/// surface.
+pub const LAND_GO_AROUNDS_ATTENTION: usize = 3;
+
+/// Approach re-plans per session before the route is churning rather than
+/// converging.
+///
+/// The recorded failure re-planned every ~47 s for the whole approach, because
+/// the drift trigger fired on cross-track that a *planned* course reversal
+/// creates by construction. Each rebuild teleported distance-to-go and the
+/// entire vertical profile with it. A healthy approach re-plans when the pilot
+/// changes the selection and otherwise not at all, so a handful in one session
+/// is already the signature of that loop returning.
+pub const ROUTE_REPLANS_ATTENTION: usize = 4;
+
+/// Committed rejoins per session before the follower is not holding its path.
+///
+/// One or two per approach is the mechanism working: the craft was blown off,
+/// a way back was committed, it flew it. Committing repeatedly means it keeps
+/// falling off a route it is supposed to be tracking — which is the lateral
+/// tracking failure, showing up one level above where it happens. The commit is
+/// already rate-limited to one per 20 s, so reaching this count takes minutes of
+/// sustained failure to track.
+pub const ROUTE_REJOINS_ATTENTION: usize = 4;
+
 /// ORBIT promises these live achieved-element tolerances before publishing
 /// completion. The reader repeats the contract so a future executor regression
 /// cannot emit a plausible-looking false success.

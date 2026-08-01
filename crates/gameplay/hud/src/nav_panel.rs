@@ -25,25 +25,25 @@
 use bevy::prelude::*;
 use bevy::ui::Val2;
 
-use thalos_game_state::autoflight::{
-    AttitudeChannel, AutoflightAnnunciation, AutoflightPolicy, AutoflightRequest,
-    FlightProgram, ThrottleChannel,
-};
-use thalos_game_state::nav::{Autopilot, AutopilotBurnSchedule, AutopilotState};
-use thalos_game_state::flight::ControlLocks;
 use crate::HudPanel;
 use crate::nav_attitude::NavAttitudeRenderTarget;
-use crate::theme::HudTheme;
-use thalos_game_state::maneuver_plan::ManeuverPlan;
 use crate::navball::markers::{MarkerIconState, MarkerKind, marker_icon_image};
 use crate::navball::ui::{NAVBALL_BOTTOM_PX, NAVBALL_LEFT_PX, NAVBALL_SIZE_PX};
-use thalos_game_state::nav::{NavigationMode, NavigationState};
+use crate::theme::HudTheme;
 use thalos_game_state::SimulationState;
+use thalos_game_state::autoflight::{
+    AttitudeChannel, AutoflightAnnunciation, AutoflightPolicy, AutoflightRequest, FlightProgram,
+    ThrottleChannel,
+};
+use thalos_game_state::flight::ControlLocks;
+use thalos_game_state::maneuver_plan::ManeuverPlan;
+use thalos_game_state::nav::LandAutopilot;
 use thalos_game_state::nav::RouteState;
-use thalos_game_state::nav::{LandAutopilot, LandPhase};
 use thalos_game_state::nav::TargetBody;
-use thalos_game_state::units::UnitDomain;
+use thalos_game_state::nav::{Autopilot, AutopilotBurnSchedule, AutopilotState};
+use thalos_game_state::nav::{NavigationMode, NavigationState};
 use thalos_game_state::nav::{WarpToManeuver, find_next_maneuver};
+use thalos_game_state::units::UnitDomain;
 
 /// Diameter of the circular panel (px).
 const PANEL_DIAMETER: f32 = 168.0;
@@ -67,7 +67,10 @@ const ASSIST_BUTTON_HEIGHT: f32 = 25.0;
 
 const TOP_RIGHT_PANEL_RIGHT_PX: f32 = 16.0;
 const AUTOPILOT_PANEL_TOP_PX: f32 = 52.0;
-const AUTOPILOT_PANEL_HEIGHT: f32 = 83.0;
+/// Minimum height for the autopilot panel. The panel sizes to its content so
+/// the LAND reason line can appear and wrap without clipping; this only keeps
+/// it from shrinking below the two-chip layout when there is nothing to say.
+const AUTOPILOT_PANEL_MIN_HEIGHT: f32 = 83.0;
 const AUTOPILOT_BUTTON_WIDTH: f32 = 82.0;
 const AUTOPILOT_BUTTON_HEIGHT: f32 = 27.0;
 
@@ -153,6 +156,14 @@ pub(super) struct LandToggleButton;
 
 #[derive(Component, Debug, Clone, Copy)]
 pub(super) struct LandToggleText;
+
+/// Wrapper for the LAND reason line, so the whole row can be hidden when there
+/// is nothing to say rather than leaving an empty gap in the panel.
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct LandNoticeRoot;
+
+#[derive(Component, Debug, Clone, Copy)]
+pub(super) struct LandNoticeText;
 
 #[derive(Component, Debug, Clone, Copy)]
 pub(super) struct ManeuverPanelRoot;
@@ -429,7 +440,7 @@ fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
                 right: Val::Px(TOP_RIGHT_PANEL_RIGHT_PX),
                 top: Val::Px(AUTOPILOT_PANEL_TOP_PX),
                 width: Val::Px(PANEL_DIAMETER),
-                height: Val::Px(AUTOPILOT_PANEL_HEIGHT),
+                min_height: Val::Px(AUTOPILOT_PANEL_MIN_HEIGHT),
                 border: UiRect::all(Val::Px(1.0)),
                 border_radius: BorderRadius::all(Val::Px(4.0)),
                 padding: UiRect::axes(Val::Px(10.0), Val::Px(6.0)),
@@ -509,6 +520,27 @@ fn spawn_autopilot_panel(commands: &mut Commands, theme: &HudTheme) {
                     },
                     TextColor(theme.text_primary),
                     LandToggleText,
+                ));
+            });
+            p.spawn((
+                Node {
+                    width: Val::Percent(100.0),
+                    ..default()
+                },
+                Visibility::Hidden,
+                LandNoticeRoot,
+                Name::new("LandNoticeRow"),
+            ))
+            .with_children(|c| {
+                c.spawn((
+                    Text::new(""),
+                    TextFont {
+                        font: theme.font.clone(),
+                        font_size: FontSize::Px(10.0),
+                        ..default()
+                    },
+                    TextColor(theme.text_dim),
+                    LandNoticeText,
                 ));
             });
         });
@@ -953,13 +985,21 @@ pub fn update_autopilot_visuals(
         (&mut Text, &mut TextColor),
         (With<LandToggleText>, Without<AutopilotToggleText>),
     >,
+    mut land_notice_text: Query<
+        (&mut Text, &mut TextColor),
+        (
+            With<LandNoticeText>,
+            Without<LandToggleText>,
+            Without<AutopilotToggleText>,
+        ),
+    >,
+    mut land_notice_root: Query<&mut Visibility, With<LandNoticeRoot>>,
 ) {
     // Engagement comes from the annunciator — the arbitration outcome —
     // so this chip can no longer contradict what is actually flying the
     // ship. `MNVR` lit now means "the burn executor is armed and no
     // program has taken it", not "someone pressed this button".
-    let maneuver_active = autopilot.arm().armed()
-        && annunciation.program == FlightProgram::None;
+    let maneuver_active = autopilot.arm().armed() && annunciation.program == FlightProgram::None;
     for (interaction, mut border, mut bg) in &mut buttons {
         let (border_color, bg_color) =
             nav_button_colors(&theme, maneuver_active, true, false, interaction);
@@ -984,6 +1024,11 @@ pub fn update_autopilot_visuals(
     } else {
         match annunciation.program {
             FlightProgram::None => format!("MNVR{}", channel_suffix),
+            // The channel suffix is dropped for a program whose own chip
+            // already annunciates a phase: `AUTOLAND GUID` does not fit the
+            // button, and wrapping it pushed the phase chip out of the panel.
+            // The phase says more than the channel does anyway.
+            FlightProgram::Landing => FlightProgram::Landing.label().to_string(),
             program => format!("{}{}", program.label(), channel_suffix),
         }
     };
@@ -1017,21 +1062,48 @@ pub fn update_autopilot_visuals(
     } else {
         disabled_text_color()
     };
-    let land_label = match land.phase() {
-        LandPhase::Enroute => "LAND ENR",
-        LandPhase::TerminalCapture => "LAND CAP",
-        LandPhase::Final => "LAND FNL",
-        LandPhase::Flare => "LAND FLR",
-        LandPhase::Rollout => "LAND ROL",
-        LandPhase::GoAround => "LAND G/A",
-        LandPhase::Off | LandPhase::Stopped | LandPhase::Unable => "LAND",
-    };
+    // Whole words, and only the phase. `LAND CAP` / `LAND FNL` / `LAND G/A`
+    // required a decoder ring, and paired with the `LAND GUID` chip above it
+    // there was no way to tell which half of the readout had changed.
+    let land_label = land.phase().label();
     for (mut text, mut color) in &mut land_text {
         if text.0 != land_label {
             text.0 = land_label.to_string();
         }
         if color.0 != land_color {
             color.0 = land_color;
+        }
+    }
+
+    // The reason line. An autopilot that changes its mind must say why in the
+    // same glance, or the change reads as a malfunction — which is exactly how
+    // a correct go-around was received.
+    let notice = land.notice;
+    for (mut text, mut color) in &mut land_notice_text {
+        let line = match notice {
+            Some(n) => format!("{}: {}", n.label(), n.detail()),
+            None => land.phase().describe().to_string(),
+        };
+        let tint = match notice {
+            Some(n) if n.is_failure() => theme.text_warn,
+            Some(_) => theme.text_accent,
+            None => theme.text_dim,
+        };
+        if text.0 != line {
+            text.0 = line;
+        }
+        if color.0 != tint {
+            color.0 = tint;
+        }
+    }
+    for mut visibility in &mut land_notice_root {
+        let target = if notice.is_some() || land.active() {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *visibility != target {
+            *visibility = target;
         }
     }
 }

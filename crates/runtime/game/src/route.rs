@@ -21,6 +21,19 @@
 //! the pilot is following, and the disagreement would be invisible until
 //! someone flew into terrain over it.
 //!
+//! # One path: [`RouteState::active_path`]
+//!
+//! There is exactly one answer to "where should I go", and it is the line on the
+//! ND. `plan.path` is the *nominal* route to the runway; `active_path` is what
+//! the craft flies, drawn, and measured against — the plan with any committed
+//! rejoin spliced onto its front ([`maybe_commit_rejoin`]).
+//!
+//! This used to be two things. The route was drawn while a per-frame rejoin was
+//! flown, so the aircraft visibly took different turns from the path on the
+//! display, and cross-track reported it as kilometres off course the whole time
+//! it was correctly flying back. Splicing removes the disagreement rather than
+//! annotating it (INC-20260801T035551Z).
+//!
 //! # When a plan is recomputed (and when it must not be)
 //!
 //! The plan is *not* rebuilt every frame — a path that jitters as airspeed
@@ -29,19 +42,29 @@
 //! [`REPLAN_CROSS_TRACK_M`] from the planned path (rate-limited by
 //! [`REPLAN_MIN_INTERVAL_S`]).
 //!
-//! **Once the craft is established on final the plan freezes.** This is not an
-//! optimisation: re-planning from a position *past* the final approach point
-//! would ask the Dubins planner to fly back to a fix behind the craft, which it
-//! solves with a full turn-around — the plan would loop the aircraft away from
-//! the runway it is 3 km from. Freezing on final is the correctness rule.
+//! **Once the craft passes the final approach point the plan freezes**
+//! ([`RouteState::plan_frozen`]). This is not an optimisation: re-planning from
+//! a position *past* the FAP would ask the Dubins planner to fly back to a fix
+//! behind the craft, which it solves with a full turn-around — the plan would
+//! loop the aircraft away from the runway it is 3 km from.
+//!
+//! **Frozen is not the same as established**, and the two must never share a
+//! flag. Freezing is geometric and irreversible; being established is a live
+//! statement about the needles that can stop being true. When one flag meant
+//! both, an approach that reached the FAP 1.8 km off the centreline froze its
+//! plan, declared itself established, and flew the unrecoverable result down to
+//! 250 m before anything objected. [`RouteState::established`] is now the
+//! honest needle test, and it is what the stabilisation gate in
+//! [`crate::route_autopilot`] reads.
 
 use bevy::math::{DVec2, DVec3};
 use bevy::prelude::*;
 
 use thalos_navigation::{
-    ApproachParams, ApproachPhase, ApproachPlan, DestinationInput,
-    DestinationParams, GuidanceInput, LateralPath, Pose2, RejoinParams, RouteFrame, RunwayStrip, VnavParams, angular_distance_rad,
-    compute_destination_guidance, compute_guidance, plan_approach, plan_rejoin, theta_of,
+    ApproachParams, ApproachPhase, ApproachPlan, DestinationInput, DestinationParams,
+    GuidanceInput, LateralPath, Pose2, RejoinParams, RouteFrame, RunwayStrip, VnavParams,
+    angular_distance_rad, compute_destination_guidance, compute_guidance, plan_approach,
+    plan_rejoin, theta_of,
 };
 use thalos_physics_canonical::body_fixed::inertial_to_body_fixed;
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
@@ -53,11 +76,11 @@ use crate::rendering::{SimulationState, SolarSystemState};
 use crate::structures::{StructureKind, StructureRegistry};
 
 pub use thalos_game_state::nav::{
-    ArmedEnd, BANK_LIMIT_RAD, RouteDisplay, RouteRequest, RouteSelection, RouteState,
-    RouteStatus, RunwayEndEntry,
+    ArmedEnd, BANK_LIMIT_RAD, RouteDisplay, RouteRequest, RouteSelection, RouteState, RouteStatus,
+    RunwayEndEntry,
 };
 
- // 25°
+// 25°
 
 /// Never plan a turn tighter than this (m), whatever the speed suggests.
 const MIN_TURN_RADIUS_M: f64 = 400.0;
@@ -65,8 +88,11 @@ const MIN_TURN_RADIUS_M: f64 = 400.0;
 /// capture altitude ~470 m above the threshold — a sane pattern altitude.
 const FINAL_LENGTH_M: f64 = 9_000.0;
 /// Aim point inset past the threshold (m). Also sets the threshold crossing
-/// height: 300 m × tan 3° ≈ 16 m, matching real ILS practice.
-const AIM_INSET_M: f64 = 300.0;
+/// height: 450 m × tan 3° ≈ 24 m. The extra margin is deliberate: the recorded
+/// approach tracked ~4 m below profile and flared to a touchdown only ~150 m
+/// into the strip when aimed at 300 m. This moves the expected contact into the
+/// touchdown zone without changing the glideslope or flare law.
+const AIM_INSET_M: f64 = 450.0;
 /// Shortest stabilised straight run onto the aim point the planner leaves itself
 /// when the craft is already inside the final corridor (m) — see
 /// `ApproachParams::min_capture_run_m`.
@@ -88,11 +114,37 @@ const FALLBACK_APPROACH_SPEED_M_S: f64 = 80.0;
 /// Multiple of stall speed flown on approach — the standard 1.3 Vs margin.
 const APPROACH_STALL_MARGIN: f64 = 1.3;
 
-/// Cross-track drift (m) that triggers a re-plan while still maneuvering.
+/// Cross-track drift (m) that triggers a re-plan while still maneuvering **and
+/// no rejoin can be flown**.
+///
+/// The qualifier is the whole point. Cross-track is measured against the route,
+/// and a rejoin is by construction a path that leaves the route to get back onto
+/// it — a bank-limited reversal swings the craft a full turn diameter clear.
+/// Treating that as "drifted" made the two mechanisms fight: the rejoin flew the
+/// craft out, the drift test called it lost, the plan was rebuilt from the
+/// craft's current position, and the cycle repeated every ~47 s. That is the
+/// loop in the recorded flight, and it is why the ND kept redrawing.
+///
+/// So drift only re-plans when the rejoin planner has already said there is no
+/// flyable way back. That is the honest "this plan is unreachable" signal.
 const REPLAN_CROSS_TRACK_M: f64 = 2_000.0;
-/// Cross-track offset (m) beyond which the rejoin is worth *drawing*. Below it
-/// the rejoin sits on top of the route and only thickens the line.
-const REJOIN_DRAW_CROSS_TRACK_M: f64 = 150.0;
+/// Cross-track (m) at which the plan is rebuilt even though a rejoin exists.
+///
+/// A backstop for the pathological case only — a rejoin technically plannable
+/// from 20 km away is a worse idea than a fresh approach. Sized well beyond any
+/// legitimate reversal: a 25° bank at 130 m/s reverses inside a 7 km diameter.
+const REPLAN_UNREACHABLE_CROSS_TRACK_M: f64 = 15_000.0;
+/// Cross-track drift (m) off the **active** path that commits a rejoin into it.
+///
+/// Well above the tracking error a working follower leaves (tens of metres), so
+/// normal flight never amends the route; well below the re-plan threshold, so
+/// the cheap fix (fly back onto this route) is always tried before the expensive
+/// one (build a different route).
+const REJOIN_COMMIT_CROSS_TRACK_M: f64 = 400.0;
+/// Minimum gap between committed rejoins (s). Committing is a decision the craft
+/// then spends a minute or two *flying*; re-deciding at frame rate is what made
+/// the old per-frame rejoin a target the craft could never reach.
+const REJOIN_COMMIT_MIN_INTERVAL_S: f32 = 20.0;
 /// Minimum wall-clock gap between automatic re-plans (s).
 const REPLAN_MIN_INTERVAL_S: f32 = 2.0;
 
@@ -107,17 +159,9 @@ const BODY_NOSE: DVec3 = DVec3::Y;
 // Selection
 // ---------------------------------------------------------------------------
 
-
-
-
 // ---------------------------------------------------------------------------
 // Published state
 // ---------------------------------------------------------------------------
-
-
-
-
-
 
 // ---------------------------------------------------------------------------
 // Plugin
@@ -226,6 +270,13 @@ fn update_route_state(
 
     // Ground track: the horizontal part of the surface-relative velocity, or the
     // nose when barely moving (a parked craft has no track).
+    // The craft's own bank, so the steering dot can show the follower's roll
+    // command against it. Same formula as `thalos_control::FlightState::bank` —
+    // the up vector rotated into body axes — evaluated here because this is
+    // where the body-fixed attitude already is.
+    let up_body = frame_state.orientation_body.inverse() * up;
+    let bank_rad = (-up_body.x).atan2(up_body.z);
+
     let velocity_bf = frame_state.translation_body.velocity;
     let horizontal = velocity_bf - up * velocity_bf.dot(up);
     let ground_speed_m_s = horizontal.length();
@@ -301,6 +352,8 @@ fn update_route_state(
         return;
     };
 
+    state.armed = Some(entry);
+
     // --- Approach speed from the craft's own stall speed at the threshold.
     let approach_speed_m_s = approach_speed(
         &sim,
@@ -347,14 +400,15 @@ fn update_route_state(
     let arrival_range_m = angular_distance_rad(up, arrival_dir) * body_radius_m;
     let selection_changed = state.planned_for != Some(armed);
     if selection_changed {
+        state.plan_frozen = false;
         state.established = false;
         state.plan = None;
         state.guidance = None;
         state.display = RouteDisplay::default();
-        state.rejoin_hint_along_m = None;
+        state.track_hint_along_m = None;
     }
     let recovery_ingress = state.force_destination_ingress && arrival_range_m > 5_000.0;
-    if !state.established && (arrival_range_m > TERMINAL_CAPTURE_RANGE_M || recovery_ingress) {
+    if !state.plan_frozen && (arrival_range_m > TERMINAL_CAPTURE_RANGE_M || recovery_ingress) {
         let altitude_m = position_bf.length() - body_radius_m;
         let arrival_altitude_m =
             entry.end.strip.elevation_m + FINAL_LENGTH_M * 3.0_f64.to_radians().tan();
@@ -382,9 +436,12 @@ fn update_route_state(
         );
         state.destination_arrival_dir = Some(arrival_dir);
         state.plan = None;
+        state.active_path = LateralPath::default();
+        state.rejoin_len_m = 0.0;
         state.guidance = None;
         state.planned_for = Some(armed);
-        state.rejoin_hint_along_m = None;
+        state.track_hint_along_m = None;
+        state.established = false;
         state.display = RouteDisplay::default();
         state.status = if state.destination_guidance.is_some() {
             RouteStatus::Armed
@@ -406,12 +463,30 @@ fn update_route_state(
 
     // --- Re-plan policy (see the module docs).
     let now = time.elapsed_secs();
-    let drifted = !state.established
-        && state
-            .guidance
-            .is_some_and(|g| g.cross_track_m.abs() > REPLAN_CROSS_TRACK_M)
-        && now - state.planned_at_s >= REPLAN_MIN_INTERVAL_S;
+    //
+    // A committed rejoin means the craft is already flying a planned way back,
+    // so cross-track from the nominal route is expected to be large and is not
+    // evidence that the plan is unreachable.
+    let cross_track_m = state.guidance.map(|g| g.cross_track_m.abs()).unwrap_or(0.0);
+    let rejoin_flying = state.rejoin_len_m > 0.0;
+    let unreachable = cross_track_m
+        > if rejoin_flying {
+            REPLAN_UNREACHABLE_CROSS_TRACK_M
+        } else {
+            REPLAN_CROSS_TRACK_M
+        };
+    let drifted =
+        !state.plan_frozen && unreachable && now - state.planned_at_s >= REPLAN_MIN_INTERVAL_S;
     let needs_plan = selection_changed || state.plan.is_none() || drifted;
+    if drifted {
+        info!(
+            target: "thalos::diagnostic::approach_ap",
+            event = "route_replanned",
+            cross_track_m,
+            rejoin_flying,
+            "route: rebuilding the approach"
+        );
+    }
 
     if needs_plan {
         match plan_approach(entry.end, position_bf, track_dir_bf, &params) {
@@ -426,10 +501,19 @@ fn update_route_state(
                         plan.turn_radius_m,
                     );
                 }
-                state.display = plan_display(&plan);
+                // A fresh plan is its own active path; any committed rejoin
+                // belonged to geometry that no longer exists.
+                state.active_path = plan.path.clone();
+                state.rejoin_len_m = 0.0;
+                state.rejoin_committed_at_s = now;
+                state.display = plan_display(&plan, &state.active_path);
                 state.plan = Some(plan);
                 state.planned_for = Some(armed);
                 state.planned_at_s = now;
+                // Both hints index into the path that was just replaced.
+                // Carrying either across would pin the craft to an along-track
+                // distance on geometry that no longer exists.
+                state.track_hint_along_m = None;
             }
             None => {
                 clear_plan(&mut state, RouteStatus::Unavailable);
@@ -443,51 +527,24 @@ fn update_route_state(
         return;
     }
 
-    // The plan borrow is scoped: everything derived from it is produced here and
-    // written back afterwards, so this block can read the plan while the writes
-    // below can own `state`.
+    // --- Commit a rejoin into the route, if the craft has drifted off it.
+    //
+    // This is the one place the route may be *amended* without being replanned.
+    // A rejoin is not a steering cue running alongside the drawn route — that
+    // arrangement gave the system two answers to "where should I go", and
+    // because it was recomputed every frame its aim point slid forward as the
+    // craft advanced, so the craft chased a receding target for 385 s without
+    // ever capturing (INC-20260801T035551Z). Committed, it is simply the front
+    // of the route: drawn, flown, and measured as one object.
     let vertical_speed_m_s = velocity_bf.dot(up);
-    let (guidance, rejoin_hint, rejoin_points) = {
+    maybe_commit_rejoin(&mut state, position_bf, track_dir_bf, now);
+
+    let (guidance, rejoin_points) = {
         let plan = state.plan.as_ref().expect("checked above");
-
-        // --- The rejoin: how to get back onto the route from where we actually
-        // are. Planned before guidance, because guidance steers along it.
         let frame = plan.frame;
-        let local = frame.to_local(position_bf);
-        let closest = plan.path.closest(local);
-        let rejoin = frame
-            .direction_to_local(track_dir_bf)
-            .try_normalize()
-            .zip(closest)
-            .and_then(|(track, closest)| {
-                plan_rejoin(
-                    &plan.path,
-                    Pose2::new(local, theta_of(track)),
-                    closest.along_m,
-                    &RejoinParams::for_radius(plan.turn_radius_m),
-                    state.rejoin_hint_along_m,
-                )
-            });
-
-        // Draw it only when it is telling the pilot something: while hugging the
-        // route the rejoin lies on top of it and would only thicken the line.
-        let mut points = Vec::new();
-        if let Some(r) = rejoin.as_ref()
-            && r.path.length() > 1.0
-            && closest.is_some_and(|c| c.cross_track_m.abs() > REJOIN_DRAW_CROSS_TRACK_M)
-        {
-            let elevation = frame.origin_altitude_m;
-            let sag_m = (r.path.length() * 0.002).clamp(2.0, 60.0);
-            points.extend(
-                r.path
-                    .polyline(sag_m)
-                    .into_iter()
-                    .map(|point| frame.to_body_fixed(point, elevation)),
-            );
-        }
-
         let guidance = compute_guidance(
             plan,
+            &state.active_path,
             &GuidanceInput {
                 position_body_fixed: position_bf,
                 track_dir_body_fixed: track_dir_bf,
@@ -495,22 +552,138 @@ fn update_route_state(
                 vertical_speed_m_s,
                 gravity_m_s2: params.gravity_m_s2,
                 bank_limit_rad: BANK_LIMIT_RAD,
+                bank_rad,
+                track_hint_along_m: state.track_hint_along_m,
             },
-            rejoin.as_ref(),
         );
-        (guidance, rejoin.as_ref().map(|r| r.capture_along_m), points)
+
+        // The committed rejoin is drawn in its own colour as the leading part of
+        // the route — "this is the bit that gets you back on" — rather than as a
+        // second line competing with it.
+        let mut points = Vec::new();
+        if state.rejoin_len_m > 1.0 {
+            let elevation = frame.origin_altitude_m;
+            let sag_m = (state.rejoin_len_m * 0.002).clamp(2.0, 60.0);
+            let head = state.active_path.head_to(state.rejoin_len_m);
+            points.extend(
+                head.polyline(sag_m)
+                    .into_iter()
+                    .map(|point| frame.to_body_fixed(point, elevation)),
+            );
+        }
+        (guidance, points)
     };
 
-    state.rejoin_hint_along_m = rejoin_hint;
     state.display.rejoin_points = rejoin_points;
+    state.track_hint_along_m = guidance.map(|g| g.along_m);
+    // The rejoin is consumed once flown: from there the craft is on the nominal
+    // route again, and a later drift is allowed to commit a fresh one.
     if let Some(g) = guidance
-        && g.phase != ApproachPhase::Transition
+        && state.rejoin_len_m > 0.0
+        && g.along_m >= state.rejoin_len_m
     {
-        // Latch: from here on the plan is frozen.
-        state.established = true;
+        state.rejoin_len_m = 0.0;
+    }
+    if let Some(g) = guidance {
+        // Two separate questions, deliberately kept apart.
+        //
+        // *May the plan still change?* — no, once past the final approach
+        // point, because re-planning from there routes back to a fix behind the
+        // craft. Purely geometric, and irreversible for this plan.
+        if g.phase != ApproachPhase::Transition {
+            state.plan_frozen = true;
+        }
+        // *Is the craft actually on the beam?* — the needles say, every frame,
+        // and they are allowed to say no again. Freezing the plan does not make
+        // an approach stable, and treating it as if it did is what flew an
+        // approach 1.8 km off course down to the threshold.
+        state.established = g.established && g.phase != ApproachPhase::Transition;
     }
     state.guidance = guidance;
     state.status = RouteStatus::Armed;
+}
+
+/// Amend the active route with a flyable rejoin when the craft has drifted off
+/// it, and adopt the plan's own path when there is nothing to amend.
+///
+/// Committing is deliberately rare and sticky. The craft is expected to *fly*
+/// the committed path, so re-deciding every frame would recreate the moving
+/// target this design exists to remove: the trigger is a real drift off the
+/// **active** path (not the nominal one, which the craft may legitimately be far
+/// from while flying a committed rejoin), it is rate-limited, and it is refused
+/// once the plan is frozen — reshaping the route past the final approach point
+/// is the same mistake as re-planning there.
+fn maybe_commit_rejoin(state: &mut RouteState, position_bf: DVec3, track_dir_bf: DVec3, now: f32) {
+    let Some(plan) = state.plan.as_ref() else {
+        return;
+    };
+    // A fresh or invalidated plan starts as its own active path.
+    if state.active_path.is_empty() {
+        state.active_path = plan.path.clone();
+        state.rejoin_len_m = 0.0;
+        state.track_hint_along_m = None;
+    }
+
+    let frame = plan.frame;
+    let local = frame.to_local(position_bf);
+    let Some(on_active) = state
+        .active_path
+        .closest_from(local, state.track_hint_along_m)
+    else {
+        return;
+    };
+    let drifted = on_active.cross_track_m.abs() > REJOIN_COMMIT_CROSS_TRACK_M;
+    if state.plan_frozen
+        || !drifted
+        || now - state.rejoin_committed_at_s < REJOIN_COMMIT_MIN_INTERVAL_S
+    {
+        return;
+    }
+
+    // Plan the way back against the *nominal* route — that is what the craft is
+    // ultimately trying to be on. A global projection is right here: commits are
+    // rare, and this is exactly the "seeding a fresh track" case.
+    let Some(track) = frame.direction_to_local(track_dir_bf).try_normalize() else {
+        return;
+    };
+    let Some(on_plan) = plan.path.closest(local) else {
+        return;
+    };
+    let Some(rejoin) = plan_rejoin(
+        &plan.path,
+        Pose2::new(local, theta_of(track)),
+        on_plan.along_m,
+        &RejoinParams::for_radius(plan.turn_radius_m),
+        None,
+    ) else {
+        return;
+    };
+    if rejoin.path.length() <= 1.0 {
+        return;
+    }
+
+    // Distance-to-go is the invariant across the swap — a splice adds length
+    // ahead of the craft and leaves every distance-to-go alone — so carry the
+    // track hint across as a dtg, not as an along-track distance. Dropping it
+    // instead would reseed the projection globally and reintroduce exactly the
+    // jump `closest_from` exists to prevent.
+    let dtg_before = (state.active_path.length() - on_active.along_m).max(0.0);
+    state.active_path = plan
+        .path
+        .splice_rejoin(rejoin.path.clone(), rejoin.capture_along_m);
+    state.rejoin_len_m = rejoin.length_m;
+    state.rejoin_committed_at_s = now;
+    state.track_hint_along_m = Some((state.active_path.length() - dtg_before).max(0.0));
+    state.display = plan_display(plan, &state.active_path);
+    info!(
+        target: "thalos::diagnostic::approach_ap",
+        event = "route_rejoin_committed",
+        cross_track_m = on_active.cross_track_m,
+        rejoin_len_m = rejoin.length_m,
+        capture_along_m = rejoin.capture_along_m,
+        excess_turn_rad = rejoin.excess_turn_rad,
+        "route: rejoin spliced into the active path"
+    );
 }
 
 /// Drop the plan and guidance, keeping the enumerated ends (a display still
@@ -520,12 +693,16 @@ fn clear_plan(state: &mut RouteState, status: RouteStatus) {
         info!("route: disarmed");
     }
     state.plan = None;
+    state.active_path = LateralPath::default();
+    state.rejoin_len_m = 0.0;
     state.guidance = None;
     state.destination_guidance = None;
     state.destination_arrival_dir = None;
+    state.armed = None;
     state.planned_for = None;
+    state.plan_frozen = false;
     state.established = false;
-    state.rejoin_hint_along_m = None;
+    state.track_hint_along_m = None;
     state.force_destination_ingress = false;
     state.display = RouteDisplay::default();
     state.status = status;
@@ -540,19 +717,20 @@ fn clear_plan(state: &mut RouteState, status: RouteStatus) {
 /// Public because the headless ND preview (`examples/nav_preview.rs`) draws real
 /// plans through this exact function — a preview that tessellated its own way
 /// would be checking symbology against geometry the game never produces.
-pub fn plan_display(plan: &ApproachPlan) -> RouteDisplay {
+pub fn plan_display(plan: &ApproachPlan, active_path: &LateralPath) -> RouteDisplay {
     let frame: &RouteFrame = &plan.frame;
-    let sag_m = (plan.length_m() * 0.002).clamp(2.0, 60.0);
+    let sag_m = (active_path.length() * 0.002).clamp(2.0, 60.0);
     let elevation = frame.origin_altitude_m;
 
     let mut display = RouteDisplay::default();
     // Leg by leg, so the final approach's first point is a known index rather
     // than the result of a float comparison (see `final_start_index`). The final
-    // is always the last leg — `plan_approach` pushes it after the transition.
-    let final_leg = plan.path.legs.len().saturating_sub(1);
+    // is always the last leg — `plan_approach` pushes it after the transition,
+    // and a spliced rejoin only ever adds legs to the front.
+    let final_leg = active_path.legs.len().saturating_sub(1);
     let mut along = 0.0;
     let mut prev: Option<DVec2> = None;
-    for (leg_index, leg) in plan.path.legs.iter().enumerate() {
+    for (leg_index, leg) in active_path.legs.iter().enumerate() {
         if leg_index == final_leg {
             display.final_start_index = display.path_points.len().saturating_sub(1);
         }

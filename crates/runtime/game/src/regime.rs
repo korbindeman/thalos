@@ -34,8 +34,8 @@ use bevy::prelude::*;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, BodyFixedPose, EntityRef, Epoch};
 use thalos_physics_canonical::regime::{
-    AuthorityKind, CraftRegime, PredictionDisplay, RegimeInputs, TranslationOwner,
-    WalkingInputs, WarpLevel, expected_authority, resolve,
+    AuthorityKind, CraftRegime, PredictionDisplay, RegimeInputs, TranslationOwner, WalkingInputs,
+    WarpLevel, expected_authority, resolve,
 };
 use thalos_physics_canonical::surface_local::{SurfaceLocalState, surface_local_to_body_fixed};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
@@ -193,10 +193,9 @@ fn resolve_regime(
         warp_target_speed: warp.target_speed(),
         warp_ladder: &warp_ladder,
         throttle_effective: throttle.effective,
-        // `selected` is the control-bus winner. Reading `commanded` here
-        // would see only the persistent pilot setpoint, leaving a landed
-        // craft pinned under BodyFixed during an autoflight launch.
-        throttle_selected: throttle.selected,
+        // `commanded` is the control-bus winner and therefore includes an
+        // automatic launch command as well as direct pilot input.
+        throttle_selected: throttle.commanded,
         authority: sim.simulation.authority().into(),
         walking,
         // Capability proxy: the EVA capsule's collider is removed at spawn.

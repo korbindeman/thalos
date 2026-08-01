@@ -8,10 +8,9 @@
 //!
 //! 1. Sample player throttle input (absolute HOTAS axis when configured,
 //!    otherwise Shift/Ctrl/Z/X, KSP convention) into
-//!    [`ThrottleState::commanded`]. The scheduled-burn autopilot
-//!    (`crates/runtime/game/src/autopilot.rs`) writes the same field while
-//!    flying a scheduled directive — programmatic and manual control
-//!    share the throttle surface.
+//!    [`ThrottleState::commanded`]. The control bus writes automatic throttle
+//!    winners into that same field, so programmatic and manual control move
+//!    one throttle surface.
 //! 2. Cap the throttle to 0 when any required reactant runs out and
 //!    push the gated value into the simulation via
 //!    [`Simulation::set_throttle`]. Engine fires only at 1× warp;
@@ -100,7 +99,6 @@ pub(crate) struct LastBurnRecipe {
     engines: Vec<ActiveEngineFlow>,
 }
 
-
 /// One-frame pilot takeover edge produced while sampling throttle input.
 ///
 /// Input is sampled even while autoflight owns the channel so deliberate
@@ -146,11 +144,10 @@ impl Plugin for FuelPlugin {
             .add_systems(
                 Update,
                 (
-                    // Sample the keyboard early so the scheduled-burn
-                    // autopilot in `crates/runtime/game/src/autopilot.rs` can
-                    // run between this and `control_bus::realize_control`,
-                    // overriding `ThrottleState::commanded` for the
-                    // upcoming gate step. Detached from the
+                    // Sample pilot input before automatic demand producers and
+                    // `control_bus::realize_control`, which moves the canonical
+                    // throttle to the arbitration winner for the upcoming gate
+                    // step. Detached from the
                     // reconcile/gate chain because it has no data
                     // dependency on attitude.
                     handle_throttle_input
@@ -274,7 +271,6 @@ pub fn handle_throttle_input(
             Some(anchor) if (lever - anchor).abs() > THROTTLE_LEVER_MOVE_EPS => {
                 *lever_anchor = Some(lever);
                 throttle.commanded = lever as f64;
-                throttle.hold_idle_until_pilot_move = false;
                 pilot.moved = true;
                 return;
             }
@@ -310,9 +306,6 @@ pub fn handle_throttle_input(
     };
     if keyboard_acted && let Some(lever) = lever_now {
         *lever_anchor = Some(lever);
-    }
-    if keyboard_acted {
-        throttle.hold_idle_until_pilot_move = false;
     }
     pilot.moved = keyboard_acted;
 }
@@ -886,7 +879,7 @@ pub fn gate_throttle_on_fuel_availability(
         return;
     }
 
-    let throttle_in_use = throttle.selected;
+    let throttle_in_use = throttle.commanded;
     let drain_dt = real_dt;
 
     if throttle_in_use <= 0.0

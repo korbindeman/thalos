@@ -54,7 +54,6 @@ use thalos_body_render::{HeightSource, ShadowedStandardMaterial, shadowed};
 // lives in `thalos_structures` (Phase 5b); this module keeps the drivers —
 // deferred placement, the collider, per-frame f64 anchoring, spaceport
 // orchestration.
-pub use thalos_structures::runway_geometry::*;
 use thalos_physics_canonical::body_fixed::{
     body_fixed_pose_from_inertial, body_fixed_surface_velocity,
 };
@@ -64,6 +63,7 @@ use thalos_physics_local::{
     ActiveLocalBubble, HeightSourceRegistry, LocalPrimitiveShape, spawn_structure_collider,
 };
 use thalos_shipyard::{AttachNodes, EngineActivation};
+pub use thalos_structures::runway_geometry::*;
 use thalos_world::{BodyId, StateVector};
 
 use crate::SimStage;
@@ -87,8 +87,6 @@ use crate::spawn::{CraftPlacement, SpawnSituation, coast_placement, place_craft}
 // paved runway (~4,580 m), both built for high-speed gliding returns; 5 km of
 // length leaves room above what the Shuttle actually needed, so any plane or
 // spaceplane can take off and land here without running out of strip.
-
-
 
 /// Flat margin levelled around the painted strip (the "shoulder" of the pad).
 /// The terrain inside `runway + this` is flattened to `E`.
@@ -121,8 +119,6 @@ const BASIN_RECT_OFFSET_ACROSS_M: f64 = 500.0;
 /// this broad ramp then fades that into the surrounding ground so it reads as a
 /// graded basin, not a plateau with a wall around it.
 const BASIN_RAMP_M: f64 = 500.0;
-
-
 
 /// Light the jet engines once the cruise aircraft is placed. Mirrors
 /// [`enable_runway_engines`] but triggers on the cruise scenario (no runway
@@ -192,7 +188,6 @@ fn enable_cruise_engines(
 // pins the chase camera overhead — the camera floor won't follow it under the
 // surface).
 
-
 /// Boot epoch (s) the runway scenario seats the world at, so the fixed site is
 /// lit by a low **morning** sun instead of the noon sun the epoch-0 sub-stellar
 /// point gives it.
@@ -253,7 +248,6 @@ const FOOTPRINT_SAMPLES_W: usize = 24;
 // ---------------------------------------------------------------------------
 // Orientation markers (raised edge posts)
 // ---------------------------------------------------------------------------
-
 
 // ---------------------------------------------------------------------------
 // Aircraft placement
@@ -428,8 +422,6 @@ fn finish_runway_spawn(
             };
             let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
             match measure_runway_clearance(
-                &sim,
-                body_id,
                 ship_entity,
                 ship_gt,
                 &children_q,
@@ -899,8 +891,6 @@ pub(crate) fn build_spaceport(
 /// ([`finish_runway_spawn`]) and the launch-select runway placement.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn measure_runway_clearance(
-    sim: &SimulationState,
-    body_id: BodyId,
     ship_entity: Entity,
     ship_gt: &GlobalTransform,
     children_q: &Query<&Children>,
@@ -920,12 +910,12 @@ pub(crate) fn measure_runway_clearance(
     // before the spring engaged. A craft with no gear falls back to the
     // visual-mesh extent and rests on its belly.
     match crate::local_physics::gear_contact_geometry(parts, gear_q, host_nodes) {
-        Some((depth_m, wheel_count)) => {
-            let body = &sim.system.bodies[body_id];
-            let g = body.gm / (body.radius_m * body.radius_m);
-            let mass = sim.simulation.ship_mass_kg().max(1.0);
-            let k = gear_tuning.k_spring.max(1.0);
-            let sag = mass * g / (wheel_count.max(1) as f64 * k);
+        Some((depth_m, mean_strut_length_m)) => {
+            // Stiffness is now derived per wheel to achieve one common loaded
+            // stroke fraction regardless of craft mass or axle load. Spawn at
+            // that same equilibrium instead of reproducing the retired fixed-k
+            // approximation here.
+            let sag = crate::local_physics::nominal_static_sag_m(gear_tuning, mean_strut_length_m);
             Some((depth_m - sag).max(0.0))
         }
         None => craft_ground_clearance(ship_entity, ship_gt, children_q, mesh_q, meshes)
@@ -978,9 +968,6 @@ fn enable_runway_engines(
 // Fixed site & heading
 // ---------------------------------------------------------------------------
 
-
-
-
 /// Max / min / mean natural terrain height over the basin footprint, sampled on
 /// a regular grid at fine LOD. The mean is the level the basin flattens to
 /// (balanced cut/fill); max/min are kept for the log / sanity checks.
@@ -1026,8 +1013,6 @@ fn footprint_stats(
 // ---------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------
-
-
 
 #[allow(clippy::too_many_arguments)]
 fn spawn_runway_geometry(
@@ -1123,12 +1108,6 @@ fn spawn_runway_geometry(
     spawn_runway_numbers(commands, meshes, materials, images, frame, runway_entity);
 }
 
-
-
-
-
-
-
 /// Paint the two runway designator numbers (one at each threshold), from the
 /// real ICAO font. Each is an alpha texture rasterized from the font and applied
 /// to a small quad lying on the runway plane, oriented so it reads upright on
@@ -1214,9 +1193,6 @@ fn spawn_runway_numbers(
         ));
     }
 }
-
-
-
 
 /// Raised edge posts at regular intervals down both sides — the 3D references
 /// to orient around. Takeoff-threshold posts green, far-end posts red, the rest

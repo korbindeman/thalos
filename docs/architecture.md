@@ -838,9 +838,10 @@ Key modules:
   `RealizedControl::assist` for the HUD (the SAS button reads FBW /
   warn-tints while protection clamps). **SAS defaults on** (`SasState`,
   surviving destruction/respawn); the HUD SAS button toggles that same
-  switch as the `T` key. Throttle still
-  rides its own setpoint path (`ThrottleState::commanded`, autopilot
-  override, `ControlLocks`) pending a later fold-in. See `docs/simulation/control.md`.
+  switch as the `T` key. Throttle shares the arbitration path: pilot and
+  automatic winners move the canonical `ThrottleState::commanded`, with only
+  fuel/warp-gated `effective` kept separate. See `docs/simulation/control.md`
+  and ADR-20260801T052037Z.
 - `map_view` — snapshot/projection boundary for map rendering. Copies
   `CraftState`, body states, and `FlightPlan` into `MapSnapshot`; map
   systems consume the snapshot and never mutate canonical simulation

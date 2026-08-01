@@ -1392,12 +1392,15 @@ acceleration accumulators.
   brings a coasting craft to a true stop in finite time and then holds it,
   instead of the old `∝ v` law that decayed asymptotically and let the
   craft creep forever.
-- **Ride height (no clip).** Damper coefficients are sized from the craft's
-  real per-wheel mass, and `k_spring` is stiff enough that the natural
-  static sag `m·g/(n·k)` is ~cm-scale, so the rigid wheel meshes don't
-  visibly clip the ground. (A uniform spring *preload* to cancel the sag was
-  tried and reverted — it unbalances the per-wheel torque and tips the
-  craft; the suspension must find its own load-balanced equilibrium.)
+- **Ride height and axle load.** The support polygon derives each axle's
+  static reaction from wheel longitudinal positions and the real craft CoM;
+  each leg's spring stiffness then follows from that load, its authored usable
+  stroke, surface gravity, and `static_sag_fraction`. This replaces the false
+  equal-load assumption (the Meridian is 12.1% nose / 87.9% mains) and keeps
+  ride height consistent across craft mass and gear size. Main-leg compression
+  damping uses half the aircraft impact mass because the mains touch first;
+  rebound damping uses the settled axle mass. A quadratic end stop begins late
+  in the stroke and stays out of ordinary taxi/landing loads.
 - **Asymmetric oleo damping.** The damper is soft on the **compression**
   stroke (`damping_ratio_compress` ≈ 0.4, ramped in over the first
   `damper_engage_frac` of travel so the contact-onset force is continuous)
@@ -1463,8 +1466,8 @@ acceleration accumulators.
   colliders are kept as the `SweptCcd`/impact backstop; with the craft
   spawned at gear-bottom clearance the belly rides above the surface and
   only engages on a gear-collapse/abnormal landing.
-- **Tuning.** `GearTuning` (spring stiffness, compress/rebound damping
-  ratios + damper engagement fraction, friction `mu`, lateral stiffness,
+- **Tuning.** `GearTuning` (loaded sag fraction, compress/rebound damping
+  ratios + damper engagement fraction, progressive end stop, friction `mu`, lateral stiffness,
   rolling `rolling_mu` + `rolling_hold_stiffness`, parking-brake stiffness,
   max steer, travel, ray margin + ray start lift) is a Reflect-registered
   resource (tune by editing the default and rebuilding).

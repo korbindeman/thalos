@@ -11,13 +11,13 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 
 use super::state::{ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode};
-use thalos_ui::hud_theme::{HudTheme, hud_button as spawn_button, panel_frame};
+use thalos_game_state::SimulationState;
+use thalos_game_state::nav::ViewMode;
 use thalos_game_state::ui::GamePause;
 use thalos_game_state::ui::PhotoMode;
-use thalos_game_state::SimulationState;
 use thalos_game_state::ui::ScenarioMenu;
 use thalos_game_state::units::UnitDomain;
-use thalos_game_state::nav::ViewMode;
+use thalos_ui::hud_theme::{HudTheme, hud_button as spawn_button, panel_frame};
 
 // ── Markers ─────────────────────────────────────────────────────────────────
 
@@ -380,18 +380,24 @@ pub(super) fn update_editor(
                     "Delete".into()
                 }
             }
-            EditorField::AxisValue(DvAxis::Prograde) => thalos_game_state::units::format::delta_v_fine(
-                node_dv.prograde,
-                units.system_for(UnitDomain::General),
-            ),
-            EditorField::AxisValue(DvAxis::Normal) => thalos_game_state::units::format::delta_v_fine(
-                node_dv.normal,
-                units.system_for(UnitDomain::General),
-            ),
-            EditorField::AxisValue(DvAxis::Radial) => thalos_game_state::units::format::delta_v_fine(
-                node_dv.radial,
-                units.system_for(UnitDomain::General),
-            ),
+            EditorField::AxisValue(DvAxis::Prograde) => {
+                thalos_game_state::units::format::delta_v_fine(
+                    node_dv.prograde,
+                    units.system_for(UnitDomain::General),
+                )
+            }
+            EditorField::AxisValue(DvAxis::Normal) => {
+                thalos_game_state::units::format::delta_v_fine(
+                    node_dv.normal,
+                    units.system_for(UnitDomain::General),
+                )
+            }
+            EditorField::AxisValue(DvAxis::Radial) => {
+                thalos_game_state::units::format::delta_v_fine(
+                    node_dv.radial,
+                    units.system_for(UnitDomain::General),
+                )
+            }
         };
         if **text != value {
             **text = value;

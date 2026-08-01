@@ -9,8 +9,7 @@ use thalos_control::{AttitudeDemand, ControlDemand};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::orbit_planner::{
-    OrbitDirection, OrbitPlan, OrbitPlanError, OrbitPlanRequest,
-    plan_target_orbit,
+    OrbitDirection, OrbitPlan, OrbitPlanError, OrbitPlanRequest, plan_target_orbit,
 };
 use thalos_world::StateVector;
 
@@ -23,9 +22,8 @@ use crate::staging::{StageDemand, StagingSummaries};
 
 pub use thalos_game_state::autoflight::SequenceEvent;
 pub use thalos_game_state::nav::{
-    MIN_ORBIT_ALTITUDE_M,
-    OrbitDraft, OrbitPlanSummary, OrbitPlaneChoice, OrbitProgram, OrbitProgramPhase,
-    OrbitShape, OrbitTargetRequest,
+    MIN_ORBIT_ALTITUDE_M, OrbitDraft, OrbitPlanSummary, OrbitPlaneChoice, OrbitProgram,
+    OrbitProgramPhase, OrbitShape, OrbitTargetRequest,
 };
 
 const ALTITUDE_STEP_M: f64 = 10_000.0;
@@ -44,18 +42,6 @@ const PREFLIGHT_POINTING_TIMEOUT_S: f64 = 5.0;
 /// This is deliberately inertial +Y, not the body's tilted local pole:
 /// inclination is measured in the canonical XZ reference plane.
 const ORBIT_REFERENCE_NORMAL: DVec3 = DVec3::Y;
-
-
-
-
-
-
-
-
-
-
-
-
 
 pub struct OrbitProgramPlugin;
 
@@ -92,7 +78,6 @@ fn handle_orbit_target_requests(
     mut maneuver_plan: ResMut<ManeuverPlan>,
     mut stage_demand: ResMut<StageDemand>,
     mut sequencer: ResMut<StageSequencer>,
-    mut throttle: ResMut<ThrottleState>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
 ) {
@@ -146,22 +131,10 @@ fn handle_orbit_target_requests(
                 invalidate_preview(&mut program, &mut maneuver_plan);
             }
             OrbitTargetRequest::Plan => {
-                plan_current_target(
-                    &mut program,
-                    &mut maneuver_plan,
-                    &sim,
-                    &solar,
-                    false,
-                );
+                plan_current_target(&mut program, &mut maneuver_plan, &sim, &solar, false);
             }
             OrbitTargetRequest::Execute => {
-                plan_current_target(
-                    &mut program,
-                    &mut maneuver_plan,
-                    &sim,
-                    &solar,
-                    true,
-                );
+                plan_current_target(&mut program, &mut maneuver_plan, &sim, &solar, true);
             }
             OrbitTargetRequest::Cancel => {
                 clear_program_nodes(&program, &mut maneuver_plan);
@@ -177,8 +150,8 @@ fn handle_orbit_target_requests(
             }
         }
         if was_active && !program.active() {
-            throttle.selected = 0.0;
-            throttle.hold_idle_until_pilot_move = true;
+            // The automatic throttle already moved the canonical control to
+            // its last value. A manual disconnect inherits that position.
             program.idle_handoff_pending = false;
         }
     }
@@ -271,13 +244,7 @@ fn plan_current_target(
         body_radius_m: body.radius_m,
         target: program.draft.target(body_id),
     }) {
-        Ok(plan) => install_orbit_plan(
-            program,
-            maneuver_plan,
-            body.radius_m,
-            plan,
-            execute,
-        ),
+        Ok(plan) => install_orbit_plan(program, maneuver_plan, body.radius_m, plan, execute),
         Err(error) => {
             fail_program(program, &plan_error_label(&error));
             info!(
@@ -355,6 +322,10 @@ pub(crate) fn update_surface_orbit_program(
     if input.attitude.length_squared() > PILOT_OVERRIDE_DEADZONE_SQ || pilot_throttle.moved {
         sequencer.cancel(&mut stage_demand);
         abort_surface_program(&mut program, "pilot_override");
+        // A pilot takeover inherits the throttle's current physical position.
+        // Safety/validation aborts keep the idle handoff requested by
+        // `abort_surface_program`.
+        program.idle_handoff_pending = false;
         return;
     }
     if sim.simulation.is_destroyed() {
@@ -417,10 +388,7 @@ pub(crate) fn update_surface_orbit_program(
                 plane_policy = ?program.draft.plane,
                 "ORBIT launch plane is unreachable"
             );
-            abort_surface_program(
-                &mut program,
-                "inclination_unreachable_from_launch_site",
-            );
+            abort_surface_program(&mut program, "inclination_unreachable_from_launch_site");
             return;
         }
         if staging.0.is_empty() {
@@ -438,10 +406,7 @@ pub(crate) fn update_surface_orbit_program(
         let staged_twr = first_powered_stage.thrust_n
             / (first_powered_stage.initial_mass_kg.max(1.0) * surface_gravity_m_s2.max(1.0e-6));
         if staged_twr < MIN_LAUNCH_TWR {
-            abort_surface_program(
-                &mut program,
-                "insufficient_thrust_to_weight",
-            );
+            abort_surface_program(&mut program, "insufficient_thrust_to_weight");
             return;
         }
         let available_delta_v_m_s: f64 = staging.0.iter().map(|stage| stage.delta_v_m_s).sum();
@@ -543,10 +508,7 @@ pub(crate) fn update_surface_orbit_program(
         let live_twr = propulsion.total_thrust_n
             / (propulsion.wet_mass_kg.max(1.0) * surface_gravity_m_s2.max(1.0e-6));
         if live_twr < MIN_LAUNCH_TWR {
-            abort_surface_program(
-                &mut program,
-                "insufficient_live_thrust_to_weight",
-            );
+            abort_surface_program(&mut program, "insufficient_live_thrust_to_weight");
             return;
         }
         set_orbit_phase(
@@ -598,13 +560,7 @@ pub(crate) fn update_surface_orbit_program(
         };
         match plan_target_orbit(request) {
             Ok(plan) => {
-                install_orbit_plan(
-                    &mut program,
-                    &mut maneuver_plan,
-                    body.radius_m,
-                    plan,
-                    true,
-                );
+                install_orbit_plan(&mut program, &mut maneuver_plan, body.radius_m, plan, true);
                 program.surface_program = false;
                 program.demand = ControlDemand::NONE;
             }
@@ -787,8 +743,7 @@ fn apply_orbit_idle_handoff(
     if !program.idle_handoff_pending {
         return;
     }
-    throttle.selected = 0.0;
-    throttle.hold_idle_until_pilot_move = true;
+    throttle.commanded = 0.0;
     program.idle_handoff_pending = false;
 }
 

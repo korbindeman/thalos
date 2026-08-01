@@ -36,21 +36,21 @@ use bevy::prelude::*;
 use bevy::ui::Val2;
 use thalos_physics_canonical::velocity_frame::{VelocityReferenceFrame, nav_basis};
 
-use thalos_game_state::flight::RealizedControl;
-use thalos_game_state::flight::ThrottleState;
 use crate::HudPanel;
 use crate::format;
-use crate::theme::{HudTheme, panel_frame, panel_node};
-use thalos_game_state::maneuver_plan::ManeuverPlan;
 use crate::navball::markers::{
     MarkerIconState, MarkerKind, MarkerVariants, compute_marker_directions, marker_icon_image,
     orientation_icon_image,
 };
 use crate::navball::ui::NavballFrameRoot;
-use thalos_game_state::{SimulationState, SolarSystemState};
+use crate::theme::{HudTheme, panel_frame, panel_node};
+use crate::velocity_frame::VelocityFrameState;
+use thalos_game_state::flight::RealizedControl;
+use thalos_game_state::flight::ThrottleState;
+use thalos_game_state::maneuver_plan::ManeuverPlan;
 use thalos_game_state::nav::TargetBody;
 use thalos_game_state::units::UnitDomain;
-use crate::velocity_frame::VelocityFrameState;
+use thalos_game_state::{SimulationState, SolarSystemState};
 
 use super::TopLeftRowAnchor;
 use super::flight_panel::VelocityPanel;
@@ -2007,7 +2007,11 @@ pub fn update_approach_guidance(
         };
 
         if let Some(angles) = angles {
-            let roll_px = ((guidance.bank_command_rad - angles.bank_rad).to_degrees() as f32
+            // The same cue the ND's steering dot shows, from the same function,
+            // so the two instruments cannot command different rolls. Rescaled
+            // from its normalised [-1, 1] into this panel's pixel travel.
+            let roll_px = (guidance.director_lateral() as f32
+                * thalos_navigation::guidance::DIRECTOR_BANK_FULL_SCALE_RAD.to_degrees() as f32
                 * FD_PX_PER_BANK_DEG)
                 .clamp(-FD_LIMIT_PX, FD_LIMIT_PX);
             // Flight-path angle is pitch minus angle of attack; the PFD does not

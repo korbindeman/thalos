@@ -168,6 +168,7 @@ just loading-preview    # headless loading-screen preview (bar, status line,
                         #   GPU/VRAM/residency readout). The ONLY way to see
                         #   that screen — it despawns before any capture
                         #   preset can shoot it.
+just terrain-assets     # download + verify Git-LFS learned terrain payloads
 just bake Mira          # rebuild assets/terrain_packages/Mira.bin offline
 just validate-bake Mira # validate package schema/index/checksums/payload
 just texgen             # rebuild versioned vegetation atlases offline

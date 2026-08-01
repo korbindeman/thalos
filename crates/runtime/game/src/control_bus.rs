@@ -25,8 +25,8 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_control::{
-    AttitudeController, AttitudeDemand, ControlDemand, DemandSource, FlightState,
-    allocate, arbitrate,
+    AttitudeController, AttitudeDemand, ControlDemand, DemandSource, FlightState, allocate,
+    arbitrate,
 };
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::aero::control_authority;
@@ -69,12 +69,9 @@ const STICK_DEADZONE_SQ: f64 = 1.0e-6;
 /// the plain hold. Above it a winged craft in atmosphere flies fly-by-wire.
 const ASSIST_MIN_AIRSPEED_M_S: f64 = 15.0;
 
-
-
 /// The stateful attitude controller (holds the captured SAS target).
 #[derive(Resource, Debug, Default)]
 pub struct AttitudeControllerState(pub AttitudeController);
-
 
 /// Ground-control winner published by the same arbiter as flight controls.
 /// Landing-gear physics is the sole effector reader.
@@ -148,7 +145,7 @@ pub fn realize_control(
     mut sas: ResMut<SasState>,
     mut realized: ResMut<RealizedControl>,
 ) {
-    let (autopilot, land, orbit, _pilot_throttle, program, burn_schedule, mut annunciation) =
+    let (autopilot, land, orbit, pilot_throttle, program, burn_schedule, mut annunciation) =
         autoflight;
     let (mut sim, mut throttle, mut ground) = outputs;
     let (kin, weight_on_wheels, hull_ground) = kin_ground;
@@ -159,7 +156,6 @@ pub fn realize_control(
     if sim.simulation.is_destroyed() {
         controller.0 = AttitudeController::new();
         sim.simulation.set_control(ControlInput::default());
-        throttle.selected = 0.0;
         *ground = ResolvedGroundControl::default();
         *realized = RealizedControl::default();
         return;
@@ -228,24 +224,19 @@ pub fn realize_control(
         } else {
             AttitudeDemand::Free
         };
-        let pilot_throttle = (!locks.throttle).then_some(if throttle.hold_idle_until_pilot_move {
-            0.0
-        } else {
-            throttle.commanded
-        });
+        let pilot_throttle = (!locks.throttle).then_some(throttle.commanded);
         let pilot_steer =
             (!locks.ground_steer).then_some((input.attitude.z as f64).clamp(-1.0, 1.0));
         demands[3].1 = ControlDemand::autoflight(attitude, pilot_throttle, pilot_steer, None);
     }
 
     let arb = arbitrate(&demands);
-    throttle.selected = arb.throttle.unwrap_or_else(|| {
-        if throttle.hold_idle_until_pilot_move {
-            0.0
-        } else {
-            throttle.commanded
-        }
-    });
+    throttle.apply_arbitration(
+        arb.throttle,
+        arb.throttle_owner == Some(DemandSource::Autopilot),
+        annunciation.throttle,
+        pilot_throttle.moved,
+    );
     ground.steer = arb.ground_steer.unwrap_or(0.0);
     ground.brake = arb.wheel_brake.unwrap_or(0.0);
 

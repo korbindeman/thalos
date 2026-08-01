@@ -138,6 +138,91 @@ fn approach_autopilot_health(stream: &Stream) -> Vec<Finding> {
             format!("runtime.jsonl session={session} event=land_completed"),
         ));
     }
+
+    // Repeated go-arounds and repeated re-plans are the two tells for the
+    // approach that will not converge. They are kept as separate findings
+    // because they point at different code: the first at the guidance laws, the
+    // second at the re-plan policy in `route.rs`.
+    let mut go_arounds: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("land_go_around")
+        .filter(|record| record.target.ends_with("::approach_ap"))
+    {
+        *go_arounds.entry(record.session.as_str()).or_default() += 1;
+    }
+    if let Some((session, count)) = go_arounds
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .filter(|(_, count)| **count >= LAND_GO_AROUNDS_ATTENTION)
+    {
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "land_go_around_churn",
+                format!("LAND went around {count} times in one session"),
+                format!(
+                    "runtime.jsonl session={session} event=land_go_around · read the `reason` and the appr_frame before each"
+                ),
+            )
+            .with_detail(
+                "at the retry limit LAND gives up as UNABLE, so this session never landed",
+            ),
+        );
+    }
+
+    let mut rejoins: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("route_rejoin_committed")
+        .filter(|record| record.target.ends_with("::approach_ap"))
+    {
+        *rejoins.entry(record.session.as_str()).or_default() += 1;
+    }
+    if let Some((session, count)) = rejoins
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .filter(|(_, count)| **count >= ROUTE_REJOINS_ATTENTION)
+    {
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "route_rejoin_churn",
+                format!("the craft had to be routed back onto its path {count} times"),
+                format!(
+                    "runtime.jsonl session={session} event=route_rejoin_committed · compare bank_cmd_rad against bank_rad in the appr_frame records"
+                ),
+            )
+            .with_detail(
+                "repeated commits mean the follower is not holding a path it was given, not that the path is wrong",
+            ),
+        );
+    }
+
+    let mut replans: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("route_replanned")
+        .filter(|record| record.target.ends_with("::approach_ap"))
+    {
+        *replans.entry(record.session.as_str()).or_default() += 1;
+    }
+    if let Some((session, count)) = replans
+        .iter()
+        .max_by_key(|(_, count)| **count)
+        .filter(|(_, count)| **count >= ROUTE_REPLANS_ATTENTION)
+    {
+        findings.push(
+            Finding::new(
+                Severity::Attention,
+                "route_replan_churn",
+                format!("the approach was rebuilt {count} times in one session"),
+                format!(
+                    "runtime.jsonl session={session} event=route_replanned · check `cross_track_m` and `rejoin_flying`"
+                ),
+            )
+            .with_detail(
+                "each rebuild teleports dtg and the vertical profile; a converging approach re-plans on selection changes only",
+            ),
+        );
+    }
     findings
 }
 
@@ -1527,6 +1612,92 @@ mod tests {
     }
 
     #[test]
+    fn one_go_around_is_healthy_but_hitting_the_retry_limit_fires() {
+        let once = vec![record(
+            "ga-one",
+            1_000,
+            "INFO",
+            "thalos::diagnostic::approach_ap",
+            json!({"event": "land_go_around", "reason": "unstable_approach"}),
+        )];
+        assert!(
+            !finding_ids(once).contains(&"land_go_around_churn"),
+            "a single go-around is the mode working, not a defect"
+        );
+
+        let repeated: Vec<_> = (0..LAND_GO_AROUNDS_ATTENTION)
+            .map(|i| {
+                record(
+                    "ga-many",
+                    1_000 + i as u128 * 60_000,
+                    "INFO",
+                    "thalos::diagnostic::approach_ap",
+                    json!({"event": "land_go_around", "reason": "unstable_approach"}),
+                )
+            })
+            .collect();
+        assert!(finding_ids(repeated).contains(&"land_go_around_churn"));
+    }
+
+    #[test]
+    fn an_occasional_rejoin_is_healthy_but_repeated_ones_fire() {
+        let once = vec![record(
+            "rejoin-one",
+            1_000,
+            "INFO",
+            "thalos::diagnostic::approach_ap",
+            json!({"event": "route_rejoin_committed", "cross_track_m": 620.0}),
+        )];
+        assert!(
+            !finding_ids(once).contains(&"route_rejoin_churn"),
+            "being blown off once and flying back is the mechanism working"
+        );
+
+        let repeated: Vec<_> = (0..ROUTE_REJOINS_ATTENTION)
+            .map(|i| {
+                record(
+                    "rejoin-many",
+                    1_000 + i as u128 * 25_000,
+                    "INFO",
+                    "thalos::diagnostic::approach_ap",
+                    json!({"event": "route_rejoin_committed", "cross_track_m": 450.0}),
+                )
+            })
+            .collect();
+        assert!(finding_ids(repeated).contains(&"route_rejoin_churn"));
+    }
+
+    #[test]
+    fn replanning_on_a_selection_change_is_quiet_but_the_churn_loop_fires() {
+        let occasional: Vec<_> = (0..ROUTE_REPLANS_ATTENTION - 1)
+            .map(|i| {
+                record(
+                    "replan-few",
+                    1_000 + i as u128 * 60_000,
+                    "INFO",
+                    "thalos::diagnostic::approach_ap",
+                    json!({"event": "route_replanned", "cross_track_m": 2_400.0, "rejoin_flying": false}),
+                )
+            })
+            .collect();
+        assert!(!finding_ids(occasional).contains(&"route_replan_churn"));
+
+        // The recorded loop: a rebuild every ~47 s for the whole approach.
+        let churn: Vec<_> = (0..ROUTE_REPLANS_ATTENTION)
+            .map(|i| {
+                record(
+                    "replan-loop",
+                    1_000 + i as u128 * 47_000,
+                    "INFO",
+                    "thalos::diagnostic::approach_ap",
+                    json!({"event": "route_replanned", "cross_track_m": 2_050.0, "rejoin_flying": true}),
+                )
+            })
+            .collect();
+        assert!(finding_ids(churn).contains(&"route_replan_churn"));
+    }
+
+    #[test]
     fn land_completion_must_be_at_stopping_speed() {
         let stopped = record(
             "land-stopped",
@@ -1744,9 +1915,8 @@ mod tests {
     /// makes the check fire on every low-altitude session.
     #[test]
     fn a_flat_spread_under_a_near_surface_view_is_not_judged() {
-        let findings = planet_reflection_health(&stream(vec![reflection_at(
-            "s", true, 0.482, 0.0018, 87.4,
-        )]));
+        let findings =
+            planet_reflection_health(&stream(vec![reflection_at("s", true, 0.482, 0.0018, 87.4)]));
         assert!(findings.is_empty(), "{findings:?}");
     }
 
@@ -1777,9 +1947,8 @@ mod tests {
     /// is still reported.
     #[test]
     fn a_missing_bake_is_reported_even_near_the_surface() {
-        let findings = planet_reflection_health(&stream(vec![reflection_at(
-            "s", false, 0.482, 0.0, 87.4,
-        )]));
+        let findings =
+            planet_reflection_health(&stream(vec![reflection_at("s", false, 0.482, 0.0, 87.4)]));
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].id, "reflection_bake_missing");
     }

@@ -490,8 +490,6 @@ fn apply_launch_placement(
         StructureKind::Runway { half_length_m, .. } => {
             let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
             let Some(clearance_m) = measure_runway_clearance(
-                &sim,
-                body_id,
                 ship_entity,
                 ship_gt,
                 &children_q,

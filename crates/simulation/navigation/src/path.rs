@@ -13,6 +13,20 @@ use glam::DVec2;
 
 use crate::waypoint::dir_from_theta;
 
+/// How far *back* along the route [`LateralPath::closest_from`] will look (m).
+///
+/// Small, because a craft flying a route does not un-fly it. The allowance is
+/// only there to absorb the projection sliding backwards a little as the craft
+/// swings around the outside of a turn.
+const TRACK_WINDOW_BACK_M: f64 = 250.0;
+/// How far *ahead* along the route [`LateralPath::closest_from`] will look (m).
+///
+/// A frame advances the projection by tens of metres at approach speed, so this
+/// is generous by two orders of magnitude and never binds in normal flight. It
+/// is still an order of magnitude below the leg separation that produced the
+/// recorded 13 km snap, which is the gap it exists to close.
+const TRACK_WINDOW_AHEAD_M: f64 = 1_000.0;
+
 /// A constant-radius circular arc, traversed from `start_theta` by `sweep`.
 ///
 /// `start_theta` is the angle of the **radius vector** from `center` to the
@@ -129,6 +143,56 @@ impl Leg {
         self.point_at(self.length())
     }
 
+    /// Signed curvature (1/m): **positive is a CCW turn**, i.e. a pilot's left,
+    /// matching the θ convention everywhere else in this crate.
+    ///
+    /// This is what a path *follower* needs and a path *aimer* does not. Holding
+    /// an arc costs a standing bank angle before any error correction; a law
+    /// built only on heading error has to grow an error first in order to
+    /// produce that bank, which is precisely a standing cross-track offset
+    /// (INC-20260801T035551Z).
+    pub fn curvature(&self) -> f64 {
+        match self {
+            Leg::Line { .. } | Leg::Point { .. } => 0.0,
+            Leg::Arc(a) => {
+                if a.radius > 1e-9 {
+                    a.sweep.signum() / a.radius
+                } else {
+                    0.0
+                }
+            }
+        }
+    }
+
+    /// The portion of this leg after `s` metres, or `None` when `s` is at or
+    /// past its end. Used to build the remainder of a route behind a spliced-in
+    /// rejoin.
+    fn after(&self, s: f64) -> Option<Leg> {
+        let len = self.length();
+        if s <= 0.0 {
+            return Some(*self);
+        }
+        if s >= len {
+            return None;
+        }
+        match self {
+            Leg::Line { to, .. } => Some(Leg::Line {
+                from: self.point_at(s),
+                to: *to,
+            }),
+            Leg::Arc(a) => {
+                let t = s / len;
+                Some(Leg::Arc(Arc2 {
+                    center: a.center,
+                    radius: a.radius,
+                    start_theta: a.start_theta + a.sweep * t,
+                    sweep: a.sweep * (1.0 - t),
+                }))
+            }
+            Leg::Point { .. } => None,
+        }
+    }
+
     /// Distance along this leg of the point closest to `p`, plus that distance
     /// from `p`. For an arc the closest point is found by angle, clamped to the
     /// swept interval — so a craft "inside" the turn circle still projects onto
@@ -187,6 +251,9 @@ pub struct PathPoint {
     pub along_m: f64,
     /// Index of the leg the point lies on.
     pub leg: usize,
+    /// Signed curvature of the path there (1/m, + = CCW/left). The feedforward
+    /// term a follower needs — see [`Leg::curvature`].
+    pub curvature: f64,
     /// Signed lateral offset of the query point from the path (m), **positive
     /// to the right** of the direction of travel. Zero for [`LateralPath::point_at`].
     pub cross_track_m: f64,
@@ -230,6 +297,7 @@ impl LateralPath {
                     theta: leg.theta_at(local),
                     along_m: s,
                     leg: i,
+                    curvature: leg.curvature(),
                     cross_track_m: 0.0,
                 });
             }
@@ -240,6 +308,12 @@ impl LateralPath {
 
     /// The closest point on the path to `p`, with the signed cross-track offset
     /// (**positive = `p` is right of the path**).
+    ///
+    /// This searches the **whole** path, so on a route that passes near itself —
+    /// a procedure turn, a teardrop, any bank-limited join that doubles back —
+    /// the answer can jump legs between one call and the next. Use it to *seed* a
+    /// track (or when there is genuinely no prior), and [`Self::closest_from`]
+    /// to follow one. See that method for why the distinction is load-bearing.
     pub fn closest(&self, p: DVec2) -> Option<PathPoint> {
         let mut best: Option<(f64, usize, f64, f64)> = None; // (dist, leg, s_local, s_global)
         let mut acc = 0.0;
@@ -259,8 +333,179 @@ impl LateralPath {
             theta,
             along_m: s_global,
             leg: leg_idx,
+            curvature: leg.curvature(),
             cross_track_m: signed_cross_track(p - position, theta),
         })
+    }
+
+    /// The closest point on the path to `p`, resolved **near where the craft
+    /// already was** rather than globally.
+    ///
+    /// # Why this exists
+    ///
+    /// Along-track position is not just a number on a plot: `dtg` is derived
+    /// from it, and `dtg` is the argument to the entire vertical profile, the
+    /// speed gates, and the approach phase. A global nearest-point search has no
+    /// obligation to be continuous, so on a path that doubles back the projection
+    /// can hop from the inbound leg to the final leg the instant the final gets
+    /// marginally nearer — and everything downstream teleports with it.
+    ///
+    /// That is not hypothetical. A recorded autoland went from 20.24 km to
+    /// 7.17 km to go, and from 26 m to 148 m of altitude error, **in one frame**,
+    /// with the craft unmoved and the plan untouched: the projection had snapped
+    /// legs. The autopilot read that as "you are suddenly 148 m high on final"
+    /// and dumped the nose.
+    ///
+    /// So the projection is windowed around the previous along-track position:
+    /// generous forward (the craft is flying), tight backward (it is not), and
+    /// both are orders of magnitude larger than a frame's travel while being far
+    /// smaller than the leg separation that produces a snap. `hint_along_m` of
+    /// `None` falls back to the global search — correct for seeding a fresh plan,
+    /// and the only place a discontinuity is legitimate.
+    ///
+    /// The caller owns the hint, so this stays a pure function of its arguments
+    /// (ADR-20260730T005746Z), exactly like the rejoin's capture hint.
+    pub fn closest_from(&self, p: DVec2, hint_along_m: Option<f64>) -> Option<PathPoint> {
+        let Some(hint) = hint_along_m else {
+            return self.closest(p);
+        };
+        self.closest_within(p, hint - TRACK_WINDOW_BACK_M, hint + TRACK_WINDOW_AHEAD_M)
+            // A hint that no longer lands on this path (a plan swapped underneath a
+            // stale hint) leaves the window empty; seeding globally beats returning
+            // nothing.
+            .or_else(|| self.closest(p))
+    }
+
+    /// The closest point on the path to `p` whose along-track distance lies in
+    /// `[lo_m, hi_m]`. `None` when that interval misses the path entirely.
+    ///
+    /// Exact, not approximate: distance from a point to a line segment or to a
+    /// circular arc is unimodal in arc length, so clamping each leg's
+    /// unconstrained minimiser into the window yields the constrained minimiser
+    /// rather than merely a nearby one.
+    pub fn closest_within(&self, p: DVec2, lo_m: f64, hi_m: f64) -> Option<PathPoint> {
+        let total = self.length();
+        let lo = lo_m.max(0.0);
+        let hi = hi_m.min(total);
+        if hi < lo {
+            return None;
+        }
+        let mut best: Option<(f64, usize, f64, f64)> = None; // (dist, leg, s_local, s_global)
+        let mut acc = 0.0;
+        for (i, leg) in self.legs.iter().enumerate() {
+            let len = leg.length();
+            let leg_lo = (lo - acc).max(0.0);
+            let leg_hi = (hi - acc).min(len);
+            if leg_hi >= leg_lo {
+                let (unconstrained, _) = leg.closest_on_leg(p);
+                let s_local = unconstrained.clamp(leg_lo, leg_hi);
+                let dist = p.distance(leg.point_at(s_local));
+                if best.is_none_or(|(bd, ..)| dist < bd) {
+                    best = Some((dist, i, s_local, acc + s_local));
+                }
+            }
+            acc += len;
+        }
+        let (_, leg_idx, s_local, s_global) = best?;
+        let leg = &self.legs[leg_idx];
+        let position = leg.point_at(s_local);
+        let theta = leg.theta_at(s_local);
+        Some(PathPoint {
+            position,
+            theta,
+            along_m: s_global,
+            leg: leg_idx,
+            curvature: leg.curvature(),
+            cross_track_m: signed_cross_track(p - position, theta),
+        })
+    }
+
+    /// The remainder of this path from `s_m` onward, as its own path.
+    ///
+    /// The straddling leg is truncated rather than dropped, so the result starts
+    /// exactly at `s_m` and no length is invented or lost.
+    pub fn tail_from(&self, s_m: f64) -> LateralPath {
+        let mut legs = Vec::new();
+        let mut acc = 0.0;
+        for leg in &self.legs {
+            let len = leg.length();
+            if acc + len > s_m
+                && let Some(part) = leg.after(s_m - acc)
+            {
+                legs.push(part);
+            }
+            acc += len;
+        }
+        LateralPath::new(legs)
+    }
+
+    /// The first `s_m` metres of this path, as its own path. The mirror of
+    /// [`Self::tail_from`]; used to draw the committed-rejoin prefix of an
+    /// active route in its own colour.
+    pub fn head_to(&self, s_m: f64) -> LateralPath {
+        let mut legs = Vec::new();
+        let mut acc = 0.0;
+        for leg in &self.legs {
+            if acc >= s_m {
+                break;
+            }
+            let len = leg.length();
+            if acc + len <= s_m {
+                legs.push(*leg);
+            } else {
+                let keep = s_m - acc;
+                legs.push(match leg {
+                    Leg::Line { from, .. } => Leg::Line {
+                        from: *from,
+                        to: leg.point_at(keep),
+                    },
+                    Leg::Arc(a) => Leg::Arc(Arc2 {
+                        center: a.center,
+                        radius: a.radius,
+                        start_theta: a.start_theta,
+                        sweep: a.sweep * (keep / len),
+                    }),
+                    Leg::Point { .. } => *leg,
+                });
+            }
+            acc += len;
+        }
+        LateralPath::new(legs)
+    }
+
+    /// This path followed by `next`.
+    ///
+    /// Geometric continuity is the caller's business — [`Self::splice_rejoin`]
+    /// is the one that guarantees it, because the rejoin was planned to meet the
+    /// route tangentially at exactly the point it cuts.
+    pub fn then(mut self, next: LateralPath) -> LateralPath {
+        self.legs.extend(next.legs);
+        self
+    }
+
+    /// The path the craft should actually fly: `rejoin`, then the remainder of
+    /// this route from `capture_along_m`.
+    ///
+    /// # Why this is a splice and not a second path
+    ///
+    /// A rejoin used as a *steering cue* leaves the system with two answers to
+    /// "where should I go" — the route that is drawn, and the rejoin that is
+    /// flown — and they visibly disagree, because a rejoin leaves the route on
+    /// purpose. Worse, recomputing it every frame makes its aim point slide
+    /// forward as the craft advances, so the craft chases a receding target and
+    /// never captures: a recorded approach flew 385 s at a steady 12° of bank
+    /// while its distance from the route grew to 2.7 km (INC-20260801T035551Z).
+    ///
+    /// Splicing makes the rejoin *part of the route*. What is drawn is what is
+    /// flown, cross-track and distance-to-go measure the same object the pilot
+    /// is looking at, and the follower has a single continuous path with a
+    /// defined curvature at every point.
+    ///
+    /// Distance-to-go is preserved for every point on the route portion: the
+    /// splice only adds length ahead of the capture point, so the vertical
+    /// profile and the speed gates keep their meaning.
+    pub fn splice_rejoin(&self, rejoin: LateralPath, capture_along_m: f64) -> LateralPath {
+        rejoin.then(self.tail_from(capture_along_m))
     }
 
     /// Distance still to fly from the point closest to `p`.
@@ -334,6 +579,193 @@ mod tests {
             from: DVec2::ZERO,
             to: DVec2::new(0.0, len),
         }])
+    }
+
+    /// A teardrop: out along +east, a 180° left turn, back along −east 600 m
+    /// north of the outbound leg. The two straights pass within 600 m of each
+    /// other, which is what makes a global projection ambiguous.
+    fn teardrop() -> LateralPath {
+        LateralPath::new(vec![
+            Leg::Line {
+                from: DVec2::ZERO,
+                to: DVec2::new(10_000.0, 0.0),
+            },
+            Leg::Arc(Arc2 {
+                center: DVec2::new(10_000.0, 300.0),
+                radius: 300.0,
+                start_theta: -std::f64::consts::FRAC_PI_2,
+                sweep: std::f64::consts::PI,
+            }),
+            Leg::Line {
+                from: DVec2::new(10_000.0, 600.0),
+                to: DVec2::new(0.0, 600.0),
+            },
+        ])
+    }
+
+    #[test]
+    fn a_global_projection_snaps_legs_where_the_route_doubles_back() {
+        // The defect this exists to pin: 350 m north of the outbound leg is
+        // nearer the *return* leg, so the whole-path search answers with an
+        // along-track distance ~15 km further on. Everything derived from
+        // along-track — dtg, the vertical profile, the speed gates, the phase —
+        // inherits that jump. Recorded live as 20.24 km -> 7.17 km in one frame.
+        let path = teardrop();
+        let outbound = path.closest(DVec2::new(5_000.0, 100.0)).expect("non-empty");
+        let snapped = path.closest(DVec2::new(5_000.0, 350.0)).expect("non-empty");
+        assert_eq!(outbound.leg, 0);
+        assert_eq!(snapped.leg, 2, "the return leg is genuinely nearer");
+        assert!(
+            snapped.along_m - outbound.along_m > 10_000.0,
+            "expected a large along-track jump, got {} -> {}",
+            outbound.along_m,
+            snapped.along_m
+        );
+    }
+
+    #[test]
+    fn a_hinted_projection_stays_on_the_leg_the_craft_is_flying() {
+        let path = teardrop();
+        // Same two query points, but following a track that is already at 5 km
+        // along the outbound leg. The projection must not jump the gap.
+        let outbound = path
+            .closest_from(DVec2::new(5_000.0, 100.0), Some(5_000.0))
+            .expect("non-empty");
+        let next = path
+            .closest_from(DVec2::new(5_000.0, 350.0), Some(outbound.along_m))
+            .expect("non-empty");
+        assert_eq!(next.leg, 0, "must stay on the outbound leg");
+        assert_abs_diff_eq!(next.along_m, 5_000.0, epsilon = 1.0);
+        // And it still reports the honest cross-track on that leg, so a craft
+        // this far off course is visible rather than silently "on" the return.
+        assert_abs_diff_eq!(next.cross_track_m, -350.0, epsilon = 1e-6);
+    }
+
+    #[test]
+    fn a_hinted_projection_still_advances_normally() {
+        let path = teardrop();
+        // Frame-to-frame travel is tens of metres; the window must never bind.
+        let mut hint = 0.0;
+        for step in 1..=100 {
+            let east = step as f64 * 80.0;
+            let pp = path
+                .closest_from(DVec2::new(east, 0.0), Some(hint))
+                .expect("non-empty");
+            assert_abs_diff_eq!(pp.along_m, east, epsilon = 1e-6);
+            assert!(pp.along_m >= hint, "along-track went backwards");
+            hint = pp.along_m;
+        }
+        // Continuing around the turn and onto the return leg, progress stays
+        // continuous — the window never binds on a craft actually flying the
+        // route, only on a projection trying to jump across it.
+        for step in 0..400 {
+            let s = 8_000.0 + step as f64 * 10.0;
+            let target = path.point_at(s).expect("on path");
+            let pp = path
+                .closest_from(target.position, Some(hint))
+                .expect("non-empty");
+            assert!(
+                (pp.along_m - s).abs() < 5.0,
+                "at s={s} the hinted projection answered {}",
+                pp.along_m
+            );
+            hint = pp.along_m;
+        }
+    }
+
+    #[test]
+    fn no_hint_falls_back_to_the_global_search() {
+        let path = teardrop();
+        let p = DVec2::new(5_000.0, 350.0);
+        assert_eq!(
+            path.closest_from(p, None).expect("non-empty"),
+            path.closest(p).expect("non-empty"),
+        );
+        // A hint stranded past the end of a shorter path also degrades to the
+        // global answer rather than to nothing.
+        let short = north_line(1_000.0);
+        assert!(
+            short
+                .closest_from(DVec2::new(0.0, 500.0), Some(9e9))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn closest_within_is_exact_at_the_window_edge() {
+        // The window cuts a line leg mid-span: the constrained answer must be
+        // the window edge, not the leg's unconstrained minimiser and not a
+        // rejection of the leg.
+        let p = north_line(1_000.0);
+        let cp = p
+            .closest_within(DVec2::new(10.0, 800.0), 0.0, 400.0)
+            .expect("window overlaps the path");
+        assert_abs_diff_eq!(cp.along_m, 400.0, epsilon = 1e-9);
+        assert!(p.closest_within(DVec2::ZERO, 2_000.0, 3_000.0).is_none());
+    }
+
+    #[test]
+    fn head_and_tail_partition_the_path_exactly() {
+        let path = teardrop();
+        let total = path.length();
+        for cut in [0.0, 1.0, 5_000.0, 9_999.0, 10_000.0, total * 0.75, total] {
+            let head = path.head_to(cut);
+            let tail = path.tail_from(cut);
+            assert_abs_diff_eq!(head.length() + tail.length(), total, epsilon = 1e-6);
+            assert_abs_diff_eq!(head.length(), cut.min(total), epsilon = 1e-6);
+            // The two meet where they were cut, with no gap and no jump.
+            if cut > 0.0 && cut < total {
+                let meet_head = head.point_at(head.length()).expect("non-empty").position;
+                let meet_tail = tail.point_at(0.0).expect("non-empty").position;
+                assert!(
+                    meet_head.distance(meet_tail) < 1e-6,
+                    "cut at {cut} left a {} m gap",
+                    meet_head.distance(meet_tail)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_spliced_rejoin_adds_its_length_and_nothing_else() {
+        // The invariant the vertical profile depends on: splicing changes
+        // along-track distances but leaves every distance-to-go on the route
+        // portion untouched, because the added length is all *ahead* of them.
+        let route = teardrop();
+        let capture = 12_000.0;
+        let rejoin = LateralPath::new(vec![Leg::Line {
+            from: DVec2::new(-2_000.0, -2_000.0),
+            to: route.point_at(capture).expect("on path").position,
+        }]);
+        let rejoin_len = rejoin.length();
+        let spliced = route.splice_rejoin(rejoin, capture);
+
+        assert_abs_diff_eq!(
+            spliced.length(),
+            rejoin_len + route.length() - capture,
+            epsilon = 1e-6
+        );
+        // A point 3 km from the end has the same distance-to-go on both paths.
+        let dtg = 3_000.0;
+        let on_route = route.point_at(route.length() - dtg).expect("on path");
+        let on_spliced = spliced.point_at(spliced.length() - dtg).expect("on path");
+        assert!(
+            on_route.position.distance(on_spliced.position) < 1e-6,
+            "the same distance-to-go must be the same place"
+        );
+    }
+
+    #[test]
+    fn curvature_is_zero_on_straights_and_signed_on_arcs() {
+        let path = teardrop();
+        assert_abs_diff_eq!(
+            path.point_at(5_000.0).expect("on path").curvature,
+            0.0,
+            epsilon = 1e-12
+        );
+        // Mid-turn: a CCW (left) sweep is positive curvature of 1/radius.
+        let mid = path.point_at(10_000.0 + 150.0 * std::f64::consts::PI / 2.0);
+        assert_abs_diff_eq!(mid.expect("on path").curvature, 1.0 / 300.0, epsilon = 1e-9);
     }
 
     #[test]

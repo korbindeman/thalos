@@ -6,9 +6,28 @@ Consumed by `thalos_terrain::DiffusionSurface` when `THALOS_TERRAIN=diffusion`
 | File | What | In git? |
 |---|---|---|
 | `thalos_chart_elev.f32/.json` | Global equirect coarse chart, 869×434 @ 23.04 km/px (equator-exact), ocean clamped to 0 | yes |
-| `thalos_site_detail_6144_90m.f32/.json` | 553 km native-resolution (90 m) window centred on the spaceport site (lat 7.6, lon 178) | **no — 151 MB, regenerate** |
+| `thalos_site_detail_6144_90m.f32/.json` | 553 km native-resolution (90 m) window centred on the spaceport site (lat 7.6, lon 178) | yes — payload via Git LFS |
 
-Regeneration is deterministic (seed-pinned, byte-identical per NTR-FT-0):
+## Download
+
+A normal clone downloads the detail payload automatically when Git LFS is
+installed. For a clone made without LFS, or one made with smudging disabled:
+
+```bash
+just terrain-assets
+```
+
+That command installs the repository-local LFS filters, downloads only the
+learned terrain payloads, and verifies the LFS object store. The payload's LFS
+object id is its SHA-256, so it must equal `sha256_le_f32` in the JSON sidecar.
+For the current 6144² window both are
+`60828b673d43b8badc0747861f59d9058a59fa7d49487046ff61b4fbc03c3482`.
+
+Training datasets, checkpoints, optimizer state, and `terrain_runs/` remain
+ignored. They are not needed to render the checked-in learned terrain.
+
+Regeneration is deterministic (seed-pinned, byte-identical per NTR-FT-0) and is
+only needed when intentionally replacing the published payload:
 
 ```bash
 # 1. Canonical macro conditioning rasters (Thalos's own continents/climate):

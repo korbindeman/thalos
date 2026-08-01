@@ -6,11 +6,11 @@ use bevy::math::DVec3;
 use bevy::prelude::*;
 use thalos_control::ControlDemand;
 use thalos_navigation::approach::RunwayEnd;
-use thalos_navigation::{ApproachPlan, DestinationGuidance, Guidance, WaypointKind};
+use thalos_navigation::{ApproachPlan, DestinationGuidance, Guidance, LateralPath, WaypointKind};
 use thalos_physics_canonical::maneuver::delta_v_to_world;
-use thalos_physics_canonical::trajectory::Trajectory;
 use thalos_physics_canonical::orbit_planner::{OrbitDirection, TargetOrbit, TargetPlane};
 use thalos_physics_canonical::simulation::Simulation;
+use thalos_physics_canonical::trajectory::Trajectory;
 use thalos_physics_canonical::velocity_frame::VelocityReferenceFrame;
 
 use crate::autoflight::{AutoflightLocks, BurnArm, SequenceEvent};
@@ -601,9 +601,9 @@ impl OrbitProgram {
             | OrbitProgramPhase::Turn
             | OrbitProgramPhase::Ascent
             | OrbitProgramPhase::MainEngineCutoff => AutoflightLocks::FULL_AUTHORITY,
-            OrbitProgramPhase::Coast
-            | OrbitProgramPhase::Circularize
-            | OrbitProgramPhase::Trim => AutoflightLocks::GUIDANCE_COAST,
+            OrbitProgramPhase::Coast | OrbitProgramPhase::Circularize | OrbitProgramPhase::Trim => {
+                AutoflightLocks::GUIDANCE_COAST
+            }
         }
     }
 
@@ -737,8 +737,24 @@ pub struct RouteDisplay {
 #[derive(Resource, Default)]
 pub struct RouteState {
     pub status: RouteStatus,
-    /// The active approach plan, if one is armed and plannable.
+    /// The active approach plan, if one is armed and plannable. This is the
+    /// *nominal* route to the runway; what the craft actually flies is
+    /// [`Self::active_path`], which is this plan with any committed rejoin
+    /// spliced onto the front.
     pub plan: Option<ApproachPlan>,
+    /// **The path that is flown and the path that is drawn — one object.**
+    ///
+    /// Equal to `plan.path` in the ordinary case. When the craft has been blown
+    /// off course, the flyable rejoin is *committed into* this path rather than
+    /// being run alongside it as a steering cue, so the ND cannot show one route
+    /// while the autopilot flies another. See
+    /// `LateralPath::splice_rejoin`.
+    pub active_path: LateralPath,
+    /// Length (m) of the leading committed-rejoin portion of
+    /// [`Self::active_path`]; `0.0` when flying the plan directly. Drawn in its
+    /// own colour so "the bit that gets me back on" is legible as part of the
+    /// route rather than as a competing one.
+    pub rejoin_len_m: f64,
     /// Live guidance against that plan.
     pub guidance: Option<Guidance>,
     /// Spherical guidance while the selected runway is outside the terminal
@@ -748,6 +764,12 @@ pub struct RouteState {
     pub destination_arrival_dir: Option<DVec3>,
     /// Every landable end on the dominant body, **nearest threshold first**.
     pub ends: Vec<RunwayEndEntry>,
+    /// The armed end itself, so a display can name the destination without
+    /// reaching for [`RouteSelection`] — and, more to the point, without keying
+    /// off `plan`, which is `None` for the whole enroute leg. Doing the latter
+    /// is why the ND announced `SELECT RWY` while LAND was flying to a runway
+    /// the player had very much selected.
+    pub armed: Option<RunwayEndEntry>,
     pub display: RouteDisplay,
     /// Approach speed the plan was built with (m/s) — shown as the speed target
     /// and used by the speed gates.
@@ -756,14 +778,35 @@ pub struct RouteState {
     pub planned_for: Option<ArmedEnd>,
     /// Real time of the last (re)plan.
     pub planned_at_s: f32,
-    /// Latched once the craft reaches the final segment: freezes the plan (see
-    /// the module docs — re-planning on final flies you away from the runway).
+    /// Latched once the craft passes the final approach point: inhibits any
+    /// further re-plan (see the module docs — re-planning from past the FAP asks
+    /// the planner for a route to a fix *behind* the craft, which it answers
+    /// with a full turn-around).
+    ///
+    /// This is a **geometric** latch about the plan's mutability. It is
+    /// deliberately not [`Self::established`]: conflating the two is what let an
+    /// approach freeze its plan while 1.8 km off the centreline and then fly the
+    /// unrecoverable result all the way to the threshold.
+    pub plan_frozen: bool,
+    /// Whether the craft is *actually* on the beam right now: on final and
+    /// inside both full-scale needles, straight from
+    /// [`thalos_navigation::Guidance::established`].
+    ///
+    /// Live, never latched — an approach that goes out of tolerance stops being
+    /// established. This is the honest input to the stabilisation gate and the
+    /// only thing a display may label ESTABLISHED.
     pub established: bool,
-    /// Where along the route the rejoin captured last frame. Fed back as a hint
-    /// so the capture point holds still while the craft flies toward it —
-    /// `plan_rejoin` is pure, so this frame-to-frame memory lives here
-    /// (ADR-20260730T005746Z).
-    pub rejoin_hint_along_m: Option<f64>,
+    /// Real time the active path last had a rejoin committed into it, so the
+    /// decision is rate-limited. A rejoin is something the craft then spends a
+    /// minute or two flying; re-deciding at frame rate is what turned the old
+    /// per-frame rejoin into a target it could never reach.
+    pub rejoin_committed_at_s: f32,
+    /// Where along the route the craft projected last frame, so this frame's
+    /// projection follows it instead of hopping legs where the route doubles
+    /// back — see `LateralPath::closest_from`. Same arrangement, same reason as
+    /// `rejoin_committed_at_s`. **Cleared on every re-plan**, since an along-track
+    /// distance means nothing on a path that no longer exists.
+    pub track_hint_along_m: Option<f64>,
     /// Recovery asks the destination leg to carry the craft back behind the
     /// runway even when that arrival fix is already inside the ordinary
     /// terminal-capture radius.
@@ -775,9 +818,13 @@ impl RouteState {
     /// to the selected runway's arrival fix.
     pub fn recover_to_destination_ingress(&mut self) {
         self.plan = None;
+        self.active_path = LateralPath::default();
+        self.rejoin_len_m = 0.0;
         self.guidance = None;
+        self.plan_frozen = false;
         self.established = false;
-        self.rejoin_hint_along_m = None;
+        self.rejoin_committed_at_s = 0.0;
+        self.track_hint_along_m = None;
         self.display = RouteDisplay::default();
         self.force_destination_ingress = true;
     }
@@ -801,6 +848,16 @@ pub struct LandAutopilot {
     pub go_arounds: u8,
     pub go_around_s: f64,
     pub diagnostic_s: f64,
+    /// How long the approach has been continuously out of tolerance (s). The
+    /// go-around gate reads a *dwell*, not an instantaneous sample, so one bad
+    /// frame — a plan swap, a gust, a projection settling — cannot throw away a
+    /// good approach.
+    pub unstable_s: f64,
+    /// The last thing LAND did that the player needs told, and how long it has
+    /// been on screen. Set on every go-around, refusal, completion, and
+    /// disengagement; cleared on a fresh engagement.
+    pub notice: Option<LandNotice>,
+    pub notice_age_s: f64,
 }
 
 /// Public phase for the HUD and diagnostics.
@@ -816,6 +873,118 @@ pub enum LandPhase {
     GoAround,
     Stopped,
     Unable,
+}
+
+impl LandPhase {
+    /// Chip text. Deliberately a *phase* word only — what LAND is doing right
+    /// now — with the reason it changed carried separately by [`LandNotice`].
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "LAND",
+            Self::Enroute => "ENROUTE",
+            Self::TerminalCapture => "APPROACH",
+            Self::Final => "FINAL",
+            Self::Flare => "FLARE",
+            Self::Rollout => "ROLLOUT",
+            Self::GoAround => "GO-AROUND",
+            Self::Stopped => "LANDED",
+            Self::Unable => "UNABLE",
+        }
+    }
+
+    /// One line of plain English for the same state. The chip is for the glance;
+    /// this is for the player who wants to know what the aircraft is doing.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Off => "not engaged",
+            Self::Enroute => "flying to the approach",
+            Self::TerminalCapture => "joining the approach",
+            Self::Final => "on final approach",
+            Self::Flare => "flaring for touchdown",
+            Self::Rollout => "braking on the runway",
+            Self::GoAround => "climbing away to try again",
+            Self::Stopped => "stopped on the runway",
+            Self::Unable => "cannot complete this landing",
+        }
+    }
+}
+
+/// Why LAND last changed what it was doing, in the player's terms.
+///
+/// This exists because the recorded failure was not that the autopilot gave up
+/// — going around was the right call — but that it did so **silently**. The
+/// reason went to `runtime.jsonl` and the screen showed only a phase chip
+/// flicking from `LAND FNL` to `LAND ENR` while the aircraft firewalled the
+/// throttle and climbed away. A player cannot learn a system that will not say
+/// what it just did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LandNotice {
+    GoAroundUnstable,
+    GoAroundSinkRate,
+    GoAroundBounce,
+    UnableGoAroundLimit,
+    UnableNoGuidance,
+    UnableLostRunway,
+    UnableDestroyed,
+    DisengagedByPilot,
+    Completed,
+}
+
+impl LandNotice {
+    /// Headline word, matching the phase vocabulary.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::GoAroundUnstable | Self::GoAroundSinkRate | Self::GoAroundBounce => "GO-AROUND",
+            Self::UnableGoAroundLimit
+            | Self::UnableNoGuidance
+            | Self::UnableLostRunway
+            | Self::UnableDestroyed => "UNABLE",
+            Self::DisengagedByPilot => "LAND OFF",
+            Self::Completed => "LANDED",
+        }
+    }
+
+    /// The reason, short enough for a HUD line and specific enough to act on.
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::GoAroundUnstable => "not lined up",
+            Self::GoAroundSinkRate => "descending too fast",
+            Self::GoAroundBounce => "bounced on landing",
+            Self::UnableGoAroundLimit => "3 tries, fly it yourself",
+            Self::UnableNoGuidance => "no approach available",
+            Self::UnableLostRunway => "runway lost",
+            Self::UnableDestroyed => "aircraft destroyed",
+            Self::DisengagedByPilot => "you took control",
+            Self::Completed => "parking brake set",
+        }
+    }
+
+    /// Whether the notice should be shown in the warning colour. A go-around is
+    /// working as intended, so it is a caution, not a failure.
+    pub fn is_failure(self) -> bool {
+        matches!(
+            self,
+            Self::UnableGoAroundLimit
+                | Self::UnableNoGuidance
+                | Self::UnableLostRunway
+                | Self::UnableDestroyed
+        )
+    }
+
+    /// Stable snake_case key for the diagnostic lane.
+    pub fn diagnostic_reason(self) -> &'static str {
+        match self {
+            Self::GoAroundUnstable => "unstable_approach",
+            Self::GoAroundSinkRate => "sink_rate",
+            Self::GoAroundBounce => "bounce",
+            Self::UnableGoAroundLimit => "go_around_limit",
+            Self::UnableNoGuidance => "no_runway_guidance",
+            Self::UnableLostRunway => "runway_lost",
+            Self::UnableDestroyed => "destroyed",
+            Self::DisengagedByPilot => "pilot_override",
+            Self::Completed => "completed",
+        }
+    }
 }
 
 /// World-frame unit vector pointing along the next maneuver node's Δv.
@@ -949,6 +1118,16 @@ impl LandAutopilot {
         self.go_arounds = 0;
         self.go_around_s = 0.0;
         self.diagnostic_s = 0.0;
+        self.unstable_s = 0.0;
+        self.notice = None;
+        self.notice_age_s = 0.0;
+    }
+
+    /// Record what just happened, for the annunciator and the lane at once, so
+    /// the two cannot disagree about the reason.
+    pub fn notify(&mut self, notice: LandNotice) {
+        self.notice = Some(notice);
+        self.notice_age_s = 0.0;
     }
 
     pub fn set_phase(&mut self, next: LandPhase) {
@@ -988,6 +1167,9 @@ impl Default for LandAutopilot {
             go_arounds: 0,
             go_around_s: 0.0,
             diagnostic_s: 0.0,
+            unstable_s: 0.0,
+            notice: None,
+            notice_age_s: 0.0,
         }
     }
 }
