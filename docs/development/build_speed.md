@@ -536,6 +536,13 @@ rasters against their sidecar dimensions and SHA-256 hashes. It does not replace
 the user's Windows/GPU play test; a newly landed package stays `verify` until it
 has launched and rendered on the target machine.
 
+Windows compilation and packaging are separate jobs joined by a short-lived
+executable artifact. If archive verification fails, **rerun failed jobs** repeats
+only the LFS checkout/package gate; it does not rebuild the release graph. The
+split was added after the first `v0.1.0` attempt spent 28 minutes compiling and
+then exposed a platform-dependent terrain content key
+(`INC-20260802T180726Z`).
+
 ---
 
 ## 8. Compiler backend policy

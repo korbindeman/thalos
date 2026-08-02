@@ -92,27 +92,21 @@ jobs:
           fi
 
   build-windows:
-    name: Windows x64
+    name: Windows x64 build
     needs: prepare
     runs-on: windows-2022
     env:
       BUILD_FEATURES: ${{ needs.prepare.outputs.cargo_features }}
       USE_DEFAULT_FEATURES: ${{ needs.prepare.outputs.use_default_features }}
       BUILD_TARGET: x86_64-pc-windows-msvc
-      BUILD_ARTIFACT: thalos_game-windows-x64
+      BINARY_ARTIFACT: windows-build-executable
       # Keep the portable ZIP independent of a separately installed Visual C++
       # redistributable. GPU/system DLLs remain ordinary Windows dependencies.
       RUSTFLAGS: -C target-feature=+crt-static
 
     steps:
-      - name: Checkout runtime content
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          lfs: true
-
-      - name: Verify Git LFS objects
-        shell: bash
-        run: git lfs fsck --objects
 
       - name: Install pinned Rust toolchain
         shell: pwsh
@@ -144,6 +138,44 @@ jobs:
           }
           & cargo @arguments
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # Keep the expensive compile as a separate successful job. If packaging
+      # rejects an archive, rerunning failed jobs reuses this executable rather
+      # than paying for the release graph again.
+      - name: Upload compiled executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_ARTIFACT }}
+          path: target/${{ env.BUILD_TARGET }}/release/thalos_game.exe
+          if-no-files-found: error
+          retention-days: 2
+
+  package-windows:
+    name: Windows x64 package
+    needs: [prepare, build-windows]
+    runs-on: windows-2022
+    env:
+      BUILD_FEATURES: ${{ needs.prepare.outputs.cargo_features }}
+      USE_DEFAULT_FEATURES: ${{ needs.prepare.outputs.use_default_features }}
+      BUILD_TARGET: x86_64-pc-windows-msvc
+      BUILD_ARTIFACT: thalos_game-windows-x64
+      BINARY_ARTIFACT: windows-build-executable
+
+    steps:
+      - name: Checkout runtime content
+        uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Verify Git LFS objects
+        shell: bash
+        run: git lfs fsck --objects
+
+      - name: Download compiled executable
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.BINARY_ARTIFACT }}
+          path: target/${{ env.BUILD_TARGET }}/release
 
       - name: Package and verify portable install
         shell: pwsh
@@ -239,7 +271,7 @@ jobs:
   release:
     name: Publish GitHub prerelease
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: [prepare, build-windows, build-macos]
+    needs: [prepare, package-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

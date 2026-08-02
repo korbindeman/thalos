@@ -9163,7 +9163,7 @@ checksum = "aa672c55ab69f787dbc9126cc387dbe57fdd595f585e4524cf89018fa44ab819"
 
 [[package]]
 name = "thalos_body_render"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "bevy",
@@ -9182,7 +9182,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_body_shading"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "glam 0.32.1",
@@ -9191,7 +9191,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_capture"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "image",
@@ -9207,14 +9207,14 @@ dependencies = [
 
 [[package]]
 name = "thalos_capture_host"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thalos_capture_runtime",
 ]
 
 [[package]]
 name = "thalos_capture_protocol"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -9222,7 +9222,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_capture_runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "thalos_capture_protocol",
@@ -9232,7 +9232,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_celestial"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "approx",
  "glam 0.32.1",
@@ -9245,7 +9245,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_control"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "approx",
  "glam 0.32.1",
@@ -9254,7 +9254,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_diag"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
  "thalos_diagnostics",
@@ -9262,7 +9262,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_diagnostics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "libc",
  "libloading 0.8.9",
@@ -9275,14 +9275,14 @@ dependencies = [
 
 [[package]]
 name = "thalos_game"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "thalos_runtime",
 ]
 
 [[package]]
 name = "thalos_game_state"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "serde",
@@ -9297,7 +9297,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_hud"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "bevy",
@@ -9318,7 +9318,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_input"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "bevy_enhanced_input",
@@ -9329,7 +9329,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_map"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "thalos_control",
@@ -9343,7 +9343,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_navigation"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "approx",
  "glam 0.32.1",
@@ -9351,14 +9351,14 @@ dependencies = [
 
 [[package]]
 name = "thalos_perfreport"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde_json",
 ]
 
 [[package]]
 name = "thalos_physics_canonical"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "approx",
  "glam 0.32.1",
@@ -9369,7 +9369,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_physics_local"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "approx",
  "avian3d",
@@ -9381,7 +9381,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "bevy",
@@ -9422,7 +9422,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_shipyard"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "glam 0.32.1",
@@ -9432,7 +9432,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_shipyard_editor"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
  "ron",
@@ -9448,7 +9448,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_structures"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ab_glyph",
  "bevy",
@@ -9460,7 +9460,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_terrain"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy_erosion_filter",
  "bincode",
@@ -9473,7 +9473,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_terrain_baker"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glam 0.32.1",
  "thalos_terrain",
@@ -9482,7 +9482,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_terrain_learned"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "burn",
  "serde",
@@ -9490,7 +9490,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_terrain_train"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "burn",
  "glam 0.32.1",
@@ -9511,11 +9511,11 @@ dependencies = [
 
 [[package]]
 name = "thalos_texgen"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "thalos_texgen_tool"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "image",
  "serde",
@@ -9539,14 +9539,14 @@ dependencies = [
 
 [[package]]
 name = "thalos_ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "bevy",
 ]
 
 [[package]]
 name = "thalos_weather"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glam 0.32.1",
  "image",
@@ -9557,7 +9557,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_world"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "approx",
  "glam 0.32.1",
@@ -9568,7 +9568,7 @@ dependencies = [
 
 [[package]]
 name = "thalos_world_map"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "glam 0.32.1",
  "image",
