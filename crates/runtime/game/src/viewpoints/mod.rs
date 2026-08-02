@@ -45,8 +45,9 @@ pub fn catalog_path() -> PathBuf {
     env::var_os("THALOS_VIEWPOINTS")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../../assets")
+            crate::content::ContentRoot::discover()
+                .expect("Failed to locate Thalos runtime content")
+                .assets()
                 .join(VIEWPOINT_CATALOG_FILENAME)
         })
 }

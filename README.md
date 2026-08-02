@@ -142,6 +142,28 @@ instead of partially cleaning Cargo artifacts. The documentation map is
 [docs/README.md](docs/README.md), and the complete build/capture workflow lives
 in [docs/development/build_speed.md](docs/development/build_speed.md).
 
+### Windows pre-alpha builds
+
+The **Build game** GitHub Actions workflow produces a portable Windows x64 ZIP.
+Its manual form accepts an explicit comma-separated Cargo feature list; the
+canonical pre-alpha selection is `neural-terrain-default`. Tagged `v*` builds
+use that selection and publish a GitHub prerelease.
+
+The terrain features intentionally separate capability from selection:
+
+- `neural-terrain` includes the learned runtime and payload but leaves the
+  procedural terrain selected by default.
+- `neural-terrain-default` implies `neural-terrain` and selects it unless
+  `THALOS_TERRAIN=procedural` overrides the session.
+- `--no-default-features` with neither feature produces a procedural-only
+  package and omits the learned payload.
+
+Every Windows archive is extracted and checked from an unrelated working
+directory in CI via `thalos_game.exe --verify-install`; this verifies the
+solar-system, input, ships, terrain packages, viewpoints, and neural payload
+without opening a renderer. See the
+[distribution build contract](docs/development/build_speed.md#74-feature-selectable-distribution-builds).
+
 ## Playing
 
 You start in a low orbit around Thalos, the homeworld, flying a prebuilt spacecraft.

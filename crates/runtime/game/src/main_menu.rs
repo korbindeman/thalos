@@ -46,6 +46,7 @@ use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
 use thalos_ui::{self as ui, SPACE_SM, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens};
 
+use crate::content::ContentRoot;
 use crate::game_context::{GameContext, InitialContext};
 use crate::loading::{
     AppState, LoadDestination, LoadingTracker, StepDesc, WorldState, step, steps_for,
@@ -352,6 +353,7 @@ fn apply_menu_action(
     mut commands: Commands,
     mut sim: ResMut<SimulationState>,
     mut situation: ResMut<SpawnSituation>,
+    content: Res<ContentRoot>,
     // `respawn_into` inputs, bundled to stay within the 16-param limit.
     respawn: (
         ResMut<ActiveLocalBubble>,
@@ -532,7 +534,7 @@ fn apply_menu_action(
         // Craft swap, airborne placement handled inside the relaunch flow.
         SpawnSituation::Cruise => {
             let Some(blueprint) =
-                crate::ship_view::load_blueprint_from_path(start.ship_blueprint_path())
+                crate::ship_view::load_blueprint_from_path(&content, start.ship_blueprint_path())
             else {
                 error!("start screen: cruise blueprint failed to load; staying on menu");
                 return;
@@ -548,7 +550,7 @@ fn apply_menu_action(
         // loading screen, exactly like a runway boot.
         SpawnSituation::Runway | SpawnSituation::RunwayApproach | SpawnSituation::Launch => {
             let Some(blueprint) =
-                crate::ship_view::load_blueprint_from_path(start.ship_blueprint_path())
+                crate::ship_view::load_blueprint_from_path(&content, start.ship_blueprint_path())
             else {
                 error!("start screen: spaceport blueprint failed to load; staying on menu");
                 return;

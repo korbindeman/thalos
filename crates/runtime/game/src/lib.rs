@@ -11,10 +11,12 @@ mod bridge;
 mod camera;
 mod camera_optics;
 pub mod capture_health;
+mod content;
 mod control_bus;
 mod controls;
 mod coords;
 mod debug;
+pub mod distribution;
 mod engine;
 mod flight_config;
 mod flight_plan_view {
@@ -148,6 +150,7 @@ use autopilot::AutopilotPlugin;
 use body_tree_panel::BodyTreePanelPlugin;
 use bridge::BridgePlugin;
 use camera::CameraPlugin;
+use content::ContentRoot;
 use controls::ControlLocksPlugin;
 use debug::DebugPlugin;
 use engine::EnginePlugin;
@@ -259,18 +262,22 @@ impl AppBuilder {
 
     pub fn build(self) -> App {
         // ------------------------------------------------------------------
-        // 1. Load the solar system definition from the RON asset files.
+        // 1. Resolve and load the portable runtime content.
         // ------------------------------------------------------------------
-        let system = load_solar_system_from_dir(std::path::Path::new("assets"))
-            .expect("Failed to load solar system from assets/");
+        let content = ContentRoot::discover().expect("Failed to locate Thalos runtime content");
+        let assets = content.assets();
+        let system = load_solar_system_from_dir(&assets).unwrap_or_else(|error| {
+            panic!(
+                "Failed to load solar system from {}: {error}",
+                assets.display()
+            )
+        });
         // Per-body surface failures degrade that body only (they are recorded
         // on the registry and reported here); this `expect` now fires only for
         // a failure global to the whole registry.
-        let body_surfaces = BodySurfaceRegistry::load(
-            &system.bodies,
-            std::path::Path::new("assets/terrain_packages"),
-        )
-        .expect("Failed to load body terrain surfaces");
+        let body_surfaces =
+            BodySurfaceRegistry::load(&system.bodies, &assets.join("terrain_packages"))
+                .expect("Failed to load body terrain surfaces");
         for degraded in body_surfaces.degraded_bodies() {
             println!(
                 "  ! {} has no terrain surface: {}",
@@ -569,18 +576,12 @@ impl AppBuilder {
                 ..default()
             })
             .set(AssetPlugin {
-                // Under `cargo run` Bevy resolves this against
-                // CARGO_MANIFEST_DIR (apps/game or tools/capture_host, both
-                // two levels below the workspace). The dx-launched capture
-                // host has no manifest dir at runtime; its client sets
-                // BEVY_ASSET_ROOT to the workspace root, which Bevy prepends
-                // verbatim — so the relative hop must collapse to "assets"
-                // there or every asset resolves outside the workspace.
-                file_path: if std::env::var_os("BEVY_ASSET_ROOT").is_some() {
-                    "assets".to_string()
-                } else {
-                    "../../assets".to_string()
-                },
+                // Use the same absolute root as the direct RON/package
+                // loaders. Bevy otherwise resolves relative paths against a
+                // runtime CARGO_MANIFEST_DIR in development and the executable
+                // in a package, which made one file_path incorrect for one of
+                // the two environments.
+                file_path: assets.to_string_lossy().into_owned(),
                 ..default()
             })
             .set(bevy::log::LogPlugin {
@@ -648,9 +649,10 @@ impl AppBuilder {
             .insert_resource(app_settings.graphics)
             .insert_resource(app_settings.units)
             .insert_resource(app_settings.hud)
+            .insert_resource(content)
             .insert_resource(
-                InputSettings::load_from_path("assets/input.ron")
-                    .expect("Failed to load input bindings from assets/input.ron"),
+                InputSettings::load_from_path(assets.join("input.ron"))
+                    .expect("Failed to load input bindings from runtime content"),
             )
             // `default_plugins` is pre-built above (window / render / asset / log),
             // with the window + winit disabled in headless screenshot mode.

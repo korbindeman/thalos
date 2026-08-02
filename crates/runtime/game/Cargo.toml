@@ -38,6 +38,7 @@ resvg = { version = "0.47", default-features = false }
 rayon = "1.12"
 # F2 desktop screenshot completion writes a PNG from Bevy's captured image.
 image = { version = "0.25", default-features = false, features = ["png"] }
+sha2 = { version = "0.10", optional = true }
 # f32 → f16 packing for the multi-scatter LUT image (Rgba16Float is linear-
 # filterable without the FLOAT32_FILTERABLE wgpu feature). Already in the lock
 # graph transitively; pinned here for the explicit conversion in `spawn.rs`.
@@ -56,6 +57,10 @@ wgpu = { version = "29", default-features = false, features = ["counters"], opti
 bevy_render_gl_backend = { package = "bevy_render", version = "0.19", default-features = false, features = ["gles"], optional = true }
 
 [features]
+# Runtime content capabilities. The default-selection feature implies the
+# capability so invalid combinations are unrepresentable through Cargo.
+neural-terrain = ["dep:sha2"]
+neural-terrain-default = ["neural-terrain"]
 # The one renderer-development fingerprint, shared by the interactive
 # launcher, cold capture, AND the persistent capture server
 # (ADR-20260724T153619Z-retire-hotpatch-single-stable-capture-lane).
@@ -66,6 +71,7 @@ bevy_render_gl_backend = { package = "bevy_render", version = "0.19", default-fe
 # stack-overflowed the app, INC-20260724T044418Z); Rust edits restart the
 # capture host instead, automatically.
 dev-renderer = [
+    "neural-terrain",
     "bevy/dynamic_linking",
     "bevy/embedded_watcher",
     "dep:bevy_render_gl_backend",

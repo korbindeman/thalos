@@ -13,9 +13,6 @@
 //! rebuilt whenever `AttachNodes` changes and kept in sync via ported
 //! versions of the editor's systems.
 
-use std::collections::{HashMap, VecDeque};
-use std::path::PathBuf;
-
 use crate::shipyard_editor::core::EditorPart;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
@@ -23,6 +20,7 @@ use bevy::math::DVec3;
 use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use std::collections::{HashMap, VecDeque};
 use thalos_physics_canonical::canonical::CraftId;
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
@@ -42,6 +40,7 @@ use thalos_body_render::{
 
 use crate::SimStage;
 use crate::camera::{CameraFocus, CameraTargetOffset, find_reference_body};
+use crate::content::ContentRoot;
 use crate::game_context::GameContext;
 use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
@@ -72,10 +71,18 @@ pub struct ShipViewPlugin;
 
 impl Plugin for ShipViewPlugin {
     fn build(&self, app: &mut App) {
-        let catalog = match PartCatalog::load_from_path("assets/parts.ron") {
+        let catalog_path = app
+            .world()
+            .resource::<ContentRoot>()
+            .assets()
+            .join("parts.ron");
+        let catalog = match PartCatalog::load_from_path(&catalog_path) {
             Ok(c) => c,
             Err(e) => {
-                error!("Failed to load parts catalog from assets/parts.ron: {e}");
+                error!(
+                    "Failed to load parts catalog from {}: {e}",
+                    catalog_path.display()
+                );
                 // Continue with an empty catalog so the rest of the app
                 // can still come up; spawn_player_ship will log and skip.
                 PartCatalog {
@@ -180,6 +187,7 @@ pub(crate) fn spawn_player_ship(
     mut commands: Commands,
     view: Res<ViewMode>,
     situation: Res<crate::spawn::SpawnSituation>,
+    content: Res<ContentRoot>,
     mut sim: ResMut<SimulationState>,
     catalog: Res<PartCatalog>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -193,7 +201,8 @@ pub(crate) fn spawn_player_ship(
     if sim.simulation.vessel_kind() == thalos_physics_canonical::types::VesselKind::Eva {
         return;
     }
-    let Some(blueprint) = load_blueprint_from_path(situation.ship_blueprint_path()) else {
+    let Some(blueprint) = load_blueprint_from_path(&content, situation.ship_blueprint_path())
+    else {
         return;
     };
 
@@ -212,8 +221,8 @@ pub(crate) fn spawn_player_ship(
 /// `ships/meridian.ron`). Logs and returns `None` on read/parse failure.
 /// Shared by the startup spawn and the start screen's scenario starter
 /// ([`crate::main_menu`]), which swaps craft per chosen scenario.
-pub(crate) fn load_blueprint_from_path(path: &str) -> Option<ShipBlueprint> {
-    let ron_path = PathBuf::from(path);
+pub(crate) fn load_blueprint_from_path(content: &ContentRoot, path: &str) -> Option<ShipBlueprint> {
+    let ron_path = content.resolve(path);
     let text = match std::fs::read_to_string(&ron_path) {
         Ok(t) => t,
         Err(e) => {

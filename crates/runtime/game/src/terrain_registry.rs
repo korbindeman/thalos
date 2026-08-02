@@ -122,30 +122,82 @@ pub struct DegradedSurface {
     pub reason: String,
 }
 
-/// NTR-X2a: render Thalos through the terrain-diffusion surface
-/// (`THALOS_TERRAIN=diffusion`). Content lives in
-/// `assets/terrain_packages/thalos_diffusion/` (exported by the
-/// terrain-diffusion checkout's `thalos_export.py`, conditioned on the
-/// canonical Thalos macro terrain via `export_thalos_macro.rs`). Also read by
-/// `runway::fixed_runway_site` — the diffusion coastline moved the flat
-/// coastal plain, so the authored spaceport site follows the toggle.
+/// NTR-X2a: whether this session renders Thalos through the learned terrain
+/// path. The Cargo features define capability/default; `THALOS_TERRAIN` is a
+/// runtime override for controlled A/Bs.
 pub fn thalos_diffusion_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("THALOS_TERRAIN")
-            .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
-            .unwrap_or(false)
-    })
+    match configured_thalos_diffusion() {
+        Ok(enabled) => enabled,
+        Err(error) => panic!("invalid Thalos terrain configuration: {error}"),
+    }
+}
+
+fn configured_thalos_diffusion() -> Result<bool, String> {
+    static ENABLED: std::sync::OnceLock<Result<bool, String>> = std::sync::OnceLock::new();
+    ENABLED
+        .get_or_init(|| {
+            select_thalos_diffusion(
+                std::env::var("THALOS_TERRAIN").ok().as_deref(),
+                cfg!(feature = "neural-terrain"),
+                cfg!(feature = "neural-terrain-default"),
+            )
+        })
+        .clone()
+}
+
+fn select_thalos_diffusion(
+    override_value: Option<&str>,
+    neural_available: bool,
+    neural_default: bool,
+) -> Result<bool, String> {
+    if neural_default && !neural_available {
+        return Err("neural-terrain-default requires neural-terrain".to_string());
+    }
+    let requested = match override_value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        None => neural_default,
+        Some(value)
+            if matches_ignore_ascii_case(value, &["diffusion", "neural", "1", "true", "on"]) =>
+        {
+            true
+        }
+        Some(value) if matches_ignore_ascii_case(value, &["procedural", "0", "false", "off"]) => {
+            false
+        }
+        Some(value) => {
+            return Err(format!(
+                "unknown THALOS_TERRAIN={value:?}; expected neural, diffusion, or procedural"
+            ));
+        }
+    };
+    if requested && !neural_available {
+        return Err(
+            "neural terrain was requested, but this binary was built without the neural-terrain feature"
+                .to_string(),
+        );
+    }
+    Ok(requested)
+}
+
+fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
+    candidates
+        .iter()
+        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 impl BodySurfaceRegistry {
     pub fn load(bodies: &[BodyDefinition], package_dir: &std::path::Path) -> Result<Self, String> {
         let mut registry = Self::default();
+        let diffusion_enabled = configured_thalos_diffusion()?;
         for body in bodies.iter().filter(|body| body.terrain.is_some()) {
-            if body.name == "Thalos" && thalos_diffusion_enabled() {
-                let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
+            if body.name == "Thalos" && diffusion_enabled {
+                #[cfg(feature = "neural-terrain")]
+                let dir = package_dir.join("thalos_diffusion");
+                #[cfg(feature = "neural-terrain")]
                 match thalos_terrain::DiffusionSurface::load(
-                    dir,
+                    &dir,
                     body.radius_m as f32,
                     body.id as u32,
                 ) {
@@ -160,12 +212,15 @@ impl BodySurfaceRegistry {
                         continue;
                     }
                     Err(error) => {
-                        bevy::log::warn!(
-                            "THALOS_TERRAIN=diffusion set but the diffusion surface failed to load \
-                             ({error}); falling back to the procedural surface"
-                        );
+                        return Err(format!(
+                            "neural terrain was selected but {} failed to load: {error}. \
+                             Re-download the complete build or run `just terrain-assets` in a developer checkout",
+                            dir.display()
+                        ));
                     }
                 }
+                #[cfg(not(feature = "neural-terrain"))]
+                unreachable!("terrain selection rejects neural mode when the feature is absent");
             }
             let built = match &body.terrain {
                 TerrainConfig::Feature(feature)
@@ -489,6 +544,28 @@ impl TerrainProvider for SharedTerrainRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terrain_selection_separates_capability_default_and_override() {
+        assert_eq!(select_thalos_diffusion(None, false, false), Ok(false));
+        assert_eq!(select_thalos_diffusion(None, true, false), Ok(false));
+        assert_eq!(select_thalos_diffusion(None, true, true), Ok(true));
+        assert_eq!(
+            select_thalos_diffusion(Some("procedural"), true, true),
+            Ok(false)
+        );
+        assert_eq!(
+            select_thalos_diffusion(Some("neural"), true, false),
+            Ok(true)
+        );
+    }
+
+    #[test]
+    fn terrain_selection_rejects_unavailable_or_unknown_modes() {
+        assert!(select_thalos_diffusion(Some("neural"), false, false).is_err());
+        assert!(select_thalos_diffusion(Some("surprise"), true, false).is_err());
+        assert!(select_thalos_diffusion(None, false, true).is_err());
+    }
 
     #[test]
     fn shared_registry_reports_zero_for_unknown_body() {

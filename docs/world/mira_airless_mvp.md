@@ -9,8 +9,8 @@ program:** [mira_learned_terrain.md](../roadmap/mira_learned_terrain.md)
 The playable MVP deliberately lands before the trained diffusion producer:
 
 - `just bake Mira` runs the standalone `thalos_terrain_baker` and emits a
-  content-keyed 32.4 MiB schema-v1 `assets/terrain_packages/Mira.bin` (±5,334 m,
-  24,820 indexed craters with the current authored seed). `just validate-bake
+  content-keyed 29.6 MiB schema-v1 `assets/terrain_packages/Mira.bin` (±13,004 m,
+  24,179 indexed craters with the current authored seed). `just validate-bake
   Mira` independently validates schema/body/content identity, sparse node/blob
   references, bounds, overlap, checksums, and payload decoding;
 - `BodySurfaceRegistry` loads one `Arc<dyn SurfaceQuery>` per body. Mira uses

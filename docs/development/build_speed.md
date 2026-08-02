@@ -496,6 +496,46 @@ you get mold, no Defender tax, and headless Vulkan — and your workload never
 needs an interactive window. Native Windows stays the right choice when a human
 is doing interactive play-testing on the same machine.
 
+### 7.4 Feature-selectable distribution builds
+
+`.github/workflows/build-game.yml` is the release/distribution entry point. A
+manual **Build game** run builds Windows x64 from the selected ref and accepts:
+
+- `cargo_features`: comma-separated `thalos_game` feature names; canonical
+  pre-alpha value `neural-terrain-default`;
+- `use_default_features`: whether Cargo defaults join that explicit list.
+
+The canonical tagged build never inherits an implicit workspace state: it uses
+`--no-default-features --features neural-terrain-default`, builds with the
+repository-pinned Rust 1.97.0 toolchain, and publishes a GitHub prerelease after
+both Windows x64 and macOS arm64 artifacts succeed. The Windows build links the
+MSVC C runtime statically, so the portable ZIP does not require a separately
+installed Visual C++ redistributable. Manual runs upload the Windows ZIP for 14
+days and do not publish a release.
+
+Terrain's build contract is capability-first:
+
+| Cargo selection | Learned code/content | Session default |
+|---|---|---|
+| *(none, no defaults)* | no | procedural |
+| `neural-terrain` | yes | procedural |
+| `neural-terrain-default` | yes | neural |
+
+`THALOS_TERRAIN=procedural` or `neural` remains a runtime A/B override, but it
+cannot request a capability omitted at build time. When neural terrain becomes
+the ordinary game default, `apps/game/Cargo.toml` can add
+`neural-terrain-default` to its `default` list; procedural artifacts remain
+reproducible with `--no-default-features`.
+
+`scripts/package-game.ps1` copies only content supported by the built binary,
+writes `BUILD_INFO.txt`, includes the licensing files, creates the ZIP and
+SHA-256 file, extracts the ZIP, then launches `thalos_game.exe --verify-install`
+from an unrelated empty directory. That non-rendering gate proves all runtime
+content resolves beside the executable and verifies the LFS-backed neural
+rasters against their sidecar dimensions and SHA-256 hashes. It does not replace
+the user's Windows/GPU play test; a newly landed package stays `verify` until it
+has launched and rendered on the target machine.
+
 ---
 
 ## 8. Compiler backend policy
