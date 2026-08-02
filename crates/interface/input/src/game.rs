@@ -276,6 +276,9 @@ pub struct GameInputPlugin;
 
 impl Plugin for GameInputPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::FrameIndependentInputPlugin>() {
+            app.add_plugins(crate::FrameIndependentInputPlugin);
+        }
         app.add_plugins(EnhancedInputPlugin)
             .add_input_context::<GameSystemContext>()
             .add_input_context::<GameFlightContext>()
@@ -892,7 +895,11 @@ fn merge_hotas_axis(current: f32, hotas: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use bevy::input::InputPlugin;
+    use bevy::input::{
+        ButtonState, InputPlugin,
+        keyboard::{Key, KeyboardInput},
+        mouse::{MouseButtonInput, MouseMotion},
+    };
     use bevy::prelude::*;
 
     use super::*;
@@ -924,6 +931,25 @@ mod tests {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
             .release(key);
+    }
+
+    fn send_mouse_button(app: &mut App, state: ButtonState) {
+        app.world_mut().write_message(MouseButtonInput {
+            button: MouseButton::Left,
+            state,
+            window: Entity::PLACEHOLDER,
+        });
+    }
+
+    fn send_key(app: &mut App, key_code: KeyCode, state: ButtonState) {
+        app.world_mut().write_message(KeyboardInput {
+            key_code,
+            logical_key: Key::Unidentified(bevy::input::keyboard::NativeKey::Unidentified),
+            state,
+            text: None,
+            repeat: false,
+            window: Entity::PLACEHOLDER,
+        });
     }
 
     fn set_precision_context(app: &mut App, active: bool) {
@@ -1074,6 +1100,69 @@ mod tests {
         assert!(intent.quick_save_viewpoint);
         // The quick save must not also trip the F8 manager toggle.
         assert!(!intent.save_perspective);
+    }
+
+    #[test]
+    fn click_between_updates_preserves_press_and_release() {
+        let mut app = input_app();
+
+        send_mouse_button(&mut app, ButtonState::Pressed);
+        send_mouse_button(&mut app, ButtonState::Released);
+        app.update();
+
+        let intent = app.world().resource::<GameInputIntent>();
+        assert!(intent.primary_started);
+        assert!(intent.primary_pressed);
+
+        app.update();
+
+        let intent = app.world().resource::<GameInputIntent>();
+        assert!(intent.primary_released);
+        assert!(!intent.primary_pressed);
+    }
+
+    #[test]
+    fn repeated_clicks_between_updates_are_replayed_without_loss() {
+        let mut app = input_app();
+
+        for _ in 0..2 {
+            send_mouse_button(&mut app, ButtonState::Pressed);
+            send_mouse_button(&mut app, ButtonState::Released);
+        }
+
+        for expected_pressed in [true, false, true, false] {
+            app.update();
+            let intent = app.world().resource::<GameInputIntent>();
+            assert_eq!(intent.primary_pressed, expected_pressed);
+            assert_eq!(intent.primary_started, expected_pressed);
+            assert_eq!(intent.primary_released, !expected_pressed);
+        }
+    }
+
+    #[test]
+    fn key_tap_between_updates_emits_action() {
+        let mut app = input_app();
+
+        send_key(&mut app, KeyCode::F8, ButtonState::Pressed);
+        send_key(&mut app, KeyCode::F8, ButtonState::Released);
+        app.update();
+
+        assert!(app.world().resource::<GameInputIntent>().save_perspective);
+    }
+
+    #[test]
+    fn mouse_motion_between_updates_is_accumulated() {
+        let mut app = input_app();
+
+        for delta in [Vec2::new(2.0, -1.0), Vec2::new(-0.5, 3.0)] {
+            app.world_mut().write_message(MouseMotion { delta });
+        }
+        app.update();
+
+        assert_eq!(
+            app.world().resource::<GameInputIntent>().camera_motion,
+            Vec2::new(1.5, 2.0),
+        );
     }
 
     #[test]

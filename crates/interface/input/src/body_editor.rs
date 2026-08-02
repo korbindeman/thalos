@@ -42,6 +42,9 @@ pub struct BodyEditorInputPlugin;
 
 impl Plugin for BodyEditorInputPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::FrameIndependentInputPlugin>() {
+            app.add_plugins(crate::FrameIndependentInputPlugin);
+        }
         app.add_plugins(EnhancedInputPlugin)
             .add_input_context::<BodyEditorContext>()
             .init_resource::<BodyEditorInputIntent>()

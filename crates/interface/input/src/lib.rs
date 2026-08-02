@@ -9,11 +9,14 @@ use bevy::input::mouse::MouseScrollUnit;
 use bevy::math::Vec2;
 
 pub mod body_editor;
+mod frame_input;
 pub mod game;
 pub mod gating;
 pub mod joystick;
 pub mod settings;
 pub mod shipyard;
+
+pub use frame_input::FrameIndependentInputPlugin;
 
 pub use bevy_enhanced_input::prelude as enhanced;
 

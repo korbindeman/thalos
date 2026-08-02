@@ -47,6 +47,9 @@ pub struct ShipyardInputPlugin;
 
 impl Plugin for ShipyardInputPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::FrameIndependentInputPlugin>() {
+            app.add_plugins(crate::FrameIndependentInputPlugin);
+        }
         // The game adds this plugin (for its in-game shipyard editor) alongside
         // `GameInputPlugin`, which already registers `EnhancedInputPlugin`. Guard
         // so it works whether or not `EnhancedInputPlugin` is already present.
