@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 use thalos_world::BodyId;
 
 /// What kind of structure a site is. Drives visuals/colliders (owned by the
@@ -48,6 +49,9 @@ pub enum StructureKind {
 #[derive(Debug, Clone, Copy, Reflect)]
 pub struct StructureSite {
     pub id: StructureId,
+    /// Owning base. Every structure belongs to exactly one base; this is the
+    /// stable campaign identity used for save/load and projection reconcile.
+    pub base_id: BaseId,
     pub body_id: BodyId,
     /// Unit body-fixed direction from the body centre to the site.
     pub anchor_dir: DVec3,
@@ -65,21 +69,95 @@ pub struct StructureSite {
     pub facility: Option<Facility>,
 }
 
-/// Every terrain-anchored structure, grouped by body.
-///
-/// **Sole writer:** structure spawners (today [`crate::runway`]) via
-/// [`Self::register`]. Readers (collider/visual attach as the surface-local
-/// bubble streams in) query [`Self::sites_on`]. Player placement will write
-/// here at runtime; the data model is identical to authored sites.
-#[derive(Resource, Default)]
-pub struct StructureRegistry {
-    pub sites: HashMap<BodyId, Vec<StructureSite>>,
-    pub next_id: u64,
+/// Stable campaign record for one base. Its root is the `BaseSite` that owns
+/// the terrain footprint; optional roles point at ordinary child structures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Reflect)]
+pub struct BaseRecord {
+    pub id: BaseId,
+    pub body_id: BodyId,
+    pub root_site: StructureId,
+    pub primary_runway: Option<StructureId>,
 }
 
-/// Stable per-session identifier for a placed structure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect)]
+/// Every terrain-anchored base and structure, grouped by body.
+///
+/// Base identity is the uniqueness authority. An authored loader calls
+/// [`Self::ensure_base`] with a stable [`BaseId`]; requesting it twice yields
+/// the existing record and cannot append a second base. Child registration
+/// requires a valid parent, so an orphan structure is unrepresentable through
+/// the public API.
+#[derive(Resource, Default)]
+pub struct StructureRegistry {
+    sites: HashMap<BodyId, Vec<StructureSite>>,
+    bases: HashMap<BaseId, BaseRecord>,
+    next_structure_id: u64,
+    next_base_id: u64,
+}
+
+/// Stable campaign identifier for a base/space center.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize, PartialOrd, Ord,
+)]
+pub struct BaseId(pub u64);
+
+impl BaseId {
+    const AUTHORED_NAMESPACE: u64 = 1 << 63;
+
+    /// Stable ID for a base authored by bundled content. The high-bit namespace
+    /// cannot collide with monotonically allocated player bases.
+    pub const fn authored(content_id: u64) -> Self {
+        assert!(content_id < Self::AUTHORED_NAMESPACE);
+        Self(Self::AUTHORED_NAMESPACE | content_id)
+    }
+
+    pub const fn is_authored(self) -> bool {
+        self.0 & Self::AUTHORED_NAMESPACE != 0
+    }
+}
+
+/// Stable campaign identifier for a placed structure.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, Reflect, Serialize, Deserialize, PartialOrd, Ord,
+)]
 pub struct StructureId(pub u64);
+
+/// Result of reconciling an authored base identity into the registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseRegistration {
+    Existing(BaseRecord),
+    Created(BaseRecord),
+}
+
+impl BaseRegistration {
+    pub fn record(self) -> BaseRecord {
+        match self {
+            Self::Existing(record) | Self::Created(record) => record,
+        }
+    }
+
+    pub fn was_created(self) -> bool {
+        matches!(self, Self::Created(_))
+    }
+}
+
+/// A stable base identity was reused for different authored data. This is
+/// corrupted snapshot/fixture data, not a condition the runtime may silently
+/// repair.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BaseIdentityConflict {
+    Body {
+        id: BaseId,
+        existing_body: BodyId,
+        requested_body: BodyId,
+    },
+    Definition {
+        id: BaseId,
+    },
+}
+
+/// Child registration failed because the requested parent does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MissingStructureParent(pub StructureId);
 
 /// An enterable facility a player reaches from the space-center hub, tagged onto
 /// the building [`StructureSite`] that represents it. The hub's hover picker maps
@@ -130,34 +208,156 @@ impl Facility {
 }
 
 impl StructureRegistry {
-    pub fn allocate_id(&mut self) -> StructureId {
-        self.next_id += 1;
-        StructureId(self.next_id)
+    fn allocate_structure_id(&mut self) -> StructureId {
+        self.next_structure_id += 1;
+        StructureId(self.next_structure_id)
     }
 
-    /// Register a structure on its body, returning the assigned id. The caller
-    /// supplies everything but the id.
-    pub fn register(
+    fn allocate_base_id(&mut self) -> BaseId {
+        self.next_base_id += 1;
+        assert!(self.next_base_id < BaseId::AUTHORED_NAMESPACE);
+        BaseId(self.next_base_id)
+    }
+
+    fn insert_base(
+        &mut self,
+        base_id: BaseId,
+        body_id: BodyId,
+        anchor_dir: DVec3,
+        heading_tangent: DVec3,
+        placement: StructurePlacement,
+    ) -> BaseRecord {
+        if !base_id.is_authored() {
+            self.next_base_id = self.next_base_id.max(base_id.0);
+        }
+        let id = self.allocate_structure_id();
+        self.sites.entry(body_id).or_default().push(StructureSite {
+            id,
+            base_id,
+            body_id,
+            anchor_dir,
+            heading_tangent,
+            placement,
+            kind: StructureKind::BaseSite,
+            parent_site: None,
+            facility: None,
+        });
+        let record = BaseRecord {
+            id: base_id,
+            body_id,
+            root_site: id,
+            primary_runway: None,
+        };
+        self.bases.insert(base_id, record);
+        record
+    }
+
+    /// Create a player-built base with a freshly allocated stable identity.
+    pub fn create_base(
         &mut self,
         body_id: BodyId,
         anchor_dir: DVec3,
         heading_tangent: DVec3,
         placement: StructurePlacement,
-        kind: StructureKind,
-        parent_site: Option<StructureId>,
-    ) -> StructureId {
-        let id = self.allocate_id();
-        self.sites.entry(body_id).or_default().push(StructureSite {
-            id,
+    ) -> BaseRecord {
+        let base_id = self.allocate_base_id();
+        self.insert_base(base_id, body_id, anchor_dir, heading_tangent, placement)
+    }
+
+    /// Reconcile an authored base with an explicit campaign identity. Reusing
+    /// the identity on the same body returns the original record without
+    /// registering another structure; reusing it on another body is invalid.
+    pub fn ensure_base(
+        &mut self,
+        base_id: BaseId,
+        body_id: BodyId,
+        anchor_dir: DVec3,
+        heading_tangent: DVec3,
+        placement: StructurePlacement,
+    ) -> Result<BaseRegistration, BaseIdentityConflict> {
+        if let Some(existing) = self.bases.get(&base_id).copied() {
+            if existing.body_id != body_id {
+                return Err(BaseIdentityConflict::Body {
+                    id: base_id,
+                    existing_body: existing.body_id,
+                    requested_body: body_id,
+                });
+            }
+            let Some(root) = self.get(existing.root_site) else {
+                return Err(BaseIdentityConflict::Definition { id: base_id });
+            };
+            if root.anchor_dir != anchor_dir
+                || root.heading_tangent != heading_tangent
+                || root.placement != placement
+                || root.kind != StructureKind::BaseSite
+            {
+                return Err(BaseIdentityConflict::Definition { id: base_id });
+            }
+            return Ok(BaseRegistration::Existing(existing));
+        }
+        Ok(BaseRegistration::Created(self.insert_base(
+            base_id,
             body_id,
             anchor_dir,
             heading_tangent,
             placement,
-            kind,
-            parent_site,
-            facility: None,
-        });
-        id
+        )))
+    }
+
+    /// Register a child on an existing base. Body and base identity are
+    /// inherited from the parent, preventing mismatched/orphan records.
+    pub fn register_child(
+        &mut self,
+        parent_site: StructureId,
+        anchor_dir: DVec3,
+        heading_tangent: DVec3,
+        placement: StructurePlacement,
+        kind: StructureKind,
+    ) -> Result<StructureId, MissingStructureParent> {
+        let Some(parent) = self.get(parent_site).copied() else {
+            return Err(MissingStructureParent(parent_site));
+        };
+        let id = self.allocate_structure_id();
+        self.sites
+            .entry(parent.body_id)
+            .or_default()
+            .push(StructureSite {
+                id,
+                base_id: parent.base_id,
+                body_id: parent.body_id,
+                anchor_dir,
+                heading_tangent,
+                placement,
+                kind,
+                parent_site: Some(parent_site),
+                facility: None,
+            });
+        Ok(id)
+    }
+
+    pub fn base(&self, id: BaseId) -> Option<&BaseRecord> {
+        self.bases.get(&id)
+    }
+
+    pub fn base_for_site(&self, id: StructureId) -> Option<&BaseRecord> {
+        let site = self.get(id)?;
+        self.base(site.base_id)
+    }
+
+    /// Assign the runway role within a base. Returns `false` if either identity
+    /// is unknown, the structure belongs to another base, or it is not a runway.
+    pub fn set_primary_runway(&mut self, base_id: BaseId, runway_id: StructureId) -> bool {
+        let Some(runway) = self.get(runway_id) else {
+            return false;
+        };
+        if runway.base_id != base_id || !matches!(runway.kind, StructureKind::Runway { .. }) {
+            return false;
+        }
+        let Some(base) = self.bases.get_mut(&base_id) else {
+            return false;
+        };
+        base.primary_runway = Some(runway_id);
+        true
     }
 
     /// Tag a registered structure as an enterable [`Facility`] (e.g. the default
@@ -208,15 +408,130 @@ impl StructureRegistry {
         }
     }
 
-    /// Remove a structure, returning it if found. Callers that remove a
-    /// `FlattenTo` structure should also call [`remove_structure_flatten`] and
-    /// trigger a terrain rebuild so the pad reverts.
-    pub fn remove(&mut self, id: StructureId) -> Option<StructureSite> {
+    /// Remove a child structure, returning it if found. Base roots have a
+    /// different aggregate lifecycle and cannot be removed through this API;
+    /// that prevents dangling `BaseRecord`/child identities.
+    pub fn remove_child(&mut self, id: StructureId) -> Option<StructureSite> {
         for sites in self.sites.values_mut() {
-            if let Some(pos) = sites.iter().position(|s| s.id == id) {
-                return Some(sites.remove(pos));
+            if let Some(pos) = sites
+                .iter()
+                .position(|site| site.id == id && site.parent_site.is_some())
+            {
+                let removed = sites.remove(pos);
+                if let Some(base) = self.bases.get_mut(&removed.base_id)
+                    && base.primary_runway == Some(id)
+                {
+                    base.primary_runway = None;
+                }
+                return Some(removed);
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn placement() -> StructurePlacement {
+        StructurePlacement::FlattenTo {
+            elevation_m: 10.0,
+            half_along_m: 100.0,
+            half_across_m: 100.0,
+            ramp_m: 20.0,
+            rect_offset_along_m: 0.0,
+            rect_offset_across_m: 0.0,
+        }
+    }
+
+    #[test]
+    fn authored_base_identity_cannot_be_registered_twice() {
+        let mut registry = StructureRegistry::default();
+        let id = BaseId(7);
+        let first = registry
+            .ensure_base(id, 2, DVec3::Y, DVec3::X, placement())
+            .unwrap();
+        let second = registry
+            .ensure_base(id, 2, DVec3::Y, DVec3::X, placement())
+            .unwrap();
+
+        assert!(first.was_created());
+        assert!(!second.was_created());
+        assert_eq!(first.record(), second.record());
+        assert_eq!(registry.sites_on(2).len(), 1);
+    }
+
+    #[test]
+    fn authored_base_identity_cannot_move_between_bodies() {
+        let mut registry = StructureRegistry::default();
+        registry
+            .ensure_base(BaseId(3), 1, DVec3::Y, DVec3::X, placement())
+            .unwrap();
+
+        assert_eq!(
+            registry.ensure_base(BaseId(3), 2, DVec3::Y, DVec3::X, placement()),
+            Err(BaseIdentityConflict::Body {
+                id: BaseId(3),
+                existing_body: 1,
+                requested_body: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn authored_base_identity_cannot_silently_change_definition() {
+        let mut registry = StructureRegistry::default();
+        registry
+            .ensure_base(BaseId::authored(3), 1, DVec3::Y, DVec3::X, placement())
+            .unwrap();
+
+        assert_eq!(
+            registry.ensure_base(BaseId::authored(3), 1, DVec3::Z, DVec3::X, placement()),
+            Err(BaseIdentityConflict::Definition {
+                id: BaseId::authored(3)
+            })
+        );
+    }
+
+    #[test]
+    fn child_requires_a_real_parent_and_inherits_base() {
+        let mut registry = StructureRegistry::default();
+        let base = registry.create_base(4, DVec3::Y, DVec3::X, placement());
+        let child = registry
+            .register_child(
+                base.root_site,
+                DVec3::Y,
+                DVec3::X,
+                StructurePlacement::Drape,
+                StructureKind::Launchpad { radius_m: 12.0 },
+            )
+            .unwrap();
+
+        assert_eq!(registry.get(child).unwrap().base_id, base.id);
+        assert!(registry.remove_child(base.root_site).is_none());
+        assert!(registry.base(base.id).is_some());
+        assert_eq!(
+            registry.register_child(
+                StructureId(999),
+                DVec3::Y,
+                DVec3::X,
+                StructurePlacement::Drape,
+                StructureKind::Launchpad { radius_m: 12.0 },
+            ),
+            Err(MissingStructureParent(StructureId(999)))
+        );
+    }
+
+    #[test]
+    fn authored_and_player_base_ids_cannot_collide() {
+        let mut registry = StructureRegistry::default();
+        registry
+            .ensure_base(BaseId::authored(1), 4, DVec3::Y, DVec3::X, placement())
+            .unwrap();
+        let player = registry.create_base(4, DVec3::Y, DVec3::X, placement());
+
+        assert_eq!(player.id, BaseId(1));
+        assert_ne!(player.id, BaseId::authored(1));
     }
 }

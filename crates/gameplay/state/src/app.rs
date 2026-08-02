@@ -16,8 +16,8 @@ pub enum AppState {
     Running,
 }
 
-/// Whether the game world — celestial-body entities, the player ship
-/// visuals, the procedural sky — has been spawned. A bare menu boot starts
+/// Whether the process-level world projection — celestial-body entities,
+/// procedural sky, and current session visuals — has been spawned. A bare menu boot starts
 /// [`Absent`](WorldState::Absent): the start screen is a lightweight UI over
 /// an empty scene (nothing simulates or streams behind it), and the world is
 /// built only when the player picks PLAY / a scenario — the menu flips this
@@ -27,9 +27,10 @@ pub enum AppState {
 /// <scenario>` boot inserts `Live` directly, so the same `OnEnter` fires
 /// on the first frame and the boot is unchanged.
 ///
-/// One-way: nothing ever sets it back to `Absent` (the world is never torn
-/// down; returning to the menu from flight keeps the world live and the
-/// menu routes through the existing live-world paths).
+/// Currently one-way for process-service reuse: nothing sets it back to
+/// `Absent`. This is not campaign/session authority. Session replacement is
+/// generation-stamped and reconciles authoritative records/projections through
+/// the session loader; uniqueness must never be inferred from this state.
 #[derive(States, Debug, Clone, Copy, Eq, PartialEq, Hash, Default)]
 pub enum WorldState {
     /// No world entities exist (bare menu boot, before the first start).

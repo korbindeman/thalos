@@ -36,6 +36,7 @@ Player-facing flows, editors, controls, and interface contracts.
 
 - [Base building](gameplay/base_building.md)
 - [Boot and start screen](gameplay/boot.md)
+- [Campaigns, revisions, and runtime sessions](gameplay/campaigns.md)
 - [Construction](gameplay/construction.md)
 - [HUD widgets](gameplay/hud_widgets.md)
 - [Input](gameplay/input.md)

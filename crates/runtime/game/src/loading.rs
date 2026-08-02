@@ -33,8 +33,8 @@
 //!
 //! Updates to an unregistered step are no-ops, so producers don't need to
 //! know which scenario is loading. A load can be re-armed at runtime
-//! (`begin` again + `NextState(AppState::Loading)`) — the start screen's
-//! runway scenarios do exactly that.
+//! (`begin` again + `NextState(AppState::Loading)`) — the session loader does
+//! this for every in-process replacement.
 //!
 //! Visual style follows `hud::theme` (same Fira Code, accent gold,
 //! warm-black panel fill) so the screen feels like part of the same UI
@@ -52,6 +52,8 @@ pub use thalos_game_state::app::{AppState, LoadDestination, WorldState};
 /// Well-known step ids. Plain strings so future systems can add their own
 /// steps without touching this module.
 pub mod step {
+    /// Session-level craft/state projection for a live-world replacement.
+    pub const SESSION: &str = "session";
     /// Per-body bake load + install (counted).
     pub const BODIES: &str = "bodies";
     /// Ground-LOD terrain spawned for the initially-wanted bodies.
@@ -114,9 +116,9 @@ impl LoadStep {
 /// Declarative loading-step registry driving the loading screen and the
 /// `Loading → next` transition.
 ///
-/// **Sole registrar:** [`register_boot_steps`] at startup and the start
-/// screen's scenario starter ([`crate::main_menu`]) at runtime; both go
-/// through [`begin`](Self::begin). Producer systems only update steps.
+/// **Sole registrar:** [`register_boot_steps`] at startup and the session-load
+/// coordinator ([`crate::session_loading`]) at runtime; both go through
+/// [`begin`](Self::begin). Producer systems only update steps.
 #[derive(Resource, Default)]
 pub struct LoadingTracker {
     steps: Vec<LoadStep>,
@@ -329,7 +331,7 @@ impl Plugin for LoadingScreenPreviewPlugin {
 /// world ([`WorldState::Absent`]) — no bodies bake, no terrain streams — so it
 /// registers **no steps** and the screen reveals into the menu on the first
 /// update. The world-load steps run later, when the menu starts a scenario
-/// (`main_menu::apply_menu_action` begins the boot step set itself).
+/// (`session_loading::apply_session_load_request` begins the boot step set).
 fn register_boot_steps(
     situation: Res<SpawnSituation>,
     dest: Res<LoadDestination>,

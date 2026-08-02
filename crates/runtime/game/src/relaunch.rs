@@ -41,7 +41,7 @@ use crate::rendering::{PlayerShip, ShipMarker, SimulationState};
 use crate::scenario_menu::clear_bubble;
 use crate::spawn::{
     Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
-    place_craft,
+    place_craft, polar_orbit_respawn_state,
 };
 use crate::view::ViewMode;
 
@@ -128,17 +128,16 @@ fn begin_relaunch(
     selected.id = None;
     sim.simulation.set_vessel_kind(VesselKind::Ship);
 
-    // Place the craft into the scenario. Aircraft fly airborne (cruise);
-    // everything else starts in the parking orbit. Both reuse the exact helpers
-    // the destruction respawn uses, so a relaunch matches the `just game` boot.
+    // Place the craft into the fixture situation. This is the live-world
+    // adapter used for every ship fixture, so changing scenarios after EVA or
+    // after a different blueprint converges with a cold fixture boot.
     let (state, attitude) = match spec.situation {
-        SpawnSituation::Cruise => {
-            compute_descent_state(SpawnSituation::Cruise, &sim, &height_sources).unwrap_or_else(
-                || {
-                    warn!("relaunch: terrain not resident for cruise; using orbit");
-                    orbit_respawn_state(&sim, homeworld.0)
-                },
-            )
+        SpawnSituation::PolarOrbit => polar_orbit_respawn_state(&sim, homeworld.0),
+        situation if situation.is_descent() => {
+            compute_descent_state(situation, &sim, &height_sources).unwrap_or_else(|| {
+                warn!("relaunch: terrain not resident for {situation:?}; using orbit");
+                orbit_respawn_state(&sim, homeworld.0)
+            })
         }
         _ => orbit_respawn_state(&sim, homeworld.0),
     };

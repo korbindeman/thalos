@@ -59,7 +59,7 @@ package remains authored source data, not part of this disposable cache.
 The subtle part — and the bug that nearly shipped — is that the namespace is
 resolved **per request**, not frozen when the provider is built. The flatten
 handle is read *per tile pixel* during synthesis, so a pad installed *after* the
-terrain entity spawned (exactly what `build_spaceport` does) still changes what
+terrain entity spawned (exactly what `ensure_spaceport` does) still changes what
 later tiles bake. A construction-time snapshot would have filed those flattened
 tiles under the *un*-flattened key and served them as pristine terrain next
 session. `NamespaceFn` (a `Fn() -> u64`) closes that hole: a tile is always stored

@@ -24,7 +24,8 @@ use thalos_world::BodyId;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 
 pub use thalos_game_state::structures::{
-    Facility, StructureId, StructureKind, StructurePlacement, StructureRegistry, StructureSite,
+    BaseId, BaseRecord, Facility, StructureId, StructureKind, StructurePlacement,
+    StructureRegistry, StructureSite,
 };
 
 /// Install a structure's terrain modification into the body's shared flatten
@@ -102,6 +103,8 @@ pub struct StructuresPlugin;
 impl Plugin for StructuresPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<StructureRegistry>()
+            .register_type::<BaseId>()
+            .register_type::<BaseRecord>()
             .register_type::<StructureId>()
             .register_type::<StructureKind>()
             .register_type::<Facility>()

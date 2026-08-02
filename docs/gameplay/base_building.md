@@ -49,7 +49,8 @@ diverges from near the primary's `−along` threshold at
 complex — the classic main-plus-diagonal layout (Dulles' 12/30 beside its
 parallels). The basin is a single wide flat area offset toward the airside
 (`BASIN_OFFSET_ACROSS_M`) and sized to clear both strips plus the complex.
-`runway::build_spaceport` registers the two runways: the primary (centred) plus
+`runway::ensure_spaceport` reconciles the base by stable authored `BaseId`, then
+registers the two runways on first materialization: the primary (centred) plus
 the angled secondary (near threshold at `SEC_NEAR_ALONG_M`/`SEC_NEAR_ACROSS_M`,
 fanning away so the strips never intersect) on the shared basin plane; both are
 plain parametric `StructureKind::Runway { half_length_m, half_width_m }`
@@ -323,12 +324,18 @@ revision).
 
 ## Persistence
 
-In-session only: the `StructureRegistry`, the flatten handle, and the building
-visual entities all survive scenario respawns / editor open-close within a run.
-There is **no disk artifact** — a process restart loses the base. Disk
-persistence (a gitignored `user/bases.ron`, loaded during `AppState::Loading`
-so sites bake flattened pre-stream à la the runway) is a clean follow-up; design
-it so loaded sites never need the runtime invalidation path.
+`BaseId` and `StructureId` are campaign identities. Every `StructureSite` owns
+exactly one `BaseId`; child registration requires an existing parent and
+inherits its base/body. Bundled bases use a reserved authored-ID namespace,
+while player construction allocates campaign-local IDs, so load order cannot
+collide. `RunwaySite`, flatten handles, and visual entities are projections and
+never decide whether a base exists.
+
+The current session foundation keeps these records in memory. Disk persistence
+lands with the campaign revision store (`docs/gameplay/campaigns.md`): bases are
+part of each complete campaign revision and load through the session
+transaction. There will be no separate global `user/bases.ron`; that would leak
+construction between campaigns and make revision checkout incorrect.
 
 ## Launch-point selection (fly from base)
 
@@ -347,7 +354,7 @@ Flow (all game-**UNVERIFIED**):
 2. `begin_launch_flow` (gated on `relaunch_idle`, so it waits for the rebuild) opens
    the picker: **Case A** — the spaceport is already built (`RunwaySite` present, e.g.
    after PLAY→space-center) → open the god-view immediately; **Case B** — first launch
-   → a brief **PLACEMENT-only** loading pass runs `runway::build_spaceport`, then the
+   → a brief **PLACEMENT-only** loading pass runs `runway::ensure_spaceport`, then the
    picker opens on `OnEnter(Running)`. (No SETTLE step — the craft is in orbit, so a
    settle gate keyed on its body-fixed point never resolves; the site's ground streams
    in live under the god-view.)
@@ -363,7 +370,7 @@ Flow (all game-**UNVERIFIED**):
    cores are warp-neutral) and the picker closes back to flight.
 
 Shared cores were extracted so both the dev runway scenario and the picker produce the
-identical result: `runway::build_spaceport` (site build minus craft place),
+identical result: `runway::ensure_spaceport` (site build minus craft place),
 `measure_runway_clearance`, `place_parked`→`place_on_runway`, and
 `place::place_on_launchpad` (from the L-key `launch_from_pad`). `RunwaySite` gained a
 `basin_id` field (idempotency key + picker `active_site`).
@@ -388,8 +395,8 @@ rather than reopening the hub (see `docs/gameplay/ui_flow.md` Phase 3).
    `Crawlerway` geometry. Taxiways currently reach the runways via two fixed
    complex-side exit nodes near the primary strip; per-runway exit taxiways
    (using the passed `_sec_heading`) are the natural refinement.
-4. **Disk persistence** (above) — the authored default base re-spawns each run;
-   player-built bases are in-session only.
+4. **Campaign revision persistence** (above) — complete base/structure records,
+   loaded and reconciled by identity with the rest of the campaign snapshot.
 5. **Scoped-AABB tile invalidation** (above).
 6. **Structure colliders** — **launchpads** now get a kinematic `Cylinder`
    collider in `spawn_structure_entity` (posed like the runway via

@@ -29,9 +29,7 @@ use crate::coords::SHIP_SCALE;
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::terrain_residency::TerrainRebuildRequest;
 use crate::rendering::{RealSpaceBody, SimulationState, SolarSystemState};
-use crate::structures::{
-    StructureKind, StructurePlacement, StructureRegistry, apply_structure_flatten,
-};
+use crate::structures::{StructurePlacement, StructureRegistry, apply_structure_flatten};
 
 use super::{BaseEditor, BaseEditorMode, base_editor_open, cursor_body_dir};
 
@@ -199,7 +197,7 @@ fn confirm_site(
         .unwrap_or(hit.height_m);
     let elevation_m = max_h + SITE_MARGIN_M;
 
-    let id = registry.register(
+    let base = registry.create_base(
         body_id,
         center_dir,
         heading,
@@ -212,9 +210,8 @@ fn confirm_site(
             rect_offset_along_m: 0.0,
             rect_offset_across_m: 0.0,
         },
-        StructureKind::BaseSite,
-        None,
     );
+    let id = base.root_site;
     if let Some(site) = registry.get(id).copied() {
         apply_structure_flatten(&site, radius_m, flatten);
     }

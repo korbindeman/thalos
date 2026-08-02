@@ -111,7 +111,7 @@ const BASIN_HALF_ACROSS_M: f64 = 1900.0;
 /// side, so a centred rectangle would waste half a kilometre of flattening
 /// behind the pads. This is a rect offset within the plane tangent at the
 /// runway centre (`StructurePlacement::FlattenTo::rect_offset_across_m`), not
-/// a moved anchor — see the basin registration in [`build_spaceport`].
+/// a moved anchor — see the basin registration in [`ensure_spaceport`].
 const BASIN_RECT_OFFSET_ACROSS_M: f64 = 500.0;
 /// Wide blend from the basin back to natural terrain. The basin levels to the
 /// *mean* terrain over its footprint (balanced cut/fill — see
@@ -214,18 +214,18 @@ const RUNWAY_MORNING_EPOCH_S: f64 = 59_100.0;
 ///
 /// One authority for "what time of day is this scenario supposed to be". It
 /// exists because the **capture lane needs the answer without booting the
-/// scenario**: a resident capture host serves many requests, `build_spaceport`
+/// scenario**: a resident capture host serves many requests, `ensure_spaceport`
 /// seats the clock exactly once (at placement), and nothing rewound it
 /// afterwards — so an untimed shot taken after a `--time` shot silently
 /// inherited the previous shot's sun, exited 0, and wrote a plausible PNG at
 /// the wrong lighting (BL-20260731T202657Z). Resolving every request against
 /// this value makes a shot's time absolute instead of history-dependent.
 ///
-/// Keep it consistent with what [`build_spaceport`] actually calls
+/// Keep it consistent with what [`ensure_spaceport`] actually calls
 /// `set_sim_time` with; a divergence would reset the clock away from the pose
 /// the placement was computed at.
 pub(crate) fn canonical_epoch_s(situation: SpawnSituation) -> Option<f64> {
-    // `build_spaceport` — the sole `set_sim_time` caller among the spawns — runs
+    // `ensure_spaceport` — the sole `set_sim_time` caller among the spawns — runs
     // for exactly the spaceport situations.
     situation.is_spaceport().then_some(RUNWAY_MORNING_EPOCH_S)
 }
@@ -275,9 +275,9 @@ const APPROACH_SINK_M_S: f64 = 4.7;
 /// billboard).
 const RUNWAY_VIS_RADIUS_FACTOR: f64 = 4.0;
 
-/// The chosen runway, in the body-fixed frame. Inserted once by
-/// [`build_spaceport`]; kept around for UI / future reference, and used as the
-/// "spaceport already built?" key by the launch-select flow.
+/// The chosen runway, in the body-fixed frame. This is a projection/cache of
+/// the registry's primary-runway role; [`crate::structures::BaseId`] is the
+/// uniqueness authority.
 #[derive(Resource, Debug, Clone, Copy)]
 pub struct RunwaySite {
     pub body_id: BodyId,
@@ -363,10 +363,9 @@ fn arm_boot_runway_placement(
 /// Deferred finisher: resolve the fixed site, build the flat platform +
 /// collider, and place the aircraft. Runs once per arming of
 /// [`RunwayPlacement`], retrying
-/// each frame until the terrain height source is resident. (Each run builds a
-/// fresh runway; today it can only ever run once per process — the boot
-/// scenario *or* the one-shot start screen — so there is no stale-runway
-/// teardown here yet.)
+/// each frame until the terrain height source is resident. Spaceport
+/// materialization reconciles stable base identity, so re-arming this placement
+/// may reseat a craft but cannot append another base or runway projection.
 #[allow(clippy::too_many_arguments)]
 fn finish_runway_spawn(
     mut placement: ResMut<RunwayPlacement>,
@@ -464,7 +463,7 @@ fn finish_runway_spawn(
         site,
         body_state,
         body_radius_m,
-    } = build_spaceport(
+    } = ensure_spaceport(
         &mut commands,
         &mut meshes,
         &mut materials,
@@ -566,7 +565,7 @@ fn finish_runway_spawn(
     tracker.complete(crate::loading::step::PLACEMENT);
 }
 
-/// Result of [`build_spaceport`]: the flattened base site plus the primary
+/// Result of [`ensure_spaceport`]: the flattened base site plus the primary
 /// runway, ready for a craft to be placed on (dev runway park) or for the
 /// player to pick a launch point on (launch-select flow).
 pub(crate) struct SpaceportBuild {
@@ -589,10 +588,10 @@ pub(crate) struct SpaceportBuild {
 ///
 /// Shared by the dev runway scenario ([`finish_runway_spawn`]) and the
 /// launch-select flow's lazy site build, so both produce the identical
-/// spaceport. Not idempotent — the caller must guard against building twice
-/// (e.g. on the [`RunwaySite`] resource already existing).
+/// spaceport. Base identity is reconciled before any registration or entity
+/// spawn, making repeated requests idempotent.
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn build_spaceport(
+pub(crate) fn ensure_spaceport(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<ShadowedStandardMaterial>,
@@ -607,6 +606,51 @@ pub(crate) fn build_spaceport(
     body_id: BodyId,
 ) -> SpaceportBuild {
     let body_radius_m = sim.system.bodies[body_id].radius_m;
+
+    // The bundled homeworld space center has one stable campaign identity.
+    // `RunwaySite` and rendered entities are projections; registry identity is
+    // the structural uniqueness guard. Returning here occurs before any
+    // registration/entity spawn, so duplicate requests cannot stack geometry.
+    const DEFAULT_SPACE_CENTER_ID: crate::structures::BaseId =
+        crate::structures::BaseId::authored(1);
+    if let Some(base) = structure_registry.base(DEFAULT_SPACE_CENTER_ID).copied() {
+        assert_eq!(
+            base.body_id, body_id,
+            "default space-center identity cannot move between bodies"
+        );
+        let basin = structure_registry
+            .get(base.root_site)
+            .expect("base record must reference its registered root site");
+        let runway = structure_registry
+            .get(
+                base.primary_runway
+                    .expect("default space center must record a primary runway"),
+            )
+            .expect("primary-runway role must reference a registered structure");
+        let elevation_m = match basin.placement {
+            crate::structures::StructurePlacement::FlattenTo { elevation_m, .. } => elevation_m,
+            crate::structures::StructurePlacement::Drape => {
+                panic!("default space-center root must own a terrain flatten")
+            }
+        };
+
+        sim.simulation.set_sim_time(RUNWAY_MORNING_EPOCH_S);
+        let body_state = sim
+            .ephemeris
+            .state(body_id, Epoch(sim.simulation.sim_time()));
+        return SpaceportBuild {
+            basin_id: base.root_site,
+            site: RunwaySite {
+                body_id,
+                center_dir: runway.anchor_dir,
+                heading_tangent: runway.heading_tangent,
+                elevation_m,
+                basin_id: base.root_site,
+            },
+            body_state,
+            body_radius_m,
+        };
+    }
 
     // Fixed body-fixed site (constant lat/lon + heading), instead of the old
     // flattest/dry/sunlit search that could land on the night side. The pad is
@@ -689,24 +733,27 @@ pub(crate) fn build_spaceport(
     // `elevation_m` across the basin, smoothstep-blending back to natural terrain
     // over the ramp. Done before placing the aircraft / moving the camera so the
     // tiles that stream in bake flattened from the start.
-    let basin_id = structure_registry.register(
-        body_id,
-        // Anchored at the runway centre — the flatten plane must be tangent
-        // where the pavement is built (see the basin comment above); the
-        // rectangle alone is pushed toward the secondary.
-        center_dir,
-        heading_tangent,
-        crate::structures::StructurePlacement::FlattenTo {
-            elevation_m,
-            half_along_m: BASIN_HALF_ALONG_M,
-            half_across_m: BASIN_HALF_ACROSS_M,
-            ramp_m: BASIN_RAMP_M,
-            rect_offset_along_m: 0.0,
-            rect_offset_across_m: BASIN_RECT_OFFSET_ACROSS_M,
-        },
-        crate::structures::StructureKind::BaseSite,
-        None,
-    );
+    let base = structure_registry
+        .ensure_base(
+            DEFAULT_SPACE_CENTER_ID,
+            body_id,
+            // Anchored at the runway centre — the flatten plane must be tangent
+            // where the pavement is built (see the basin comment above); the
+            // rectangle alone is pushed toward the secondary.
+            center_dir,
+            heading_tangent,
+            crate::structures::StructurePlacement::FlattenTo {
+                elevation_m,
+                half_along_m: BASIN_HALF_ALONG_M,
+                half_across_m: BASIN_HALF_ACROSS_M,
+                ramp_m: BASIN_RAMP_M,
+                rect_offset_along_m: 0.0,
+                rect_offset_across_m: BASIN_RECT_OFFSET_ACROSS_M,
+            },
+        )
+        .expect("default space-center identity must belong to the homeworld")
+        .record();
+    let basin_id = base.root_site;
     if let Some(basin) = structure_registry.get(basin_id).copied() {
         crate::structures::apply_structure_flatten(&basin, body_radius_m, flatten_registry);
     }
@@ -730,28 +777,31 @@ pub(crate) fn build_spaceport(
         + across * SEC_NEAR_ACROSS_M
         + sec_heading * (SECONDARY_LENGTH_M * 0.5);
     let sec_center_dir = (center_dir * body_radius_m + sec_center_offset).normalize();
-    structure_registry.register(
-        body_id,
-        center_dir,
-        heading_tangent,
-        crate::structures::StructurePlacement::Drape,
-        crate::structures::StructureKind::Runway {
-            half_length_m: RUNWAY_HALF_LENGTH_M as f32,
-            half_width_m: RUNWAY_HALF_WIDTH_M as f32,
-        },
-        Some(basin_id),
-    );
-    structure_registry.register(
-        body_id,
-        sec_center_dir,
-        sec_heading,
-        crate::structures::StructurePlacement::Drape,
-        crate::structures::StructureKind::Runway {
-            half_length_m: (SECONDARY_LENGTH_M * 0.5) as f32,
-            half_width_m: (SECONDARY_WIDTH_M * 0.5) as f32,
-        },
-        Some(basin_id),
-    );
+    let primary_runway = structure_registry
+        .register_child(
+            basin_id,
+            center_dir,
+            heading_tangent,
+            crate::structures::StructurePlacement::Drape,
+            crate::structures::StructureKind::Runway {
+                half_length_m: RUNWAY_HALF_LENGTH_M as f32,
+                half_width_m: RUNWAY_HALF_WIDTH_M as f32,
+            },
+        )
+        .expect("default space-center basin must exist before its runway");
+    assert!(structure_registry.set_primary_runway(DEFAULT_SPACE_CENTER_ID, primary_runway));
+    structure_registry
+        .register_child(
+            basin_id,
+            sec_center_dir,
+            sec_heading,
+            crate::structures::StructurePlacement::Drape,
+            crate::structures::StructureKind::Runway {
+                half_length_m: (SECONDARY_LENGTH_M * 0.5) as f32,
+                half_width_m: (SECONDARY_WIDTH_M * 0.5) as f32,
+            },
+        )
+        .expect("default space-center basin must exist before its runway");
 
     // The primary runway backs the parked-craft spawn + gear collider skip.
     let site = RunwaySite {

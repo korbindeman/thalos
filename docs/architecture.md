@@ -618,17 +618,18 @@ Key modules:
   The world-spawn systems hang off `OnEnter(WorldState::Live)` instead of
   `Startup`; naming a scenario (`just game runway`) or setting
   `THALOS_AUTO_RUN` skips the menu and inserts `Live` (same chain, first
-  frame, boot unchanged). The menu's first start after a deferred boot *is*
-  a boot: it arms the boot placement flags, registers the boot step set,
-  flips `Live`, and re-enters `Loading` (no craft swap needed —
-  `spawn_player_ship` builds the chosen scenario's blueprint directly).
-  With the world already live (menu re-entered from flight), scenario
-  starts reuse the respawn / relaunch machinery in place — the runway pair
-  re-arms its deferred placement + settle gate and re-enters `Loading`.
-  `SpawnSituation` is therefore **mutable at runtime**; deferred placements
-  are explicitly armed (`DescentPlacement`, `RunwayPlacement`), never keyed
-  off the situation with a `Local<bool>`.
-- **Spawn situation is a flag: ship in orbit, EVA on the
+  frame, boot unchanged). PLAY and every dev shortcut submit a
+  generation-stamped `SessionLoadRequest`; `session_loading` is the sole
+  consumer. It validates source assets, clears stale transient requests, and
+  arms the same projection workers whether the process world is absent or
+  live. A live non-EVA fixture always rebuilds its declared craft, and the
+  default space center reconciles stable `BaseId` identity rather than
+  consulting `RunwaySite`, eliminating cold/live craft drift and duplicate
+  base construction. Direct CLI/capture boots use the same
+  `SessionSource`/`ScenarioFixture` vocabulary. The complete campaign/revision
+  model and remaining snapshot migration are in
+  `docs/gameplay/campaigns.md`.
+- **Spawn situation is fixture-adapter vocabulary: ship in orbit, EVA on the
   surface, a landing approach over land, a final approach over
   flat land, one of two surface-runway scenarios, or Saturn on a launchpad.**
   `crates/runtime/game/src/lib.rs` reads
@@ -983,7 +984,7 @@ Key modules:
   painted from the true compass heading**; every runway lies on the
   one shared basin tangent plane via `RunwayFrame::center_offset`, so an offset
   strip stays flush with the flattened ground). The
-  **default base is a spaceport on a flat basin**: `runway::build_spaceport`
+  **default base is a spaceport on a flat basin**: `runway::ensure_spaceport`
   registers a wide `BaseSite` basin, registers **two runways in a V** (the 5 km
   primary + an angled crosswind secondary diverging 30° from near the primary's
   threshold, on the side opposite the launch complex; the divergence gives each
@@ -1007,7 +1008,7 @@ Key modules:
   clicking a runway lands the craft horizontal-on-gear and a launchpad lands it
   vertical-nose-up, via the shared placement cores (`runway::place_on_runway` /
   `place::place_on_launchpad`). The spaceport is built lazily on the first launch
-  (`runway::build_spaceport`, extracted from `finish_runway_spawn`) behind a brief
+  (`runway::ensure_spaceport`, extracted from `finish_runway_spawn`) behind a brief
   loading pass, and persists thereafter. Every **launchpad now carries its own
   kinematic collider** (`spawn_structure_entity`) — required because a
   `RunwaySite` makes `local_physics::terrain_patch` skip the generic ground patch
@@ -1030,7 +1031,7 @@ Key modules:
   an already-selected **facility** building opens it. Facilities are tagged on the
   `StructureSite` via `structures::Facility` (only `Vab` wired today; the seam for
   runway/pad launch, tracking station, admin). Entry: start-screen PLAY (a
-  **clean start** — builds the spaceport *base only*, `runway::build_spaceport`
+  **clean start** — builds the spaceport *base only*, `runway::ensure_spaceport`
   with **no craft parked**, behind the loading screen via
   `HubSpaceportBuild`/`finish_hub_spaceport`, then opens the hub on reveal), or
   the in-flight pause menu's **SPACE CENTER** button. The only way to fly is to

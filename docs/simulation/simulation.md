@@ -1445,7 +1445,13 @@ readback -> presentation -> camera.
 
 ## Save/load
 
-Save canonical simulation state, not renderer state.
+This section defines the simulation payload inside a complete campaign
+revision. Campaign ownership, immutable revisions, bookmarks/quicksaves,
+scenario fixtures, and the load transaction are specified in
+`docs/gameplay/campaigns.md`. There is one snapshot schema and one loader; this
+is not a vessel-only or parallel save format.
+
+Persist canonical simulation state, not renderer state.
 
 Save:
 

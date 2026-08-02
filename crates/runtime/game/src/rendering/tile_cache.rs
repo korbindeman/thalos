@@ -126,7 +126,7 @@ impl TileCacheRegistry {
     /// `flatten` is the body's **live** flatten handle, not a snapshot. The
     /// namespace closure re-reads it on every tile request, because the tile
     /// provider itself reads it per tile *pixel*: a pad installed after the
-    /// terrain entity spawned (which is exactly what `build_spaceport` does)
+    /// terrain entity spawned (which is exactly what `ensure_spaceport` does)
     /// changes what subsequent tiles bake. Freezing the flatten hash at spawn
     /// would file those flattened tiles under the un-flattened key and serve them
     /// as pristine terrain next session. Pass `None` for terrain with no flatten

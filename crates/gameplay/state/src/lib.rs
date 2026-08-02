@@ -32,6 +32,7 @@ pub mod relaunch;
 pub mod scenario;
 pub mod scene;
 pub mod sched;
+pub mod session;
 pub mod solar_system;
 pub mod structures;
 pub mod surface_frame;
@@ -54,6 +55,10 @@ pub use relaunch::{RelaunchRequest, RelaunchSpec, SpaceportLaunchRequest};
 pub use scenario::SpawnSituation;
 pub use scene::{ActiveCraft, CameraExposure, CelestialBody, PlayerShip, ShipMarker};
 pub use sched::{RealizeControlSet, SimStage};
+pub use session::{
+    ActiveSession, PendingSessionLoad, ScenarioFixture, SessionDurability, SessionGeneration,
+    SessionLoadRequest, SessionPlan, SessionSource,
+};
 pub use solar_system::{BodyEnvironmentState, SimulationState, SolarSystemState};
 pub use ui::{HideInPhotoMode, HudPanel, PhotoMode, UiKeyboardGate, UiPointerGate};
 pub use units::{AviationUnits, UnitDomain, UnitSystem, UnitsSettings};

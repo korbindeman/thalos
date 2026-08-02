@@ -39,7 +39,7 @@ use crate::loading::{AppState, LoadingTracker, step};
 use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::RealSpaceRoot;
 use crate::rendering::{SimulationState, SolarSystemState};
-use crate::runway::{RunwaySite, SpaceportBuild, build_spaceport};
+use crate::runway::{SpaceportBuild, ensure_spaceport};
 use crate::shipyard_editor::ShipyardEditor;
 use crate::spawn::Homeworld;
 use crate::structures::{
@@ -105,13 +105,12 @@ impl Plugin for SpaceCenterPlugin {
 /// Build the spaceport (base only, no craft) during PLAY's loading pass, then
 /// complete the PLACEMENT step so the loading screen reveals into the hub.
 /// Retries until the terrain height source is resident (as `finish_runway_spawn`
-/// does), and no-ops if the spaceport already exists this session. Mirrors
+/// does), and reconciles stable base identity if it already exists. Mirrors
 /// `launch_select::finish_launch_spaceport` — both are thin loaders over the
-/// shared `runway::build_spaceport`, differing only in what the reveal opens.
+/// shared `runway::ensure_spaceport`, differing only in what the reveal opens.
 #[allow(clippy::too_many_arguments)]
 fn finish_hub_spaceport(
     mut build: ResMut<HubSpaceportBuild>,
-    runway_site: Option<Res<RunwaySite>>,
     homeworld: Res<Homeworld>,
     mut sim: ResMut<SimulationState>,
     mut tracker: ResMut<LoadingTracker>,
@@ -129,13 +128,8 @@ fn finish_hub_spaceport(
     if !build.pending {
         return;
     }
-    // Already built this session (e.g. returned to the menu then PLAY again) —
-    // just release the gate; `build_spaceport` is not idempotent.
-    if runway_site.is_some() {
-        build.pending = false;
-        tracker.complete(step::PLACEMENT);
-        return;
-    }
+    // `RunwaySite` is only a projection/cache. `ensure_spaceport` reconciles
+    // stable base identity and is safe even if that cache is missing.
     // The spaceport is on the homeworld (Thalos) — not `dominant_body()`, which
     // would build a nonsensical base on whatever SOI the placeholder craft is in.
     let body_id = homeworld.0;
@@ -143,7 +137,7 @@ fn finish_hub_spaceport(
         return; // terrain height source not resident yet — retry next frame
     };
     let hs = height_source.as_ref();
-    let SpaceportBuild { site, .. } = build_spaceport(
+    let SpaceportBuild { site, .. } = ensure_spaceport(
         &mut commands,
         &mut meshes,
         &mut materials,
@@ -264,7 +258,7 @@ pub(crate) struct HubContext {
 /// Anchored to `body_id` = the homeworld (Thalos), **not** `dominant_body()`:
 /// the Space Center is always on the homeworld, and the unused placeholder craft
 /// can drift out of the homeworld's SOI (its dominant body then resolves to the
-/// star) after `build_spaceport` jumps the sim clock to the morning epoch.
+/// star) after `ensure_spaceport` jumps the sim clock to the morning epoch.
 pub(crate) fn hub_context(
     sim: &SimulationState,
     solar: &SolarSystemState,

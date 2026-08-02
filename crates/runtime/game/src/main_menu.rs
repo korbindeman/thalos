@@ -11,24 +11,11 @@
 //! agents and scripted runs keep their one-shot flow. See `main.rs` for the
 //! boot routing.
 //!
-//! Scenario starts route two ways, on [`crate::loading::WorldState`]:
-//!
-//! - **World absent** (first start after a bare menu boot): every start is
-//!   literally a *boot* triggered at runtime. `apply_menu_action` seats the
-//!   sim / arms the boot deferred-placement flags
-//!   ([`crate::spawn::DescentPlacement`], [`crate::runway::RunwayPlacement`]),
-//!   registers the boot step set (world load + placement), flips the world
-//!   [`Live`](crate::loading::WorldState::Live) — which fires the
-//!   `OnEnter(WorldState::Live)` world-spawn systems next frame — and
-//!   re-enters [`AppState::Loading`]. `ship_view::spawn_player_ship` builds
-//!   the chosen scenario's own blueprint, so no craft swap is needed.
-//! - **World live** (menu re-entered from flight): the existing in-place
-//!   machinery. Same-craft scenarios (orbit, the two descents, EVA) go
-//!   through [`crate::scenario_menu::respawn_into`] and transition straight
-//!   to `Running`; craft-swapping scenarios (cruise + the runway pair fly
-//!   the Meridian) queue a [`crate::relaunch::RelaunchRequest`]; runway
-//!   scenarios additionally re-arm the deferred placement + settle gate and
-//!   re-enter `Loading`.
+//! PLAY and every developer shortcut submit a
+//! [`SessionLoadRequest`](crate::session_loading::SessionLoadRequest). The
+//! session loader is the only code that decides how a source is validated and
+//! projected, so a cold boot and a live-world replacement cannot grow separate
+//! gameplay setup paths here.
 //!
 //! While the menu is up the sim clock is paused ([`crate::sim_clock`]) and
 //! gameplay input contexts are deactivated ([`crate::input`]); Escape only
@@ -42,26 +29,13 @@ use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowCloseRequested};
 use bevy::winit::{UpdateMode, WinitSettings};
 use thalos_input::game::GameInputIntent;
-use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
 use thalos_ui::{self as ui, SPACE_SM, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens};
 
-use crate::content::ContentRoot;
-use crate::game_context::{GameContext, InitialContext};
-use crate::loading::{
-    AppState, LoadDestination, LoadingTracker, StepDesc, WorldState, step, steps_for,
-    world_load_steps,
-};
-use crate::maneuver::{ManeuverPlan, SelectedNode};
-use crate::player_controller::EvaMode;
-use crate::relaunch::{RelaunchRequest, RelaunchSpec};
-use crate::rendering::{PlayerShip, SimulationState};
-use crate::runway::{RunwayPlacement, RunwaySite};
-use crate::scenario_menu::respawn_into;
+use crate::loading::AppState;
+use crate::session_loading::{ScenarioFixture, SessionLoadRequest, SessionSource};
 use crate::settings_menu::SettingsMenu;
-use crate::space_center::HubSpaceportBuild;
-use crate::spawn::{DescentPlacement, Homeworld, SpawnSituation};
-use crate::surface_settle::SurfaceSettle;
+use crate::spawn::SpawnSituation;
 
 #[derive(Component)]
 struct MainMenuRoot;
@@ -94,6 +68,11 @@ enum MenuAction {
 #[derive(Resource, Default)]
 struct PendingMenuAction(Option<MenuAction>);
 
+/// Ordering seam consumed by the canonical session loader. All menu click
+/// collection/application finishes before it looks for a request.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct MainMenuActionSet;
+
 pub struct MainMenuPlugin;
 
 impl Plugin for MainMenuPlugin {
@@ -117,6 +96,7 @@ impl Plugin for MainMenuPlugin {
                     update_dev_visibility,
                 )
                     .chain()
+                    .in_set(MainMenuActionSet)
                     .run_if(in_state(AppState::MainMenu)),
             );
     }
@@ -344,46 +324,13 @@ fn collect_menu_clicks(
     }
 }
 
-/// Consume the clicked action. Scenario starts mutate [`SpawnSituation`] (the
-/// per-frame scenario consumers — engine lighting, runway systems — read it
-/// live) and route per the module docs.
-#[allow(clippy::too_many_arguments)]
+/// Consume UI-only actions locally and submit playable sources to the one
+/// session loader. No campaign object is spawned from this module.
 fn apply_menu_action(
     mut pending: ResMut<PendingMenuAction>,
-    mut commands: Commands,
-    mut sim: ResMut<SimulationState>,
-    mut situation: ResMut<SpawnSituation>,
-    content: Res<ContentRoot>,
-    // `respawn_into` inputs, bundled to stay within the 16-param limit.
-    respawn: (
-        ResMut<ActiveLocalBubble>,
-        Res<HeightSourceRegistry>,
-        ResMut<EvaMode>,
-        ResMut<ManeuverPlan>,
-        ResMut<SelectedNode>,
-        Res<Homeworld>,
-    ),
-    player_ship: Query<Entity, With<PlayerShip>>,
-    // Loading-pass plumbing for the runway scenarios.
-    load: (
-        ResMut<LoadingTracker>,
-        ResMut<LoadDestination>,
-        ResMut<SurfaceSettle>,
-        ResMut<RunwayPlacement>,
-        ResMut<RelaunchRequest>,
-        ResMut<DescentPlacement>,
-    ),
-    // Deferred-world boot: `Absent` after a bare menu boot, until the first
-    // start flips it `Live` (see `loading::WorldState`).
-    world: (Res<State<WorldState>>, ResMut<NextState<WorldState>>),
-    mut next_state: ResMut<NextState<AppState>>,
-    runway_site: Option<Res<RunwaySite>>,
-    ui: (
-        ResMut<SettingsMenu>,
-        ResMut<InitialContext>,
-        ResMut<HubSpaceportBuild>,
-        ResMut<DevMenuExpanded>,
-    ),
+    mut requests: ResMut<SessionLoadRequest>,
+    mut settings: ResMut<SettingsMenu>,
+    mut dev: ResMut<DevMenuExpanded>,
     exit: (
         Query<Entity, With<PrimaryWindow>>,
         MessageWriter<WindowCloseRequested>,
@@ -393,45 +340,14 @@ fn apply_menu_action(
     let Some(action) = pending.0.take() else {
         return;
     };
-    let (mut active, height_sources, mut eva_mode, mut plan, mut selected, homeworld) = respawn;
-    let (mut tracker, mut dest, mut settle, mut runway_placement, mut relaunch, mut descent) = load;
-    let (world_state, mut next_world) = world;
-    let (mut settings, mut initial_context, mut hub_build, mut dev) = ui;
     let (primary_window, mut close_requested, mut app_exit) = exit;
-    let world_absent = *world_state.get() == WorldState::Absent;
 
-    let start = match action {
+    let source = match action {
         MenuAction::ToggleDev => {
             dev.0 = !dev.0;
             return;
         }
-        MenuAction::Play => {
-            // Clean start: build the spaceport (base only — **no craft parked**)
-            // behind the loading screen and reveal into the space-center hub. The
-            // player launches a ship themselves from the VAB; nothing is loaded on
-            // the pad/runway. If the spaceport already exists this session, skip
-            // straight to the hub.
-            initial_context.0 = Some(GameContext::SpaceCenter);
-            if runway_site.is_some() {
-                next_state.set(AppState::Running);
-            } else {
-                hub_build.pending = true;
-                // After a deferred menu boot the world itself still needs to
-                // spawn: prepend the world-load steps and flip it live. The
-                // spaceport build self-gates on terrain residency, so it
-                // simply waits its turn within the same loading pass.
-                let mut steps = Vec::new();
-                if world_absent {
-                    steps.extend(world_load_steps());
-                    next_world.set(WorldState::Live);
-                }
-                steps.push(StepDesc::new(step::PLACEMENT, "Building spaceport", 1.0));
-                tracker.begin(steps);
-                dest.0 = AppState::Running;
-                next_state.set(AppState::Loading);
-            }
-            return;
-        }
+        MenuAction::Play => SessionSource::NewCampaign,
         MenuAction::Settings => {
             settings.open = true;
             return;
@@ -446,130 +362,16 @@ fn apply_menu_action(
             }
             return;
         }
-        MenuAction::Shipyard => {
-            // The VAB opens on entry to `Running` (never during a load) via the
-            // initial-context boot route, same as `just game shipyard`.
-            initial_context.0 = Some(GameContext::Vab);
-            SpawnSituation::ShipOrbit
+        MenuAction::Shipyard => SessionSource::Fixture(ScenarioFixture::Shipyard),
+        MenuAction::Scenario(situation) => {
+            SessionSource::Fixture(ScenarioFixture::Flight(situation))
         }
-        MenuAction::Scenario(s) => s,
     };
-
-    *situation = start;
-
-    // Deferred-world start (first start after a bare menu boot): the world
-    // was never spawned, so every scenario is literally a *boot* triggered at
-    // runtime — no craft exists yet to swap or reseat. Arm the same
-    // deferred-placement flags the boot arming systems set, register the boot
-    // step set (world load + placement), and flip the world live: the
-    // `OnEnter(WorldState::Live)` chain spawns bodies / ship / sky next frame
-    // behind the loading pass, and `spawn_player_ship` reads the situation
-    // just written above, so it builds the scenario's own blueprint directly
-    // (meridian for the aircraft starts) — the relaunch craft-swap the
-    // live-world paths below need is unnecessary here.
-    if world_absent {
-        match start {
-            // Seat the sim itself into the scenario now (orbit state reset /
-            // EVA vessel-kind swap — neither needs terrain, and the EVA
-            // branch's ship-despawn loop just sees an empty query).
-            SpawnSituation::ShipOrbit | SpawnSituation::PolarOrbit | SpawnSituation::Eva => {
-                respawn_into(
-                    start,
-                    &mut commands,
-                    &mut sim,
-                    &mut active,
-                    &height_sources,
-                    &mut eva_mode,
-                    &player_ship,
-                    &mut plan,
-                    &mut selected,
-                    homeworld.0,
-                );
-            }
-            // The descent family boots from the placeholder parking orbit and
-            // is placed by `spawn::refine_descent_spawn` once terrain is
-            // resident — `respawn_into` here would find no height source and
-            // silently fall back to a bare orbit.
-            SpawnSituation::Landing | SpawnSituation::FinalApproach | SpawnSituation::Cruise => {
-                descent.pending = true;
-            }
-            SpawnSituation::Runway | SpawnSituation::RunwayApproach | SpawnSituation::Launch => {
-                runway_placement.pending = true;
-                settle.arm(
-                    matches!(start, SpawnSituation::Runway | SpawnSituation::Launch),
-                    false,
-                );
-            }
-        }
-        tracker.begin(steps_for(start, true));
-        dest.0 = AppState::Running;
-        next_world.set(WorldState::Live);
-        next_state.set(AppState::Loading);
-        info!("start screen: launching {start:?} (world boot)");
-        return;
-    }
-
-    match start {
-        // Same-craft starts: seat the boot placeholder craft (or the EVA
-        // capsule) into the scenario in place and reveal immediately.
-        SpawnSituation::ShipOrbit
-        | SpawnSituation::PolarOrbit
-        | SpawnSituation::Landing
-        | SpawnSituation::FinalApproach
-        | SpawnSituation::Eva => {
-            respawn_into(
-                start,
-                &mut commands,
-                &mut sim,
-                &mut active,
-                &height_sources,
-                &mut eva_mode,
-                &player_ship,
-                &mut plan,
-                &mut selected,
-                homeworld.0,
-            );
-            next_state.set(AppState::Running);
-        }
-        // Craft swap, airborne placement handled inside the relaunch flow.
-        SpawnSituation::Cruise => {
-            let Some(blueprint) =
-                crate::ship_view::load_blueprint_from_path(&content, start.ship_blueprint_path())
-            else {
-                error!("start screen: cruise blueprint failed to load; staying on menu");
-                return;
-            };
-            relaunch.0 = Some(RelaunchSpec {
-                blueprint,
-                situation: start,
-            });
-            next_state.set(AppState::Running);
-        }
-        // Craft swap + deferred terrain-aware placement: run a fresh loading
-        // pass so the site build, park, and tile settle stay behind the
-        // loading screen, exactly like a runway boot.
-        SpawnSituation::Runway | SpawnSituation::RunwayApproach | SpawnSituation::Launch => {
-            let Some(blueprint) =
-                crate::ship_view::load_blueprint_from_path(&content, start.ship_blueprint_path())
-            else {
-                error!("start screen: spaceport blueprint failed to load; staying on menu");
-                return;
-            };
-            relaunch.0 = Some(RelaunchSpec {
-                blueprint,
-                situation: start,
-            });
-            runway_placement.pending = true;
-            settle.arm(
-                matches!(start, SpawnSituation::Runway | SpawnSituation::Launch),
-                false,
-            );
-            tracker.begin(steps_for(start, false));
-            dest.0 = AppState::Running;
-            next_state.set(AppState::Loading);
-        }
-    }
-    info!("start screen: launching {start:?}");
+    let generation = requests.request(source);
+    info!(
+        "start screen: requested session generation {} from {:?}",
+        generation.0, source
+    );
 }
 
 /// Show/hide the collapsible Dev / Quick-start section on toggle.

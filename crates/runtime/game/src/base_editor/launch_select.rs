@@ -14,7 +14,7 @@
 //! 2. [`begin_launch_flow`] (once the relaunch is idle) either opens the
 //!    god-view immediately if the spaceport is already built (the
 //!    [`RunwaySite`] resource exists), or — first launch — runs a brief loading
-//!    pass that builds the spaceport ([`build_spaceport`]) behind the loading
+//!    pass that builds the spaceport ([`ensure_spaceport`]) behind the loading
 //!    screen, then opens the god-view on `Loading → Running`.
 //! 3. [`update_launch_pick`] raycasts the cursor against the base and latches
 //!    the clicked launch point; [`apply_launch_placement`] measures the craft's
@@ -41,10 +41,11 @@ use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::RealSpaceRoot;
 use crate::rendering::{PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
 use crate::runway::{
-    RunwaySite, SpaceportBuild, build_spaceport, craft_extent_below, measure_runway_clearance,
+    RunwaySite, SpaceportBuild, craft_extent_below, ensure_spaceport, measure_runway_clearance,
     place_on_runway,
 };
 use crate::shipyard_editor::core::EditorPart;
+use crate::spawn::Homeworld;
 use crate::staging::StagingPlan;
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
 
@@ -230,11 +231,12 @@ fn begin_launch_flow(
 /// Build the spaceport lazily during the launch-flow loading pass, then complete
 /// the PLACEMENT step so the loading screen reveals into the god-view. Retries
 /// each frame until the terrain height source is resident (as `finish_runway_spawn`
-/// does at boot). Idempotent-guarded by the `RunwaySite`-absent decision in
-/// [`begin_launch_flow`] plus its own one-shot `build.pending`.
+/// does at boot). Stable base identity inside [`ensure_spaceport`] makes this
+/// safe even if a projection cache is missing or two callers request it.
 #[allow(clippy::too_many_arguments)]
 fn finish_launch_spaceport(
     mut build: ResMut<LaunchSpaceportBuild>,
+    homeworld: Res<Homeworld>,
     mut sim: ResMut<SimulationState>,
     mut tracker: ResMut<LoadingTracker>,
     height_sources: Res<HeightSourceRegistry>,
@@ -251,12 +253,12 @@ fn finish_launch_spaceport(
     if !build.pending {
         return;
     }
-    let body_id = sim.simulation.dominant_body();
+    let body_id = homeworld.0;
     let Some(height_source) = height_sources.get(body_id) else {
         return; // terrain height source not resident yet — retry next frame
     };
     let hs = height_source.as_ref();
-    let SpaceportBuild { site, .. } = build_spaceport(
+    let SpaceportBuild { site, .. } = ensure_spaceport(
         &mut commands,
         &mut meshes,
         &mut materials,

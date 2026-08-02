@@ -3,12 +3,13 @@
 //! tuning) stays with the runtime's `spawn` / `runway` modules.
 
 use bevy::prelude::*;
+use serde::{Deserialize, Serialize};
 
 /// Which start scenario the session was asked for (`just game [mode]`,
 /// `THALOS_SPAWN`, the start screen, or a respawn/relaunch picker), so the
 /// deferred placement systems (the runtime's `runway` module and
 /// `refine_descent_spawn`) can tell which path they belong to.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpawnSituation {
     /// Ship in the low equatorial parking orbit (default).
     ShipOrbit,

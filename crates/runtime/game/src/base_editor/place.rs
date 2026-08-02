@@ -395,7 +395,7 @@ fn update_structure_placement(
     if (keys.just_pressed(KeyCode::Delete) || keys.just_pressed(KeyCode::KeyX))
         && let Some(sel) = state.selected.take()
     {
-        registry.remove(sel);
+        registry.remove_child(sel);
         for (entity, pv) in placed_q.iter() {
             if pv.structure_id == sel {
                 commands.entity(entity).despawn();
@@ -682,7 +682,7 @@ fn spawn_structure(
         registry,
         root,
         body_id,
-        Some(site_id),
+        site_id,
         building_dir,
         heading,
         across,
@@ -703,7 +703,7 @@ pub(super) fn place_structure(
     registry: &mut StructureRegistry,
     root: Entity,
     body_id: BodyId,
-    parent_site: Option<StructureId>,
+    parent_site: StructureId,
     anchor_dir: DVec3,
     heading: DVec3,
     across: DVec3,
@@ -720,14 +720,15 @@ pub(super) fn place_structure(
     let (center_body, basis_body) =
         placement_frame(anchor_dir, heading, across, yaw, pad_r, center_height);
     let heading_proj = (heading - anchor_dir * heading.dot(anchor_dir)).normalize();
-    let id = registry.register(
-        body_id,
-        anchor_dir,
-        heading_proj,
-        StructurePlacement::Drape,
-        kind,
-        parent_site,
-    );
+    let id = registry
+        .register_child(
+            parent_site,
+            anchor_dir,
+            heading_proj,
+            StructurePlacement::Drape,
+            kind,
+        )
+        .expect("base-editor placement parent must be a registered base site");
     spawn_structure_entity(
         commands,
         meshes,

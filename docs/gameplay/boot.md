@@ -18,9 +18,8 @@ CLAUDE.md *Invariants* (the paused-on-spawn / `THALOS_AUTO_RUN` contract).
 ```
 Loading ──(all tracker steps complete)──▶ LoadDestination
                                             ├─ MainMenu   (bare launch)
-                                            └─ Running    (just game <scenario>)
-MainMenu ──(scenario picked)──▶ Running                 (same-craft starts)
-MainMenu ──(runway scenario picked)──▶ Loading ──▶ Running
+                                            └─ Running    (direct fixture boot)
+MainMenu ──(SessionLoadRequest accepted)──▶ Loading? ──▶ Running
 ```
 
 - `Loading` is the **default state** and covers the very first frame (also
@@ -54,6 +53,7 @@ Steps are built by `loading::steps_for(situation, boot)`:
 
 | id | label | registered | completed by |
 |---|---|---|---|
+| `session` | Projecting session | live-world non-spaceport session replacement | `session_loading::complete_live_session_projection`, after relaunch becomes idle |
 | `bodies` | Celestial bodies | boot only | total seeded by `rendering::spawn::spawn_bodies`; advanced (+ body-name detail) by `rendering::generation::poll_planet_install_tasks` |
 | `terrain` | Surface terrain | boot only | `rendering::terrain_residency::initial_residency_loading_gate`, gated on `bodies` completing first |
 | `placement` | Placing craft | scenarios with a deferred placement | `spawn::refine_descent_spawn` or `runway::finish_runway_spawn` |
@@ -97,56 +97,49 @@ fires at the first regular state transition (same frame, after `Startup`,
 still behind the loading screen) and the scenario boot is unchanged. While the menu is up, `WinitSettings` is
 swapped to reactive mode (~30 Hz idle / instant on input), so an idle menu
 costs near-zero CPU/GPU; the continuous game loop is restored on exit.
-`WorldState` is **one-way** — the world is never torn down; a menu
-re-entered from flight keeps it live.
+`WorldState` currently records whether process-level world projections have
+ever been created. It may remain `Live` across a session replacement so content
+and renderer services can be reused; it is **not** campaign authority and must
+not be used for uniqueness or save decisions.
 
-Scenario starts route on `WorldState`; **no process restart** either way:
+PLAY and every developer shortcut submit one generation-stamped
+`SessionLoadRequest`:
 
-- **World absent** (the first start after a bare menu boot): every start is
-  literally a boot triggered at runtime. `apply_menu_action` writes
-  `SpawnSituation`, seats the sim where no terrain is needed
-  (`respawn_into` for orbit / polar / EVA), arms the boot deferred-placement
-  flags for the rest (`DescentPlacement` for the descents + cruise,
-  `RunwayPlacement` + settle for the runway pair and launchpad start), registers the **boot**
-  step set (`steps_for(start, true)` — world load + placement), flips
-  `WorldState::Live`, and re-enters `Loading` with destination `Running`.
-  No craft swap: `spawn_player_ship` hasn't run yet and builds the chosen
-  scenario's own blueprint when the world spawns. PLAY prepends
-  `world_load_steps()` to its spaceport-build pass the same way.
-- **World live** (menu re-entered from flight):
-  - **Orbit / Polar orbit / Landing / Final approach / EVA** — same-craft:
-    `scenario_menu::respawn_into` (the destruction picker's path) seats the
-    craft, then straight to `Running`.
-  - **Cruise** — craft swap to the Meridian: queues a
-    `relaunch::RelaunchRequest` (the shipyard Launch path), which tears down
-    the old craft, places cruise, and rebuilds from the blueprint.
-  - **Runway / Runway approach / Launch** — craft swap **plus** the deferred
-    terrain-aware placement: re-arms `runway::RunwayPlacement` and the
-    settle gate (`SurfaceSettle::arm`), registers a fresh `[placement(,
-    settle)]` tracker pass, and re-enters `Loading` so site build + park +
-    tile settle happen behind the loading screen exactly like a direct
-    spaceport boot. `launch` swaps to `ships/saturn.ron` and routes vertical
-    seating through the shared `base_editor::place_on_launchpad` core.
-- **SHIPYARD** — arms `OpenShipyardOnStart` and starts the orbit scenario
-  (through either route above); the editor opens on entry to `Running` (it
-  must never open during a load — it gates off the very systems that
-  complete one).
-- **SETTINGS** — opens the native Bevy-UI settings overlay in place.
+- **PLAY** selects `SessionSource::NewCampaign`: a durable campaign adapter,
+  default space-center situation, and `GameContext::SpaceCenter`.
+- **Quick Start / Dev** selects a versioned `ScenarioFixture` hosted by an
+  ephemeral campaign adapter. Flight, space-center, and shipyard fixtures all
+  enter the same coordinator.
+- `session_loading::apply_session_load_request` validates the fixture craft
+  before mutation, clears former transient requests, assigns the situation and
+  entry context, and arms the projection workers. It is the sole consumer.
+- With an absent process world, it also registers world-load steps and flips
+  `WorldState::Live`. With a live world, every non-EVA flight fixture rebuilds
+  its declared blueprint through `RelaunchRequest`; orbit/landing may not retain
+  a coincidentally compatible outgoing craft. This keeps EVA→orbit and all
+  craft appearances/behavior equal to a cold fixture boot.
+- Spaceport fixtures and New Campaign reconcile the authored `BaseId` through
+  `runway::ensure_spaceport`. `RunwaySite` is only a cache; repeated requests
+  cannot append a second base or second set of geometry.
+- The new `ActiveSession` generation is published only once the app is
+  `Running` and craft replacement is idle. Validation failure leaves the old
+  active session untouched.
+
+SETTINGS and QUIT remain process-shell actions and do not enter the loader.
 
 Escape on the menu only closes the settings overlay; the pause-menu Escape
 chain is gated to `Running`.
 
-The start screen is currently **one-shot per process** (no return-to-menu
-from the pause menu yet). That invariant is load-bearing in one place: the
-runway scenarios never tear down a previous runway, so a second runway
-start in one process would double-build — add teardown before adding a
-RETURN TO MENU button.
+Returning to the main menu and starting another fixture is supported. Complete
+authoritative resource replacement (rather than the current compatibility
+adapters over singleton runtime state) is tracked by the campaign snapshot
+slice in `docs/gameplay/campaigns.md` §8.
 
 ## 4. Runtime-scenario invariants
 
-`SpawnSituation` is **mutable at runtime** now (the start screen is its
-second writer after `main.rs`). Consequences already handled, to keep in
-mind for new code:
+`SpawnSituation` is temporary fixture-adapter vocabulary and remains mutable at
+runtime. Gameplay must not branch on fixture origin. Consequences already
+handled during the complete-snapshot migration:
 
 - Deferred placements are **explicitly armed** (`DescentPlacement`,
   `RunwayPlacement` resources), not keyed off the situation resource with

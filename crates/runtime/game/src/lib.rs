@@ -85,6 +85,7 @@ mod runtime_diagnostics;
 mod runway;
 mod scenario_menu;
 mod screenshot;
+mod session_loading;
 mod settings;
 mod settings_menu;
 mod ship_view;
@@ -434,6 +435,30 @@ impl AppBuilder {
                 });
             SpawnSituation::from_request(body_request)
         };
+        let initial_session_source = if menu_boot {
+            None
+        } else if boot_hub {
+            Some(session_loading::SessionSource::Fixture(
+                session_loading::ScenarioFixture::SpaceCenter,
+            ))
+        } else if open_shipyard {
+            Some(session_loading::SessionSource::Fixture(
+                session_loading::ScenarioFixture::Shipyard,
+            ))
+        } else {
+            Some(session_loading::SessionSource::Fixture(
+                session_loading::ScenarioFixture::Flight(situation),
+            ))
+        };
+        let initial_session_generation =
+            session_loading::SessionGeneration(u64::from(initial_session_source.is_some()));
+        let initial_session_plan = initial_session_source.map(session_loading::SessionSource::plan);
+        debug_assert!(
+            initial_session_plan
+                .map(|plan| plan.situation == situation)
+                .unwrap_or(true),
+            "direct boot situation must come from its session source plan"
+        );
 
         let (ship_state, vessel_kind, ship_params, attitude) = if situation == SpawnSituation::Eva {
             // Sub-stellar point so the player wakes up in daylight: the direction
@@ -693,22 +718,38 @@ impl AppBuilder {
             .insert_resource(body_surfaces)
             .init_resource::<terrain_registry::RenderedGroundRegistry>()
             .insert_resource(situation)
+            // Direct CLI/capture boots and in-game starts share the same source
+            // vocabulary. A direct boot is generation 1; a bare menu has no
+            // active session and allocates generation 1 when PLAY/a fixture is
+            // selected.
+            .insert_resource(match initial_session_source {
+                Some(source) => {
+                    session_loading::ActiveSession::projected(initial_session_generation, source)
+                }
+                None => session_loading::ActiveSession::default(),
+            })
+            .insert_resource(session_loading::SessionLoadRequest::after(
+                initial_session_generation,
+            ))
             // `just game hub` / the headless hub preset: build the spaceport (no
             // craft) behind the boot loading pass and open the space-center hub on
             // reveal — the same arming the start screen's PLAY does at runtime.
             // `register_boot_steps` adds the PLACEMENT step when the build is armed.
-            .insert_resource(space_center::HubSpaceportBuild { pending: boot_hub })
+            .insert_resource(space_center::HubSpaceportBuild {
+                pending: initial_session_plan.is_some_and(|plan| {
+                    plan.entry_context == game_context::GameContext::SpaceCenter
+                }),
+            })
             // Boot routing: which `GameContext` the boot load reveals into (retiring
             // the old `Open{Shipyard,SpaceCenter}OnStart` one-shot flags). The
             // context switch is applied on `OnEnter(Running)` by
             // `game_context::apply_initial_context`; `None` reveals into Flight.
-            .insert_resource(game_context::InitialContext(if open_shipyard {
-                Some(game_context::GameContext::Vab)
-            } else if boot_hub {
-                Some(game_context::GameContext::SpaceCenter)
-            } else {
-                None
-            }))
+            .insert_resource(game_context::InitialContext(initial_session_plan.and_then(
+                |plan| {
+                    (plan.entry_context != game_context::GameContext::Flight)
+                        .then_some(plan.entry_context)
+                },
+            )))
             // Where the boot load reveals to: the start screen for a bare
             // launch, straight into the scenario otherwise.
             .insert_resource(loading::LoadDestination(if menu_boot {
@@ -797,6 +838,7 @@ impl AppBuilder {
             .add_plugins(thalos_ui::ThalosUiPlugin)
             .add_plugins(HudPlugin)
             .add_plugins(PauseMenuPlugin)
+            .add_plugins(session_loading::SessionLoadingPlugin)
             .add_plugins(main_menu::MainMenuPlugin)
             .add_plugins(SettingsMenuPlugin)
             // FPS/FRAME_TIME diagnostics for the F3 performance view and
