@@ -19,11 +19,15 @@ use bevy::math::DVec3;
 use bevy::prelude::{Resource, Vec3};
 use thalos_body_render::{GpuAtlasMirrorHandle, ImpostorAlbedo, RenderedGround};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
+#[cfg(not(debug_assertions))]
+use thalos_terrain::load_static_package_artifact;
 use thalos_terrain::{
     BodyArchetype, DynamicSurfaceState, PackageSurface, PlanetSurface, ProceduralSurface,
-    SurfaceQuery, TerrainCompileContext, TerrainCompileOptions, TerrainConfig, cache,
-    compile_dynamic_surface_layers, compile_tectonics_from_config, load_static_package,
+    SurfaceQuery, TerrainCompileContext, TerrainConfig, cache, compile_dynamic_surface_layers,
+    compile_tectonics_from_config,
 };
+#[cfg(debug_assertions)]
+use thalos_terrain::{TerrainCompileOptions, load_static_package};
 use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
 /// Coarse LOD (metres per sample) for orbital collision queries. The propagator
@@ -320,10 +324,18 @@ fn build_airless_package_surface(
     package_dir: &std::path::Path,
 ) -> Result<BuiltSurface, String> {
     let context = terrain_context(body);
+    #[cfg(debug_assertions)]
     let options = TerrainCompileOptions::default();
-    let key = cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
     let path = cache::cache_path(package_dir, &body.name);
-    let package = load_static_package(&path, &body.name, key).map_err(|error| {
+    #[cfg(debug_assertions)]
+    let package = {
+        let key =
+            cache::terrain_cache_key(&body.terrain, body.tectonics.as_ref(), &context, options);
+        load_static_package(&path, &body.name, key)
+    };
+    #[cfg(not(debug_assertions))]
+    let package = load_static_package_artifact(&path, &body.name);
+    let package = package.map_err(|error| {
         format!(
             "requires an offline terrain package: {error}. Run `just bake {}`",
             body.name

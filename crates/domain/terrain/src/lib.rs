@@ -67,7 +67,7 @@ pub use package::{
     HeightPyramidSpec, LoadedTerrainPackage, PackageBlob, PackageBlobKind, PackageBorderRule,
     PackageCodec, PackageError, PackageNode, PackageNodeAddress, PackageProducer, PackageSurface,
     SCHEMA_VERSION as PACKAGE_SCHEMA_VERSION, TerrainPackageManifest, load_static_package,
-    write_static_package,
+    load_static_package_artifact, write_static_package,
 };
 pub use procedural::{
     COAST_BAND_M, GENERATOR_VERSION, MacroBiome, MacroSignals, ProceduralSurface,

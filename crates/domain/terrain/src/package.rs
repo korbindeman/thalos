@@ -483,6 +483,30 @@ pub fn load_static_package(
     expected_body: &str,
     expected_content_key: u64,
 ) -> Result<LoadedTerrainPackage, PackageError> {
+    load_static_package_inner(path, expected_body, Some(expected_content_key))
+}
+
+/// Decode and fully validate a shipped package without applying the bakery's
+/// source-freshness check.
+///
+/// Release artifacts already select exact package bytes through their source
+/// revision. Player startup validates schema, body identity, bounds, graph
+/// structure, blob ranges, checksums, and decoding; it must not reject those
+/// bytes because the compiler checkout used different text line endings or
+/// another developer-only source signature. Tools and debug builds use
+/// [`load_static_package`] to retain the stricter rebake signal.
+pub fn load_static_package_artifact(
+    path: &Path,
+    expected_body: &str,
+) -> Result<LoadedTerrainPackage, PackageError> {
+    load_static_package_inner(path, expected_body, None)
+}
+
+fn load_static_package_inner(
+    path: &Path,
+    expected_body: &str,
+    expected_content_key: Option<u64>,
+) -> Result<LoadedTerrainPackage, PackageError> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -671,7 +695,7 @@ fn validate_manifest(
     path: &Path,
     manifest: &TerrainPackageManifest,
     expected_body: &str,
-    expected_content_key: u64,
+    expected_content_key: Option<u64>,
     blob_region_len: usize,
 ) -> Result<(), PackageError> {
     if manifest.schema_version != SCHEMA_VERSION {
@@ -692,7 +716,9 @@ fn validate_manifest(
             ),
         );
     }
-    if manifest.content_key != expected_content_key {
+    if let Some(expected_content_key) = expected_content_key
+        && manifest.content_key != expected_content_key
+    {
         return Err(PackageError::ContentKeyMismatch {
             path: path.to_path_buf(),
             expected: expected_content_key,
@@ -944,5 +970,23 @@ impl SurfaceQuery for PackageSurface {
 
     fn prewarm(&self, region: Region, lod_m: f32) {
         self.inner.prewarm(region, lod_m)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn artifact_loader_validates_package_without_bakery_freshness() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/terrain_packages/Mira.bin");
+        let artifact = load_static_package_artifact(&path, "Mira").unwrap();
+        let wrong_key = artifact.manifest.content_key ^ 1;
+
+        assert!(matches!(
+            load_static_package(&path, "Mira", wrong_key),
+            Err(PackageError::ContentKeyMismatch { .. })
+        ));
     }
 }
