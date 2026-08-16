@@ -2,9 +2,17 @@
 
 ![Auron](screenshots/auron.jpg)
 
-Thalos (working title) is a spaceflight simulation game.
+Thalos (working title) is first and foremost a spaceflight simulation game I
+intend to release.
 
 I'm aiming for a more physically grounded take on the genre, with a realistic scaling, simulation that aims for physical plausibility while still being fun to play, and a solar system whose nature reveals itself through exploration.
+
+The wider Thalos project is also my exploration of how to emulate and render
+natural worlds. Its internal world foundation is designed to serve the game,
+focused applications such as the real-world Kòrsou explorer, and future
+experiments across flat maps, planets, and full solar systems. The distinction
+between the project, the game, and that internal foundation is defined in
+[Project purpose](docs/purpose.md).
 
 ## Set Up a Development Checkout
 
@@ -147,7 +155,10 @@ in [docs/development/build_speed.md](docs/development/build_speed.md).
 The **Build game** GitHub Actions workflow produces a portable Windows x64 ZIP.
 Its manual form accepts an explicit comma-separated Cargo feature list; the
 canonical pre-alpha selection is `neural-terrain-default`. Tagged `v*` builds
-use that selection and publish a GitHub prerelease.
+use that selection and publish a GitHub prerelease. The tag event dispatches the
+actual build on `main` while checking out and verifying the immutable tag commit;
+this lets Windows and macOS reuse Cargo dependency artifacts across release tags
+without reintroducing a compiler wrapper.
 
 The terrain features intentionally separate capability from selection:
 

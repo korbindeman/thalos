@@ -43,12 +43,14 @@ use bevy::{
     window::{CursorIcon, SystemCursorIcon},
 };
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+#[cfg(feature = "legacy-udlod")]
+use thalos_body_render::BodyTerrainMaterial;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::tiles::TileTerrainRoot;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
-use thalos_body_render::{
-    BodyTerrainMaterial, CloudsConfig, HeightSource, cloud_target_memory_for,
-};
+use thalos_body_render::{CloudsConfig, HeightSource, cloud_target_memory_for};
 use thalos_capture_protocol::{
     CAPTURE_PROTOCOL_SCHEMA, CameraOptics as CameraOpticsSpec, CaptureAction,
     CaptureCameraOverride, CaptureClock, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
@@ -64,7 +66,9 @@ use crate::camera_optics::CameraOptics;
 use crate::graphics_settings::GraphicsSettings;
 use crate::loading::AppState;
 use crate::rendering::contact_shadow::ContactShadowConfig;
-use crate::rendering::ground_terrain::{BodyTerrain, OceanDebugSettings};
+#[cfg(feature = "legacy-udlod")]
+use crate::rendering::ground_terrain::BodyTerrain;
+use crate::rendering::ground_terrain::OceanDebugSettings;
 use crate::rendering::ssao::SsaoConfig;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::sim_clock::SimClockDrive;
@@ -1812,7 +1816,7 @@ impl ScreenshotConfig {
     ///   coverage-preserving; capture-only far opacity A/B.
     /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
     /// - `THALOS_SCREENSHOT_GRAPHICS` — cold-capture compatibility form for
-    ///   typed graphics settings, e.g. `clouds=off,grass=on`.
+    ///   typed graphics settings, e.g. `clouds=off,grass=on,foliage=off`.
     /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults under
     ///   `artifacts/diagnostics/`).
     /// - `THALOS_SCREENSHOT_OCEAN_TIME` — optional fixed canonical ocean time
@@ -1830,7 +1834,11 @@ impl ScreenshotConfig {
             .unwrap_or_else(|error| panic!("invalid capture framing: {error}"));
         resolve_capture_time_s(
             cfg.canonical_epoch_s(),
-            cfg.viewpoint.as_ref().map(|viewpoint| viewpoint.sim_time_s),
+            cfg.viewpoint.as_ref().and_then(|viewpoint| {
+                crate::viewpoints::authored_context(viewpoint)
+                    .ok()
+                    .map(|(_, _, _, sim_time_s)| sim_time_s)
+            }),
             overrides.get("THALOS_SCREENSHOT_TIME").map(String::as_str),
         )
         .unwrap_or_else(|error| panic!("invalid capture time: {error}"));
@@ -1979,7 +1987,11 @@ impl ScreenshotConfig {
     pub fn target_body_name(&self) -> &str {
         self.viewpoint
             .as_ref()
-            .map(|viewpoint| viewpoint.body.as_str())
+            .map(|viewpoint| {
+                crate::viewpoints::authored_context(viewpoint)
+                    .expect("capture viewpoints must be authored-body-fixed")
+                    .0
+            })
             .unwrap_or_else(|| self.preset.target_body_name())
     }
 
@@ -1987,7 +1999,11 @@ impl ScreenshotConfig {
     pub fn spawn_situation(&self) -> SpawnSituation {
         self.viewpoint
             .as_ref()
-            .map(|viewpoint| crate::viewpoints::situation_of_viewpoint(viewpoint.spawn))
+            .map(|viewpoint| {
+                let (_, spawn, _, _) = crate::viewpoints::authored_context(viewpoint)
+                    .expect("capture viewpoints must be authored-body-fixed");
+                crate::viewpoints::situation_of_viewpoint(spawn)
+            })
             .unwrap_or_else(|| self.preset.spawn_situation())
     }
 
@@ -2003,7 +2019,11 @@ impl ScreenshotConfig {
     pub fn boots_hub(&self) -> bool {
         self.viewpoint
             .as_ref()
-            .map(|viewpoint| viewpoint.boots_hub)
+            .map(|viewpoint| {
+                crate::viewpoints::authored_context(viewpoint)
+                    .expect("capture viewpoints must be authored-body-fixed")
+                    .2
+            })
             .unwrap_or_else(|| self.preset.boots_hub())
     }
 }
@@ -2331,6 +2351,8 @@ struct PersistentCaptureServer {
     requested_camera: CaptureCameraOverride,
     active_camera: Option<CapturedCameraState>,
     active_graphics: Option<CaptureGraphicsSettings>,
+    /// Validated restart-time composition used by this host.
+    render_plan: Option<thalos_render_kit::RenderPlan>,
     /// Ground residency sampled at the active request's readback, for the
     /// receipt. `None` until a tile-rendered body has been observed.
     active_terrain: Option<CaptureTerrainResidency>,
@@ -2384,6 +2406,7 @@ impl PersistentCaptureServer {
             source: self.active_source.clone(),
             camera: self.active_camera,
             graphics: self.active_graphics,
+            render_plan: self.render_plan,
             terrain: self.active_terrain,
             clock: CaptureClock {
                 sim_time_s: self.active_sim_time.map(|(time_s, _)| time_s),
@@ -2487,7 +2510,9 @@ struct TerrainReadiness<'w, 's> {
             &'static crate::rendering::tile_terrain::TileTerrainBody,
         ),
     >,
+    #[cfg(feature = "legacy-udlod")]
     udlod_trees: Res<'w, TerrainViewComponents<TileTree>>,
+    #[cfg(feature = "legacy-udlod")]
     udlod_terrains: Query<
         'w,
         's,
@@ -2497,6 +2522,7 @@ struct TerrainReadiness<'w, 's> {
             &'static TileAtlas,
         ),
     >,
+    #[cfg(feature = "legacy-udlod")]
     camera_q: Query<'w, 's, Entity, With<ShipCamera>>,
 }
 
@@ -2517,6 +2543,7 @@ const BRAKE_RECOVER_TIMEOUT_S: f64 = 45.0;
 /// udlod path: how long the finest resident LOD at the view must hold without
 /// improving before the ground counts as streamed (wall clock — headless frame
 /// rates make frame counts meaningless against ~30 ms/tile bakes).
+#[cfg(feature = "legacy-udlod")]
 const MASSIF_LOD_PLATEAU_S: f64 = 6.0;
 
 /// Boot-time clock selection for the headless host: `wall` (default), `driven`
@@ -2591,10 +2618,10 @@ impl Plugin for HeadlessScreenshotPlugin {
                 apply_capture_time
                     .before(crate::SimStage::Physics)
                     .run_if(in_state(AppState::Running)),
-            )
-            // Diagnostic transect across the spaceport basin (headless runs
-            // only): resident tile LOD + rendered height vs the basin plane.
-            .add_systems(Update, probe_apron_lod.run_if(in_state(AppState::Running)));
+            );
+
+        #[cfg(feature = "legacy-udlod")]
+        app.add_systems(Update, probe_apron_lod.run_if(in_state(AppState::Running)));
 
         if self.persistent {
             app.init_resource::<PersistentCaptureServer>()
@@ -2634,6 +2661,7 @@ fn record_shader_reloads(
 fn initialize_capture_server(
     cfg: Res<ScreenshotConfig>,
     drive: Res<SimClockDrive>,
+    render_plan: Res<thalos_render_kit::ActiveRenderPlan>,
     mut server: ResMut<PersistentCaptureServer>,
 ) {
     server.clock = match drive.dt_s() {
@@ -2647,6 +2675,7 @@ fn initialize_capture_server(
     server.settle_frames = env_parse("THALOS_CAPTURE_SETTLE_FRAMES").unwrap_or(60);
     server.source = capture_source_snapshot_from_env();
     server.active_source = server.source.clone();
+    server.render_plan = Some(render_plan.plan());
     server.publish(false);
 }
 
@@ -2691,22 +2720,31 @@ fn compatible_presets(boot: &ScreenshotConfig) -> Vec<String> {
                 .viewpoints
                 .iter()
                 .filter(|viewpoint| {
-                    viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
-                        && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn)
-                            == boot.spawn_situation()
-                        && viewpoint.boots_hub == boot.boots_hub()
-                        && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
-                            == [boot.width, boot.height]
+                    crate::viewpoints::authored_context(viewpoint).is_ok_and(
+                        |(body, spawn, boots_hub, _)| {
+                            body.eq_ignore_ascii_case(boot.target_body_name())
+                                && crate::viewpoints::situation_of_viewpoint(spawn)
+                                    == boot.spawn_situation()
+                                && boots_hub == boot.boots_hub()
+                                && default_headless_extent_for_aspect(
+                                    viewpoint.optics.sensor.aspect,
+                                ) == [boot.width, boot.height]
+                        },
+                    )
                 })
                 .map(crate::viewpoints::viewpoint_scene_name),
         );
         if catalog.latest().is_some_and(|viewpoint| {
-            viewpoint.body.eq_ignore_ascii_case(boot.target_body_name())
-                && crate::viewpoints::situation_of_viewpoint(viewpoint.spawn)
-                    == boot.spawn_situation()
-                && viewpoint.boots_hub == boot.boots_hub()
-                && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
-                    == [boot.width, boot.height]
+            crate::viewpoints::authored_context(viewpoint).is_ok_and(
+                |(body, spawn, boots_hub, _)| {
+                    body.eq_ignore_ascii_case(boot.target_body_name())
+                        && crate::viewpoints::situation_of_viewpoint(spawn)
+                            == boot.spawn_situation()
+                        && boots_hub == boot.boots_hub()
+                        && default_headless_extent_for_aspect(viewpoint.optics.sensor.aspect)
+                            == [boot.width, boot.height]
+                },
+            )
         }) {
             scenes.push("latest-perspective".to_owned());
         }
@@ -2772,6 +2810,7 @@ fn throttle_idle_capture_host(server: Res<PersistentCaptureServer>) {
 fn poll_capture_requests(
     mut cfg: ResMut<ScreenshotConfig>,
     mut graphics: ResMut<GraphicsSettings>,
+    mut preferences: ResMut<thalos_preferences::GraphicsPreferences>,
     mut runtime: ResMut<CaptureRuntimeOverrides>,
     mut driver: ResMut<ScreenshotDriver>,
     mut server: ResMut<PersistentCaptureServer>,
@@ -2871,9 +2910,11 @@ fn poll_capture_requests(
     }
     if let Err(error) = resolve_capture_time_s(
         next.canonical_epoch_s(),
-        next.viewpoint
-            .as_ref()
-            .map(|viewpoint| viewpoint.sim_time_s),
+        next.viewpoint.as_ref().and_then(|viewpoint| {
+            crate::viewpoints::authored_context(viewpoint)
+                .ok()
+                .map(|(_, _, _, sim_time_s)| sim_time_s)
+        }),
         request
             .overrides
             .get("THALOS_SCREENSHOT_TIME")
@@ -2935,9 +2976,15 @@ fn poll_capture_requests(
     }
 
     let next_graphics = GraphicsSettings::for_capture(request.graphics);
+    *preferences = thalos_preferences::GraphicsPreferences::showcase();
+    preferences.foliage = request
+        .graphics
+        .foliage
+        .unwrap_or(thalos_preferences::GraphicsPreferences::showcase().foliage);
     server.active_graphics = Some(CaptureGraphicsSettings {
         clouds: next_graphics.clouds,
         grass: next_graphics.grass,
+        foliage: preferences.foliage,
     });
     *graphics = next_graphics;
     runtime.values = request.overrides;
@@ -2999,7 +3046,11 @@ fn apply_capture_time(
     }
     let requested = match resolve_capture_time_s(
         cfg.canonical_epoch_s(),
-        cfg.viewpoint.as_ref().map(|viewpoint| viewpoint.sim_time_s),
+        cfg.viewpoint.as_ref().and_then(|viewpoint| {
+            crate::viewpoints::authored_context(viewpoint)
+                .ok()
+                .map(|(_, _, _, sim_time_s)| sim_time_s)
+        }),
         runtime.get("THALOS_SCREENSHOT_TIME"),
     ) {
         Ok(requested) => requested,
@@ -3060,7 +3111,7 @@ fn apply_live_capture_diagnostics(
     mut ssao: ResMut<SsaoConfig>,
     mut contact_shadow: ResMut<ContactShadowConfig>,
     mut cloud_shadow: ResMut<crate::rendering::clouds::CloudShadowConfig>,
-    mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
+    #[cfg(feature = "legacy-udlod")] mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut tile_materials: ResMut<Assets<thalos_body_render::tiles::material::TileTerrainMaterial>>,
 ) {
     if !cfg.is_changed() && !runtime.is_changed() {
@@ -3173,6 +3224,7 @@ fn apply_live_capture_diagnostics(
     cloud_shadow.apply_capture_mode(runtime.get("THALOS_CLOUD_SHADOW"));
     cloud_shadow.apply_godray_mode(runtime.get("THALOS_CLOUD_GODRAY"));
     let inspection = terrain_inspection_override(runtime.get("THALOS_TERRAIN_INSPECTION"));
+    #[cfg(feature = "legacy-udlod")]
     for (_, material) in terrain_materials.iter_mut() {
         material.extras.inspection.x = inspection;
     }
@@ -3384,6 +3436,7 @@ fn apply_flow_effect_capture(
 /// basin flatten's plane being tangent at the offset rect centre instead of the
 /// runway centre. Headless-only (the plugin is added only under
 /// `THALOS_SCREENSHOT`), one line per ~4 s.
+#[cfg(feature = "legacy-udlod")]
 fn probe_apron_lod(
     mut frame: Local<u32>,
     sim: Res<SimulationState>,
@@ -3823,28 +3876,39 @@ fn drive_headless_screenshot(
                 .find(|(_, b)| b.body_id == homeworld.0)
                 .is_some_and(|(root, _)| root.coverage_ready() && root.settled())
         } else {
-            // udlod path: wall-clock plateau of the finest resident LOD at
-            // the streamer's view position (mirrors `surface_settle`).
-            match crate::surface_settle::resident_lod_under_view(
-                &sim,
-                &readiness.udlod_trees,
-                &readiness.udlod_terrains,
-                &readiness.camera_q,
-            ) {
-                Some(m)
-                    if driver
-                        .terrain_best_lod_m
-                        .is_none_or(|best| m < best * 0.999) =>
-                {
-                    driver.terrain_best_lod_m = Some(m);
-                    driver.terrain_lod_hold_s = 0.0;
-                    false
+            #[cfg(feature = "legacy-udlod")]
+            {
+                // udlod path: wall-clock plateau of the finest resident LOD at
+                // the streamer's view position (mirrors `surface_settle`).
+                match crate::surface_settle::resident_lod_under_view(
+                    &sim,
+                    &readiness.udlod_trees,
+                    &readiness.udlod_terrains,
+                    &readiness.camera_q,
+                ) {
+                    Some(m)
+                        if driver
+                            .terrain_best_lod_m
+                            .is_none_or(|best| m < best * 0.999) =>
+                    {
+                        driver.terrain_best_lod_m = Some(m);
+                        driver.terrain_lod_hold_s = 0.0;
+                        false
+                    }
+                    Some(_) => {
+                        driver.terrain_lod_hold_s += dt;
+                        driver.terrain_lod_hold_s >= MASSIF_LOD_PLATEAU_S
+                    }
+                    None => false,
                 }
-                Some(_) => {
-                    driver.terrain_lod_hold_s += dt;
-                    driver.terrain_lod_hold_s >= MASSIF_LOD_PLATEAU_S
-                }
-                None => false,
+            }
+            #[cfg(not(feature = "legacy-udlod"))]
+            {
+                error!(
+                    target: "thalos::screenshot",
+                    "validated render plan has no active ground renderer"
+                );
+                false
             }
         };
         if ready {
@@ -4901,15 +4965,17 @@ fn stats_json(stats: Option<ProbeStats>) -> String {
 
 fn framing_json(cfg: &ScreenshotConfig) -> String {
     if let Some(viewpoint) = cfg.viewpoint.as_ref() {
+        let (body, _, _, sim_time_s) = crate::viewpoints::authored_context(viewpoint)
+            .expect("capture viewpoints must be authored-body-fixed");
         return serde_json::json!({
             "kind": "viewpoint",
             "id": viewpoint.id.as_str(),
-            "body": viewpoint.body.as_str(),
-            "position_body_m": viewpoint.camera_position_body_m,
-            "rotation_body_xyzw": viewpoint.camera_rotation_body_xyzw,
+            "body": body,
+            "position_body_m": viewpoint.camera_position_m,
+            "rotation_body_xyzw": viewpoint.camera_rotation_xyzw,
             "optics": viewpoint.optics,
             "derived_vertical_fov_rad": viewpoint.optics.vertical_fov_rad(),
-            "recorded_sim_time_s": viewpoint.sim_time_s,
+            "recorded_sim_time_s": sim_time_s,
         })
         .to_string();
     }

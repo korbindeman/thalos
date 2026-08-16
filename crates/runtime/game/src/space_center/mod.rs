@@ -36,8 +36,8 @@ use thalos_world::BodyId;
 use crate::base_editor::{BaseEditor, BaseEditorMode};
 use crate::game_context::{ContextHistory, GameContext, enter_context};
 use crate::loading::{AppState, LoadingTracker, step};
-use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::RealSpaceRoot;
+use crate::rendering::terrain_flatten::TerrainFlattenRegistry;
 use crate::rendering::{SimulationState, SolarSystemState};
 use crate::runway::{SpaceportBuild, ensure_spaceport};
 use crate::shipyard_editor::ShipyardEditor;
@@ -118,7 +118,7 @@ fn finish_hub_spaceport(
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     mut structure_registry: ResMut<StructureRegistry>,
     mut paved: ResMut<crate::base_editor::PavedFootprints>,
-    mut rebuild: ResMut<crate::rendering::terrain_residency::TerrainRebuildRequest>,
+    mut rebuild: ResMut<crate::rendering::terrain_flatten::TerrainRebuildRequest>,
     root: Res<RealSpaceRoot>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,

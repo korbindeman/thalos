@@ -1,9 +1,9 @@
-//! Unified application settings — one `settings.ron` file, four sections.
+//! Full-game settings — one `settings.ron` file for game-only sections.
 //!
-//! The window, graphics, units, and HUD-workspace preferences each keep their
-//! own Bevy resource so every consumer is unchanged; this module owns only the on-disk aggregate
-//! ([`AppSettings`]) plus the single load/save seam that replaced the three
-//! per-domain files (`user/settings.ron` / `graphics.ron` / `units.ron`).
+//! Application-wide window and anti-aliasing preferences live in
+//! `thalos_preferences` so Kòrsou and the normal game share them. This module
+//! persists only full-game rendering, units, and HUD workspace state. Foliage
+//! is shared with Kòrsou and therefore persists with application preferences.
 //!
 //! **Storage location** (Bevy 0.19's [`bevy::platform::dirs::preferences_dir`]):
 //! - **Debug builds** keep it project-local at `user/settings.ron` (gitignored)
@@ -12,10 +12,8 @@
 //!   `<preferences_dir>/thalos/settings.ron` (e.g. `%APPDATA%\thalos\` on
 //!   Windows), falling back to the project-local path if the OS has no such dir.
 //!
-//! [`load`] runs in `main()` before the app exists (the window section shapes
-//! the initial [`Window`]); it migrates the legacy per-domain files on first
-//! run. [`AppSettingsPlugin`] owns the single autosave that watches all three
-//! resources and rewrites the file when any value changes.
+//! [`load`] runs before the app exists and migrates the legacy per-domain files
+//! on first run. [`AppSettingsPlugin`] owns the single autosave.
 
 use std::path::PathBuf;
 
@@ -24,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::graphics_settings::GraphicsSettings;
 use crate::units_settings::UnitsSettings;
-use crate::window_settings::WindowSettings;
 
 /// Project-local settings path (the only location in debug; the fallback in
 /// release). Relative to the working directory the game loads `assets/` from.
@@ -36,7 +33,6 @@ const DEV_SETTINGS_PATH: &str = "user/settings.ron";
 #[derive(Serialize, Deserialize, Clone, PartialEq, Default)]
 #[serde(default)]
 pub struct AppSettings {
-    pub window: WindowSettings,
     pub graphics: GraphicsSettings,
     pub units: UnitsSettings,
     pub hud: thalos_hud::mfd::HudWorkspaceSettings,
@@ -60,15 +56,15 @@ pub fn settings_path() -> PathBuf {
 pub fn load() -> AppSettings {
     let path = settings_path();
     if let Ok(text) = std::fs::read_to_string(&path) {
-        // The unified format names its sections (`window:` / `graphics:` /
-        // `units:`); a legacy window-only `settings.ron` (flat `(mode: …)`)
+        // The unified format names its sections (`graphics:` / `units:` /
+        // `hud:`); a legacy window-only `settings.ron` (flat `(mode: …)`)
         // does not. Distinguish so the migration below isn't shadowed by a
         // lenient `AppSettings` parse that would silently drop the old window
         // prefs (the debug path collides with the legacy window file name).
         if is_unified(&text) {
             match ron::from_str::<AppSettings>(&text) {
                 Ok(mut settings) => {
-                    settings.window = settings.window.sanitized();
+                    settings.graphics = settings.graphics.sanitized();
                     return settings;
                 }
                 Err(err) => {
@@ -84,9 +80,7 @@ pub fn load() -> AppSettings {
 }
 
 /// Heuristic: does this file use the unified (sectioned) schema? The settings
-/// structs have no string fields that could contain these section keys, so a
-/// substring check is robust enough to separate the new format from a legacy
-/// flat `WindowSettings` file.
+/// structs have no string fields that could contain these section keys.
 fn is_unified(text: &str) -> bool {
     text.contains("window:")
         || text.contains("graphics:")
@@ -96,15 +90,10 @@ fn is_unified(text: &str) -> bool {
 
 /// First-run migration: fold the legacy per-domain RON files into one
 /// [`AppSettings`]. Best-effort — any file that is missing or unparseable just
-/// leaves its section at the default. The legacy window file shared the
-/// `user/settings.ron` path, so in debug it is read straight back here.
+/// leaves its section at the default. Shared preferences migrate their own
+/// window and MSAA fields before this file is rewritten.
 fn migrate_legacy() -> AppSettings {
     let mut settings = AppSettings::default();
-    if let Ok(text) = std::fs::read_to_string(DEV_SETTINGS_PATH)
-        && let Ok(window) = ron::from_str::<WindowSettings>(&text)
-    {
-        settings.window = window;
-    }
     if let Ok(text) = std::fs::read_to_string("user/graphics.ron")
         && let Ok(graphics) = ron::from_str::<GraphicsSettings>(&text)
     {
@@ -115,7 +104,6 @@ fn migrate_legacy() -> AppSettings {
     {
         settings.units = units;
     }
-    settings.window = settings.window.sanitized();
     settings
 }
 
@@ -139,10 +127,7 @@ pub fn save(settings: &AppSettings) {
     }
 }
 
-/// Owns the single unified-file persistence. The four domain resources are
-/// inserted in `main()` (the window section must exist before the initial
-/// [`Window`] is built); their plugins keep only their `register_type` + apply
-/// systems. This plugin adds the one autosave that watches all four.
+/// Owns persistence for the three full-game resources inserted in `main()`.
 pub struct AppSettingsPlugin;
 
 impl Plugin for AppSettingsPlugin {
@@ -157,14 +142,16 @@ impl Plugin for AppSettingsPlugin {
 /// file). The first frame seeds `last` from the live resources and writes once,
 /// which also completes a legacy migration / creates the file on a fresh run.
 fn autosave_settings(
-    window: Res<WindowSettings>,
     graphics: Res<GraphicsSettings>,
     units: Res<UnitsSettings>,
     hud: Res<thalos_hud::mfd::HudWorkspaceSettings>,
+    quality_overrides: Res<thalos_preferences::QualityOverrides>,
     mut last: Local<Option<AppSettings>>,
 ) {
+    if quality_overrides.preset.is_some() {
+        return;
+    }
     let current = AppSettings {
-        window: window.clone(),
         graphics: graphics.clone(),
         units: *units,
         hud: hud.clone(),

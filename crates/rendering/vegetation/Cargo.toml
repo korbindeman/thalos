@@ -1,0 +1,9 @@
+[package]
+name = "thalos_vegetation"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+thalos_body_shading = { path = "../shading" }

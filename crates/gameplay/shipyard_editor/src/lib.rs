@@ -40,8 +40,8 @@ use thalos_input::shipyard::ShipyardInputPlugin;
 use self::core::{EditorPart, EditorUiGate, PreviewGhost, ShipEditorCorePlugin};
 
 use thalos_game_state::coords::EDITOR_LAYER;
-use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HudPanel;
+use thalos_photo_mode::HideInPhotoMode;
 
 /// Whether the in-game shipyard editor is open. A sim-clock pause source.
 ///

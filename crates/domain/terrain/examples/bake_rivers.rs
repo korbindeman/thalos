@@ -38,12 +38,11 @@
 //! THALOS_TERRAIN=diffusion cargo run -p thalos_terrain --release --example bake_rivers
 //! ```
 
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::io::Write as _;
-
 use glam::DVec3;
 use rayon::prelude::*;
+use thalos_terrain::hydrology::{
+    HydrologyConfig, NO_RECEIVER, annual_runoff_mm, solve_equirectangular,
+};
 use thalos_terrain::query::SurfaceQuery;
 use thalos_terrain::{DiffusionSurface, ProceduralSurface};
 
@@ -56,8 +55,22 @@ const DEFAULT_PX_M: f64 = 2_000.0;
 const FILL_EPSILON_M: f32 = 1.0e-3;
 /// Decades of catchment the shipped u8 spans (1 km2 .. 10^7 km2).
 const LOG_DECADES: f32 = 7.0;
+/// Encoded annual-mean discharge range, in log10(m³/s). Byte zero remains the
+/// explicit "no runoff" value; bytes 1..=255 span this range.
+const DISCHARGE_LOG_MIN: f32 = -3.0;
+const DISCHARGE_LOG_MAX: f32 = 6.0;
 /// Catchment above which a cell counts as a channel for the structure stats.
 const CHANNEL_HEAD_KM2: f32 = 1_000.0;
+
+fn encode_log_discharge(discharge_m3_s: f32) -> u8 {
+    if discharge_m3_s <= 10.0f32.powf(DISCHARGE_LOG_MIN) {
+        return 0;
+    }
+    let t = ((discharge_m3_s.log10() - DISCHARGE_LOG_MIN)
+        / (DISCHARGE_LOG_MAX - DISCHARGE_LOG_MIN))
+        .clamp(0.0, 1.0);
+    1 + (t * 254.0).round() as u8
+}
 
 fn load_surface() -> (Box<dyn SurfaceQuery>, &'static str) {
     let diffusion = std::env::var("THALOS_TERRAIN")
@@ -107,171 +120,54 @@ fn main() {
                 .collect::<Vec<_>>()
         })
         .collect();
-    println!("  sampled in {:.1}s", t0.elapsed().as_secs_f64());
+    println!("  sampled height in {:.1}s", t0.elapsed().as_secs_f64());
 
-    // Per-row geometry. `cos(lat)` shrinks the east-west run *and* the cell
-    // area; both matter and they are not the same correction.
-    let lat_of = |y: usize| (0.5 - (y as f64 + 0.5) / h as f64) * std::f64::consts::PI;
-    let dy_m = std::f64::consts::PI * RADIUS_M / h as f64;
-    let row_dx_m: Vec<f64> = (0..h)
-        .map(|y| std::f64::consts::TAU * RADIUS_M * lat_of(y).cos() / w as f64)
-        .collect();
-    let row_area_km2: Vec<f64> = (0..h).map(|y| row_dx_m[y] * dy_m / 1.0e6).collect();
-
-    // --- 2. fill depressions (priority-flood) -----------------------------
-    //
-    // **Without this there are no rivers.** Analytic terrain is full of local
-    // minima, and a raw steepest-descent router terminates at every one, so each
-    // pit truncates its own catchment: the first bake of this peaked at
-    // 20 505 km2 of drainage — smaller than the Rhine — because no flow ever
-    // reached the sea. Priority-flood raises each pit to its spill elevation, so
-    // every land cell gains a monotone downhill path to the ocean and catchments
-    // compose all the way down.
-    //
-    // Routing uses the FILLED heights; the original field is untouched and is
-    // still what the game renders. A filled cell just means "water would cross
-    // here", which is exactly what a lake or a floodplain is.
-    let t_fill = std::time::Instant::now();
-    let key = |v: f32| -> u32 {
-        // Monotone f32 -> u32 so the heap can order by height without floats.
-        let b = v.to_bits();
-        if v >= 0.0 { b | 0x8000_0000 } else { !b }
-    };
-    let mut filled = height.clone();
-    let mut done = vec![false; w * h];
-    let mut heap: BinaryHeap<Reverse<(u32, u32)>> = BinaryHeap::new();
-    for i in 0..w * h {
-        if height[i] <= 0.0 {
-            done[i] = true;
-            heap.push(Reverse((key(height[i]), i as u32)));
-        }
-    }
-    let mut raised = 0usize;
-    let mut raised_sum = 0.0f64;
-    while let Some(Reverse((_, i))) = heap.pop() {
-        let i = i as usize;
-        let (y, x) = (i / w, i % w);
-        for dyi in -1i64..=1 {
-            for dxi in -1i64..=1 {
-                if dxi == 0 && dyi == 0 {
-                    continue;
-                }
-                let ny = y as i64 + dyi;
-                if ny < 0 || ny >= h as i64 {
-                    continue;
-                }
-                let nx = (x as i64 + dxi).rem_euclid(w as i64);
-                let j = ny as usize * w + nx as usize;
-                if done[j] {
-                    continue;
-                }
-                done[j] = true;
-                // **Epsilon fill, not flat fill.** Filling a depression to
-                // exactly its spill height creates a *plateau*, and a
-                // steepest-descent router finds no strictly-downhill neighbour
-                // on a plateau — so every filled cell becomes a fresh sink and
-                // drainage gets *worse*, not better. Measured: plain fill took
-                // the largest catchment from 20 505 km2 down to 10 928. Adding
-                // a hair of gradient per step guarantees a strict descent out
-                // of every basin. Over a 1 000-cell flat this accumulates 1 m,
-                // which is far below anything the terrain or the landcover
-                // notices.
-                // Randomised per cell, not constant: a constant epsilon makes
-                // every flat drain in whichever direction the flood happened to
-                // sweep, which prints as long straight streaks. A positive
-                // random step keeps the descent strict but removes the
-                // direction preference.
-                let jit = {
-                    let mut z = (j as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
-                    z ^= z >> 29;
-                    z = z.wrapping_mul(0xbf58_476d_1ce4_e5b9);
-                    0.5 + ((z >> 40) as f32 / 16_777_216.0)
-                };
-                let target = filled[i] + FILL_EPSILON_M * jit;
-                if filled[j] < target {
-                    raised += 1;
-                    raised_sum += (target - filled[j]) as f64;
-                    filled[j] = target;
-                }
-                heap.push(Reverse((key(filled[j]), j as u32)));
-            }
-        }
-    }
-    println!(
-        "  filled {raised} depressions (mean rise {:.1} m) in {:.1}s",
-        if raised > 0 {
-            raised_sum / raised as f64
-        } else {
-            0.0
-        },
-        t_fill.elapsed().as_secs_f64()
-    );
-
-    // --- 3. steepest-descent receiver, by GRADIENT not height drop --------
-    let t1 = std::time::Instant::now();
-    let receiver: Vec<i64> = (0..h)
+    // Annual runoff is a second extensive field on the same cells. Keep it
+    // separate from geometric catchment: drainage *shape* comes from terrain,
+    // while perennial strength comes from climate. Folding the two together
+    // would make it impossible to distinguish "large basin" from "large
+    // river" later in the landcover and water renderers.
+    let t_climate = std::time::Instant::now();
+    let runoff_mm: Vec<f32> = (0..h)
         .into_par_iter()
         .flat_map(|y| {
-            let dx_m = row_dx_m[y];
             (0..w)
-                .map(|x| {
-                    let i = y * w + x;
-                    let hc = filled[i];
-                    if height[i] <= 0.0 {
-                        return -1; // ocean: a sink, not a router
-                    }
-                    let (mut best, mut best_slope) = (-1i64, 0.0f64);
-                    for dyi in -1i64..=1 {
-                        for dxi in -1i64..=1 {
-                            if dxi == 0 && dyi == 0 {
-                                continue;
-                            }
-                            let ny = y as i64 + dyi;
-                            if ny < 0 || ny >= h as i64 {
-                                continue;
-                            }
-                            let nx = (x as i64 + dxi).rem_euclid(w as i64);
-                            let j = ny as usize * w + nx as usize;
-                            let run =
-                                ((dxi as f64 * dx_m).powi(2) + (dyi as f64 * dy_m).powi(2)).sqrt();
-                            let slope = (hc - filled[j]) as f64 / run;
-                            if slope > best_slope {
-                                best_slope = slope;
-                                best = j as i64;
-                            }
-                        }
-                    }
-                    best
-                })
+                .map(|x| annual_runoff_mm(surface.landcover_moisture(dir_of(x, y, w, h))))
                 .collect::<Vec<_>>()
         })
         .collect();
-    println!("  receivers in {:.1}s", t1.elapsed().as_secs_f64());
-
-    // --- 4. accumulate downhill, highest cell first -----------------------
-    // Processing in descending height guarantees every donor is resolved before
-    // its receiver, so one pass suffices — no iteration to convergence.
-    let t2 = std::time::Instant::now();
-    let mut order_idx: Vec<u32> = (0..(w * h) as u32)
-        .filter(|&i| height[i as usize] > 0.0)
-        .collect();
-    order_idx.sort_unstable_by(|a, b| filled[*b as usize].total_cmp(&filled[*a as usize]));
-    let mut accum_km2: Vec<f32> = vec![0.0; w * h];
-    for &i in &order_idx {
-        let i = i as usize;
-        let own = row_area_km2[i / w] as f32;
-        let total = accum_km2[i] + own;
-        accum_km2[i] = total;
-        let r = receiver[i];
-        if r >= 0 {
-            accum_km2[r as usize] += total;
-        }
-    }
     println!(
-        "  accumulated {} land cells in {:.1}s",
-        order_idx.len(),
-        t2.elapsed().as_secs_f64()
+        "  sampled runoff climate in {:.1}s",
+        t_climate.elapsed().as_secs_f64()
     );
+
+    // --- 2. solve hydrology on the sampled raster -------------------------
+    // The solver is independent of this preview adapter. The final neural bake
+    // passes its completed DEM here directly, at the authored band resolution.
+    let t_hydrology = std::time::Instant::now();
+    let solved = solve_equirectangular(
+        HydrologyConfig {
+            width: w,
+            height: h,
+            planet_radius_m: RADIUS_M,
+            fill_epsilon_m: FILL_EPSILON_M,
+        },
+        &height,
+        &runoff_mm,
+    )
+    .unwrap_or_else(|e| panic!("hydrology solve failed: {e}"));
+    println!(
+        "  solved {} land cells in {:.1}s; filled {} cells (mean {:.1} m, max {:.1} m)",
+        solved.descending_land.len(),
+        t_hydrology.elapsed().as_secs_f64(),
+        solved.raised_cell_count,
+        solved.mean_fill_depth_m,
+        solved.max_fill_depth_m
+    );
+    let receiver = &solved.receiver;
+    let order_idx = &solved.descending_land;
+    let accum_km2 = &solved.catchment_km2;
+    let discharge_m3_s = &solved.discharge_m3_s;
 
     // --- 5. report + write -------------------------------------------------
     let land: Vec<f32> = order_idx.iter().map(|&i| accum_km2[i as usize]).collect();
@@ -291,6 +187,27 @@ fn main() {
         println!(
             "    >= {thr:>9.0} km2: {n:>8} cells ({:.3}% of land)",
             n as f64 / land.len() as f64 * 100.0
+        );
+    }
+    let mut discharge_sorted: Vec<f32> = order_idx
+        .iter()
+        .map(|&i| discharge_m3_s[i as usize])
+        .collect();
+    discharge_sorted.sort_unstable_by(f32::total_cmp);
+    let dq = |f: f64| discharge_sorted[((discharge_sorted.len() - 1) as f64 * f) as usize];
+    println!(
+        "  annual-mean discharge m3/s: p50 {:.3}  p90 {:.1}  p99 {:.0}  p99.9 {:.0}  max {:.0}",
+        dq(0.5),
+        dq(0.9),
+        dq(0.99),
+        dq(0.999),
+        discharge_sorted[discharge_sorted.len() - 1]
+    );
+    for thr in [1.0f32, 10.0, 100.0, 1_000.0] {
+        let n = discharge_sorted.iter().filter(|v| **v >= thr).count();
+        println!(
+            "    >= {thr:>7.0} m3/s: {n:>8} cells ({:.3}% of land)",
+            n as f64 / discharge_sorted.len() as f64 * 100.0
         );
     }
 
@@ -326,7 +243,7 @@ fn main() {
         };
         order[i] = o;
         let r = receiver[i];
-        if r >= 0 {
+        if r != NO_RECEIVER {
             let r = r as usize;
             if o > donor_max[r] {
                 donor_max[r] = o;
@@ -349,7 +266,7 @@ fn main() {
             continue;
         }
         let ends = match receiver[i] {
-            r if r < 0 => true,
+            NO_RECEIVER => true,
             r => order[r as usize] != o,
         };
         if ends {
@@ -394,18 +311,40 @@ fn main() {
             }
         })
         .collect();
+    let discharge_bytes: Vec<u8> = discharge_m3_s
+        .iter()
+        .map(|&v| encode_log_discharge(v))
+        .collect();
     let stem = out_dir.join(format!("thalos_rivers_{}m", px_m as u64));
     std::fs::write(stem.with_extension("u8"), &bytes).unwrap();
+    std::fs::write(stem.with_extension("discharge.u8"), &discharge_bytes).unwrap();
     let meta = format!(
-        "{{\"width\":{w},\"height\":{h},\"px_m_equator\":{px_m},\"planet_radius_m\":{RADIUS_M},\"backing\":\"{backing}\",\"log_decades\":{LOG_DECADES},\"units\":\"u8 = 255*log10(catchment_km2)/log_decades\",\"mapping\":\"equirect\"}}
+        "{{\"width\":{w},\"height\":{h},\"px_m_equator\":{px_m},\"planet_radius_m\":{RADIUS_M},\"backing\":\"{backing}\",\"log_decades\":{LOG_DECADES},\"units\":\"u8 = 255*log10(catchment_km2)/log_decades\",\"discharge_log_min\":{DISCHARGE_LOG_MIN},\"discharge_log_max\":{DISCHARGE_LOG_MAX},\"discharge_units\":\"annual_mean_m3_s; byte 0 = zero; bytes 1..255 linear in log10\",\"runoff_model\":\"canonical_macro_moisture_v1\",\"mapping\":\"equirect\"}}
 "
     );
     std::fs::write(stem.with_extension("json"), meta).unwrap();
     let nz = bytes.iter().filter(|b| **b > 0).count();
     println!(
-        "  wrote {} ({:.1} MB u8, {:.1}% non-zero)",
+        "  wrote {} + discharge ({:.1} MB each, {:.1}% catchment non-zero, {:.1}% runoff non-zero)",
         stem.with_extension("u8").display(),
         bytes.len() as f64 / 1e6,
-        nz as f64 / bytes.len() as f64 * 100.0
+        nz as f64 / bytes.len() as f64 * 100.0,
+        discharge_bytes.iter().filter(|b| **b > 0).count() as f64 / discharge_bytes.len() as f64
+            * 100.0
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discharge_encoding_reserves_zero_and_is_monotone() {
+        assert_eq!(encode_log_discharge(0.0), 0);
+        assert_eq!(encode_log_discharge(0.001), 0);
+        let values = [0.01, 1.0, 100.0, 10_000.0, 1_000_000.0];
+        let encoded: Vec<u8> = values.into_iter().map(encode_log_discharge).collect();
+        assert!(encoded.windows(2).all(|w| w[0] < w[1]));
+        assert_eq!(encoded[encoded.len() - 1], 255);
+    }
 }

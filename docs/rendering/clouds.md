@@ -59,8 +59,8 @@ This is an upgrade, not a greenfield renderer. Preserve these foundations:
   1024×1024×6 RGBA cubemap carrying coverage/type/base/top, plus an
   8-level footprint-filtering mip chain.
 - Per-pixel cloud hit distance and deterministic composition through one
-  fullscreen `CloudCompositeMaterial`, including opaque-scene occlusion and
-  independence from the atmosphere material's cloud ownership.
+  fullscreen `CloudCompositeMaterial`, including opaque-scene and analytic-ocean
+  occlusion, and independence from the atmosphere material's cloud ownership.
 - Static-view sparse accumulation plus fresh full-pixel raymarching during
   camera motion; body-fixed reprojection only stabilizes a freshly marched
   moving result.

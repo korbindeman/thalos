@@ -71,12 +71,15 @@ impl Plugin for FlightConfigPlugin {
 fn update_flight_config(
     clock: Res<SimClock>,
     intent: Res<GameInputIntent>,
-    brake: Res<ParkingBrake>,
+    brake: thalos_game_state::ActiveCraftRef<ParkingBrake>,
     ground_control: Res<crate::control_bus::ResolvedGroundControl>,
     kin: Res<thalos_physics_local::LocalCraftKinematics>,
     mut config: ResMut<FlightConfig>,
     mut fast_enough: Local<bool>,
 ) {
+    let Some(brake) = brake.get() else {
+        return;
+    };
     if intent.flaps_extend {
         config.flap_setting = (config.flap_setting + 1).min(FLAP_DETENTS);
     }

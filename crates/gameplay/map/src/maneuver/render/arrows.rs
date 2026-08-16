@@ -10,8 +10,8 @@ use super::super::state::{
 };
 use thalos_game_state::camera::{ActiveCamera, CameraFocus};
 use thalos_game_state::coords::WorldScale;
-use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HideInShipView;
+use thalos_photo_mode::HideInPhotoMode;
 
 /// Spawn/despawn arrow handles and the slide sphere when node selection changes.
 pub(in crate::maneuver) fn manage_arrow_handles(

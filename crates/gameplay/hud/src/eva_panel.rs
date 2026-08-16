@@ -65,12 +65,16 @@ pub(super) fn setup(mut commands: Commands, theme: Res<HudTheme>) {
 
 pub(super) fn update(
     state: Res<PlayerControllerState>,
-    eva_mode: Res<EvaMode>,
+    eva_mode: thalos_game_state::ActiveCraftRef<EvaMode>,
     theme: Res<HudTheme>,
     mut roots: Query<&mut Visibility, With<EvaStatusRoot>>,
     mut texts: Query<(&mut Text, &mut TextColor), With<EvaStatusText>>,
 ) {
     let Ok(mut visibility) = roots.single_mut() else {
+        return;
+    };
+    let Some(eva_mode) = eva_mode.get() else {
+        *visibility = Visibility::Hidden;
         return;
     };
 

@@ -1,3 +1,11 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Unpublished report input</title>
+<main style="font: 18px/1.5 system-ui; max-width: 44rem; margin: 4rem auto; padding: 0 1rem">
+  <h1>Unpublished report input</h1>
+  <p>This file is editable source, not the report. Run <code>just publish-report &lt;this-file&gt;</code>, then open only the path printed after <code>OPEN ONLY:</code>.</p>
+</main>
+<script type="text/x-thalos-report" id="thalos-report-source">
 <!--
 Canonical presentation page for Thalos visual reports.
 Copy this file, keep the stylesheet untouched, replace the content.
@@ -11,9 +19,10 @@ Rules the stylesheet enforces or assumes:
   - text volume of a slide deck: bullets and captions here, prose in the chat reply
 
 Hand-back flow (docs/development/visual_testing.md):
-  copy this to artifacts/reports/<date>-<slug>.html and fill it in, then
-    python3 scripts/present_embed.py artifacts/reports/<page>.html
-  and navigate the agent browser pane to the .embedded.html's file:// path.
+  copy this to artifacts/reports/<date>-<slug>.html.in and fill it in, then
+    just publish-report artifacts/reports/<date>-<slug>.html.in
+  and open only the path printed after OPEN ONLY. Never hand back or open the
+  editable .html.in input; it contains unresolved image tokens.
 -->
 <title>Short title of the change</title>
 <style>
@@ -81,8 +90,9 @@ Hand-back flow (docs/development/visual_testing.md):
   <li>What is still unverified, if anything.</li>
 </ul>
 
-<!-- Each {{img:…}} token becomes a complete <img> tag when present_embed.py runs;
-     write the token on its own, never inside a src attribute. -->
+<!-- Each image token becomes a complete image tag when the publisher runs.
+     Write the token on its own, never inside a src attribute. This .html.in
+     input stays editable; the canonical .html is the only browser page. -->
 <figure class="pair">
   {{img:artifacts/visual/runs/comparisons/preset/axis/01_off.png|off}}
   {{img:artifacts/visual/runs/comparisons/preset/axis/02_on.png|on}}
@@ -95,3 +105,4 @@ Hand-back flow (docs/development/visual_testing.md):
   {{img:artifacts/visual/latest/preset_name.png|preset name}}
   <figcaption>Figure 2. Single captures get the same treatment.</figcaption>
 </figure>
+</script>

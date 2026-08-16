@@ -73,8 +73,6 @@ impl Plugin for GameLocalPhysicsPlugin {
             .init_resource::<AvianAuthority>()
             .init_resource::<AvianHandoffDiagnostics>()
             .init_resource::<GearTuning>()
-            .init_resource::<GearState>()
-            .init_resource::<ParkingBrake>()
             .init_resource::<WeightOnWheels>()
             .init_resource::<GearVisualCompression>()
             .init_resource::<SurfaceFriction>()

@@ -31,6 +31,7 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use thalos_game_state::ActiveCraftRef;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, BodyFixedPose, EntityRef, Epoch};
 use thalos_physics_canonical::regime::{
@@ -122,7 +123,7 @@ fn resolve_regime(
     contact_graph: Res<ContactGraph>,
     weight_on_wheels: Res<WeightOnWheels>,
     terrain: Res<GameTerrainRegistry>,
-    eva_mode: Res<EvaMode>,
+    eva_mode: ActiveCraftRef<EvaMode>,
     intent: Res<GameInputIntent>,
     player: Option<Res<PlayerControllerState>>,
     mut craft_q: Query<
@@ -135,6 +136,9 @@ fn resolve_regime(
         With<LocalCraftBody>,
     >,
 ) {
+    let Some(eva_mode) = eva_mode.get() else {
+        return;
+    };
     // No live local body, no regime — mirrors the legacy systems' bubble
     // early-returns (pre-bubble loading frames are unclassified).
     let Some(bubble) = active.bubble.as_ref() else {

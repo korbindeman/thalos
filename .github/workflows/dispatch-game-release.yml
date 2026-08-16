@@ -1,0 +1,38 @@
+name: Dispatch game release
+run-name: Dispatch ${{ github.ref_name }}
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    name: Start release build on main
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Dispatch immutable release source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_REF: ${{ github.ref }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          gh workflow run build-game.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref main \
+            --field cargo_features=neural-terrain-default \
+            --field use_default_features=false \
+            --field release_ref="${RELEASE_REF}" \
+            --field release_sha="${RELEASE_SHA}"
+
+          {
+            echo "### Release build dispatched"
+            echo "Source ref: \`${RELEASE_REF}\`"
+            echo "Source revision: \`${RELEASE_SHA}\`"
+            echo "The [Build game workflow](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/workflows/build-game.yml) runs on main so release caches are reusable across tags."
+          } >> "${GITHUB_STEP_SUMMARY}"

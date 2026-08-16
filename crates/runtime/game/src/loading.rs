@@ -492,6 +492,7 @@ fn spawn_loading_screen(
                     label_color: TEXT_FAINT,
                     value_color: TEXT_DIM,
                     caption: "VRAM",
+                    show_header: true,
                 },
             );
         });

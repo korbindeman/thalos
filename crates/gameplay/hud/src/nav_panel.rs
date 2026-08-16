@@ -767,7 +767,7 @@ pub fn handle_clicks(
     dismiss_interactions: Query<&Interaction, (Changed<Interaction>, With<ManeuverDismissButton>)>,
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     sim: Res<SimulationState>,
     route: Res<RouteState>,
     mut nav: ResMut<NavigationState>,
@@ -776,10 +776,13 @@ pub fn handle_clicks(
     mut warp_to: ResMut<WarpToManeuver>,
     mut maneuver_panel: ResMut<ManeuverPanelState>,
 ) {
+    let Some(plan) = plan.get() else {
+        return;
+    };
     for (interaction, button) in &interactions {
         if matches!(interaction, Interaction::Pressed)
             && !locks.navigation_mode
-            && mode_available(button.mode, &target, &plan)
+            && mode_available(button.mode, &target, plan)
         {
             if nav.mode == Some(button.mode) {
                 nav.mode = None;
@@ -857,8 +860,8 @@ pub fn update_button_visuals(
     theme: Res<HudTheme>,
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
-    realized: Res<thalos_game_state::flight::RealizedControl>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
+    realized: thalos_game_state::ActiveCraftRef<thalos_game_state::flight::RealizedControl>,
     sas: Res<thalos_game_state::flight::SasState>,
     mut buttons: ParamSet<(
         Query<(
@@ -878,14 +881,17 @@ pub fn update_button_visuals(
     mut icons: Query<(&NavButtonIcon, &mut ImageNode)>,
     mut text_q: Query<(&mut Text, &mut TextColor)>,
 ) {
+    let (Some(plan), Some(realized)) = (plan.get(), realized.get()) else {
+        return;
+    };
     if let Some(mode) = nav.mode
-        && !mode_available(mode, &target, &plan)
+        && !mode_available(mode, &target, plan)
     {
         nav.mode = None;
     }
 
     for (button, interaction, mut border, mut bg) in &mut buttons.p0() {
-        let available = mode_available(button.mode, &target, &plan);
+        let available = mode_available(button.mode, &target, plan);
         let active = nav.mode == Some(button.mode);
         let (border_color, bg_color) = nav_button_colors(
             &theme,
@@ -946,7 +952,7 @@ pub fn update_button_visuals(
     }
 
     for (icon, mut image) in &mut icons {
-        let target_handle = if mode_available(icon.mode, &target, &plan) {
+        let target_handle = if mode_available(icon.mode, &target, plan) {
             &icon.enabled
         } else {
             &icon.disabled
@@ -1104,7 +1110,7 @@ pub fn update_autopilot_visuals(
 pub fn update_maneuver_visuals(
     autopilot: Res<Autopilot>,
     schedule: Res<AutopilotBurnSchedule>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     sim: Res<SimulationState>,
     warp_to: Res<WarpToManeuver>,
     theme: Res<HudTheme>,
@@ -1153,6 +1159,9 @@ pub fn update_maneuver_visuals(
         ),
     >,
 ) {
+    let Some(plan) = plan.get() else {
+        return;
+    };
     let directive = schedule.next();
     // The burn HUD tracks the upcoming/active burn only. Spent (`Executed`)
     // nodes linger in the plan for review but must not keep this panel pinned

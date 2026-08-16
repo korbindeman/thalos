@@ -1,0 +1,13 @@
+[package]
+name = "thalos_viewer"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = "0.19"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thalos_render_model = { path = "../../rendering/model" }
+thalos_photo_mode = { path = "../photo_mode" }
+thalos_ui = { path = "../ui" }

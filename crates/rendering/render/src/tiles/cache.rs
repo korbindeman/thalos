@@ -296,6 +296,10 @@ impl TerrainTileProvider for CachedTileProvider {
         self.inner.height_range_m()
     }
 
+    fn refinement_error_m(&self, key: TileKey, radius_m: f64) -> Option<f32> {
+        self.inner.refinement_error_m(key, radius_m)
+    }
+
     fn request(&self, key: TileKey, radius_m: f64) -> SurfaceTile {
         let ns = (self.namespace)();
 

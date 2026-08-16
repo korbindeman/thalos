@@ -53,13 +53,16 @@ pub use map::{MapContext, MapProjection, MapSnapshot, ProjectedBodyState};
 pub use regime::{AvianAuthority, AvianRole, CraftRegimeState};
 pub use relaunch::{RelaunchRequest, RelaunchSpec, SpaceportLaunchRequest};
 pub use scenario::SpawnSituation;
-pub use scene::{ActiveCraft, CameraExposure, CelestialBody, PlayerShip, ShipMarker};
+pub use scene::{
+    ActiveCraft, ActiveCraftMut, ActiveCraftRef, CameraExposure, CelestialBody, CraftIdentity,
+    CraftPart, CraftRoot, PlayerShip, ShipMarker,
+};
 pub use sched::{RealizeControlSet, SimStage};
 pub use session::{
     ActiveSession, PendingSessionLoad, ScenarioFixture, SessionDurability, SessionGeneration,
     SessionLoadRequest, SessionPlan, SessionSource,
 };
 pub use solar_system::{BodyEnvironmentState, SimulationState, SolarSystemState};
-pub use ui::{HideInPhotoMode, HudPanel, PhotoMode, UiKeyboardGate, UiPointerGate};
+pub use ui::{HudPanel, UiKeyboardGate, UiPointerGate};
 pub use units::{AviationUnits, UnitDomain, UnitSystem, UnitsSettings};
 pub use view_anchor::{AnchorBody, ViewAnchor};

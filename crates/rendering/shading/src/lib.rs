@@ -11,16 +11,14 @@
 //! ## Plugin
 //!
 //! [`PlanetLightingPlugin`] registers the two shader libraries
-//! ([`thalos::lighting`] and [`thalos::atmosphere`]). `BodyRenderPlugin` adds
+//! ([`thalos::lighting`] and [`thalos::atmosphere`]). The planetary and far-body adapters add
 //! it once; the impostor and ground sub-plugins also add it defensively so
 //! either works standalone.
 
-mod atmosphere;
 mod lighting;
 mod multi_scatter;
 mod sky_view;
 
-pub use atmosphere::{AtmosphereBlock, CLOUD_BAND_COUNT};
 pub use lighting::{
     MAX_ECLIPSE_OCCLUDERS, MAX_STARS, SCENE_FLUX_SCALE, SURFACE_DIRECT_SCALE, SceneLighting,
     StarLight, spine_parity_exposure,
@@ -29,6 +27,7 @@ pub use multi_scatter::{
     MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, MultiScatterLut, bake_multi_scatter_lut,
 };
 pub use sky_view::{SKY_VIEW_LUT_HEIGHT, SKY_VIEW_LUT_WIDTH, SkyViewLut};
+pub use thalos_atmosphere::{AtmosphereBlock, CLOUD_BAND_COUNT};
 
 use bevy::prelude::*;
 

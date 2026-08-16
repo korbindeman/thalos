@@ -1,12 +1,12 @@
-//! Thalos integration of the forked `thalos_udlod` UDLOD renderer.
+//! Shared ground appearance plus the sealed legacy UDLOD implementation.
 //!
 //! # Status: LEGACY
 //!
 //! The UDLOD terrain half of this module is **end-of-life** (keystone
 //! ADR-20260723T142945Z): [`crate::tiles`] is the default ground renderer, and
-//! udlod now streams only bodies the tile driver has not installed on, or the
-//! whole world under the `THALOS_TILE_RENDERER=0` A/B baseline. Defect-driven
-//! fixes only — new ground work goes on the tile path.
+//! UDLOD is absent from default builds and exists only behind `legacy-udlod`
+//! for the `THALOS_TILE_RENDERER=0` A/B baseline. Defect-driven fixes only;
+//! new ground work goes on the tile path.
 //!
 //! **Not legacy:** the analytic [`BodySkyMaterial`] / [`BodyOceanMaterial`]
 //! projections and the shared ground-patch utilities that live here are the
@@ -27,15 +27,14 @@
 //!
 //! ## Plugin layering
 //!
-//! [`ThalosTerrainPlugin`] adds [`thalos_udlod::prelude::TerrainPlugin`] +
-//! [`bevy::pbr::MaterialPlugin<BodyTerrainMaterial>`] and embeds the body
-//! terrain shader. `thalos_udlod::TerrainPlugin` in turn adds
-//! [`big_space::prelude::BigSpaceDefaultPlugins`] unconditionally, so
-//! consumers that already register `BigSpaceDefaultPlugins` directly must
-//! drop that registration to avoid the duplicate-plugin panic.
+//! [`GroundAppearancePlugin`] installs the standard-path materials and shared
+//! mechanisms. Feature-gated [`LegacyUdlodPlugin`] adds
+//! [`thalos_udlod::prelude::TerrainPlugin`], the legacy material pipeline, and
+//! its body-terrain shader.
 
 use bevy::pbr::MaterialPlugin;
 use bevy::prelude::*;
+#[cfg(feature = "legacy-udlod")]
 use thalos_udlod::prelude::{TerrainMaterialPlugin, TerrainPlugin};
 
 mod body_material;
@@ -43,8 +42,9 @@ mod gpu_grass;
 mod ground_patch;
 mod height_source;
 mod landcover;
+mod material_masks;
 mod ocean_material;
-mod ocean_slope;
+#[cfg(feature = "legacy-udlod")]
 mod pipeline;
 #[cfg(feature = "playground")]
 mod playground_material;
@@ -53,13 +53,12 @@ mod rock_material;
 mod rock_mesh;
 mod scatter;
 mod sky_material;
+#[cfg(feature = "legacy-udlod")]
 mod synthetic;
 mod tile_lattice;
 pub(crate) mod tile_synthesis_pool;
-mod tree_atlas;
 mod tree_impostor;
 mod tree_material;
-mod tree_mesh;
 mod vegetation;
 
 pub use body_material::{
@@ -75,24 +74,22 @@ pub use gpu_grass::{
 };
 pub use ground_patch::{GroundPatchMaterial, GroundPatchMaterialPlugin};
 pub use height_source::{
-    ConstantHeightSource, CpuPipelineHeightSource, GpuAtlasHeightMirror,
-    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, HeightSource, RenderedGround,
+    ConstantHeightSource, CpuPipelineHeightSource, HeightSource, RenderedGround,
     RenderedGroundHeightSource, horizon_sun_visibility,
+};
+#[cfg(feature = "legacy-udlod")]
+pub use height_source::{
+    GpuAtlasHeightMirror, GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle,
 };
 pub use landcover::{LandcoverSample, sample_landcover};
 pub use ocean_material::BodyOceanMaterial;
-pub use ocean_slope::{
-    OCEAN_CASCADE_DOMAINS_M, OceanSpectrumProjection, OceanWaveFrame, bake_ocean_slope_texture,
-    ocean_packet_phase_speeds, ocean_wave_frame, project_ocean_spectrum,
-};
-pub use pipeline::{
-    PipelineTileProvider, rendered_height_m, rendered_height_range, renderer_tile_lod_m_at,
-};
+#[cfg(feature = "legacy-udlod")]
+pub use pipeline::{PipelineTileProvider, renderer_tile_lod_m_at};
 #[cfg(feature = "playground")]
 pub use playground_material::PlaygroundMaterial;
 pub use rendered_height::{
     TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh, build_rendered_terrain_patch,
-    build_rendered_terrain_patch_from_source,
+    build_rendered_terrain_patch_from_source, rendered_height_m, rendered_height_range,
 };
 pub use rock_material::{RockMaterial, RockMaterialPlugin};
 pub use rock_mesh::{RockMeshData, RockMeshParams, build_rock_mesh, build_rock_mesh_data};
@@ -103,13 +100,21 @@ pub use scatter::{
     combine_tree_tile_mesh, placement_gate,
 };
 pub use sky_material::BodySkyMaterial;
+#[cfg(feature = "legacy-udlod")]
 pub use synthetic::{SyntheticTerrainMode, SyntheticTileProvider};
+pub use thalos_ocean::{
+    OCEAN_CASCADE_DOMAINS_M, OceanFrameProjection, OceanMechanismPlugin, OceanSpectrumProjection,
+    OceanSurfaceProjection, OceanWaveFrame, RenderFrameTime, bake_ocean_slope_texture,
+    ocean_packet_phase_speeds, ocean_wave_frame, project_ocean_frame,
+};
+pub use thalos_vegetation::{
+    ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, CanopyStyle, FoliageImpostorBakePlugin,
+    GRASS_CARD_VARIANTS, ImpostorBakeConfig, ImpostorBakeRig, TreeMeshData, TreeMeshParams,
+    atlas_uv, build_foliage_atlas, build_foliage_material_atlas, build_grass_card_atlas,
+    build_tree_mesh, build_tree_mesh_data, despawn_impostor_bake_rig, spawn_impostor_bake_rig,
+};
 pub use tile_lattice::{TileKey, TileLattice, cube_dir, cube_face_uv, tiles_per_side};
 pub use tile_synthesis_pool::{tile_synthesis_pool, veg_scatter_pool};
-pub use tree_atlas::{
-    ATLAS_N, BARK_CELL_COUNT, BARK_CELL_FIRST, GRASS_CARD_VARIANTS, build_foliage_atlas,
-    build_foliage_material_atlas, build_grass_card_atlas,
-};
 pub use tree_impostor::{
     BakeParams, IMPOSTOR_MAX_SPECIES, ImpostorAtlasLayout, ImpostorParams, TreeBakeMaterial,
     TreeImpostorExtension, TreeImpostorMaterial, TreeImpostorMaterialPlugin, hemioct_decode,
@@ -119,9 +124,6 @@ pub use tree_impostor::{
 pub use tree_material::{
     TreeMaterial, TreeMaterialPlugin, TreeShadingExtension, fallback_shadow_map, tree_material,
 };
-pub use tree_mesh::{
-    CanopyStyle, TreeMeshData, TreeMeshParams, build_tree_mesh, build_tree_mesh_data,
-};
 pub use vegetation::{
     GRASS_TILE_SIZE_M, GrassBladeLod, GrassClumpParams, GrassFieldParams, GrassMaterial,
     GrassMaterialPlugin, GrassParams, GrassProfile, GrassTileBuildInput, GrassTileKey,
@@ -129,24 +131,23 @@ pub use vegetation::{
     grass_tile_frame, grass_tile_key, grass_tiles_per_side,
 };
 
-pub struct ThalosTerrainPlugin;
+/// Standard-path ground appearance shared by the planetary tile adapter and
+/// the optional legacy renderer.
+pub struct GroundAppearancePlugin;
 
-impl Plugin for ThalosTerrainPlugin {
+impl Plugin for GroundAppearancePlugin {
     fn build(&self, app: &mut App) {
+        app.add_plugins(big_space::plugin::BigSpaceDefaultPlugins);
         // `thalos::lighting` and `thalos::atmosphere` shader libraries live in
-        // the shared `thalos_planet_lighting` crate. Add its plugin defensively
+        // the shared `thalos_body_shading` crate. Add its plugin defensively
         // so terrain works in apps that don't also load
         // `PlanetRenderingPlugin` (e.g. headless examples).
         if !app.is_plugin_added::<crate::shading::PlanetLightingPlugin>() {
             app.add_plugins(crate::shading::PlanetLightingPlugin);
         }
-        app.add_plugins(TerrainPlugin);
-        app.add_systems(
-            Last,
-            height_source::sync_gpu_atlas_height_mirrors
-                .after(thalos_udlod::prelude::TileAtlas::update),
-        );
-        app.add_plugins(TerrainMaterialPlugin::<BodyTerrainMaterial>::default());
+        if !app.is_plugin_added::<OceanMechanismPlugin>() {
+            app.add_plugins(OceanMechanismPlugin);
+        }
         // Sky and ocean both use the standard Bevy MaterialPlugin — they
         // render through the regular forward pipeline as fullscreen analytic
         // projections, not thalos_udlod's UDLOD pipeline.
@@ -172,16 +173,35 @@ impl Plugin for ThalosTerrainPlugin {
         // Far-band tree impostors render through the forward pipeline too; the
         // bake material is rendered only by the startup off-screen bake cameras.
         app.add_plugins(MaterialPlugin::<TreeImpostorMaterial>::default());
-        app.add_plugins(MaterialPlugin::<TreeBakeMaterial>::default());
-        body_material::embed_body_terrain_shader(app);
+        if !app.is_plugin_added::<thalos_vegetation::FoliageImpostorBakePlugin>() {
+            app.add_plugins(thalos_vegetation::FoliageImpostorBakePlugin);
+        }
         sky_material::embed_body_sky_shader(app);
         vegetation::embed_grass_shader(app);
         gpu_grass::embed_gpu_grass_shader(app);
         // Trees moved to the standard path: their shader is the asset-loaded
         // (hot-reloadable) `shaders/tree_standard.wgsl`, not an embed.
         rock_material::embed_rock_shader(app);
-        tree_impostor::embed_tree_impostor_shaders(app);
         #[cfg(feature = "playground")]
         playground_material::embed_playground_shader(app);
+    }
+}
+
+/// Sealed legacy UDLOD renderer. This plugin and its dependency do not exist
+/// in the default build graph.
+#[cfg(feature = "legacy-udlod")]
+pub struct LegacyUdlodPlugin;
+
+#[cfg(feature = "legacy-udlod")]
+impl Plugin for LegacyUdlodPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_plugins(TerrainPlugin);
+        app.add_systems(
+            Last,
+            height_source::sync_gpu_atlas_height_mirrors
+                .after(thalos_udlod::prelude::TileAtlas::update),
+        );
+        app.add_plugins(TerrainMaterialPlugin::<BodyTerrainMaterial>::default());
+        body_material::embed_body_terrain_shader(app);
     }
 }

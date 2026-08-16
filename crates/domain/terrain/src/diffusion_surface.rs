@@ -455,6 +455,9 @@ pub struct DiffusionSurface {
     height_range_m: f32,
     /// FNV-1a over the raster payloads — cache-namespace identity.
     pub content_fingerprint: u64,
+    /// Procedural generator version that authored the conditioning chart.
+    /// `None` is legacy content whose sidecar predates provenance tracking.
+    conditioning_generator_version: Option<u64>,
 }
 
 impl DiffusionSurface {
@@ -467,6 +470,8 @@ impl DiffusionSurface {
         let width = json_num(&chart_json, "width").ok_or("chart sidecar: width")? as usize;
         let height = json_num(&chart_json, "height").ok_or("chart sidecar: height")? as usize;
         let px_m = json_num(&chart_json, "px_m_equator").unwrap_or(23_040.0);
+        let conditioning_generator_version =
+            json_num(&chart_json, "conditioning_generator_version").map(|value| value as u64);
         let chart = Raster::load(
             &dir.join("thalos_chart_elev.f32"),
             width,
@@ -550,7 +555,15 @@ impl DiffusionSurface {
             // deeper than the old landmask shelf's −3.45 km).
             height_range_m: peak_m + 1_500.0 + 4_000.0,
             content_fingerprint,
+            conditioning_generator_version,
         })
+    }
+
+    /// Generator version of the macro conditioning consumed by the learned
+    /// chart. A mismatch means the package is valid learned content, but its
+    /// planet-scale relief predates the current authored tectonic structure.
+    pub fn conditioning_generator_version(&self) -> Option<u64> {
+        self.conditioning_generator_version
     }
 
     /// Attach a baked drainage raster to the inner landcover authority

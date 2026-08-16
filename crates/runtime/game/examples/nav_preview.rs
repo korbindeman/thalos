@@ -35,14 +35,14 @@ use bevy::ui::IsDefaultUiCamera;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
+use thalos_game_runtime::display_preview::{
+    NavDisplayMaterial, NavSceneInputs, build_nav_scene, nav_display_data,
+};
+use thalos_game_runtime::route::plan_display;
 use thalos_navigation::{
     ApproachParams, ApproachPlan, Pose2, RejoinParams, RouteFrame, RunwayEnd, RunwayStrip,
     VnavParams, plan_approach, plan_rejoin, theta_of,
 };
-use thalos_runtime::display_preview::{
-    NavDisplayMaterial, NavSceneInputs, build_nav_scene, nav_display_data,
-};
-use thalos_runtime::route::plan_display;
 
 /// Plot size per panel (px). Larger than the in-game 200 px so thin symbology is
 /// legible in the contact sheet.

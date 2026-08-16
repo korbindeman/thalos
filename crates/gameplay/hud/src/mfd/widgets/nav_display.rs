@@ -30,7 +30,7 @@
 //! Drawn by `assets/shaders/nav_display.wgsl`; [`NavDisplayData`] mirrors that
 //! shader's struct field-for-field. Assembly is the pure
 //! [`nav_display_data`] over a [`NavScene`], so the headless preview
-//! (`cargo run -p thalos_runtime --example nav_preview`) can render states that
+//! (`cargo run -p thalos_game_runtime --example nav_preview`) can render states that
 //! are hard to fly to.
 
 use bevy::ecs::system::SystemParam;

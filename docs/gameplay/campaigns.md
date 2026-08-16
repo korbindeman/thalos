@@ -125,8 +125,11 @@ campaign clock; Thalos does not create per-player time subspaces.
 
 A future mission planner produces a graph of intended operations with
 preconditions, success conditions, explicit contingency edges, and terminal
-states. Its executor sends demands through the same control path as a human or
-autopilot. The world decides what happened:
+states. It is intended to compose any operation available to manual flight,
+including coordinated multi-launch and multi-vessel missions, and start the
+whole plan as one execution. Its executor sends demands through the same control
+path as a human or autopilot; automation is not a privileged simulation mode.
+The world decides what happened:
 
 - a satisfied precondition advances the plan;
 - a missed window or rendezvous follows an authored contingency or marks the

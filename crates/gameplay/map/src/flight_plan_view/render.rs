@@ -46,7 +46,7 @@ pub(super) fn render_trajectory(
     // BodyFixed crafts have no live orbital prediction — any cached
     // flight plan is frozen at the pre-collapse state. Drawing it would
     // show an orbit the craft is no longer on.
-    if let Some(craft) = snapshot.crafts.first()
+    if let Some(craft) = snapshot.active_craft()
         && matches!(craft.authority, AuthorityMode::BodyFixed { .. })
     {
         return;

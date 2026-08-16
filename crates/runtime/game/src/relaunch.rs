@@ -31,13 +31,14 @@
 //! editor's build is left untouched (hidden), so the design survives flying.
 
 use bevy::prelude::*;
+use thalos_game_state::{ActiveCraft, ActiveCraftMut, CraftRoot};
 
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
 use crate::SimStage;
 use crate::maneuver::{ManeuverPlan, SelectedNode};
-use crate::rendering::{PlayerShip, ShipMarker, SimulationState};
+use crate::rendering::SimulationState;
 use crate::scenario_menu::clear_bubble;
 use crate::spawn::{
     Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
@@ -54,7 +55,12 @@ pub use thalos_game_state::relaunch::{RelaunchRequest, RelaunchSpec};
 /// (`pub(crate)` only so [`relaunch_idle`] can appear in run conditions; no
 /// other module touches it.)
 #[derive(Resource, Default)]
-pub(crate) struct RelaunchInFlight(Option<RelaunchSpec>);
+pub(crate) struct RelaunchInFlight(Option<PendingRelaunch>);
+
+struct PendingRelaunch {
+    spec: RelaunchSpec,
+    outgoing_root: Option<Entity>,
+}
 
 /// Run condition: no relaunch teardown/rebuild is in flight. Systems that
 /// measure or place the player craft (the deferred runway placement) gate on
@@ -96,32 +102,33 @@ fn begin_relaunch(
     mut active: ResMut<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
     homeworld: Res<Homeworld>,
-    mut plan: ResMut<ManeuverPlan>,
+    active_craft: Res<ActiveCraft>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
-    player_ship: Query<Entity, With<PlayerShip>>,
-    ship_marker: Query<Entity, With<ShipMarker>>,
 ) {
     let Some(spec) = request.0.take() else {
         return;
     };
 
-    // Drop the old flight visuals: the `PlayerShip` root (despawn is recursive,
-    // taking the reparented part tree) and the separate map-view billboard.
-    for entity in player_ship.iter() {
-        commands.entity(entity).despawn();
-    }
-    for entity in ship_marker.iter() {
-        commands.entity(entity).despawn();
-    }
+    // Drop only the selected craft root. Other craft roots and their markers
+    // remain intact; marker reconciliation removes this root's billboard.
+    let outgoing_root = active_craft.0;
     // Tear down the wreck/old bubble so `spawn_player_avian_body` builds a fresh
     // one for the new craft once it exists.
-    clear_bubble(&mut commands, &mut active);
+    let bubble_root = clear_bubble(&mut commands, &mut active);
+    if let Some(entity) = outgoing_root
+        && Some(entity) != bubble_root
+    {
+        commands.entity(entity).despawn();
+    }
 
     // Fresh-craft reset, mirroring `scenario_menu::respawn_into`: clear any
     // structural-failure flag, drop to 1×, discard the old flight plan.
     sim.simulation.repair();
     sim.simulation.warp.reset();
-    if !plan.nodes.is_empty() {
+    if let Some(mut plan) = plan.get_mut()
+        && !plan.nodes.is_empty()
+    {
         plan.nodes.clear();
         plan.dirty = true;
     }
@@ -145,7 +152,10 @@ fn begin_relaunch(
     // is the shared canonical-state core.)
     place_craft(&mut sim, coast_placement(state, attitude), None);
 
-    in_flight.0 = Some(spec);
+    in_flight.0 = Some(PendingRelaunch {
+        spec,
+        outgoing_root,
+    });
 }
 
 /// Phase 2: once the old `PlayerShip` has actually despawned, build the new
@@ -157,27 +167,20 @@ fn finish_relaunch(
     view: Res<ViewMode>,
     mut sim: ResMut<SimulationState>,
     catalog: Res<thalos_shipyard::PartCatalog>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
-    player_ship: Query<(), With<PlayerShip>>,
+    craft_roots: Query<(), With<CraftRoot>>,
 ) {
-    if in_flight.0.is_none() {
+    let Some(pending) = in_flight.0.as_ref() else {
+        return;
+    };
+    // Wait only for the outgoing root. Unrelated roots must not block a launch.
+    if pending
+        .outgoing_root
+        .is_some_and(|entity| craft_roots.get(entity).is_ok())
+    {
         return;
     }
-    // Wait for the phase-1 despawn to apply, so the new craft is the only one.
-    if !player_ship.is_empty() {
-        return;
-    }
-    let spec = in_flight.0.take().unwrap();
-    crate::ship_view::build_player_ship(
-        &mut commands,
-        &view,
-        &spec.blueprint,
-        &mut sim,
-        &catalog,
-        &mut meshes,
-        &mut std_materials,
-    );
+    let spec = in_flight.0.take().unwrap().spec;
+    crate::ship_view::build_player_ship(&mut commands, &view, &spec.blueprint, &mut sim, &catalog);
     info!(
         "relaunch: built '{}' ({} parts) into {:?}",
         spec.blueprint.name,

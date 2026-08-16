@@ -12,6 +12,7 @@ edition.workspace = true
 # crate instead of the 186 MB parent when the capture host rebuilds.
 # See ADR-20260724T022732Z-render-crate-split-for-hot-iteration.
 [dependencies]
+thalos_atmosphere = { path = "../atmosphere" }
 thalos_world = { path = "../../domain/world" }
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
 glam = "0.32"

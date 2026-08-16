@@ -1,11 +1,21 @@
+#[cfg(feature = "legacy-udlod")]
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
+#[cfg(feature = "legacy-udlod")]
+use std::sync::RwLock;
 
-use bevy::math::{DVec2, DVec3, UVec2, Vec2, Vec3};
+#[cfg(feature = "legacy-udlod")]
+use bevy::math::{DVec2, UVec2, Vec2};
+use bevy::math::{DVec3, Vec3};
+#[cfg(feature = "legacy-udlod")]
 use bevy::prelude::*;
 pub use thalos_terrain::HeightSource;
-use thalos_terrain::{SurfaceQuery, TerrainPatchBasis, TerrainPatchMesh};
+#[cfg(feature = "legacy-udlod")]
+use thalos_terrain::TerrainPatchBasis;
+use thalos_terrain::{SurfaceQuery, TerrainPatchMesh};
+#[cfg(feature = "legacy-udlod")]
 use thalos_udlod::math::{Coordinate, TerrainModel, TileCoordinate};
+#[cfg(feature = "legacy-udlod")]
 use thalos_udlod::prelude::TileAtlas;
 
 /// Ground-distance march stations for [`horizon_sun_visibility`], metres from
@@ -140,6 +150,7 @@ impl HeightSource for ConstantHeightSource {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 pub type GpuAtlasMirrorHandle = Arc<RwLock<GpuAtlasHeightMirror>>;
 
 /// **The rendered ground, whichever renderer drew it.**
@@ -161,6 +172,7 @@ pub type GpuAtlasMirrorHandle = Arc<RwLock<GpuAtlasHeightMirror>>;
 #[derive(Clone)]
 pub enum RenderedGround {
     /// udlod's GPU tile atlas, mirrored on the CPU.
+    #[cfg(feature = "legacy-udlod")]
     Udlod(GpuAtlasMirrorHandle),
     /// The standard-path tile renderer's resident tile grids.
     Tiles(crate::tiles::TileHeightMirrorHandle),
@@ -171,6 +183,7 @@ impl RenderedGround {
     /// nothing is resident there.
     pub fn sample_height_m(&self, dir: Vec3) -> Option<f32> {
         match self {
+            #[cfg(feature = "legacy-udlod")]
             Self::Udlod(m) => m.read().ok()?.sample_height_m(dir),
             Self::Tiles(m) => m.read().ok()?.sample_height_m(dir),
         }
@@ -182,6 +195,7 @@ impl RenderedGround {
     /// must check this, not mere presence.
     pub fn best_resident_texel_m(&self, dir: Vec3) -> Option<f32> {
         match self {
+            #[cfg(feature = "legacy-udlod")]
             Self::Udlod(m) => m.read().ok()?.best_resident_texel_m(dir),
             Self::Tiles(m) => m.read().ok()?.best_resident_texel_m(dir),
         }
@@ -189,6 +203,7 @@ impl RenderedGround {
 
     pub fn revision(&self) -> u64 {
         match self {
+            #[cfg(feature = "legacy-udlod")]
             Self::Udlod(m) => m.read().map(|m| m.revision()).unwrap_or(0),
             Self::Tiles(m) => m.read().map(|m| m.revision()).unwrap_or(0),
         }
@@ -200,6 +215,7 @@ impl RenderedGround {
         max_resolution: u32,
     ) -> Option<TerrainPatchMesh> {
         match self {
+            #[cfg(feature = "legacy-udlod")]
             Self::Udlod(m) => m
                 .read()
                 .ok()?
@@ -213,6 +229,7 @@ impl RenderedGround {
 
     /// The concrete udlod atlas mirror, for the one consumer that owns it
     /// (`spawn_body_terrain`'s [`GpuAtlasHeightMirrorComponent`]).
+    #[cfg(feature = "legacy-udlod")]
     pub fn udlod_handle(&self) -> Option<GpuAtlasMirrorHandle> {
         match self {
             Self::Udlod(m) => Some(Arc::clone(m)),
@@ -236,6 +253,7 @@ impl RenderedGroundHeightSource {
     /// A source backed by udlod's atlas mirror. Creates the mirror; hand
     /// [`Self::rendered_ground`] to the registry and `mirror()` to the terrain
     /// entity.
+    #[cfg(feature = "legacy-udlod")]
     pub fn new_udlod(surface: Arc<dyn SurfaceQuery>) -> Self {
         Self {
             mirror: RenderedGround::Udlod(Arc::new(RwLock::new(GpuAtlasHeightMirror::default()))),
@@ -257,6 +275,7 @@ impl RenderedGroundHeightSource {
     }
 
     /// The udlod atlas handle, when this source is udlod-backed.
+    #[cfg(feature = "legacy-udlod")]
     pub fn mirror(&self) -> Option<GpuAtlasMirrorHandle> {
         self.mirror.udlod_handle()
     }
@@ -291,17 +310,20 @@ impl HeightSource for RenderedGroundHeightSource {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 #[derive(Component, Clone)]
 pub struct GpuAtlasHeightMirrorComponent {
     pub mirror: GpuAtlasMirrorHandle,
 }
 
+#[cfg(feature = "legacy-udlod")]
 impl GpuAtlasHeightMirrorComponent {
     pub fn new(mirror: GpuAtlasMirrorHandle) -> Self {
         Self { mirror }
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 #[derive(Default)]
 pub struct GpuAtlasHeightMirror {
     model: Option<TerrainModel>,
@@ -319,6 +341,7 @@ pub struct GpuAtlasHeightMirror {
     revision: u64,
 }
 
+#[cfg(feature = "legacy-udlod")]
 #[derive(Clone)]
 struct MirroredHeightTile {
     atlas_index: u32,
@@ -326,6 +349,7 @@ struct MirroredHeightTile {
     texels: MirroredHeightTexels,
 }
 
+#[cfg(feature = "legacy-udlod")]
 #[derive(Clone)]
 enum MirroredHeightTexels {
     R16(Vec<u16>),
@@ -333,6 +357,7 @@ enum MirroredHeightTexels {
     R32Float(Vec<f32>),
 }
 
+#[cfg(feature = "legacy-udlod")]
 impl MirroredHeightTexels {
     fn len(&self) -> usize {
         match self {
@@ -362,6 +387,7 @@ impl MirroredHeightTexels {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 impl GpuAtlasHeightMirror {
     pub fn revision(&self) -> u64 {
         self.revision
@@ -601,6 +627,7 @@ impl GpuAtlasHeightMirror {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn sync_gpu_atlas_height_mirrors(
     mirrors: Query<(&TileAtlas, &GpuAtlasHeightMirrorComponent)>,
 ) {
@@ -611,6 +638,7 @@ pub(crate) fn sync_gpu_atlas_height_mirrors(
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn tile_lookup_at_lod(coordinate: Coordinate, lod: u32) -> (TileCoordinate, Vec2) {
     let count = TileCoordinate::count(lod) as f64;
     let scaled = coordinate.uv * count;
@@ -630,6 +658,7 @@ fn tile_lookup_at_lod(coordinate: Coordinate, lod: u32) -> (TileCoordinate, Vec2
     )
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn sample_r16_tile(
     texels: &[u16],
     texture_size: u32,
@@ -642,6 +671,7 @@ fn sample_r16_tile(
     .map(|v| v.round().clamp(0.0, u16::MAX as f32) as u16)
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn sample_rg16_height_tile(
     texels: &[[u16; 2]],
     texture_size: u32,
@@ -653,10 +683,12 @@ fn sample_rg16_height_tile(
     })
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn decode_rg16_height(texel: [u16; 2]) -> f32 {
     texel[0] as f32 / u16::MAX as f32 + texel[1] as f32 / (u16::MAX as f32 * u16::MAX as f32)
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn sample_f32_tile(
     texels: &[f32],
     texture_size: u32,
@@ -668,6 +700,7 @@ fn sample_f32_tile(
     })
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn sample_tile_unit(
     texture_size: u32,
     border_size: u32,

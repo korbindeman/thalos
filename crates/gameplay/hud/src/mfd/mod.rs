@@ -403,7 +403,7 @@ impl Plugin for MfdPlugin {
                     .chain()
                     .after(thalos_game_state::sched::SimStage::Sync)
                     .run_if(
-                        thalos_game_state::ui::not_in_photo_mode
+                        thalos_photo_mode::not_in_photo_mode
                             .and_then(thalos_game_state::context::flight_or_no_context),
                     ),
             );

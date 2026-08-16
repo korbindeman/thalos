@@ -29,6 +29,7 @@ pub fn update_map_snapshot(
     snapshot
         .crafts
         .extend(sim.simulation.craft_states().cloned());
+    snapshot.active_craft_id = Some(sim.simulation.active_craft_id());
     snapshot.flight_plan = sim.simulation.prediction().cloned();
     snapshot.branch_stack = sim.simulation.trajectory_branches().cloned();
     snapshot.prediction_version = sim.simulation.prediction_version();

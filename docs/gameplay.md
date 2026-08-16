@@ -5,6 +5,11 @@ recorded so decisions downstream of it stay consistent. It is not a parallel
 status tracker: subsystem roadmaps hold strategy and `backlog.md` alone schedules
 their execution.
 
+This document owns the design of the **Thalos game**, the project's primary
+application and intended release. The relationship between that game, the
+internal world foundation, and secondary applications such as Kòrsou is defined
+in [Project purpose](purpose.md).
+
 Lore and setting live in [lore/civilization.md](lore/civilization.md) (progression
 phases, resource economy, the Pelagos question) and
 [lore/solar_system.md](lore/solar_system.md). This doc is the *mechanical* layer: what

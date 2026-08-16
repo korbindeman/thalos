@@ -310,7 +310,7 @@ fn inspect_catalog(
                 &viewpoint.name,
                 "saved",
                 &viewpoint.description,
-                Some(&viewpoint.body),
+                Some(viewpoint.frame.label()),
                 None,
                 latest.join(format!("{}.png", file_slug(&viewpoint.id))),
                 thumbnail_dir,
@@ -685,7 +685,9 @@ fn timestamp_millis() -> u128 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use thalos_capture_protocol::{CameraOptics, ScriptedViewpoint, Viewpoint, ViewpointSpawn};
+    use thalos_capture_protocol::{
+        CameraOptics, ScriptedViewpoint, Viewpoint, ViewpointFrame, ViewpointSpawn,
+    };
     use uuid::Uuid;
 
     fn sample_catalog() -> ViewpointCatalog {
@@ -695,12 +697,14 @@ mod tests {
                 name: "Saved view".into(),
                 description: "A saved camera".into(),
                 saved_unix_ms: 1,
-                body: "Thalos".into(),
-                spawn: ViewpointSpawn::Runway,
-                boots_hub: false,
-                sim_time_s: 59_100.0,
-                camera_position_body_m: [1.0, 2.0, 3.0],
-                camera_rotation_body_xyzw: [0.0, 0.0, 0.0, 1.0],
+                frame: ViewpointFrame::AuthoredBodyFixed {
+                    body: "Thalos".into(),
+                    spawn: ViewpointSpawn::Runway,
+                    boots_hub: false,
+                    sim_time_s: 59_100.0,
+                },
+                camera_position_m: [1.0, 2.0, 3.0],
+                camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
                 optics: CameraOptics::from_vertical_fov(1.0, [16, 9]).unwrap(),
             }],
             scripted_viewpoints: vec![ScriptedViewpoint {

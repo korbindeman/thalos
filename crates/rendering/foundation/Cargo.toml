@@ -1,0 +1,8 @@
+[package]
+name = "thalos_render_foundation"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }

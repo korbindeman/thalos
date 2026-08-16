@@ -9,7 +9,7 @@ use bevy::prelude::*;
 
 use crate::navball::render::NavballRenderTarget;
 use crate::theme::HudTheme;
-use thalos_game_state::ui::HideInPhotoMode;
+use thalos_photo_mode::HideInPhotoMode;
 
 pub const NAVBALL_LEFT_PX: f32 = 28.0;
 pub const NAVBALL_BOTTOM_PX: f32 = 28.0;

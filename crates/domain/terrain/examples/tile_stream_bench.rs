@@ -10,14 +10,14 @@
 //!     worker fans its tile's *rows* across.
 //!
 //! The outer width (`TILE_SYNTHESIS_THREADS = 4`) was sized for UDLOD's 512²
-//! tiles — 262 k samples each. The tile renderer's tiles are 67² = 4.5 k
-//! samples, **58× smaller**, so the same width may now be leaving the machine
-//! idle while row fan-out overhead dominates. This sweeps outer width × inner
-//! fan-out and reports tiles/s, so the constant is chosen against a measurement
-//! instead of an inherited comment.
+//! tiles — 262 k samples each. The tile renderer's tiles are 131² = 17.2 k
+//! samples, **15× smaller**, so the same width may still leave the machine idle
+//! while row fan-out overhead dominates. This sweeps outer width × inner fan-out
+//! and reports tiles/s, so the constant is chosen against a measurement instead
+//! of an inherited comment.
 //!
 //! Samples through `sample_bands_d` — the exact call `SurfaceQueryProvider`
-//! makes — over the real 67×67 halo grid.
+//! makes — over the real 131×131 halo grid.
 //!
 //! Not a test (terrain-gen tests are disabled during iteration — see CLAUDE.md).
 //!
@@ -37,17 +37,18 @@ use thalos_terrain::query::SurfaceQuery;
 
 const RADIUS_M: f64 = 3_186_000.0; // Thalos
 
-/// `tiles::TILE_RES` (65) + 2 × `TILE_HALO` (1) — the provider's sample grid.
-const SIDE: usize = 67;
+/// `tiles::TILE_RES` (129) + 2 × `TILE_HALO` (1) — the provider's sample grid.
+const SIDE: usize = 131;
 
-/// Level 12 on Thalos: a representative near-surface streaming tile.
+/// Level 11 on Thalos: a representative near-surface streaming tile, with the
+/// same sample spacing as the former 65² level-12 tile.
 /// `tile_arc / (TILE_RES − 1)` = the provider's `sample_spacing_m`.
 fn spacing_at_level(level: u32) -> f64 {
-    RADIUS_M * std::f64::consts::FRAC_PI_2 / (1u64 << level) as f64 / 64.0
+    RADIUS_M * std::f64::consts::FRAC_PI_2 / (1u64 << level) as f64 / 128.0
 }
 
 /// One tile's worth of provider work, single-threaded (the `parallel_rows =
-/// false` shape): 67 rows × 67 `sample_bands_d` calls.
+/// false` shape): 131 rows × 131 `sample_bands_d` calls.
 fn eval_tile_serial(surface: &ProceduralSurface, base: DVec3, spacing: f64) -> f64 {
     (0..SIDE).map(|j| eval_row(surface, base, spacing, j)).sum()
 }
@@ -148,7 +149,7 @@ fn main() {
         .build()
         .expect("inner pool");
 
-    let level = 12;
+    let level = 11;
     let spacing = spacing_at_level(level);
     let centres = tile_centres(tiles);
 

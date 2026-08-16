@@ -6,14 +6,35 @@ and the invariants that are expensive to rediscover. Everything else lives in
 `docs/` — **`docs/README.md` is the canonical documentation map**, and
 `docs/architecture.md` holds the crate/module anatomy this file used to inline.
 
-## Thalos
+## Project purpose
 
-A planetary exploration / orbital-mechanics sandbox in Rust (edition 2024, Bevy
-0.19, glam 0.32), in **pre-alpha**. Architecture and tooling are still being
-shaped — you are encouraged to tear down infrastructure you find lacking and
-replace it with something better. You don't need permission; you do need to
-leave a trail: say what you replaced and why, and update this file plus the
-relevant `docs/` spec in the same change. No silent rewrites.
+The name **Thalos** currently covers three related things; keep their boundary
+explicit until a future rename gives the wider project its own name:
+
+- the **Thalos game** is the primary product: a spaceflight simulator intended
+  for release, not a renderer showcase;
+- the **world foundation** is the project's internal personal engine for
+  representing, emulating, and rendering natural worlds, from small flat maps
+  through several spherical or ellipsoidal bodies to full solar systems;
+- **Kòrsou** is a real secondary passion project and focused real-world
+  laboratory, developed tangentially and possibly targeting the web later. It
+  is neither a disposable demo nor a scenario inside the game.
+
+The game remains the product and integration anchor. Focused applications may
+deepen terrain, ocean, foliage, atmosphere, and other systems in a constrained
+environment; promote findings into the shared foundation only when the
+mechanism genuinely matches, then bring them back to every relevant
+application. Share meaning, not topology: planar, cube-sphere, analytic-body,
+far-body, and geodetic-ellipsoid concerns stay in explicit adapters. Full
+purpose and decision rules: `docs/purpose.md`.
+
+The Thalos game is a planetary exploration / orbital-mechanics sandbox in Rust
+(edition 2024, Bevy 0.19, glam 0.32), in **pre-alpha**. Project architecture and
+tooling are still being shaped — you are encouraged to tear down infrastructure
+you find lacking and replace it with something better. You don't need
+permission; you do need to leave a trail: say what you replaced and why, and
+update this file plus the relevant `docs/` spec in the same change. No silent
+rewrites.
 
 ## Current focus
 
@@ -41,10 +62,11 @@ ocean, plumes, celestial sky, capture harness) continue; MIRA-1 pauses after its
 L2 gate.
 
 **Background sprints** — architecture & code quality
-(`docs/roadmap/architecture_cleanup.md`, `clean §N`) and the surviving
-graphics-fidelity composites (`docs/roadmap/graphics_fidelity.md`, `gfx §N`,
-whose **one-world principle** still holds: every surface obeys the same light,
-shadows, occlusion, and air).
+(`docs/roadmap/architecture_cleanup.md`, `clean §N`), the lightweight
+capability-selected application runtime (`docs/roadmap/application_runtime.md`,
+`app §N`), and the surviving graphics-fidelity composites
+(`docs/roadmap/graphics_fidelity.md`, `gfx §N`, whose **one-world principle**
+still holds: every surface obeys the same light, shadows, occlusion, and air).
 
 ## Steering & memory
 
@@ -110,6 +132,14 @@ the exception; when you're unsure whether something earns a record, it doesn't.
   composition, sim-coupled drivers, and glue. Modules still handle ordinary
   sub-feature size, and never split what's scheduled for demolition
   (`thalos_udlod`, the procedural terrain chain).
+- **The shared runtime is light by default.** `thalos_runtime` is an
+  empty-default capability facade (`docs/roadmap/application_runtime.md`,
+  ADR-20260809T201216Z): Kòrsou selects the interactive shell; the game opts
+  into the complete `game` bundle. Simulation/gameplay/planetary become
+  independent selectors only after honest crate boundaries exist. Features select optional
+  crate/plugin edges at composition — they never replace crate boundaries or
+  spread `#[cfg]` through implementation systems. A disabled capability must
+  be absent from the dependency graph, not merely inactive at runtime.
 - **Size work in LLM tokens, not days.** The work is done by agents, so
   "two days" / "a week" / "a sprint" are meaningless units here — they describe
   a human workday nobody is spending. Estimate and compare in the currency that
@@ -144,6 +174,8 @@ just game [mode]        # USER-RUN ONLY; stops the capture host, then owns the
                         # one machine-wide renderer lease. modes: menu (default) orbit
                         #   polar eva landing final cruise runway runway-approach
                         #   shipyard hub mira mira-eva
+                        #   On macOS, quality defaults to laptop. quality=showcase
+                        #   or THALOS_QUALITY overrides the session pin.
 just check [package]    # fast type-check (default thalos_game)
 just build              # cargo build --workspace
 just clippy             # cargo clippy --workspace
@@ -158,8 +190,9 @@ just compare <preset> <axis>   # N-way matrix → artifacts/visual/runs/comparis
 just screenshot-cold / just compare-cold   # clean-process isolated evidence
 just capture-status / just capture-stop    # persistent capture host
 just build-reset        # the ONE supported full artifact reset
+just publish-report <page>.html.in  # embed + validate images → canonical .html
 
-just map                # whole-planet biome map + per-biome stats → target/
+just map                # whole-planet biome + relief maps, per-biome stats → target/
 just preview            # headless procedural-object gallery → artifacts/visual/latest/
 just nd-preview           # headless navigation-display preview (8 approach
                         #   situations, real plans + real shader)
@@ -178,6 +211,10 @@ just diag [hours]       # diagnostics triage: what in the last <hours> of the
 just perf-report [s]    # runtime.jsonl perf lane → HTML + summary.json per
                         #   session (latest | <pid>-<ms> | --list); F3 in-game
                         #   shows the same data live (tooling.md · perf lane)
+just perf-bisect [p]    # one warmed offscreen foliage × custom-shadow matrix
+                        #   (default preset forest-stand) → headless-matrix.json
+just perf-shadow-bisect [p] # warmed 4→0 custom-shadow cascade cost ladder
+                            #   → headless-shadow-cascades.json
 just trace              # profile-tracy build (needs Tracy GUI v0.11.x running)
 just release <kind>     # bump version, commit, tag, push
 ```
@@ -294,8 +331,12 @@ evidence (you ran `just screenshot` / `capture` / `compare` / `preview` /
 spans enough subsystems that a diagram beats a list, or when asked. Judge it
 yourself — this is not a step to perform on every run.
 
-**Build it as a local page in `artifacts/reports/`** (`<date>-<slug>.html`,
-gitignored like all evidence) and open it in the user's own browser:
+**Build it as a local page in `artifacts/reports/`**. The editable input is
+`<date>-<slug>.html.in`; its non-HTML suffix is a safety boundary, not a naming
+preference. The self-contained result is the only browser page,
+`<date>-<slug>.html` (both are gitignored like all evidence). Open only that
+result in the user's own browser. If the input is opened accidentally, its
+non-rendering source wrapper shows only an **Unpublished report input** warning:
 
 - **Start from `scripts/present_template.html`** and keep its stylesheet. The
   design language is fixed (defined in `docs/development/visual_testing.md` ·
@@ -306,23 +347,26 @@ gitignored like all evidence) and open it in the user's own browser:
   full write-up belongs in the chat reply, which the user reads regardless.
 - **Captures must be embedded.** `artifacts/visual/latest/` and the comparison
   dirs are overwritten on every rerun, so a page that references them live
-  silently changes under the reader. Write the page with
+  silently changes under the reader. Write the `.html.in` file with
   `{{img:artifacts/visual/latest/<name>.png}}` tokens (optionally
-  `{{img:<path>|caption text}}`), then run
-  `python3 scripts/present_embed.py <page>.html` — it downscales, inlines, and
-  writes `<page>.embedded.html`. Present *that* file by navigating the agent
-  browser pane to its `file://` path (`force: true` if the pane shows a stale
-  snapshot); keep the token source so the page can be regenerated after a
-  recapture.
-- **Before/after beats after.** Show the matched pair from the comparison run,
-  same preset and framing, labelled — never two differently-framed stills.
+  `{{img:<path>|caption text}}`), then run `just publish-report <page>.html.in`.
+  The command refuses malformed/unresolved tokens and any non-embedded image,
+  then prints `OPEN ONLY:` followed by the canonical `<page>.html`. Present
+  exactly that file by navigating the agent browser pane to its `file://` path
+  (`force: true` if the pane shows a stale snapshot). Keep the `.html.in` input
+  and its unpublished-input wrapper only so the page can be regenerated after
+  a recapture; it must never be handed back or opened as a page.
+- **Always show a before/after when applicable.** If the result has a meaningful
+  prior state, present both states rather than only the finished result. For
+  visual changes, use the matched pair from the comparison run with the same
+  preset and framing, clearly labelled — never two differently-framed stills.
 - **Diagrams are mermaid**, rendered natively (```mermaid fence or
   `<pre class="mermaid">`); no external library will load.
 - **Plain language, same as a visual report**: what you see, what changed, what
   you deliberately left alone, and what is still unverified. Name the presets
   and files so the user can rerun them.
 - The claude.ai Artifact tool is the secondary route, for a page that must
-  travel off this machine — publish the same `.embedded.html` (its CSP blocks
+  travel off this machine — publish the same canonical `.html` (its CSP blocks
   external loads, which the embedding already satisfies). With no way to open
   a page at all, fall back to a short markdown summary with the PNG paths — do
   not describe pixels you could have shown.
@@ -500,7 +544,8 @@ LLVM backend. Full policy and machine-specific recipes:
 
 ## Codebase map
 
-Pure-Rust libraries (no Bevy) — `thalos_world` (authored body/system truth),
+Pure-Rust libraries (no Bevy) — `thalos_render_model` (validated immutable
+render-frame inputs), `thalos_world` (authored body/system truth),
 `thalos_physics_canonical` (orbital mechanics, aero, surface-local frame),
 `thalos_control` (fly-by-wire), `thalos_terrain` (`SurfaceQuery` + generation),
 `thalos_celestial` (sky model), `thalos_texgen` (offline textures),
@@ -517,12 +562,25 @@ ADR-20260731T024003Z), the **gameplay feature crates** that read it
 `crates/gameplay/` — each depends only downward, **never on each other or on
 the runtime**, and orders against the published `thalos_game_state::sched`
 system sets rather than another crate's systems),
-`thalos_runtime` (`crates/runtime/game`, the sole app
-composition: gameplay, rendering integration, UI, scenarios, capture presets),
-`thalos_game` (`apps/game`, thin launcher), `thalos_body_render` +
-`thalos_body_shading` (celestial-body rendering; owns both the default
-`tiles` ground renderer and the legacy `thalos_udlod` one it is replacing —
-sole consumer of that crate), `thalos_physics_local` (Avian boundary),
+`thalos_preferences` (`crates/interface/preferences`, the shared window,
+UI-scale, MSAA, persistence, and modular settings-menu host used by both apps),
+`thalos_viewer` (`crates/interface/viewer`, shared semantic freecam motion,
+physical optics, level/ground/speed preferences, freecam panel, and the one
+frame-tagged viewpoint store/CRUD/F8/F9 UI over explicit application spatial
+adapters),
+`thalos_runtime` (`crates/runtime/app`, the thin empty-default capability
+facade shared by player apps and capture tools), `thalos_game_runtime`
+(`crates/runtime/game`, the transitional complete game composition selected by
+the facade's explicit `game` bundle), `thalos_game` (`apps/game`, thin
+launcher), `korsou` (`apps/korsou`, real-world explorer with planar and
+WGS84/EGM2008 ellipsoid adapters that selects only `interactive` and has no
+simulation/gameplay capability), `thalos_body_render` +
+`thalos_render_foundation` + `thalos_body_shading` + `thalos_ocean` +
+`thalos_vegetation` (shared GPU passes plus topology-independent shading,
+water, and woody-appearance payloads), `thalos_body_render` (planetary and
+far-body adapters; owns the default `tiles` ground renderer and is the sole,
+feature-gated consumer of the optional legacy `thalos_udlod` baseline),
+`thalos_physics_local` (Avian boundary),
 `thalos_shipyard` (construction model), `thalos_input`, `thalos_ui`,
 `thalos_capture_{protocol,runtime}`, vendored `big_space`.
 
@@ -537,15 +595,19 @@ collection runs in `PreUpdate` before them.
 
 **Crate boundaries**
 
-- **The pure crates have no Bevy**, even transitively: `thalos_world`,
-  `thalos_physics_canonical`, `thalos_terrain`, `thalos_celestial`. CI-guarded
-  with a `cargo tree` check. (`bevy_erosion_filter` is allowed only via
+- **The pure crates have no Bevy**, even transitively: `thalos_render_model`,
+  `thalos_world`, `thalos_physics_canonical`, `thalos_terrain`,
+  `thalos_celestial`. CI-guarded with a `cargo tree` check.
+  (`bevy_erosion_filter` is allowed only via
   `default-features = false`, which pulls no Bevy engine crate.)
 - Avian lives behind `thalos_physics_local`; never add it to
   `physics_canonical`. Don't derive `Reflect` there either — mirror canonical
   state into a Bevy resource at the bridge (`CraftStateMirror`).
 - `thalos_body_render` is the **sole** consumer of `thalos_udlod`, so replacing
   the ground backend stays localized.
+- `thalos_render_foundation` owns GPU resources and pass ordering only. It may
+  depend on Bevy and `thalos_diagnostics`, never on a world, spatial adapter,
+  gameplay crate, or application composition. CI guards this dependency seam.
 
 **Ground renderer: tiles by default, udlod is legacy**
 
@@ -554,14 +616,14 @@ collection runs in `PreUpdate` before them.
   `ViewAnchor` by `rendering::tile_terrain`. New terrain, shading, scatter, or
   LOD work goes here.
 - **`thalos_udlod` + `body_render::ground`'s terrain half + the terrain WGSL
-  stack (`body_terrain.wgsl`, udlod's shaders) are legacy**: defect-driven
-  fixes only, deleted once the remaining `ntr §6` rows close. They still stream
-  bodies the tile driver has not installed on (it takes one body per session
-  today), which is the only reason the path is still wired.
-- **`THALOS_TILE_RENDERER=0` is an A/B baseline, not a supported mode** — it
-  forces the whole process back onto legacy udlod, which is what the `renderer`
-  compare axis drives. The gate is a boot `OnceLock`, so it always needs a cold
-  run / host restart. Anything else (including unset) is the tile path.
+  stack (`body_terrain.wgsl`, udlod's shaders) are sealed legacy**: defect-driven
+  fixes only. They are absent from every default application graph and exist
+  only behind the optional `legacy-udlod` feature for matched A/B evidence.
+- **`THALOS_TILE_RENDERER=0` is a feature-only A/B baseline, not a supported
+  mode** — it requires a binary built with `legacy-udlod`. The canonical
+  `renderer` compare axis adds that feature automatically for the legacy cold
+  capture; ordinary `just game`/capture builds do not compile it. Anything else
+  (including unset) is the tile path.
 - The analytic composites that live in `body_render::ground` — `BodySky`,
   `BodyOcean`, the impostor handoff — are **not** legacy; they are the
   ADR-20260723T142945Z carve-out and outlive udlod.

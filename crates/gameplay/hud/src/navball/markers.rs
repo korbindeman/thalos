@@ -217,7 +217,7 @@ pub fn update_navball_markers(
     sim_state: Res<SimulationState>,
     solar_system: Res<SolarSystemState>,
     target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     velocity_frame: Res<VelocityFrameState>,
     mut markers: Query<(
         &MarkerKind,
@@ -227,12 +227,15 @@ pub fn update_navball_markers(
         &mut Visibility,
     )>,
 ) {
+    let Some(plan) = plan.get() else {
+        return;
+    };
     let directions = compute_marker_directions(
         velocity_frame.active,
         &sim_state,
         &solar_system,
         &target,
-        &plan,
+        plan,
     );
     let icon_half = ICON_SIZE as f32 * 0.5;
 

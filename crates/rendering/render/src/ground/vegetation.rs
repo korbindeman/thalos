@@ -33,7 +33,7 @@ use crate::ground::height_source::HeightSource;
 use crate::ground::rendered_height::TerrainPatchBasis;
 use crate::ground::scatter::{ScatterClass, ScatterRegion, classify_scatter, placement_gate};
 use crate::ground::tile_lattice::{self, TileLattice, cube_dir};
-use crate::ground::tree_atlas::GRASS_CARD_VARIANTS;
+use thalos_vegetation::GRASS_CARD_VARIANTS;
 
 /// Nominal metric side of one grass tile at a cube-face centre. Toward face
 /// corners the cube projection shrinks tiles laterally (down to ~1/2 side);
@@ -1219,7 +1219,7 @@ pub(crate) fn embed_grass_shader(app: &mut App) {
 }
 
 /// Standalone plugin that registers [`GrassMaterial`] and embeds its shader, for
-/// consumers that render grass without the full [`ThalosTerrainPlugin`](crate::ground::ThalosTerrainPlugin)
+/// consumers that render grass without the full [`GroundAppearancePlugin`](crate::ground::GroundAppearancePlugin)
 /// (e.g. the headless object preview). The terrain plugin registers the same
 /// material directly, so don't add both.
 pub struct GrassMaterialPlugin;

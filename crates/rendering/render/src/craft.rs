@@ -291,7 +291,7 @@ pub struct CraftRenderPlugin;
 impl Plugin for CraftRenderPlugin {
     fn build(&self, app: &mut App) {
         // The hull shader `#import`s `thalos::shadow`; make sure that library is
-        // registered even where the full BodyRenderPlugin isn't added (standalone
+        // registered even where the full adapter composition isn't added (standalone
         // editor). No-op if already present — mirrors the other sub-plugins.
         if !app.is_plugin_added::<crate::shading::PlanetLightingPlugin>() {
             app.add_plugins(crate::shading::PlanetLightingPlugin);

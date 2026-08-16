@@ -32,6 +32,15 @@ pub(crate) fn camera_scroll_delta(delta: Vec2, unit: MouseScrollUnit) -> Vec2 {
     }
 }
 
+/// Freecam speed follows trackpad swipes directly, while a notched wheel keeps
+/// its existing line-scroll direction.
+pub(crate) fn freecam_speed_scroll_lines(delta_y: f32, unit: MouseScrollUnit) -> f32 {
+    match unit {
+        MouseScrollUnit::Line => delta_y,
+        MouseScrollUnit::Pixel => -delta_y / PIXELS_PER_CAMERA_SCROLL_LINE,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -48,5 +57,17 @@ mod tests {
     fn line_scroll_stays_in_logical_lines() {
         let delta = Vec2::new(1.0, -2.0);
         assert_eq!(camera_scroll_delta(delta, MouseScrollUnit::Line), delta);
+    }
+
+    #[test]
+    fn freecam_speed_reverses_trackpad_but_not_wheel_scroll() {
+        assert_eq!(
+            freecam_speed_scroll_lines(-70.0, MouseScrollUnit::Pixel),
+            2.0
+        );
+        assert_eq!(
+            freecam_speed_scroll_lines(-2.0, MouseScrollUnit::Line),
+            -2.0
+        );
     }
 }

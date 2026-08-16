@@ -7,6 +7,7 @@ use bevy::math::{DMat3, DQuat, DVec3, Isometry3d, Quat, Vec3};
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use thalos_body_render::TerrainPatchBasis;
+use thalos_game_state::ActiveCraftMut;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::{
     body_fixed::body_fixed_pose_from_inertial,
@@ -102,8 +103,8 @@ fn configure_craft_collider_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
     config.render_layers = bevy::camera::visibility::RenderLayers::layer(SHIP_LAYER);
 }
 
-// The F3 toggle for `show_hitboxes` lives in `perf::overlay::toggle_debug_view`:
-// one press flips the debug view, these hitboxes, and the aero gizmos together.
+// `perf::overlay` observes the shared F3 panel state for `show_hitboxes`: one
+// press flips the diagnostics view, these hitboxes, and the aero gizmos together.
 
 /// Half-width of the ground-collider grid drawn under the craft, in metres.
 const GROUND_GRID_HALF_M: f64 = 50.0;
@@ -388,8 +389,8 @@ fn commit_debug_surface_teleport(
     mut teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
     mut sim: ResMut<SimulationState>,
-    mut eva_mode: ResMut<EvaMode>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut eva_mode: ActiveCraftMut<EvaMode>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
     mut target: ResMut<TargetBody>,
     mut view: ResMut<ViewMode>,
@@ -425,6 +426,10 @@ fn commit_debug_surface_teleport(
         return;
     }
     let Some(body) = sim.system.bodies.get(hit.body_id).cloned() else {
+        teleport.cancel();
+        return;
+    };
+    let (Some(mut eva_mode), Some(mut plan)) = (eva_mode.get_mut(), plan.get_mut()) else {
         teleport.cancel();
         return;
     };

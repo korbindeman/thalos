@@ -21,7 +21,6 @@ use bevy::mesh::Mesh;
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 use std::collections::{HashMap, VecDeque};
-use thalos_physics_canonical::canonical::CraftId;
 use thalos_physics_canonical::types::ShipParameters;
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, ControlSurfaceRole, Decoupler, Engine,
@@ -44,6 +43,9 @@ use crate::content::ContentRoot;
 use crate::game_context::GameContext;
 use crate::rendering::{CelestialBody, PlayerShip, ShipMarker, SimulationState, SolarSystemState};
 use crate::view::{HideInMapView, HideInShipView, ViewMode};
+use thalos_game_state::flight::{EvaMode, GearState, ParkingBrake, RealizedControl};
+use thalos_game_state::maneuver_plan::ManeuverPlan;
+use thalos_game_state::scene::{CraftIdentity, CraftPart, CraftRoot};
 
 /// Radial segments for cylinder / frustum part meshes. Matches the ship
 /// editor's value so the two look identical side-by-side.
@@ -123,6 +125,7 @@ impl Plugin for ShipViewPlugin {
                     update_ship_part_transforms.after(rebuild_ship_visuals),
                     update_ship_part_shader_params.after(rebuild_ship_visuals),
                     update_ship_camera_offset.after(update_ship_part_transforms),
+                    reconcile_craft_markers,
                     sync_view_mode_changed
                         .run_if(resource_changed::<ViewMode>)
                         .before(crate::SimStage::Physics),
@@ -139,20 +142,6 @@ impl Plugin for ShipViewPlugin {
 /// material it should mutate.
 #[derive(Component)]
 pub(crate) struct PartVisual;
-
-/// Root of one rendered canonical craft. [`PlayerShip`] marks the selected
-/// root; every other root remains a real visible vessel in the same scene.
-#[derive(Component)]
-pub(crate) struct CraftRoot;
-
-/// Stable link from a rendered craft root or part to canonical fleet state.
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CraftIdentity(pub CraftId);
-
-/// Ownership of a flight part. Aggregations that affect player controls and
-/// canonical active-vessel parameters must filter to the active [`CraftId`].
-#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CraftPart(pub CraftId);
 
 /// Marker on the gear gearbox's rendered mesh child, so
 /// [`sync_gear_visibility`] can hide it when the gear is retracted
@@ -190,8 +179,6 @@ pub(crate) fn spawn_player_ship(
     content: Res<ContentRoot>,
     mut sim: ResMut<SimulationState>,
     catalog: Res<PartCatalog>,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
 ) {
     // KSP-style vessel split: `VesselKind::Eva` means the player is on
     // foot, controlling a single-part "EVA vessel" instead of a rocket.
@@ -206,15 +193,7 @@ pub(crate) fn spawn_player_ship(
         return;
     };
 
-    build_player_ship(
-        &mut commands,
-        &view,
-        &blueprint,
-        &mut sim,
-        &catalog,
-        &mut meshes,
-        &mut std_materials,
-    );
+    build_player_ship(&mut commands, &view, &blueprint, &mut sim, &catalog);
 }
 
 /// Load a ship blueprint RON from a workspace-relative path (e.g.
@@ -255,8 +234,6 @@ pub(crate) fn build_player_ship(
     blueprint: &ShipBlueprint,
     sim: &mut SimulationState,
     catalog: &PartCatalog,
-    meshes: &mut Assets<Mesh>,
-    std_materials: &mut Assets<StandardMaterial>,
 ) {
     // Push spawn-time MOI + reaction-wheel torque into the physics
     // simulation so attitude integration knows what we're flying. Active
@@ -351,10 +328,7 @@ pub(crate) fn build_player_ship(
         ViewMode::Ship => Visibility::Inherited,
     };
 
-    // Default the instance name to the blueprint's authored name. Both
-    // the ship-view root and the map-view billboard carry the same name
-    // so UI surfaces (body tree, focus indicator, debug picker) display
-    // it consistently regardless of which entity is the focus target.
+    // Default the instance name to the blueprint's authored name.
     let ship_name = blueprint.name.clone();
     let craft_id = sim.simulation.active_craft_id();
 
@@ -363,6 +337,11 @@ pub(crate) fn build_player_ship(
             PlayerShip,
             CraftRoot,
             CraftIdentity(craft_id),
+            GearState::default(),
+            ParkingBrake::default(),
+            EvaMode::default(),
+            RealizedControl::default(),
+            ManeuverPlan::default(),
             HideInMapView,
             Transform::IDENTITY,
             initial_visibility,
@@ -370,39 +349,9 @@ pub(crate) fn build_player_ship(
             // every frame by `update_ship_camera_offset` so it tracks staging
             // and design changes.
             CameraTargetOffset::default(),
-            Name::new(ship_name.clone()),
+            Name::new(ship_name),
         ))
         .id();
-    // Map-view billboard for this ship. Position and scale are overwritten
-    // every frame by `update_ship_position` (in `rendering.rs`), so the
-    // initial transform is a placeholder. Material is unique per ship so
-    // future per-ship marker styling (colour-by-faction, IFF tags, etc.)
-    // doesn't bleed across instances.
-    let marker_icon = meshes.add(Circle::new(1.0));
-    let marker_material = std_materials.add(StandardMaterial {
-        base_color: Color::WHITE,
-        emissive: LinearRgba::WHITE * 2.0,
-        unlit: true,
-        double_sided: true,
-        alpha_mode: AlphaMode::Blend,
-        // Match body icon billboards: a small tie-breaker for same-depth
-        // transparent markers, without bypassing normal depth occlusion.
-        depth_bias: 10.0,
-        ..default()
-    });
-    commands.spawn((
-        Mesh3d(marker_icon),
-        MeshMaterial3d(marker_material),
-        Transform::IDENTITY,
-        // Updated every frame by `update_ship_position` based on view mode,
-        // photo mode, and the ship's current local system.
-        Visibility::Hidden,
-        ShipMarker,
-        HideInShipView,
-        NotShadowCaster,
-        NotShadowReceiver,
-        Name::new(ship_name),
-    ));
 
     // Reparent all parts owned by this ship into the PlayerShip hierarchy
     // so they inherit its scale + translation. Runs as a deferred command
@@ -458,6 +407,60 @@ pub(crate) fn build_player_ship(
             world.entity_mut(player_ship).add_child(*part);
         }
     });
+}
+
+/// Keep one map marker for every live runtime craft root. Identity, rather
+/// than active selection, is the join key so detached and inactive vessels
+/// remain visible while relaunch removes only the outgoing craft's marker.
+fn reconcile_craft_markers(
+    mut commands: Commands,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    roots: Query<(&CraftIdentity, &Name), With<CraftRoot>>,
+    markers: Query<(Entity, &CraftIdentity), With<ShipMarker>>,
+) {
+    let root_ids: HashMap<_, _> = roots
+        .iter()
+        .map(|(identity, name)| (identity.0, name.as_str()))
+        .collect();
+    let marker_ids: HashMap<_, _> = markers
+        .iter()
+        .map(|(entity, identity)| (identity.0, entity))
+        .collect();
+
+    for (entity, identity) in &markers {
+        if !root_ids.contains_key(&identity.0) {
+            commands.entity(entity).despawn();
+        }
+    }
+
+    for (&craft_id, &name) in &root_ids {
+        if marker_ids.contains_key(&craft_id) {
+            continue;
+        }
+        let marker_icon = meshes.add(Circle::new(1.0));
+        let marker_material = materials.add(StandardMaterial {
+            base_color: Color::WHITE,
+            emissive: LinearRgba::WHITE * 2.0,
+            unlit: true,
+            double_sided: true,
+            alpha_mode: AlphaMode::Blend,
+            depth_bias: 10.0,
+            ..default()
+        });
+        commands.spawn((
+            Mesh3d(marker_icon),
+            MeshMaterial3d(marker_material),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+            ShipMarker,
+            CraftIdentity(craft_id),
+            HideInShipView,
+            NotShadowCaster,
+            NotShadowReceiver,
+            Name::new(name.to_owned()),
+        ));
+    }
 }
 
 /// Sync every rendered craft root to its canonical fleet state. The active
@@ -996,16 +999,23 @@ fn rebuild_ship_wing_visuals(
 /// pitch raises the elevator's trailing edge, roll-right raises the right
 /// aileron / lowers the left, nose-right yaw swings the rudder.
 fn animate_ship_control_surfaces(
-    realized: Res<crate::control_bus::RealizedControl>,
+    realized: Query<(&CraftIdentity, &RealizedControl), With<CraftRoot>>,
     flight_config: Res<crate::flight_config::FlightConfig>,
-    mut q: Query<(&ControlSurfaceVisual, &mut Transform)>,
+    parts: Query<&CraftPart>,
+    mut q: Query<(&ChildOf, &ControlSurfaceVisual, &mut Transform)>,
 ) {
     // Attitude surfaces deflect to the commanded attitude effort (full-scale),
     // not the allocated aero fraction — see `RealizedControl::command`. Flaps
     // and spoilers deflect to the flight-config actuator positions, the same
     // smoothed values the aero force model consumes.
-    let cmd_vec = realized.command;
-    for (cs, mut transform) in q.iter_mut() {
+    for (parent, cs, mut transform) in q.iter_mut() {
+        let Ok(part) = parts.get(parent.parent()) else {
+            continue;
+        };
+        let Some((_, realized)) = realized.iter().find(|(identity, _)| identity.0 == part.0) else {
+            continue;
+        };
+        let cmd_vec = realized.command;
         let cmd = match cs.role {
             // −θ raises the trailing edge; nose-up pitch wants elevator up.
             ControlSurfaceRole::Elevator => -(cmd_vec.x as f32),
@@ -1152,15 +1162,25 @@ fn rebuild_ship_gear_visuals(
 /// read as a stiff geometric fold rather than a real undercarriage). Touches
 /// each [`GearVisual`] only when its target visibility changes.
 fn sync_gear_visibility(
-    gear_state: Res<crate::local_physics::GearState>,
-    mut visuals: Query<&mut Visibility, With<GearVisual>>,
+    gear_states: Query<(&CraftIdentity, &GearState), With<CraftRoot>>,
+    parts: Query<&CraftPart>,
+    mut visuals: Query<(&ChildOf, &mut Visibility), With<GearVisual>>,
 ) {
-    let target = if gear_state.down {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut vis in &mut visuals {
+    for (parent, mut vis) in &mut visuals {
+        let Ok(part) = parts.get(parent.parent()) else {
+            continue;
+        };
+        let Some((_, gear_state)) = gear_states
+            .iter()
+            .find(|(identity, _)| identity.0 == part.0)
+        else {
+            continue;
+        };
+        let target = if gear_state.down {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         if *vis != target {
             *vis = target;
         }

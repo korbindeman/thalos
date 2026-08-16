@@ -113,32 +113,6 @@ impl BodyTerrainResidency {
     }
 }
 
-/// Bodies whose resident terrain must be rebuilt from cold this frame because
-/// their flatten set changed *after* tiles had already streamed in (the base
-/// editor's flatten-confirm, a deleted pad). Written by gameplay; drained by
-/// [`apply_terrain_rebuild_requests`].
-///
-/// **Why a full despawn/respawn rather than a per-tile re-bake:** UDLOD bakes
-/// each resident tile exactly once and has no per-tile invalidation path, so a
-/// [`thalos_terrain::TerrainFlatten`] written after a tile is resident stays
-/// invisible until that tile is rebuilt. Dropping and respawning the body's
-/// terrain entity re-streams every tile through the body's *persistent* flatten
-/// handle (which already carries the new region), and the GPU-atlas height
-/// mirror + surface-local collider follow via their existing revision chain
-/// with no extra work. The event is rare (one confirm per site) and the world is
-/// paused under the editor, so the ~1–2 s cold re-stream is acceptable.
-#[derive(Resource, Default)]
-pub struct TerrainRebuildRequest {
-    bodies: std::collections::HashSet<BodyId>,
-}
-
-impl TerrainRebuildRequest {
-    /// Queue `body_id` for a cold terrain rebuild. Idempotent within a frame.
-    pub fn request(&mut self, body_id: BodyId) {
-        self.bodies.insert(body_id);
-    }
-}
-
 /// Wanted set produced by [`compute_wanted_residency`] each frame and
 /// consumed by [`apply_residency_changes`]. Pulled out as a `Resource`
 /// rather than a system-local so the loading-screen gate can read it.
@@ -156,8 +130,6 @@ impl Plugin for TerrainResidencyPlugin {
         app.init_resource::<TerrainResidencyConfig>()
             .init_resource::<BodyTerrainResidency>()
             .init_resource::<WantedResidencySet>()
-            .init_resource::<TerrainRebuildRequest>()
-            .init_resource::<super::ground_terrain::TerrainFlattenRegistry>()
             .add_systems(
                 Update,
                 (
@@ -303,7 +275,7 @@ struct ResidencySpawnParams<'w, 's> {
     body_terrain_materials: ResMut<'w, Assets<BodyTerrainMaterial>>,
     tile_trees: ResMut<'w, TerrainViewComponents<TileTree>>,
     rendered_ground: Res<'w, RenderedGroundRegistry>,
-    flatten: ResMut<'w, super::ground_terrain::TerrainFlattenRegistry>,
+    flatten: ResMut<'w, super::terrain_flatten::TerrainFlattenRegistry>,
     /// Per-body tile caches. Held in a resource so retained tile payloads survive
     /// the despawn/respawn this module performs on every tier change.
     tile_cache: ResMut<'w, super::tile_cache::TileCacheRegistry>,
@@ -409,7 +381,7 @@ fn apply_residency_changes(
 /// **Ungated** so it runs while the base editor pauses the sim.
 fn apply_terrain_rebuild_requests(
     mut commands: Commands,
-    mut request: ResMut<TerrainRebuildRequest>,
+    mut request: ResMut<super::terrain_flatten::TerrainRebuildRequest>,
     sim: Res<SimulationState>,
     mut residency: ResMut<BodyTerrainResidency>,
     mut params: ResidencySpawnParams,
@@ -529,7 +501,7 @@ fn try_spawn(
         TerrainTier::Near => params.rendered_ground.udlod_handle(body_id),
         // `Distant` scenery and `Map` (orbital-map focus, spawned by its own
         // path and never routed here) carry no collider/HUD height queries.
-        TerrainTier::Distant | TerrainTier::Map => None,
+        TerrainTier::Distant => None,
     };
     let flatten = params.flatten.handle(body_id);
     let sun_shadow_maps = params.sun_shadow.handles.clone();

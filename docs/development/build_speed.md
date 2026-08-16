@@ -163,6 +163,15 @@ workspace crates non-cacheable. If cross-machine cold-build throughput becomes a
 priority again, evaluate a **remote** cache backend (S3/GCS/Redis) for
 correctness first under a fresh ADR — do not restore the local-daemon design.
 
+The GitHub release workflow does cache Cargo's already-compiled **dependency
+artifacts** with `Swatinem/rust-cache`; that is deliberately not a compiler
+cache. There is no `RUSTC_WRAPPER`, daemon, cross-worktree path normalization,
+or object-level lookup. Cargo still validates every restored artifact against
+the pinned compiler, manifests, lockfile, target, flags, and feature selection,
+and a miss is an ordinary clean build. The action prunes workspace crates and
+incremental artifacts before saving, keeping the cache focused on the expensive
+Bevy/wgpu dependency graph (ADR-20260802T232314Z-release-cache-default-branch).
+
 ### 3.6 One Cargo at a time; one feature fingerprint
 From `CLAUDE.md`/tooling.md, still load-bearing:
 
@@ -505,12 +514,25 @@ manual **Build game** run builds Windows x64 from the selected ref and accepts:
   pre-alpha value `neural-terrain-default`;
 - `use_default_features`: whether Cargo defaults join that explicit list.
 
+`release_ref` and `release_sha` are internal dispatcher inputs; leave them
+empty for manual builds. A `v*` tag starts
+`.github/workflows/dispatch-game-release.yml`, which dispatches **Build game**
+on `main` with both the immutable tag ref and its exact commit. The build checks
+out that ref, rejects a SHA mismatch, and uses the verified SHA for package
+provenance. Running the expensive job on `main` is load-bearing: GitHub Actions
+caches are scoped to a branch or tag, and one release tag cannot restore a
+previous tag's cache. The separate dispatch gives all releases the shared
+default-branch cache scope while still building the tagged source.
+
 The canonical tagged build never inherits an implicit workspace state: it uses
 `--no-default-features --features neural-terrain-default`, builds with the
 repository-pinned Rust 1.97.0 toolchain, and publishes a GitHub prerelease after
 both Windows x64 and macOS arm64 artifacts succeed. The Windows build links the
 MSVC C runtime statically, so the portable ZIP does not require a separately
-installed Visual C++ redistributable. Manual runs upload the Windows ZIP for 14
+installed Visual C++ redistributable. Before compiling, each platform restores
+only Cargo registry data and dependency build artifacts keyed by target,
+toolchain, compiler environment, manifests, lockfile, and requested features;
+workspace crates are always rebuilt. Manual runs upload the Windows ZIP for 14
 days and do not publish a release.
 
 Terrain's build contract is capability-first:
@@ -607,6 +629,8 @@ in CLAUDE.md).
 - `CLAUDE.md` (root) — the operating manual; its "Build & iteration" section
   carries the load-bearing subset and points here.
 - ADR-20260723T222214Z-abandon-sccache — why the compiler cache was removed.
+- ADR-20260802T232314Z-release-cache-default-branch — why tagged releases
+  dispatch their build on `main`, and what the CI cache may contain.
 - ADR-20260721T212438Z-portable-build-policy-local-acceleration — the portable
   profile / local-config split.
 - INC-0006 (`docs/incidents/`) — the `-Zthreads` parallel-MIR ICE.

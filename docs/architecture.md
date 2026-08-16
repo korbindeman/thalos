@@ -7,32 +7,54 @@ data had no single home, and the planet-rendering concern was spread across
 three crates that must stay byte-for-byte consistent. Per the project rule
 (CLAUDE.md): infrastructure changes are announced here before they land.
 
-## Three organizing principles
+This architecture implements [Project purpose](purpose.md). The Thalos game is
+the primary product and integration anchor; the reusable world foundation is an
+internal personal engine, not a public SDK. Kòrsou is both a coherent secondary
+application and a constrained place to deepen systems before promoting proven
+mechanisms back into the foundation and the game.
+
+## Four organizing principles
 
 1. **One authored source of truth for the world.** Every physical parameter of
    the system and its bodies lives in one pure crate, `thalos_world`, consumed
    *downward* by physics, terrain generation, and rendering. Nobody else parses
    the body RON or owns body parameters.
 
-2. **One celestial-body appearance model, multiple render backends.** The
-   surface BRDF + atmosphere + cloud + water *math* is defined once. The
-   impostor billboard (distant) and the ground mesh (close — the standard-path
-   `tiles` renderer, or legacy udlod for bodies it has not taken over) are
-   consumers of it — a backend chooses geometry, never its own shading.
+2. **One authored appearance model, explicit spatial adapters.** Share
+   state-in/pixels-out mechanisms where their interfaces match: atmosphere
+   projections, ocean wave state/filtering, woody payloads, and body shading.
+   Keep planar, cube-sphere, analytic-sphere, and future ellipsoid geometry in
+   concrete adapters. An adapter chooses spatial topology, precision, and
+   composition; it does not fork authored world state or a shared mechanism.
 
-3. **One game runtime, multiple application shells.** Interactive play and
-   headless capture compose the same plugin graph through `thalos_runtime`.
-   `thalos_game` and `thalos_capture_host` are thin launchers; neither owns a
-   parallel world or renderer. Capture is a first-class surface for stills,
-   comparisons, deterministic video, and agent verification (see `capture.md`).
+3. **One lean application runtime, multiple compositions.** Interactive Thalos,
+   Kòrsou, and headless tools select coarse capabilities through
+   `thalos_runtime`. The base is lightweight: Kòrsou enables the common
+   interactive shell and its planar adapter, while simulation and gameplay are
+   absent from its dependency graph. Rendering leaves still provide a real
+   second caller for state-in/pixels-out mechanisms without creating a second
+   Thalos world or verification renderer. The application boundary is sequenced
+   in [`application_runtime.md`](roadmap/application_runtime.md); the render
+   boundary is sequenced in
+   [`render_kit_architecture.md`](roadmap/render_kit_architecture.md).
+
+4. **Focused applications feed the foundation through evidence.** Kòrsou and
+   future applications own coherent experiences, not just test fixtures. They
+   may incubate a system where its constraints are clearest, but a mechanism
+   moves into the shared foundation only when another real consumer has the
+   same semantics or the boundary provides a measured dependency, testing, or
+   iteration payoff. Application-specific topology, content, and policy stay
+   with their adapter. A possible future application alone does not justify a
+   framework abstraction.
 
 ### The appearance invariant
 
 > A body's look = one authored dataset (`thalos_world`) + one dynamic
-> environment state (`SolarSystemState`, single-writer in `thalos_runtime`) + one
-> shading library (`thalos_body_render::shading`). A render backend may choose
-> its geometry (billboard vs LOD mesh) but never defines its own lighting,
-> atmosphere, cloud, or water math.
+> environment state (for the Thalos application, `SolarSystemState` is
+> single-writer in `thalos_runtime`) + reusable rendering leaves + one explicit
+> spatial adapter. An adapter may choose geometry, precision, coast data, and
+> render composition; it must not invent a second authored state, wave clock,
+> or copy of a shared shading mechanism.
 
 This is what keeps a planet identical across the impostor↔terrain LOD swap, for
 lighting, atmosphere, weather/clouds, and water alike. It is already true for
@@ -79,19 +101,24 @@ The dependency layers:
 
 ```text
 L0  foundation    diagnostics, big_space
-L1  pure domain   world, terrain, celestial, physics_canonical, control,
-                  navigation, texgen            (no Bevy — CI-guarded)
-L2  Bevy leaves   input, ui, body_shading, physics_local, shipyard,
+L1  pure model    render_model, world, terrain, celestial, physics_canonical,
+                  control, navigation, texgen   (no Bevy — CI-guarded)
+L2  Bevy leaves   input, ui, render_foundation, atmosphere, body_shading,
+                  ocean, vegetation, physics_local, shipyard,
                   capture/*, + feature crates (hud, map, shipyard_editor,
                   structures, clouds, …)
 L2.5 game state   thalos_game_state — the blackboard L2 reads/writes
-L3  composition   thalos_runtime — schedule ordering, plugin graph,
-                  sim-coupled drivers, glue; target ~25–35 kLOC
-L4  shells        apps/game, tools/capture_host
+L3  composition   thalos_runtime — light capability facade;
+                  thalos_game_runtime — transitional schedule ordering,
+                  sim-coupled drivers, glue; target facade ~25–35 kLOC
+L4  applications  apps/game, apps/korsou; tools/capture_host is the canonical
+                  Thalos automation shell
 ```
 
 New feature work goes in a feature crate whenever it clears the bar;
-`thalos_runtime` accepts only composition, sim-coupled drivers, and glue.
+`thalos_runtime` accepts only capability selection, composition, sim-coupled
+drivers, and glue. Its Cargo features select optional crate/plugin bundles;
+they do not replace these ownership boundaries.
 The migration that dismantles the current 93 kLOC runtime is **Phase 5**
 below.
 
@@ -107,6 +134,7 @@ crate per feature — with the granularity bar above deciding when a feature
 ```text
 apps/
   game/                         # bin: thalos_game
+  korsou/                       # flat explorer over runtime[interactive]; no sim/gameplay
 
 crates/
   vendor/
@@ -125,14 +153,21 @@ crates/
     physics_local/
     control/
   rendering/
+    model/                      # validated immutable render inputs; no Bevy
+    foundation/                 # shared Bevy GPU resources + ordered passes
     render/                     # current body_render; state-in/pixels-out
                                 #   tiles/ = the default ground renderer
+    atmosphere/                 # authored planetary + Bevy local projections
     shading/                    # thalos_body_shading: shared shading model
+    ocean/                      # wave clock, geometry/slope mechanisms + WGSL
+    vegetation/                 # topology-independent woody mesh + atlas payload
     clouds/                     # (planned, Phase 5c) volumetric-cloud composite
     udlod/                      # LEGACY terrain-render backend (EOL)
   interface/
     input/
     ui/
+    viewer/                     # freecam, optics, panel, viewpoint store + UI
+    preferences/                # window/settings host + shared MSAA tracer
   gameplay/
     state/                      # thalos_game_state: the types-only blackboard
                                 #   every feature crate shares
@@ -142,7 +177,8 @@ crates/
     structures/                 # runway + connection GEOMETRY (the placement
                                 #   drivers stay in runtime)
   runtime/
-    game/                       # lib: thalos_runtime, sole app composition
+    app/                        # thalos_runtime: light capability facade
+    game/                       # thalos_game_runtime: complete game composition
   capture/
     protocol/                   # Serde-only request/result types
     runtime/                    # Bevy capture state machine/readback
@@ -154,6 +190,7 @@ tools/
   capture/                      # CLI: shot/compare/record/verify/status/stop
   capture_host/                 # headless shell over the real game runtime
   terrain_baker/
+  korsou_terrain_baker/
   terrain_train/
   texgen/
   world_map/
@@ -169,27 +206,39 @@ artifacts/
   diagnostics/
 ```
 
-Visual verification scenes belong to `thalos_runtime` and render through the
-canonical capture host. The former object/UI previews remain temporary crate
-examples until equivalent in-context runtime presets land; there is no parallel
-`labs/` application layer. Exploratory browser tooling such as Terrain Lab stays
-under `tools/` and is not an acceptance renderer.
+Thalos visual verification scenes belong to `thalos_runtime` and render through
+the canonical capture host. Kòrsou's headless captures verify Kòrsou's own
+planar adapter; they are not a parallel acceptance renderer for the Thalos game.
+The former object/UI previews remain temporary crate examples until equivalent
+in-context runtime presets land; there is no parallel `labs/` application layer.
 
-`apps/` is intentionally narrow: it contains software shipped to and launched
-directly by the player. Headless capture is a first-class product capability,
-but its host process is developer/automation infrastructure and therefore lives
-under `tools/` alongside its controller.
+`apps/` is intentionally narrow: it contains player-facing application
+compositions. Both apps use the lightweight `thalos_runtime` facade with an
+explicit capability set. `apps/game` selects the complete game bundle;
+`apps/korsou` selects the interactive shell and its real-world planar adapter,
+with simulation and gameplay absent from its graph. Headless Thalos capture is
+a first-class product capability, but its host process is developer/automation
+infrastructure and therefore lives under `tools/`.
 
 The target dependency direction is:
 
 ```text
-apps/game → thalos_runtime → domain + simulation + rendering + interface
-tools/capture_host → thalos_runtime + capture_runtime → capture_protocol
+apps/game → thalos_runtime[game] → simulation + gameplay + planetary + interface
+apps/korsou → thalos_runtime[interactive] + planar adapter + rendering leaves
+              (no simulation or gameplay)
+tools/capture_host → thalos_runtime[game,capture] + capture_runtime → capture_protocol
 capture CLI → capture_protocol
 rendering → construction
 physics_local + rendering → terrain height/query contract
 runtime → renderer-specific GPU height-mirror registry
 ```
+
+The runtime features are a thin composition selector over optional crates, not
+an alternative to the crate boundaries below. `thalos_runtime` has an empty
+default feature set; supported bundles are type-checked and Kòrsou's graph is
+guarded against simulation/gameplay dependencies. See
+ADR-20260809T201216Z-light-runtime-capability-bundles and
+`docs/roadmap/application_runtime.md`.
 
 The construction/rendering edge now points correctly: rendering consumes the
 construction model and owns the material projection. The terrain seam is also
@@ -230,7 +279,7 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
 - **Phase 2** — render consolidation. *(done)*
   - `planet_lighting` + `planet_rendering` + `terrain_render` merged into
     `thalos_body_render` (`shading`/`impostor`/`ground` modules behind one
-    `BodyRenderPlugin`). The three old crates are deleted. Runtime composition
+    explicit planetary/far-body plugins). The three old crates are deleted. Runtime composition
     depends on `thalos_body_render`; local physics consumes only the shared
     `thalos_terrain::HeightSource`/patch contract and has no rendering dependency.
   - The `atmosphere` data crate folded into `thalos_world::atmosphere`
@@ -245,21 +294,14 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
   paths; a `just game` launch should confirm shaders load and bodies render.
 - **Phase 3** — rename `planet_editor` → `body_editor`. *(done)* Migrating
   "planet" terminology in the render layer to celestial-body terms remains.
-- **Phase 4** — render *mechanism* consolidation (state-in / pixels-out).
-  *(planned — sequenced AFTER the graphics-fidelity foundation, `docs/roadmap/graphics_fidelity.md`
-  §3.)* The scene-level rendering mechanism is currently split between crates: the
-  camera/post bundle (`body_render::impostor::post_stack`, mis-filed under
-  `impostor/`), the `scene_depth` and `sun_shadow` render-graph nodes (in
-  `game::rendering`), the env probe (`game::reflection_probe`), and the hull
-  material (`thalos_shipyard::material`). These consolidate into
-  `thalos_body_render` — the de-facto render crate, already consumed by both
-  `game` and `shipyard` — which is then renamed **`thalos_render`**. **Drivers stay
-  put:** `game::rendering` is ~90% sim-coupled systems (read `SolarSystemState` /
-  `CraftState` → uniforms / LOD swaps / spawns) and remains in `game`. The boundary
-  is **state-in / pixels-out**: the render crate owns *how* to shade; `game` owns
-  *what* to shade this frame. Deferred so the full mechanism set — including the new
-  AO / sky-view-LUT / env-IBL render-graph nodes the fidelity foundation adds — is
-  extracted in one pass rather than twice.
+- **Phase 4** — render-kit consolidation (state-in / pixels-out). Superseded in
+  detail by `docs/roadmap/render_kit_architecture.md`. The first GPU mechanism
+  has moved down rather than sideways: `thalos_render_foundation` owns the
+  application-neutral scene-depth image lifecycle and ordered copy/resolve
+  pass. `thalos_runtime` selects a camera and remains the owner of sim-coupled
+  drivers; planetary and far-body adapters remain concrete until RK-3 splits
+  them. Sun shadows, probes, and post effects move only when their concrete
+  consumers prove an equally narrow seam.
 - **Phase 4a** — decouple rendering from `thalos_shipyard`. The construction crate
   carries rendering only because it began as a self-contained egui editor with its
   own viewport; now that the in-game Bevy-UI editor is primary, `thalos_shipyard`
@@ -443,9 +485,41 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
   the kitchen-sink testbed (`just ui-preview` → PNG). Fonts: Inter
   (interface, OFL) + Fira Code (numeric/mono; Δ-strings stay mono by
   convention). See `docs/gameplay/ui.md`.
-- **`thalos_runtime`** — the canonical Bevy composition layer shared by the
-  player app and headless capture host; owns gameplay, rendering integration,
-  UI, scenarios, and deterministic capture presets.
+- **`thalos_diagnostics_ui`** — the lightweight shared F3 surface (Bevy): one
+  wall-clock CPU/GPU frame ring, common device/process/scene facts, panel and
+  graph, requested-open state, application availability gate, and typed ECS
+  extension roots. Thalos contributes simulation/planetary/debug-draw fields;
+  Kòrsou contributes planar streaming and UTM position. The Bevy-free event
+  contract and JSONL sink remain in `thalos_diagnostics`. See
+  ADR-20260810T191952Z and `app §5.4`.
+- **`thalos_photo_mode`** — the lightweight shared F1 clean-view capability
+  (Bevy): one state resource, one opt-in overlay marker, and one visibility
+  arbiter that preserves each overlay's ordinary visibility while photo mode
+  owns the frame. Applications retain their input adapters and modal gates;
+  Thalos and Kòrsou share the behavior.
+- **`thalos_preferences`** — the lightweight application preferences boundary
+  selected by `thalos_runtime[interactive]`: one `preferences.ron` for window
+  mode/resolution/monitor/vsync, UI scale, and MSAA; environment overrides;
+  live window/camera projection; and the modular F10 settings host. The game
+  appends its rendering/units/input sections; Kòrsou receives only the common
+  Window and Graphics sections. Headless composition applies camera preferences
+  from defaults but installs neither the UI nor autosave.
+- **`thalos_viewer`** — the lightweight shared viewer mechanism selected by
+  `thalos_runtime[interactive]`: semantic freecam intent, stable f64 motion,
+  physical optics/projection, spring zoom, level/ground/speed preferences, and
+  the canonical panel; plus the validated viewpoint store, atomic writer,
+  CRUD/F8/F9 UI, and apply-request seam. Frame-tagged viewpoint and optics data
+  live in `thalos_render_model`. Applications adapt space explicitly: the game
+  retains body-fixed/floating-origin/terrain/warp policy and scripted drivers;
+  Kòrsou retains DEM bounds and planar/ellipsoid projection. Nothing here
+  depends on capture, so Kòrsou does not acquire the capture graph.
+- **`thalos_runtime`** — the capability-selected Bevy composition facade shared
+  by player apps and headless tools. Its base is light; APP-0 supports
+  `interactive`, `game`, and `capture`, with `game` selecting the transitional
+  **`thalos_game_runtime`** complete composition. Simulation, gameplay, and
+  planetary become independent selectors only as their implementations gain
+  real crate/plugin boundaries. The facade owns only capability reporting,
+  selection, integration, and compatibility exports. See `app §3`–`§4`.
 - **`thalos_game`** — the player-facing binary under `apps/game`; a thin wrapper
   that launches `thalos_runtime::AppBuilder`.
 - **`thalos_terrain`** — procedural terrain generation pipeline (no Bevy dependency)
@@ -469,8 +543,38 @@ Thalos is a planetary exploration / orbital mechanics sandbox in Rust
 
   *(The former `thalos_atmosphere` data crate — gas-giant cloud decks, hazes, rings, terrestrial scattering schemas — is folded into `thalos_world::atmosphere`; authored body data has one home.)*
 - **`thalos_physics_local`** — Bevy/Avian f64 local-physics boundary for M5; aggregate craft hydration, terrain collider patches, contact/collapse helpers. **Ships integrate in the surface-local frame (SLF)** — a body-fixed tangent frame anchored under the craft, Y-up, small (meters–km) coordinates near the anchor, re-anchored at ~1.5 km drift; the frame math is `thalos_physics_canonical::surface_local` and the design/implementation notes are in `docs/simulation/surface_local.md`. The Avian rigid body persists across every regime; what *role* Avian plays each frame is a three-way `AvianRole`: `Paused` under warp / `BodyFixed` (canonical owns everything), `AttitudeOnly` while coasting in vacuum at 1× (Kepler owns translation, Avian still integrates rotation + contact for player input and SAS), `Full` when there's a non-gravity force to integrate (throttle active, terrain collider attached, or inside the atmosphere shell). Since the A3 port the role is **classified by the `CraftRegime` resolver** (`thalos_physics_canonical::regime`) and merely projected onto `AvianAuthority` by `compute_avian_authority` (`crates/runtime/game/src/local_physics/mod.rs`), which keeps the `previous_role` edge the handoff snap reads. Coasting flight in vacuum stays under Kepler / `OnRails` so AP/PE do not drift. The role classifier (`compute_avian_authority`) lives in `crates/runtime/game/src/local_physics/mod.rs`; the resulting **canonical authority transitions are owned by the regime executor** (`crate::regime::apply_regime_authority`, applying the unit-tested `thalos_physics_canonical::regime::expected_authority` — it subsumed the former `manage_authority`, the landed throttle release, and the timed settle collapse; see `docs/simulation/regimes.md` Phase A3). **Ground colliders are solid and static in the SLF**: terrain is a parry **heightfield** (not a one-sided trimesh — the trimesh's one-step penetration recovery flung landing craft off their gear), the runway is a solid cuboid slab (`crates/runtime/game/src/runway.rs`). A **wheeled craft's hull is filtered out of solver contact with the ground** via collision layers (`GROUND_LAYER`/`CRAFT_LAYER`); its raycast spring-damper landing gear is the sole ground interface and its force/torque is inertia-relative clamped. Gearless craft (landers) keep all-vs-all layers and rest on the heightfield directly. Fast descents are kept from tunneling by `SweptCcd` + the analytic `terrain_floor_backstop`, and a too-hard contact destroys the craft via the whole-craft impact model (`detect_terrain_impact` → `Simulation::mark_destroyed`, gated on `ShipParameters::impact_tolerance_m_s`; the contact signal is `weight_on_wheels` for wheeled craft, hull contact for gearless). **EVA is a deliberately separate kinematic path** — it is *not* an SLF citizen: it has no collider and computes its canonical state directly in the body-fixed frame (`player_controller::step_eva_controller`), so it gains nothing from the SLF's contact-solver stability; do not "unify" it into the SLF without on-foot walk-testing (see `docs/simulation/surface_local.md` §10). On destruction the game force-pauses and shows an in-place scenario-respawn picker (`crates/runtime/game/src/scenario_menu.rs`) offering the four start scenarios (ship orbit / landing / final approach / EVA); see `docs/simulation/surface.md`.
-- **`thalos_body_render`** — *(Phase 2, new)* unified celestial-body rendering, one appearance model + regime-scaled projections. Five modules behind one `BodyRenderPlugin`: `shading` (shared `SceneLighting`/`AtmosphereBlock`/Hapke `shade_hapke_surface` + the `thalos::lighting`/`thalos::atmosphere` WGSL libraries), `impostor` (distant billboard materials for planets, gas giants, rings, solid bodies), **`tiles` (the default ground renderer** — cube-sphere quadtree of ordinary `Mesh` + `StandardMaterial`/`TileTerrainMaterial` entities on Bevy's standard path, `SurfaceQueryProvider` content, `TileHeightMirror` for ground consumers), `ground` (**legacy**: the `thalos_udlod`-backed terrain LOD — `ThalosTerrainPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial` — plus the *non*-legacy analytic `BodySkyMaterial`/`BodyOceanMaterial` projections and rendered-height patch utilities), and `clouds` (the absorbed MIT `bevy-volumetric-clouds` fork: spherical body-fixed volume march + cloud-local history targets). Merged from the former `planet_lighting`+`planet_rendering`+`terrain_render` and top-level `thalos_volumetric_clouds` mechanisms. A backend chooses geometry or cost, never its own lighting/atmosphere/weather authority. Terrestrial clouds obey ADR-20260720T212214Z-one-weather-field-many-cloud-projections: authored `CloudClimate` → one per-body `CloudWeatherField` → near/orbit/shadow projections.
-- **`thalos_udlod`** — **LEGACY / end-of-life** (keystone ADR-20260723T142945Z): `thalos_body_render::tiles` is the default ground renderer; this crate streams only bodies the tile driver has not installed on, or the whole world under the `THALOS_TILE_RENDERER=0` A/B baseline. Defect-driven fixes only — the rules below are for keeping it alive, not for extending it. Thalos-owned UDLOD terrain renderer at `crates/rendering/udlod/`. It originated from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source. It is **runtime-provider-first**: it renders sparse tile atlases fed by `TileProvider` implementations, not preprocessed Earth-style asset trees. The old GeoTIFF/preprocess path is gone. (Upstream's own successor is now a *different repo*, [`planetary_terrain_renderer`](https://github.com/kurtkuehnert/planetary_terrain_renderer) — a useful diff reference for fixes to the Taylor-series precision path.) A 2026-07 optimization pass tailored the subsystem to Thalos; **see `docs/reference/terrain_lod_optimization.md`**, and note these load-bearing rules:
+- **`thalos_atmosphere`** — authored atmosphere projection leaf. Owns the
+  compact `AtmosphereBlock` used by Thalos's custom planetary shaders and the
+  concrete Bevy Earth adapter used by Kòrsou's planar standard-PBR path. It
+  owns neither application composition nor a universal renderer interface;
+  see ADR-20260808T221912Z.
+- **`thalos_render_model`** — Bevy-free render-facing input vocabulary. RK-1
+  owns validated current/previous f64 frame epochs plus the concrete
+  `RenderPlan`/capability vocabulary, physical camera optics, and the v3
+  frame-tagged viewpoint catalog. Applications resolve pause, warp, clock,
+  coordinate-space adapters, and render selection before constructing these
+  records; rendering mechanisms never import application runtime state.
+- **`thalos_render_kit`** — thin Bevy composition seam. It publishes the
+  validated plan as `ActiveRenderPlan` and emits the structured
+  `thalos::diagnostic::render_plan` selection event; concrete adapters remain
+  ordinary plugins rather than dynamic trait objects.
+- **`thalos_geodetic`** — Bevy-free real-world spatial contract: typed WGS84
+  geodetic, UTM 19N, ECEF, local ENU, and EGM2008 orthometric positions. The
+  Curaçao regional geoid grid is bounded and rejects extrapolation; Kòrsou's
+  ellipsoid mode converts dataset UTM + orthometric heights through this crate
+  before narrowing a bounded ENU frame to f32 render coordinates.
+- **`thalos_ocean`** — topology-independent ocean mechanism leaf. Owns
+  `OceanState` plus `RenderFrameTime` projection, f64-reduced spectral and
+  current/previous resolved-wave phases, the
+  deterministic slope payload, and the `thalos::ocean_waves` WGSL functions
+  for height/slope/crest, anisotropic filtering, omitted variance, and coastal
+  attenuation. Thalos's analytic planetary material and Kòrsou's displaced
+  planar clipmap are explicit consumers.
+- **`thalos_vegetation`** — topology-independent woody mesh and foliage-atlas
+  payloads consumed by Thalos's cube-sphere scatter adapter and Kòrsou's planar
+  cell batches. Placement and LOD remain adapter-owned.
+- **`thalos_body_render`** — concrete celestial-body adapters and appearance mechanisms. Applications compose `PlanetaryRenderPlugin` (cube-sphere tiles, analytic atmosphere/ocean, clouds) and `FarBodyRenderPlugin` (impostors and rings) explicitly through a validated `RenderPlan`; the former `BodyRenderPlugin` facade is gone. `tiles` is the default ground renderer: a cube-sphere quadtree of ordinary `Mesh` + `StandardMaterial`/`TileTerrainMaterial` entities on Bevy's standard path, with `SurfaceQueryProvider` content and a `TileHeightMirror` for ground consumers. `ground` owns shared sky/ocean/vegetation appearance plus the feature-gated legacy provider/material modules. A spatial adapter chooses geometry or cost, never its own authored atmosphere/weather/ocean state.
+- **`thalos_udlod`** — **SEALED LEGACY / end-of-life** (keystone ADR-20260723T142945Z). It is an optional dependency of `thalos_body_render` behind `legacy-udlod` and is absent from the default game, capture-host, and Kòrsou graphs. `THALOS_TILE_RENDERER=0` is accepted only by a binary compiled with that feature; the canonical `renderer` comparison axis requests the feature automatically for its legacy variant. Defect-driven fixes only. The crate originated from [`kurtkuehnert/bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by Kurt Kühnert (MIT OR Apache-2.0); attribution + license files travel with the source.
   - **Providers own mip generation.** `TileProvider::request_tile` must return the **full mip chain** (call `AttachmentData::generate_mipmaps` inside the task). The atlas does *not* regenerate mips — that kept per-tile mip filtering on the main thread and made cached payloads useless.
   - **Attachments may differ in resolution.** The GPU atlas sizes each attachment's texture array independently. Height keeps the full grid (it is the geometry, and the only attachment physics reads); albedo/roughness/material bake at half (`TierConfig::detail_texture_size`) — a >2× cut in the game's largest allocation.
   - **Tiles are cached, and the cache key is the contract** (`game::rendering::tile_cache`): memory (survives terrain despawn/respawn) over disk (survives the process) over synthesis. The namespace is a `NamespaceFn` resolved **per request**, not frozen at construction, because the flatten handle is read per tile *pixel* — a pad installed after spawn still changes what later tiles bake. **If you add an input to tile synthesis, fold it into the namespace, and bump `thalos_terrain::GENERATOR_VERSION` when generation output changes** — otherwise a cached run silently renders old terrain. `THALOS_TILE_CACHE=0` disables the disk tier while iterating on generation.
@@ -513,10 +617,12 @@ sequence/video capture. Both applications must compose the same plugin graph.
 
 Core separation: `world`, `physics_canonical`, `control`, `terrain`,
 `celestial`, and `texgen` are pure Rust libraries; `input`, `runtime`,
-`body_render`, `physics_local`, and `shipyard` are Bevy consumers. Within
-`body_render`, the `shading` module is the single source of truth for
-`SceneLighting`, `AtmosphereBlock`, and the surface BRDF that both the
-`impostor` and `ground` backends consume — no field-by-field mirror types.
+`atmosphere`, `body_shading`, `ocean`, `body_render`, `physics_local`, and
+`shipyard` are Bevy consumers. `thalos_atmosphere` owns `AtmosphereBlock`;
+`thalos_body_shading` owns `SceneLighting` and the shared surface BRDF while
+re-exporting that block; `thalos_body_render` consumes/re-exports those leaves
+for its impostor and ground adapters. No adapter carries field-by-field mirror
+types.
 Avian lives behind `thalos_physics_local`; do not add Avian to
 `thalos_physics_canonical`.
 Semantic input for the Bevy binaries flows through `thalos_input`
@@ -885,22 +991,21 @@ Key modules:
     / sibling fade.
   - `body_lod` — screen-space LOD: icon ↔ impostor crossfade,
     moon-merge fade, double-click-to-focus picking, homeworld focus.
-  - `scene_depth` — `SceneDepthImage` resource + copy pass. Copies the main
-    view depth into a sample-able `Depth32Float` image for custom effects that
-    still consume it. The canonical rocky-body atmosphere uses Bevy's own
-    depth-aware raymarch; the retained `BodySkyMaterial` is a debug atmosphere,
-    while ocean and clouds are dedicated backend-independent composites.
+  - shared scene depth — composes `thalos_render_foundation::SceneDepthPlugin`
+    and marks the ship camera with `SceneDepthView`. The foundation owns the
+    sampleable `Depth32Float` image lifecycle and the opaque-to-transparent
+    copy/MSAA-resolve pass; Thalos-specific SSAO and the planetary composites
+    consume the exported image without the foundation importing `ShipCamera`.
   - `tile_terrain` — driver for the **default** ground renderer
-    (`body_render::tiles`): installs a `TileTerrainRoot` on the first
-    anchor-resolved terrain body, republishes the selection eye from
-    `ViewAnchor` each frame, and points the body's `RenderedGround` +
-    `HeightSource` at the tile height mirror. `THALOS_TILE_RENDERER=0` is the
-    legacy-udlod A/B baseline (boot `OnceLock`; needs a cold run).
-  - `ground_terrain` — **legacy** UDLOD terrain spawn for procedural bodies +
-    impostor↔terrain LOD swap (`sync_terrain_impostor_swap`) at
-    `4 × radius`. It still spawns the legacy `BodySky` fullscreen quad for
-    debug comparison; normal rendering force-hides it in favour of the Bevy
-    raymarched atmosphere. `BodyOceanMaterial` and `CloudCompositeMaterial`
+    (`body_render::tiles`): follows the resolved `ViewAnchor` with one
+    `TileTerrainRoot`, republishes the selection eye each frame, and points the
+    body's `RenderedGround` + `HeightSource` at the tile height mirror.
+    `THALOS_TILE_RENDERER=0` is accepted only in the feature-gated legacy A/B
+    build.
+  - `ground_terrain` — planetary impostor↔terrain visibility, analytic
+    sky/ocean environment projection, and feature-gated UDLOD spawn/material
+    support. `terrain_flatten` separately owns renderer-independent pad handles
+    and rebuild requests.
     remain visible independently and must never be gated by that toggle.
   - `view_anchor` — the **one per-frame answer to "where is the view?"**
     for every view-dependent detail system. `ViewAnchor` (sole writer
@@ -1047,44 +1152,23 @@ Key modules:
   feel and one shadow-focus override. Start screen (`main_menu`) is now the usual
   **PLAY / SETTINGS / QUIT** with the direct-scenario shortcuts tucked in a
   collapsible **QUICK START / DEV** submenu.
-- `settings` — **unified settings persistence**. All user preferences live in
-  one `settings.ron` (`AppSettings { window, graphics, units }` — a section per
-  domain). Storage location switches on build profile (Bevy 0.19's
-  `bevy::platform::dirs::preferences_dir`): **debug** keeps it project-local at
-  the gitignored `user/settings.ron` (easy to inspect/reset during dev),
-  **release** uses the OS app-data dir `<preferences_dir>/thalos/settings.ron`.
-  `settings::load()` runs in `main()` before the app (the window section shapes
-  the initial `Window`) and **migrates the legacy per-domain files**
-  (`user/{settings,graphics,units}.ron`) on first run — a sectioned vs flat-RON
-  heuristic disambiguates the new unified file from the old window-only
-  `settings.ron` at the same path. Each domain still gets its **own Bevy
-  resource** (`WindowSettings`/`GraphicsSettings`/`UnitsSettings`, inserted in
-  `main()`) so every consumer is unchanged; `AppSettingsPlugin`'s one autosave
-  watches all three and rewrites the file when any value changes (value-compared,
-  so an open settings tab doesn't churn it). The per-domain modules below own
-  only their resource + runtime behaviour, not the file IO.
-- `window_settings` — window/display preferences (mode, windowed resolution,
-  vsync, fullscreen monitor, user UI scale; the `window` section). Edited live
-  from the settings menu's Window tab (`settings_menu`).
-  `THALOS_WINDOW_MODE` / `THALOS_WINDOW_SIZE` / `THALOS_VSYNC` are *session
-  overrides* (`overrides_from_env`: they win for the run, grey out their UI
-  control, never persist), and `THALOS_SCALE` stays a pure env diagnostic.
-  `apply_window_settings` pushes settings onto the primary `Window`
-  (value-compared) and writes back windowed drag-resizes (the unified autosave
-  persists them); `apply_ui_scale` (which absorbed the former
-  `compensate_fractional_ui_scale`) multiplies the user UI scale into the
-  fractional-HiDPI crisp-text snap and drives `UiScale`. Caveat: runtime mode
-  switches recreate the swapchain, which the known flaky Windows driver path
-  (generic surface-acquire panic in Bevy's `prepare_windows`) can turn into a
-  crash — pre-existing platform issue, newly reachable at runtime.
+- `settings` — **full-game settings persistence**. `settings.ron` now contains
+  only game rendering, units, and HUD workspace sections. Shared application
+  preferences moved to `thalos_preferences` and its separate
+  `preferences.ron`; on first run that crate extracts window and MSAA values
+  from the old combined game file. Keeping the files separate prevents Kòrsou
+  from acquiring game-only schemas and prevents headless capture settings from
+  rewriting player preferences.
 - `graphics_settings` — graphics/rendering preferences (the `graphics` section),
   edited live from the settings menu's Graphics tab (`settings_menu`). Knobs:
   the **volumetric-cloud toggle** (`GraphicsSettings::clouds`), read by
   `rendering::clouds::drive_clouds` — when off it parks the cloud raymarch via
   the no-cloud-body path (`ActiveCloudBody = None` → blank fallback bound onto
-  `BodySkyMaterial`), so the sky renders clear at near-zero GPU cost; the grass
-  toggle; and the MSAA level. Add new render knobs here as fields + a control in
-  `show_graphics_tab`.
+  `BodySkyMaterial`), so the sky renders clear at near-zero GPU cost; plus grass,
+  foliage, and GPU-grass toggles. MSAA is shared by
+  `thalos_preferences::GraphicsPreferences`. Add a knob here only while it has
+  one game consumer; promote it when a second application implements the same
+  concrete contract.
 - `units_settings` — display-unit preference (the `units` section), edited from
   the settings menu's Units tab. **SI is always the internal/simulation unit;**
   this only changes how a value is formatted for display. Two fields, because one
@@ -1277,18 +1361,76 @@ status boundary.
 
 ### Body render crate (`crates/rendering/render/`)
 
-Unified Bevy rendering for celestial bodies — one appearance model with
-regime-scaled projections. No world generation logic. Added via a single
-`BodyRenderPlugin` (which composes four module sub-plugins). Four modules:
+Bevy crate containing shared appearance mechanisms, concrete planetary and
+far-body adapters, GPU-foundation residue, and sealed legacy ground. No world
+generation logic. Applications compose `PlanetaryRenderPlugin` and
+`FarBodyRenderPlugin` explicitly; the transitional all-in-one facade is gone.
 
-**`shading`** — the single source of truth every body-surface material
-reads from. No materials of its own.
+#### RK-2 ownership inventory (2026-08-09)
+
+The classification test is behavioral: a **mechanism** owns appearance meaning
+or reusable payloads; **foundation** owns GPU resources/pass order without
+world geometry; **planetary** owns spherical/cube-sphere frames, topology, or
+composition; **far-body** owns orbital/impostor projection; **legacy** exists
+only for the UDLOD fallback. The rows below cover every Rust module in
+`thalos_body_render`; mixed directories are recorded instead of hidden.
+
+| Module(s) | Role | Ownership |
+|---|---|---|
+| `lib.rs`, `planetary.rs`, `far_body.rs` | planetary + far-body | Explicit concrete adapter plugins plus public payload re-exports; no all-in-one composition facade. |
+| `composite_order.rs`, `rt.rs` | foundation | Fullscreen sort slots; Solari mesh-eligibility contract. |
+| `craft.rs` | mechanism | Craft surface materials and shared cascade bindings. |
+| `clouds/cell_field.rs`, `clouds/fill_lut.rs` | mechanism | Cloud morphology and near/far fill calibration. |
+| `clouds/mod.rs`, `clouds/composite.rs`, `clouds/compute.rs`, `clouds/config.rs`, `clouds/images.rs`, `clouds/shadow_frame.rs`, `clouds/uniforms.rs` | planetary | Body-fixed spherical march, planet-radius controls, tangent shadow frame, targets, uniforms, and scene-depth composition. |
+| `ground/ground_patch.rs`, `ground/landcover.rs`, `ground/rock_material.rs`, `ground/rock_mesh.rs`, `ground/tree_impostor.rs`, `ground/tree_material.rs` | mechanism | Reusable surface appearance and object geometry/material payloads. |
+| `ground/gpu_grass.rs`, `ground/height_source.rs`, `ground/ocean_material.rs`, `ground/rendered_height.rs`, `ground/scatter.rs`, `ground/sky_material.rs`, `ground/tile_lattice.rs`, `ground/tile_synthesis_pool.rs`, `ground/vegetation.rs` | planetary | Body-local height/placement seams, cube-sphere lattices, vegetation placement, and analytic atmosphere/ocean composition. `height_source.rs` retains the legacy atlas mirror until UDLOD retires. |
+| `ground/mod.rs`, `ground/body_material.rs`, `ground/pipeline.rs`, `ground/playground_material.rs`, `ground/synthetic.rs` | legacy | `LegacyUdlodPlugin`, material/provider pipeline, and synthetic harness, all gated by `legacy-udlod`; `GroundAppearancePlugin` remains the non-legacy half of `ground/mod.rs`. |
+| `impostor/mod.rs`, `impostor/bake.rs`, `impostor/gas_giant.rs`, `impostor/map_ocean.rs`, `impostor/material.rs`, `impostor/proc_impostor.rs`, `impostor/rings.rs`, `impostor/shader_types.rs`, `impostor/solid_planet.rs`, `impostor/texture.rs` | far-body | Distant body projection, materials, baked payloads, rings, and map-scale ocean. |
+| `impostor/film_grain.rs`, `impostor/post_stack.rs` | foundation | Camera post stack and the ordered film-grain GPU pass; mis-filed under `impostor` until RK-3. |
+| `tiles/mod.rs`, `tiles/cache.rs`, `tiles/height_mirror.rs`, `tiles/material.rs`, `tiles/vram_share.rs` | planetary | Default cube-sphere terrain adapter, cache/residency, rendered-height mirror, and standard-path material. |
+
+Custom resources owned by the crate are also classified exhaustively:
+
+| Resources | Role |
+|---|---|
+| `CraftShadowMaps` | mechanism |
+| `CloudsConfig`, `CloudRenderTexture`, `CloudDistanceTexture`, `CloudWeatherMap`, `CloudSurfaceDensityMap`, `CloudShadowMap`, `CloudsImage`, `CameraMatrices`, `CloudsUniform`, `CloudsUniformBuffer`, `CloudsUniformBindGroup`, `CloudsImageBindGroup`, `CloudsPipeline` | planetary |
+| `TileEye` | planetary |
+| `FilmGrainUniformBuffer`, `FilmGrainPipeline` | foundation |
+
+Explicit pass ownership is smaller than the material inventory:
+
+| Pass/order contract | Schedule | Role |
+|---|---|---|
+| Cloud init/update raymarch, sun-transmittance dispatch, and history copies (`run_clouds_compute`) | `RenderGraphSystems::Begin`, before camera rendering | planetary |
+| Atmosphere/ocean/cloud material composites plus `composite_order` slots | Bevy transparent phase | planetary + foundation ordering |
+| Film grain (`film_grain_pass`) | `Core3dSystems::PostProcess`, after CAS | foundation |
+
+Everything else is a Bevy material phase, asset/payload builder, provider, or
+main-world streaming system rather than a custom render-graph pass.
+
+### Render foundation crate (`crates/rendering/foundation/`)
+
+`thalos_render_foundation` is the first extracted GPU seam. It owns
+`SceneDepthView`, `SceneDepthImage`, viewport resizing, the single-sample depth
+copy, the MSAA depth-only resolve, its embedded shader, and the ordering between
+Bevy's main opaque and transparent passes. An application marks its chosen
+camera and uses `scene_depth_view_texture_usages()`; downstream adapters bind the
+exported image handle. The crate depends only on Bevy, and CI rejects any world,
+adapter, gameplay, or application dependency. Its integration test constructs a
+standalone Bevy consumer and verifies the image format, usages, and viewport
+resize without importing `thalos_runtime`.
+
+**`shading`** — the `thalos_body_shading` leaf every body-surface material
+reads from. No materials of its own. It re-exports the atmosphere projection
+owned by `thalos_atmosphere`.
 - `PlanetLightingPlugin` — registers the `thalos::lighting` and
   `thalos::atmosphere` shader libraries. The `impostor` and `ground`
   sub-plugins also add it defensively (no-op if already added) so each
   works standalone.
-- `SceneLighting` / `StarLight` / `MAX_STARS` / `MAX_ECLIPSE_OCCLUDERS`,
-  `AtmosphereBlock` / `CLOUD_BAND_COUNT` — scene + per-body uniforms.
+- `SceneLighting` / `StarLight` / `MAX_STARS` / `MAX_ECLIPSE_OCCLUDERS` —
+  scene uniforms; `AtmosphereBlock` / `CLOUD_BAND_COUNT` are re-exported from
+  `thalos_atmosphere` for existing body-render call sites.
 - `shaders/lighting.wgsl` — WGSL mirror of `SceneLighting` plus
   `eclipse_factor`, `planetshine_sample`, `hapke_brdf`, and
   `shade_hapke_surface`. The impostor always shades through
@@ -1332,16 +1474,14 @@ grid, entirely on Bevy's standard render path.
   (`assets/shaders/tile_terrain.wgsl`): Hapke branch for airless bodies,
   `thalos::shadow` receive, and the shared `THALOS_TERRAIN_INSPECTION` lane.
 
-**`ground`** — **LEGACY** terrain half + non-legacy composites. The
-`thalos_udlod`-backed terrain LOD (former `terrain_render`) is end-of-life and
-takes defect-driven fixes only; `BodySkyMaterial`, `BodyOceanMaterial`, the
-impostor handoff, and the ground-patch utilities that share this module are the
-ADR-20260723T142945Z carve-out and outlive it.
-- `ThalosTerrainPlugin` — adds `thalos_udlod::TerrainPlugin` +
-  `BodyTerrainMaterial`/`BodySkyMaterial`/`BodyOceanMaterial`/`GrassMaterial`,
-  embedding their `src/ground/*.wgsl` via `embedded://thalos_body_render/ground/…`.
-- `PipelineTileProvider`, `rendered_height_*`, the `HeightSource` family,
-  and rendered-height patch utilities used by M5 colliders.
+**`ground`** — shared ground appearance plus a sealed legacy implementation.
+- `GroundAppearancePlugin` installs the non-legacy sky/ocean/grass/tree/rock
+  materials and shared ocean/shading mechanisms used by standard-path tiles.
+- `LegacyUdlodPlugin`, `PipelineTileProvider`, `BodyTerrainMaterial`, atlas
+  mirrors, and their WGSL exist only with `legacy-udlod`. The former
+  `ThalosTerrainPlugin` compatibility facade is gone.
+- `rendered_height_*`, `CpuPipelineHeightSource`, tile-backed
+  `RenderedGroundHeightSource`, and patch utilities are renderer-independent.
 - `vegetation` — near-camera grass-blade decoration layer for vegetated
   bodies: cube-sphere grass-tile lattice + batched blade-mesh builder
   (placement reuses the tile baker's grass-mask gate against the body's
@@ -1368,10 +1508,11 @@ ADR-20260723T142945Z carve-out and outlive it.
   composition stays in `BodySkyMaterial`; the first orbit projection is in
   `SolidPlanetMaterial`. See ADR-20260720T212214Z-one-weather-field-many-cloud-projections and `docs/rendering/clouds.md`.
 
-`body_render` is the **sole consumer** of the Thalos-owned `thalos_udlod`,
-re-exported as `thalos_body_render::udlod` (`{prelude, math, big_space}`); no
-other crate depends on the fork directly. Replacing the ground backend stays
-localized to the `ground` module + that re-export.
+`body_render` is the **sole direct consumer** of the Thalos-owned
+`thalos_udlod`; both its optional dependency and its
+`thalos_body_render::udlod` re-export are feature-gated. Runtime comparison code
+can name the re-export only under the same feature, while every default graph is
+UDLOD-free. CI guards both facts.
 
 ## Data flow
 

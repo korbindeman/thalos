@@ -358,7 +358,7 @@ climb. Both mappings are pinned by unit tests
   header, the centring dot, the zoom row, and the data column are Bevy UI nodes
   and are not in the image.
 - Unit tests: `cargo test -p thalos_navigation` (geometry, planner, VNAV,
-  guidance signs) and `cargo test -p thalos_runtime --lib -- nav_display`
+  guidance signs) and `cargo test -p thalos_game_runtime --lib -- nav_display`
   (scale, culling, decimation, range ladder).
 - In-game: `just game runway-approach` → arm the runway, confirm the ND route and
   the PFD needles agree and both track as the aircraft maneuvers.

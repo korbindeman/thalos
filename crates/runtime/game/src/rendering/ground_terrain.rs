@@ -11,84 +11,78 @@
 //! `PlanetMaterial` is shared with the [`PipelineTileProvider`] via `Arc`,
 //! so there is exactly one copy of the heavy cubemap data per body.
 
+#[cfg(feature = "legacy-udlod")]
 use std::sync::Arc;
 
+#[cfg(feature = "legacy-udlod")]
 use bevy::camera::visibility::RenderLayers;
+#[cfg(feature = "legacy-udlod")]
 use bevy::light::NotShadowCaster;
 use bevy::math::DVec3;
 use bevy::prelude::*;
+#[cfg(feature = "legacy-udlod")]
 use big_space::grid::Grid;
 use big_space::prelude::CellCoord;
+#[cfg(feature = "legacy-udlod")]
+use thalos_body_render::AtmosphereBlock;
+#[cfg(feature = "legacy-udlod")]
+use thalos_body_render::SceneLighting;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::math::TileCoordinate;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::prelude::*;
-use thalos_body_render::{AU_M, AtmosphereBlock, LIGHT_AT_1AU, SceneLighting};
+use thalos_body_render::{AU_M, LIGHT_AT_1AU};
 use thalos_body_render::{
-    BodySkyExtra, BodySkyMaterial, BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial,
-    CASCADE_COUNT, FlattenBlock, GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle,
-    MAX_FLATTEN_REGIONS, PipelineTileProvider, SyntheticTerrainMode, SyntheticTileProvider,
-    TerrainShadingStyle, ocean_wave_frame, project_ocean_spectrum, rendered_height_range,
+    BodySkyExtra, BodySkyMaterial, RenderFrameTime, TerrainShadingStyle, ocean_wave_frame,
+    project_ocean_frame,
 };
+#[cfg(feature = "legacy-udlod")]
+use thalos_body_render::{
+    BodyTerrainDebug, BodyTerrainExtras, BodyTerrainMaterial, CASCADE_COUNT, FlattenBlock,
+    GpuAtlasHeightMirrorComponent, GpuAtlasMirrorHandle, MAX_FLATTEN_REGIONS, PipelineTileProvider,
+    SyntheticTerrainMode, SyntheticTileProvider, rendered_height_range,
+};
+#[cfg(feature = "legacy-udlod")]
 use thalos_physics_canonical::canonical::AuthorityMode;
+#[cfg(feature = "legacy-udlod")]
 use thalos_physics_canonical::types::VesselKind;
-use thalos_terrain::{FlattenHandle, FlattenedSurface, SurfaceQuery, flatten_handle};
+#[cfg(feature = "legacy-udlod")]
+use thalos_terrain::{FlattenHandle, FlattenedSurface, SurfaceQuery};
 use thalos_world::{BodyDefinition, BodyId};
 
-use std::collections::HashMap;
-
 use super::ocean::BodyOcean;
+#[cfg(feature = "legacy-udlod")]
+use super::terrain_flatten::TerrainFlattenRegistry;
+#[cfg(feature = "legacy-udlod")]
 use super::tile_cache::TileCacheRegistry;
 use crate::camera::ShipCamera;
+#[cfg(feature = "legacy-udlod")]
 use crate::coords::SHIP_LAYER;
+#[cfg(feature = "legacy-udlod")]
 use crate::player_controller::{EvaMode, PlayerControllerState};
+#[cfg(feature = "legacy-udlod")]
+use thalos_game_state::ActiveCraftRef;
 use thalos_game_state::coords::SCREEN_MARKER_RADIUS;
 
 use super::real_space::REAL_SPACE_CELL_SIZE_M;
 use super::types::{CameraExposure, RealSpaceBody, SimulationState, SolarSystemState};
-
-/// Per-body shared [`FlattenHandle`]s for local terrain flattening (e.g. the
-/// runway pad). The handle is created once per body and reused across terrain
-/// despawn/respawn churn, so a flatten region set by gameplay survives a
-/// residency reload: the next provider wraps the same handle and re-bakes the
-/// affected tiles flattened. Empty by default (no flattening).
-///
-/// **Writers:** [`crate::runway`] sets a body's region. **Readers:**
-/// [`spawn_body_terrain`] wraps the tile-provider surface with it.
-#[derive(Resource, Default)]
-pub struct TerrainFlattenRegistry {
-    handles: HashMap<BodyId, FlattenHandle>,
-}
-
-impl TerrainFlattenRegistry {
-    /// Fetch the body's flatten handle, creating an empty one on first use so a
-    /// writer and the terrain provider share the same object regardless of which
-    /// runs first.
-    pub fn handle(&mut self, body_id: BodyId) -> FlattenHandle {
-        self.handles
-            .entry(body_id)
-            .or_insert_with(flatten_handle)
-            .clone()
-    }
-
-    /// Read-only lookup for consumers that must not create a handle (e.g. the
-    /// per-frame material driver mirroring pads to the GPU). `None` simply
-    /// means "no flattening on this body yet".
-    pub fn get(&self, body_id: BodyId) -> Option<&FlattenHandle> {
-        self.handles.get(&body_id)
-    }
-}
 
 /// LOD depth for body terrains. 16 LODs over a Mira-scale body
 /// (~10.7 Mm circumference) gives ~1.3 m at the deepest tile texel — well
 /// past where the synthesized cubemap data carries meaningful detail. Stage
 /// 4+ may pin this to per-body values once the v2 backlog provides true
 /// arbitrary-resolution synthesis.
+#[cfg(feature = "legacy-udlod")]
 const LOD_COUNT: u32 = 16;
 
 /// Tile attachment resolution. 512 is the upstream default and matches what
 /// the playground example uses; thalos_udlod mandates power-of-two for
 /// mipmap generation. Larger sizes trade tile latency for fewer LOD levels.
+#[cfg(feature = "legacy-udlod")]
 const TILE_TEXTURE_SIZE: u32 = 512;
+#[cfg(feature = "legacy-udlod")]
 const TILE_BORDER_SIZE: u32 = 2;
+#[cfg(feature = "legacy-udlod")]
 const TILE_MIP_LEVELS: u32 = 4;
 /// CPU tile synthesis concurrency for Thalos' runtime terrain provider.
 ///
@@ -98,7 +92,9 @@ const TILE_MIP_LEVELS: u32 = 4;
 /// The admission queue is kept deeper than the slot count so the
 /// nearest-view-first admission in `TileAtlas::update` has a wide candidate set
 /// to draw the immediate tiles from on a cold view.
+#[cfg(feature = "legacy-udlod")]
 const TILE_LOAD_SLOTS: u32 = 4;
+#[cfg(feature = "legacy-udlod")]
 const TILE_LOAD_QUEUE_SIZE: u32 = TILE_LOAD_SLOTS * 8;
 
 /// Resident tiles per body. Upstream defaults to 1024, which is tuned for
@@ -111,6 +107,7 @@ const TILE_LOAD_QUEUE_SIZE: u32 = TILE_LOAD_SLOTS * 8;
 /// seam — under the worst-case viewpoint (player near a cube corner, three
 /// seams in near-field) this adds ~50–80 tiles on top of the in-window set.
 /// 384 leaves room without ballooning per-body memory.
+#[cfg(feature = "legacy-udlod")]
 const ATLAS_SIZE: u32 = 384;
 
 // ── Distant tier ─────────────────────────────────────────────────────────
@@ -130,28 +127,12 @@ const ATLAS_SIZE: u32 = 384;
 // shrink that drops baked albedo/roughness attachments touches the shared
 // shader + pipeline and is deferred), so the same `BodyTerrainMaterial` and
 // `body_terrain.wgsl` render both tiers with no shader branch.
+#[cfg(feature = "legacy-udlod")]
 const LOD_COUNT_DISTANT: u32 = 8;
+#[cfg(feature = "legacy-udlod")]
 const TILE_TEXTURE_SIZE_DISTANT: u32 = 128;
+#[cfg(feature = "legacy-udlod")]
 const ATLAS_SIZE_DISTANT: u32 = 64;
-
-// ── Map tier ───────────────────────────────────────────────────────────────
-//
-// The orbital map renders the *focused* body filling the screen — a full sphere
-// seen from outside, not the small disc the `Distant` tier targets. Covering a
-// whole sphere even at LOD 2 already needs ~96 tiles (6 faces × 4²), so the
-// 64-slot `Distant` atlas is slot-starved for this view and gets stuck on a
-// coarse LOD whose 128² texels read as visible pixels. This tier is sized for a
-// single full-screen body instead: enough slots to cover the visible hemisphere
-// at a fine LOD (with the back side and the 2:1 balance ring on coarser tiles),
-// a deeper LOD cap so it keeps refining as the map zooms in, and 256² tiles for
-// crisper texels. Only ever one body uses it at a time (the map focus), so the
-// footprint is a single-body cost, not multiplied across every visible planet.
-//
-// Memory ≈ `ATLAS_SIZE_MAP` × `TILE_TEXTURE_SIZE_MAP`² × 14 B × ~1.33 (mips)
-//        ≈ 256 × 256² × 14 × 1.33 ≈ 310 MB for the one focused body.
-const LOD_COUNT_MAP: u32 = 12;
-const TILE_TEXTURE_SIZE_MAP: u32 = 256;
-const ATLAS_SIZE_MAP: u32 = 256;
 
 /// Detail tier for a body's ground-LOD terrain. Assigned by the residency
 /// planner ([`crate::rendering::terrain_residency`]) from how gameplay-relevant
@@ -159,17 +140,16 @@ const ATLAS_SIZE_MAP: u32 = 256;
 /// (collider-backed, deep LODs, full atlas), `Distant` for bodies that are only
 /// big enough on screen to deserve real terrain instead of the icon dot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "legacy-udlod")]
 pub(crate) enum TerrainTier {
     Near,
     Distant,
-    /// The orbital-map focused body: a full-screen single sphere. Larger atlas /
-    /// deeper LODs / bigger tiles than `Distant` so it isn't slot-starved.
-    Map,
 }
 
 /// Concrete atlas/LOD knobs for one [`TerrainTier`]. The attachment *border* and
 /// *mip count* are shared across tiers; only the slot count, LOD depth, and tile
 /// resolution differ.
+#[cfg(feature = "legacy-udlod")]
 struct TierConfig {
     lod_count: u32,
     atlas_size: u32,
@@ -178,6 +158,7 @@ struct TierConfig {
     load_queue: u32,
 }
 
+#[cfg(feature = "legacy-udlod")]
 impl TierConfig {
     /// Resolution for the *appearance* attachments (albedo / roughness /
     /// material), as opposed to height.
@@ -210,6 +191,7 @@ impl TierConfig {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 impl TerrainTier {
     fn config(self) -> TierConfig {
         match self {
@@ -227,13 +209,6 @@ impl TerrainTier {
                 load_slots: TILE_LOAD_SLOTS,
                 load_queue: TILE_LOAD_QUEUE_SIZE,
             },
-            TerrainTier::Map => TierConfig {
-                lod_count: LOD_COUNT_MAP,
-                atlas_size: ATLAS_SIZE_MAP,
-                tile_texture_size: TILE_TEXTURE_SIZE_MAP,
-                load_slots: TILE_LOAD_SLOTS,
-                load_queue: TILE_LOAD_QUEUE_SIZE,
-            },
         }
     }
 
@@ -241,7 +216,6 @@ impl TerrainTier {
         match self {
             TerrainTier::Near => "near",
             TerrainTier::Distant => "distant",
-            TerrainTier::Map => "map",
         }
     }
 }
@@ -250,6 +224,7 @@ impl TerrainTier {
 /// Carries the body id so the impostor↔terrain LOD swap can pair it with the
 /// matching impostor without walking parents.
 #[derive(Component, Debug)]
+#[allow(dead_code)]
 pub(crate) struct BodyTerrain {
     pub(crate) body_id: BodyId,
 }
@@ -316,12 +291,14 @@ const TERRAIN_HANDOFF_SCREEN_MARKERS: f32 = 1.0;
 /// seams seen in `Analytic3d` are therefore caused by height data, not by the
 /// vertex stage.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg(feature = "legacy-udlod")]
 pub(super) enum TerrainTileProviderMode {
     Pipeline,
     Analytic3d,
     Flat,
 }
 
+#[cfg(feature = "legacy-udlod")]
 impl TerrainTileProviderMode {
     fn from_env() -> Self {
         let Ok(value) = std::env::var("THALOS_TERRAIN_PROVIDER") else {
@@ -347,6 +324,7 @@ impl TerrainTileProviderMode {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 pub(super) fn terrain_tile_provider_mode() -> TerrainTileProviderMode {
     TerrainTileProviderMode::from_env()
 }
@@ -354,6 +332,7 @@ pub(super) fn terrain_tile_provider_mode() -> TerrainTileProviderMode {
 /// Fullbright terrain is a capture-only diagnostic that separates missing
 /// raster coverage from Hapke/shadow/BRDF output. It never changes geometry,
 /// tile synthesis, or attachment data.
+#[cfg(feature = "legacy-udlod")]
 fn terrain_inspection_flag() -> f32 {
     let Ok(value) = std::env::var("THALOS_TERRAIN_INSPECTION") else {
         return 0.0;
@@ -370,6 +349,7 @@ fn terrain_inspection_flag() -> f32 {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn analytic_provider_height_range() -> f32 {
     // Mountain-scale relief regardless of the body's authored range. With
     // the multi-octave fBm signal sharpened to favour peaks (see
@@ -405,10 +385,12 @@ fn analytic_provider_height_range() -> f32 {
 /// distance per band), which makes the transition substantially smoother
 /// while staying under the morph-distance / range invariant the upstream
 /// docs call out (`morph_distance >= ~6 tile sizes`).
+#[cfg(feature = "legacy-udlod")]
 const TERRAIN_MORPH_RANGE: f32 = 0.5;
 
 /// Same widening for the fragment / vertex height blend band so colours and
 /// heights cross-fade over the same window the geometry morphs across.
+#[cfg(feature = "legacy-udlod")]
 const TERRAIN_BLEND_RANGE: f32 = 0.5;
 
 /// Distance at which the vertex shader switches from UDLOD's Taylor-series
@@ -428,6 +410,7 @@ const TERRAIN_BLEND_RANGE: f32 = 0.5;
 /// multiplier of body radius (UDLOD multiplies by `scale` in
 /// `TileTree::new` before the value reaches the shader), so the conversion
 /// to a per-body ratio lives in [`body_terrain_view_config`].
+#[cfg(feature = "legacy-udlod")]
 const TERRAIN_PRECISION_THRESHOLD_M: f64 = 10_000.0;
 
 /// Above this stationary surface-warp target, keep the current UDLOD request
@@ -437,12 +420,14 @@ const TERRAIN_PRECISION_THRESHOLD_M: f64 = 10_000.0;
 /// full warp ladder while standing still, and the terrain renderer avoids the
 /// one-time request storm/stall that used to happen as warp crossed into the
 /// high surface levels.
+#[cfg(feature = "legacy-udlod")]
 const SURFACE_WARP_STREAMING_PAUSE_SPEED: f64 = 100.0;
 
 /// UDLOD view config for body terrain. Wider morph + blend bands than the
 /// upstream default plus a much larger high-precision threshold so the
 /// Taylor branch actually fires; everything else stays at the upstream
 /// tuning.
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn body_terrain_view_config(body_radius_m: f64) -> TerrainViewConfig {
     TerrainViewConfig {
         morph_range: TERRAIN_MORPH_RANGE,
@@ -482,6 +467,7 @@ pub(crate) fn terrain_shading_style_for(body: &BodyDefinition) -> TerrainShading
 /// pure function of the tier, so both views stream the *same* procedural surface
 /// through identical attachments (no shader branch). Shared by
 /// [`spawn_body_terrain`] and `rendering::map_terrain`.
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn build_terrain_config(model: TerrainModel, tier: TerrainTier) -> TerrainConfig {
     let tc = tier.config();
     TerrainConfig {
@@ -548,6 +534,7 @@ pub(crate) fn build_terrain_config(model: TerrainModel, tier: TerrainTier) -> Te
 ///
 /// `is_spherical` is true for body terrain (`TerrainModel::sphere`), giving six
 /// faces; the planar fallback (single side) is harmless to pin defensively.
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn pin_root_tiles(tile_atlas: &mut TileAtlas) {
     let side_count = if tile_atlas.model().is_spherical() {
         6
@@ -574,6 +561,7 @@ pub(crate) fn pin_root_tiles(tile_atlas: &mut TileAtlas) {
 /// `tier` picks the atlas footprint (see [`TerrainTier`]): `Near` for the body
 /// the player is on/heading toward (full atlas, deep LODs), `Distant` for a body
 /// that is merely visible (tiny atlas so many stay resident cheaply).
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn spawn_body_terrain(
     commands: &mut Commands,
     body: &BodyDefinition,
@@ -822,16 +810,18 @@ pub(crate) fn spawn_body_terrain(
 ///
 /// The map-layer impostor and map halo live on `MAP_LAYER` and are not
 /// touched here.
+#[cfg(feature = "legacy-udlod")]
 pub(super) fn pause_surface_terrain_streaming_at_high_warp(
     mut commands: Commands,
     sim: Res<SimulationState>,
-    eva_mode: Res<EvaMode>,
+    eva_mode: ActiveCraftRef<EvaMode>,
     player: Option<Res<PlayerControllerState>>,
     terrains: Query<(Entity, &BodyTerrain, Option<&TerrainStreamingPaused>)>,
 ) {
+    let eva_grounded = eva_mode.get().is_some_and(|mode| mode.is_grounded());
     let surface_stationary = match sim.simulation.authority() {
         AuthorityMode::BodyFixed { .. } => true,
-        _ if sim.simulation.vessel_kind() == VesselKind::Eva && eva_mode.is_grounded() => player
+        _ if sim.simulation.vessel_kind() == VesselKind::Eva && eva_grounded => player
             .as_deref()
             .map(|state| state.is_at_rest())
             .unwrap_or(false),
@@ -860,7 +850,7 @@ pub(super) fn sync_body_render_lod(
     sim: Res<SimulationState>,
     ship_cam_q: Query<&GlobalTransform, With<ShipCamera>>,
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
-    mut terrains: Query<
+    #[cfg(feature = "legacy-udlod")] mut terrains: Query<
         (&BodyTerrain, &TileAtlas, &mut Visibility),
         (
             Without<RealSpaceImpostor>,
@@ -935,10 +925,13 @@ pub(super) fn sync_body_render_lod(
     // resident-ancestor chain (otherwise the GPU samples
     // `INVALID_ATLAS_INDEX` → vertices drop to `min_height` → visible "void"
     // holes during the load window).
+    #[cfg(feature = "legacy-udlod")]
     let mut terrain_resident: std::collections::HashSet<BodyId> = terrains
         .iter()
         .filter_map(|(t, atlas, _)| atlas.pinned_tiles_ready().then_some(t.body_id))
         .collect();
+    #[cfg(not(feature = "legacy-udlod"))]
+    let mut terrain_resident = std::collections::HashSet::<BodyId>::new();
     // Standard-path tile terrain (NTR-X1) counts as resident ground once it
     // has fully covered its selection — same handoff the udlod atlas gate
     // provides. Without this the impostor billboard (an analytic smooth
@@ -979,6 +972,7 @@ pub(super) fn sync_body_render_lod(
         }
     };
 
+    #[cfg(feature = "legacy-udlod")]
     for (terrain, atlas, mut vis) in &mut terrains {
         let Some((dist, swap, _shell)) = body_metrics(terrain.body_id) else {
             continue;
@@ -1141,13 +1135,17 @@ pub(crate) struct OceanDebugSettings {
 /// `update_real_space_body_positions` (for up-to-date body grid transforms).
 pub(super) fn update_body_terrain_atmosphere(
     body_q: Query<(&RealSpaceBody, &GlobalTransform)>,
-    terrain_q: Query<(&BodyTerrain, &MeshMaterial3d<BodyTerrainMaterial>)>,
+    #[cfg(feature = "legacy-udlod")] terrain_q: Query<(
+        &BodyTerrain,
+        &MeshMaterial3d<BodyTerrainMaterial>,
+    )>,
     sky_q: Query<(&BodySky, &MeshMaterial3d<BodySkyMaterial>)>,
     ship_cam_q: Query<(&CellCoord, &Transform), With<ShipCamera>>,
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
     ocean_debug: Res<OceanDebugSettings>,
+    mut previous_ocean_epoch_s: Local<Option<f64>>,
     // Combined into one tuple param to stay under Bevy's 16-arg system limit:
     // .0 = cloud config (heights for occlusion), .1 = which body the cloud
     // raymarch is currently rendered for (sole writer: `clouds::drive_clouds`),
@@ -1177,26 +1175,8 @@ pub(super) fn update_body_terrain_atmosphere(
         Option<Res<thalos_body_render::clouds::CloudShadowMap>>,
         Res<super::clouds::CloudShadowConfig>,
     ),
-    flatten_registry: Res<TerrainFlattenRegistry>,
-    // ADR-20260720T185958Z-water-projects-one-signed-sea-field: resident-height-tile lookup inputs for the sky material's
-    // analytic-ocean branch. .0 finds each body's udlod terrain entity + its
-    // `TileAtlas` (lod count, height decode range, attachment-0 UV layout);
-    // .1 supplies the per-(terrain, view) tile tree's window size.
-    tile_lookup_io: (
-        Query<(
-            Entity,
-            &BodyTerrain,
-            &thalos_body_render::udlod::prelude::TileAtlas,
-        )>,
-        Option<
-            Res<
-                thalos_body_render::udlod::terrain_view::TerrainViewComponents<
-                    thalos_body_render::udlod::prelude::TileTree,
-                >,
-            >,
-        >,
-    ),
-    mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
+    #[cfg(feature = "legacy-udlod")] flatten_registry: Res<TerrainFlattenRegistry>,
+    #[cfg(feature = "legacy-udlod")] mut terrain_materials: ResMut<Assets<BodyTerrainMaterial>>,
     mut sky_materials: ResMut<Assets<BodySkyMaterial>>,
 ) {
     let Some(ref states) = cache.states else {
@@ -1206,6 +1186,17 @@ pub(super) fn update_body_terrain_atmosphere(
     let star_pos = states.first().map(|s| s.position).unwrap_or_default();
     // Atmosphere airlight tuning (see `AtmosphereTuning`).
     let tuning = &cloud_io.2;
+    let simulation_epoch_s = sim.simulation.sim_time();
+    let ocean_frame_time = if let Some(override_s) = ocean_debug.phase_time_override_s {
+        RenderFrameTime::new(override_s, override_s)
+    } else {
+        let previous_s = previous_ocean_epoch_s
+            .filter(|previous_s| previous_s.is_finite() && *previous_s <= simulation_epoch_s)
+            .unwrap_or(simulation_epoch_s);
+        RenderFrameTime::new(previous_s, simulation_epoch_s)
+    }
+    .expect("ocean render epochs must be finite and monotonic");
+    *previous_ocean_epoch_s = Some(simulation_epoch_s);
 
     // Planet center and orientation in render space from each body's grid
     // transform. The real-space grid rotation is body-local → world, so the
@@ -1247,48 +1238,6 @@ pub(super) fn update_body_terrain_atmosphere(
                 + transform.translation.as_dvec3()
         })
         .unwrap_or_else(|_| sim.simulation.ship_state().position);
-
-    // ADR-20260720T185958Z-water-projects-one-signed-sea-field: per-body height-tile lookup parameters for the sky material's
-    // ocean branch, which samples signed sea height from the same udlod atlas
-    // the terrain mesh displaces from. Bodies without a terrain (or whose
-    // tile tree hasn't spawned yet) keep `tile_lookup.x = 0` — the shader
-    // falls back to the coast atlas, and the material's bind-group prepare
-    // also force-disables the flag if the render-world resources are missing.
-    let (terrain_atlas_q, tile_trees) = &tile_lookup_io;
-    let mut tile_lookup_by_body: std::collections::HashMap<BodyId, (Entity, Vec4, Vec4)> =
-        std::collections::HashMap::new();
-    for (terrain_entity, terrain, atlas) in terrain_atlas_q {
-        // Attachment 0 is the height attachment by construction
-        // (`build_terrain_config` adds it first); verify by name anyway so a
-        // future re-ordering fails safe (coast-atlas fallback) instead of
-        // decoding albedo texels as heights.
-        let Some(height_cfg) = atlas.attachment_configs().first() else {
-            continue;
-        };
-        if height_cfg.name != "height" {
-            continue;
-        }
-        let Some(tree_size) = tile_trees.as_ref().and_then(|trees| {
-            trees
-                .iter()
-                .find(|((t, _view), _)| *t == terrain_entity)
-                .map(|(_, tree)| tree.tree_size())
-        }) else {
-            continue;
-        };
-        let texture = height_cfg.texture_size as f32;
-        let border = height_cfg.border_size as f32;
-        let center = texture - 2.0 * border;
-        let (min_h, max_h) = atlas.model().height_range();
-        tile_lookup_by_body.insert(
-            terrain.body_id,
-            (
-                terrain_entity,
-                Vec4::new(1.0, atlas.lod_count() as f32, tree_size as f32, center),
-                Vec4::new(center / texture, border / texture, min_h, max_h),
-            ),
-        );
-    }
 
     // Per-body sky data: sun direction, flux, planet center, radius.
     let mut sky_by_body: std::collections::HashMap<BodyId, BodySkyExtra> =
@@ -1353,6 +1302,9 @@ pub(super) fn update_body_terrain_atmosphere(
             ocean_low_phase,
             ocean_high_phase,
             ocean_slope_amplitudes,
+            ocean_surface_wavelengths_m,
+            ocean_surface_amplitudes_m,
+            ocean_surface_phases_rad,
             ocean_spectrum,
             ocean_wind_basis,
             ocean_crosswind_basis,
@@ -1366,11 +1318,9 @@ pub(super) fn update_body_terrain_atmosphere(
                 let sea_r = body.radius_m + sea_level_m as f64;
                 let cam_alt_sea = ((camera_inertial - body_state.position).length() - sea_r) as f32;
                 let state = body.ocean.unwrap_or_default();
-                let wave_time_s = ocean_debug
-                    .phase_time_override_s
-                    .unwrap_or_else(|| sim.simulation.sim_time());
                 let projection =
-                    project_ocean_spectrum(&state, body.surface_gravity_m_s2(), wave_time_s);
+                    project_ocean_frame(&state, body.surface_gravity_m_s2(), ocean_frame_time);
+                let wave_time_s = ocean_frame_time.current_epoch_s();
                 let camera_body =
                     body_state.orientation.inverse() * (camera_inertial - body_state.position);
                 let frame = ocean_wave_frame(camera_body, &state);
@@ -1388,9 +1338,12 @@ pub(super) fn update_body_terrain_atmosphere(
                     ),
                     Vec4::new(deep_r, deep_g, deep_b, state.optical_depth_m.max(0.1)),
                     frame.camera_phase_m,
-                    projection.low_phase,
-                    projection.high_phase,
-                    projection.slope_amplitudes,
+                    projection.spectrum.low_phase,
+                    projection.spectrum.high_phase,
+                    projection.spectrum.slope_amplitudes,
+                    projection.current_surface.wavelengths_m,
+                    projection.current_surface.amplitudes_m,
+                    projection.current_surface.phases_rad,
                     Vec4::new(
                         frame.swell_angle_rad,
                         state.swell_energy.clamp(0.0, 1.0),
@@ -1411,12 +1364,11 @@ pub(super) fn update_body_terrain_atmosphere(
                 Vec4::ZERO,
                 Vec4::ZERO,
                 Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
+                Vec4::ZERO,
             ),
         };
-        let (tile_lookup, tile_atlas_uv) = tile_lookup_by_body
-            .get(&i)
-            .map(|(_, lookup, uv)| (*lookup, *uv))
-            .unwrap_or((Vec4::ZERO, Vec4::ZERO));
         sky_by_body.insert(
             i,
             BodySkyExtra {
@@ -1435,11 +1387,17 @@ pub(super) fn update_body_terrain_atmosphere(
                 ocean_low_phase,
                 ocean_high_phase,
                 ocean_slope_amplitudes,
+                ocean_surface_wavelengths_m,
+                ocean_surface_amplitudes_m,
+                ocean_surface_phases_rad,
                 ocean_spectrum,
                 ocean_wind_basis,
                 ocean_crosswind_basis,
-                tile_lookup,
-                tile_atlas_uv,
+                // The analytic ocean no longer reaches into a renderer-owned
+                // height atlas. Coast masking is sourced from the shared coast
+                // field, so both ground renderers use the same representation.
+                tile_lookup: Vec4::ZERO,
+                tile_atlas_uv: Vec4::ZERO,
                 cloud_march: if Some(i) == cloud_io.1.0 {
                     cloud_io
                         .0
@@ -1519,6 +1477,7 @@ pub(super) fn update_body_terrain_atmosphere(
     // the checker across the surface whenever the camera orbits a stationary
     // player, because the phase reference and the shader's camera reference then
     // disagree by the orbit offset.
+    #[cfg(feature = "legacy-udlod")]
     for (terrain, mat_handle) in &terrain_q {
         let Some(mut mat) = terrain_materials.get_mut(mat_handle) else {
             continue;
@@ -1670,13 +1629,7 @@ pub(super) fn update_body_terrain_atmosphere(
         } else {
             mat.cloud_shadow = Default::default();
         }
-        // ADR-20260720T185958Z-water-projects-one-signed-sea-field: point the material at this body's live terrain entity so
-        // its bind-group prepare can resolve the height atlas + tile tree in
-        // the render world. Refreshed every frame, so terrain despawn/respawn
-        // (residency tiers, flatten invalidation) can never leave it stale.
-        mat.terrain_entity = tile_lookup_by_body
-            .get(&sky.body_id)
-            .map(|(entity, _, _)| *entity);
+        mat.terrain_entity = None;
         // Sky-dome dev overrides (`< 0` keep the authored value).
         if tuning.strength >= 0.0 {
             mat.atmosphere.atmos_geom.z = tuning.strength;
@@ -1729,6 +1682,7 @@ pub(super) fn update_body_terrain_atmosphere(
 /// positions, so they are scale-invariant: the map-view terrain
 /// (`rendering::map_terrain`) reuses this with an empty occluder list (the map
 /// schematic skips eclipse shadows) and a `MAP_SCALE` body.
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn build_terrain_scene_lighting(
     body_id: BodyId,
     states: &thalos_physics_canonical::types::BodyStates,
@@ -1794,6 +1748,7 @@ pub(crate) fn build_terrain_scene_lighting(
 /// the flux is an artistic night-lift, not lux. `MOON_FULL_FLUX` is the single
 /// brightness knob (the lift from a full, bright moon overhead); tune it from a
 /// night screenshot.
+#[cfg(feature = "legacy-udlod")]
 fn compute_moonlight(
     body_id: BodyId,
     bodies: &[thalos_world::BodyDefinition],

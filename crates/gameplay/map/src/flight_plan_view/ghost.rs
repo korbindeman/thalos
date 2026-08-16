@@ -12,8 +12,8 @@ use bevy::prelude::*;
 use crate::map_view::MapSnapshot;
 use thalos_game_state::camera::{CameraFocus, CameraFocusTarget};
 use thalos_game_state::coords::{RenderOrigin, WorldScale};
-use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HideInShipView;
+use thalos_photo_mode::HideInPhotoMode;
 
 use super::view::{FlightPlanView, GhostPhase};
 

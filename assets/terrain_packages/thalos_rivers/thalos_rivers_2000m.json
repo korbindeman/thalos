@@ -1,1 +1,1 @@
-{"width":10009,"height":5004,"px_m_equator":2000,"planet_radius_m":3186000,"backing":"diffusion","log_decades":7,"units":"u8 = 255*log10(catchment_km2)/log_decades","mapping":"equirect"}
+{"width":10009,"height":5004,"px_m_equator":2000,"planet_radius_m":3186000,"backing":"diffusion","log_decades":7,"units":"u8 = 255*log10(catchment_km2)/log_decades","discharge_log_min":-3,"discharge_log_max":6,"discharge_units":"annual_mean_m3_s; byte 0 = zero; bytes 1..255 linear in log10","runoff_model":"canonical_macro_moisture_v1","mapping":"equirect"}

@@ -121,6 +121,22 @@ THALOS_WINDOW_MODE=windowed      # windowed | borderless | fullscreen
 THALOS_WINDOW_SIZE=1600x900      # optional, used for windowed mode
 THALOS_WGPU_BACKEND=vulkan       # auto | dx12 | vulkan | metal | gl
 THALOS_SCALE=2                   # optional, pin the UI scale factor
+THALOS_QUALITY=laptop            # optional, pin Showcase or Laptop for one session
+```
+
+### Developer quality profile (`THALOS_QUALITY`)
+
+`THALOS_QUALITY=laptop|showcase` stamps the named bundle for one process and
+does not write `preferences.ron` / `settings.ron`. On macOS, `just game` and
+`just korsou` default that pin to laptop (graphics knobs only; the window
+mode is unchanged) so an existing checkout does not stay on Showcase
+layers.
+`quality=showcase` forces the canonical look. Capture ignores the pin. Full
+contract: `docs/development/quality_profiles.md`.
+
+```bash
+just game orbit
+just game orbit quality=showcase
 ```
 
 ### HiDPI UI scale factor (`THALOS_SCALE`)
@@ -163,11 +179,49 @@ that floor shows no movement. Set `THALOS_VSYNC=off` (also accepts
 `0`/`false`/`no`) to launch with `PresentMode::AutoNoVsync` and read the true,
 uncapped frame time while still allowing wgpu to fall back to a supported
 non-vsync present mode; anything else keeps the vsync default. Read by
-`overrides_from_env` in `crates/runtime/game/src/window_settings.rs` as a session
-override: it wins over the persisted `user/settings.ron` vsync preference and
+`thalos_preferences::overrides_from_env` as a session override: it wins over
+the persisted `user/preferences.ron` vsync preference and
 greys out the VSync control in the settings menu, without being written into
 the file. (Vsync can also be toggled live from the settings menu's Window
 tab, which *does* persist.)
+
+### Render-cost attribution matrix
+
+`just perf-bisect [preset]` is the agent-runnable render-cost discriminator. It
+boots the real screenshot world and offscreen render graph once, removes the
+capture host's 60 Hz pacing and PNG readback, waits for terrain coverage plus
+stable mesh/tile counts, then measures the four cells of foliage × custom
+shadows in that same warmed process. Each cell gets a frame-history flush and
+240-frame measurement window. Results and the computed main/interaction
+effects go to `artifacts/diagnostics/reports/headless-matrix.json`.
+The recipe explicitly enables the diagnostic target even when the calling
+shell has a restrictive `RUST_LOG`; the report command fails if any cell is
+missing rather than publishing a partial matrix.
+
+`just perf-shadow-bisect [preset]` uses the same warmed scene and controls but
+holds foliage resident while stepping the live shadow-camera budget 4→0. Its
+`headless-shadow-cascades.json` report gives the marginal frame cost of every
+cascade. Use that ladder before changing cascade coverage or resolution: it
+separates a costly individual view from fixed rig overhead, and it fails closed
+when any rung is missing.
+
+The default preset is `forest-stand`; output is fixed at 1600×900 with clouds,
+grass, and MSAA off so the matrix changes only woody vegetation and the custom
+shadow rig. `THALOS_PERF_FOLIAGE` remains a session-only control that never
+rewrites the persisted foliage preference. `THALOS_SHADOW_CASCADES=0..4`
+remains a cold-run control for ordinary game/capture sessions; the benchmark
+alone changes its live ceiling between warmed cells. The matrix excludes
+swapchain presentation, input, and the interactive window, so use it to rank
+render subsystems. Use the matching interactive scene only for the final
+player-visible validation if the offscreen result identifies a lever.
+
+Every `frame_gauge` records the effective foliage/cloud/grass/MSAA state,
+shadow-cascade budget, VSync state, and physical window size. `just perf-report`
+copies that identity into `summary.json`; a comparison is invalid when those
+fields differ outside the intended axis. Each offscreen cell additionally emits
+`headless_benchmark_{config,ready,start,end}` records with frame percentiles,
+wall duration, scene counts, stage samples, resolution, and an explicit GPU
+timing-availability bit.
 
 For A/B attribution, have the user change one variable at a time and report
 the frame time from the F3 debug view or capture a chrome trace
@@ -214,12 +268,16 @@ still controls which events exist.
 ### Performance telemetry (perf lane)
 
 `thalos::diagnostic::perf` is the always-on performance lane inside the shared
-runtime stream (`crates/runtime/game/src/perf/`). One collector (`PerfSamples`,
-per-frame CPU/GPU ms rings + memory/count gauges) feeds three consumers:
+runtime stream. `thalos_diagnostics_ui::FrameSamples` is the one wall-clock
+CPU/GPU ring consumed by the common F3 graph and the game recorder;
+`crates/runtime/game/src/perf/::PerfSamples` adds only game stage and
+memory/count gauges.
 
-- **F3 debug view** — one F3 press toggles the live stats/graph screen *and*
-  the physics-hitbox + aero-gizmo overlays together (single toggle in
-  `perf::overlay::toggle_debug_view`; the per-module F3 readers are gone).
+- **F3 debug view** — `thalos_diagnostics_ui` owns the single F3 reader,
+  requested-open state, common frame/device/process/scene sections, and frame
+  graph in every interactive application. Typed application extensions add
+  their own facts. Thalos observes the shared state to toggle physics hitboxes
+  and aero gizmos together; Kòrsou adds planar streaming and UTM/AGL position.
   Graphs render as `UiMaterial` quads (`assets/shaders/perf_graph.wgsl`, so
   they hot-reload). To screenshot it headlessly, `THALOS_DEBUG_VIEW=1` starts
   it visible and `THALOS_SCREENSHOT_HUD=1` is also required — the default
@@ -244,24 +302,27 @@ per-frame CPU/GPU ms rings + memory/count gauges) feeds three consumers:
   session id you read once a month in the same size and colour, which is
   unreadable at a glance:
 
-  - **headline** — fps, with frame/gpu/stage timings and the top GPU passes
-    beneath it in small dim type;
+  - **headline** — fps, with shared frame/GPU distribution and the top GPU
+    passes beneath it in small dim type; Thalos adds stage/warp timing under
+    **SIMULATION**;
   - **DEVICE** — the adapter actually in use (name, backend, driver — not
-    always the one the machine advertises), window size, renderer instances;
-  - **MEMORY** — the shared **VRAM bar** (see `vram_bar.rs`), then the two
-    things a bar cannot express: terrain residency against the budget that
-    coarsens the ground, and the *host* side (RSS, mesh/image CPU bytes);
-  - **SCENE** — object counts and the tile driver's `split_scale`
-    (< 1 = the residency budget is actively coarsening the ground);
+    always the one the machine advertises) and window size;
+  - **MEMORY** — whole-card VRAM plus process RSS in the core; Thalos extends
+    it with the attributed VRAM bar, terrain residency budget, CPU asset bytes,
+    and the two-minute terrain/slab graph;
+  - **SCENE** — common object counts; Thalos adds renderer instances, resident
+    tiles, and the tile driver's `split_scale` (< 1 = the residency budget is
+    actively coarsening the ground);
   - **POSITION** — body, latitude/longitude, altitude/AGL/ground, view speed,
     and the landcover moisture + canopy the generator reports at that exact
     direction — the same fields the ground shader and scatter placer read, so a
     disagreement between the image and this readout is itself the bug.
 
   Each source degrades to a stated gap, never a zero.
-- **`frame_gauge`** every ~2 s: fps, cpu ms mean/p50/p95/max, gpu ms, SimStage
+- **`frame_gauge`** every ~2 s: fps, cpu ms mean/p50/p95/max, GPU ms plus an
+  explicit availability bit, SimStage
   wall times, entities, mesh/image counts, tile-resident MiB, mesh-slab MiB,
-  plus the CPU side: `rss_mib` (whole-process working set) with
+  effective render configuration, plus the CPU side: `rss_mib` (whole-process working set) with
   `mesh_cpu_mib` / `image_cpu_mib` to attribute it. Added 2026-07-29 because a
   capture host was killed at 8.1 GiB RSS while every GPU-side gauge summed to
   ~2 GiB (INC-20260729T081809Z) — `just diag`'s `memory_growth` prefers
@@ -349,7 +410,8 @@ session of that lane to `artifacts/diagnostics/reports/<session>/report.html`
 curves, counts, stage breakdown, per-spike sparklines) plus a `summary.json`
 for agents. Note the honesty split in `summary.json`: `worst_window_*` fields
 are window-level aggregates; exact frame percentiles (`full_rate.*`) appear
-only when a full-rate recording exists. Deep profiling remains Tracy /
+only when a full-rate recording exists. Missing GPU timing is `null` with
+`gpu_timing_available: false`, never a misleading zero. Deep profiling remains Tracy /
 `profile-chrome` — the perf lane tells you when to reach for them.
 
 **Storage**: `runtime_diagnostics::jsonl_layer` calls

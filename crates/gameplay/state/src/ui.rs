@@ -1,7 +1,6 @@
-//! Shared UI-facing state and markers read across feature crates: photo
-//! mode, the per-device UI input gates, and the HUD-panel marker. Writers
-//! stay with their owning features (the HUD's `hide_in_photo_mode` and
-//! `update_ui_input_gates`); everything else only reads.
+//! Shared game-specific UI-facing state and markers read across feature crates.
+//! Cross-application photo-mode state lives in `thalos_photo_mode`; the
+//! per-device input gates and HUD-panel marker remain on the game blackboard.
 
 use bevy::prelude::*;
 
@@ -9,17 +8,6 @@ use bevy::prelude::*;
 /// the editors, which must blank the flight UI) can toggle them all.
 #[derive(Component)]
 pub struct HudPanel;
-
-/// Global photo-mode state.
-#[derive(Resource, Default, Debug)]
-pub struct PhotoMode {
-    pub active: bool,
-}
-
-/// Marker: entities with this component are hidden while photo mode is active.
-/// Attach to the root of any overlay mesh (children inherit visibility).
-#[derive(Component)]
-pub struct HideInPhotoMode;
 
 /// True while a UI surface owns the pointer: the cursor is over (or dragging
 /// with) an interactive Bevy-UI element or an egui area.
@@ -51,12 +39,6 @@ impl UiKeyboardGate {
     pub fn text_entry(&self) -> bool {
         self.text_entry
     }
-}
-
-/// Run condition: true when photo mode is inactive. Use to gate HUD panels,
-/// gizmo draws, and the per-frame update systems of overlay mesh entities.
-pub fn not_in_photo_mode(photo_mode: Res<PhotoMode>) -> bool {
-    !photo_mode.active
 }
 
 /// Marker: entities with this component are hidden while the view is

@@ -494,7 +494,7 @@ fn update_lens_flare(
 
     // `Node` left/top are UI-logical px, which Bevy multiplies by `UiScale`
     // (set ≠ 1 to compensate fractional HiDPI scale and apply the user's UI
-    // scale — see `window_settings::apply_ui_scale`). `sun_screen`/`to_center` are
+    // scale — see `thalos_preferences`' window projection). `sun_screen`/`to_center` are
     // window-logical px from `world_to_viewport` + `window.width()`, which are
     // UiScale-independent. Divide by UiScale here so the ghost's *physical*
     // position lands on the projected star instead of drifting by the UiScale

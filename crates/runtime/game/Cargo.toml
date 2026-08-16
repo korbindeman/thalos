@@ -1,5 +1,5 @@
 [package]
-name = "thalos_runtime"
+name = "thalos_game_runtime"
 publish = false
 version.workspace = true
 edition.workspace = true
@@ -10,6 +10,10 @@ thalos_control = { path = "../../simulation/control" }
 thalos_navigation = { path = "../../simulation/navigation" }
 thalos_world = { path = "../../domain/world" }
 thalos_input = { path = "../../interface/input" }
+thalos_diagnostics_ui = { path = "../../interface/diagnostics_ui" }
+thalos_preferences = { path = "../../interface/preferences" }
+thalos_photo_mode = { path = "../../interface/photo_mode" }
+thalos_viewer = { path = "../../interface/viewer" }
 thalos_ui = { path = "../../interface/ui" }
 thalos_game_state = { path = "../../gameplay/state" }
 thalos_hud = { path = "../../gameplay/hud" }
@@ -18,6 +22,8 @@ thalos_structures = { path = "../../gameplay/structures" }
 thalos_shipyard_editor = { path = "../../gameplay/shipyard_editor" }
 thalos_body_render = { path = "../../rendering/render" }
 thalos_body_shading = { path = "../../rendering/shading" }
+thalos_render_foundation = { path = "../../rendering/foundation" }
+thalos_render_kit = { path = "../../rendering/kit" }
 thalos_terrain = { path = "../../domain/terrain" }
 thalos_weather = { path = "../../domain/weather" }
 thalos_physics_local = { path = "../../simulation/physics_local" }
@@ -26,7 +32,6 @@ thalos_shipyard = { path = "../../domain/construction" }
 thalos_capture_protocol = { path = "../../capture/protocol" }
 thalos_diagnostics = { workspace = true }
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
-bevy_egui = "0.41.1"
 big_space = { workspace = true }
 # Persisted user settings (user/settings.ron — window mode, vsync, UI scale).
 ron = "0.12"
@@ -57,6 +62,10 @@ wgpu = { version = "29", default-features = false, features = ["counters"], opti
 bevy_render_gl_backend = { package = "bevy_render", version = "0.19", default-features = false, features = ["gles"], optional = true }
 
 [features]
+# Standard-path tiles are the production ground renderer. UDLOD remains only
+# as an explicit comparison capability and is absent from ordinary builds.
+default = []
+legacy-udlod = ["thalos_body_render/legacy-udlod"]
 # Runtime content capabilities. The default-selection feature implies the
 # capability so invalid combinations are unrepresentable through Cargo.
 neural-terrain = ["dep:sha2"]

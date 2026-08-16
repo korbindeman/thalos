@@ -16,5 +16,6 @@ thalos_game_state = { path = "../state" }
 thalos_input = { path = "../../interface/input" }
 thalos_physics_canonical = { path = "../../simulation/physics_canonical" }
 thalos_physics_local = { path = "../../simulation/physics_local" }
+thalos_photo_mode = { path = "../../interface/photo_mode" }
 thalos_ui = { path = "../../interface/ui" }
 thalos_world = { path = "../../domain/world" }

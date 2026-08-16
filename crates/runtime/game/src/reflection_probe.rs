@@ -43,7 +43,6 @@ use bevy::render::render_resource::{
 use std::sync::Arc;
 
 use thalos_body_render::ImpostorAlbedo;
-use thalos_body_render::udlod::prelude::PreciseRotation;
 
 use crate::coords::SHIP_LAYER;
 use crate::rendering::{CameraExposure, PlayerShip, RealSpaceBody, SimulationState};
@@ -439,7 +438,7 @@ fn refresh_cubemap(
     exposure: Option<Res<CameraExposure>>,
     mut sky_ambient: ResMut<SkyAmbient>,
     impostors: Option<Res<ImpostorAlbedoRegistry>>,
-    body_rotations: Query<(&RealSpaceBody, &PreciseRotation)>,
+    body_rotations: Query<(&RealSpaceBody, &GlobalTransform)>,
 ) {
     let Some(probe) = probe else { return };
 
@@ -487,11 +486,11 @@ fn refresh_cubemap(
         let rotation = body_rotations
             .iter()
             .find(|(body, _)| body.body_id == body_id)
-            .map(|(_, precise)| precise.0)?;
+            .map(|(_, transform)| transform.compute_transform().rotation)?;
         Some(PlanetSurface {
             albedo,
-            // `PreciseRotation` is body → world; the cube is indexed body-fixed.
-            world_to_body: rotation.inverse().as_quat(),
+            // The body transform is body → world; the cube is body-fixed.
+            world_to_body: rotation.inverse(),
         })
     };
     let (env, sky_inputs) = sim
@@ -761,8 +760,8 @@ struct EnvParams {
 /// surface in this direction".
 ///
 /// The lookup is a ray-sphere hit followed by a cube sample in the body-fixed
-/// frame. The orientation is **read from the body entity's `PreciseRotation`**,
-/// i.e. the rotation the renderer actually drew the planet with, rather than
+/// frame. The orientation is read from the body entity's rendered transform,
+/// rather than
 /// recomputed — so the reflected coastline and the visible coastline cannot
 /// drift apart, including on a tidally-locked body where the render orientation
 /// is a lock composition rather than the raw ephemeris quaternion. A frame of

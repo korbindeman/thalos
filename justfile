@@ -9,6 +9,9 @@ set dotenv-filename := ".env.just"
 # game command in `.env.just` to opt out locally.
 game_command := env_var_or_default("THALOS_GAME_COMMAND", "cargo run -p thalos_game --features dev-renderer")
 capture_command := env_var_or_default("THALOS_CAPTURE_COMMAND", "cargo run -p thalos_capture_host --features dev-renderer")
+# Existing Mac checkouts already have preferences.ron, so first-run Laptop
+# never fires. A bare `just game` on macOS pins Laptop for the session.
+default_quality := env_var_or_default("THALOS_QUALITY", if os() == "macos" { "laptop" } else { "" })
 
 # Run the game. Bare `just game` boots to the start screen (scenario
 # picker / shipyard / settings); naming a mode skips it and launches
@@ -28,9 +31,18 @@ capture_command := env_var_or_default("THALOS_CAPTURE_COMMAND", "cargo run -p th
 # Set a persistent default with THALOS_SPAWN in `.env.just`. The stop is the
 # friendly handoff from an idle capture host; the process-level renderer lease
 # remains the race-proof authority if another renderer starts concurrently.
-game mode=env_var_or_default("THALOS_SPAWN", "menu"):
+# On macOS, `quality` defaults to laptop (cheap knobs; window mode unchanged).
+# Override with `quality=showcase` or THALOS_QUALITY in `.env.just`.
+game mode=env_var_or_default("THALOS_SPAWN", "menu") quality=default_quality:
     cargo run -p thalos_capture --bin thalos_capture -- stop
-    {{game_command}} -- {{mode}}
+    {{ if quality != "" { "THALOS_QUALITY='" + quality + "' " } else { "" } }}{{game_command}} -- {{mode}}
+
+# Run the lightweight Kòrsou explorer. Hand off from an idle Thalos capture
+# host first; the machine-wide renderer lease remains the race-proof authority.
+# On macOS this also defaults to the Laptop developer profile.
+korsou quality=default_quality:
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    {{ if quality != "" { "THALOS_QUALITY='" + quality + "' " } else { "" } }}cargo run -p korsou --features dev-renderer
 
 # The ship editor is the in-game Bevy-UI editor: `just game shipyard`
 # (or the pause menu's SHIPYARD button). There is no standalone editor binary.
@@ -57,7 +69,7 @@ ui-preview:
 # wiring. See crates/runtime/game/examples/nav_preview.rs and
 # docs/gameplay/navigation.md.
 nd-preview:
-    cargo run -p thalos_runtime --features bevy/dynamic_linking --example nav_preview
+    cargo run -p thalos_game_runtime --features bevy/dynamic_linking --example nav_preview
 
 # Loading-screen preview: renders the real loading screen — bar, status line,
 # and the GPU/VRAM/residency readout — to
@@ -65,7 +77,7 @@ nd-preview:
 # ONLY way to look at that screen: it despawns before any capture preset can
 # shoot it. See crates/runtime/game/examples/loading_preview.rs.
 loading-preview:
-    cargo run -p thalos_runtime --features bevy/dynamic_linking --example loading_preview
+    cargo run -p thalos_game_runtime --features bevy/dynamic_linking --example loading_preview
 
 # Interactive window variant of `just ui-preview` (hover/press/typing feel;
 # S saves the same screenshot). User-run (opens a window).
@@ -106,7 +118,7 @@ preview-window:
 #   $env:THALOS_SCREENSHOT_ELEVATION='90'; $env:THALOS_SCREENSHOT_DISTANCE='6000'; just screenshot
 # Other knobs: THALOS_SCREENSHOT_AZIMUTH, _SIZE (1920x1080), _OUT, _WARMUP,
 # _TIME (canonical simulation seconds; overrides a saved viewpoint's time),
-# _GRAPHICS (clouds=off,grass=on; cold-capture compatibility adapter),
+# _GRAPHICS (clouds=off,grass=on,foliage=off; cold-capture compatibility adapter),
 # Cloud probes additionally accept _CAMERA_ALTITUDE, _LOOK_ELEVATION,
 # _SUN_ELEVATION, _CLOUD_QUALITY (low/baseline/high/reference),
 # _CLOUD_TEMPORAL (on/off), _CLOUD_COVERAGE, and _REPORT (JSONL). Ocean probes
@@ -138,6 +150,12 @@ capture-stop:
 # reach for this only when it reports the retry failed too.
 build-reset:
     cargo run -p thalos_capture --bin thalos_capture -- reset
+
+# Publish a visual report from its non-browser-renderable `.html.in` input.
+# The publisher embeds every image, validates that no live image or placeholder
+# remains, and prints the one canonical `.html` file agents may open.
+publish-report report:
+    python3 scripts/present_embed.py "{{report}}"
 
 # Deterministic visual A/B or N-way comparison. The lightweight orchestrator
 # sends every variant to the same persistent renderer used by `just screenshot`,
@@ -176,12 +194,13 @@ validate-bake body="Mira":
 texgen:
     cargo run --release -p thalos_texgen_tool
 
-# Whole-planet biome map export (headless, agent-readable): renders the true
-# in-game macro palette + a flat biome-class map with per-biome area stats to
-# target/world_map.png + target/world_biomes.png, then exits. Defaults to
-# web-mercator; knobs (set as env vars): WORLD_PROJ=equirect, WORLD_MODE=hypso
-# (legacy ramp), WORLD_W, WORLD_SEED, WORLD_RADIUS_KM, and the WORLD_ZOOM /
-# WORLD_TRANSECT probe modes. See tools/world_map/src/main.rs.
+# Whole-planet map export (headless, agent-readable): renders the true in-game
+# macro palette, a climate-independent signed-elevation relief map, and a flat
+# biome-class map with per-biome area stats to target/world_{map,relief,biomes}.png,
+# then exits. Defaults to web-mercator; knobs (set as env vars):
+# WORLD_PROJ=equirect, WORLD_MODE=hypso (legacy ramp), WORLD_W, WORLD_SEED,
+# WORLD_RADIUS_KM, and the WORLD_ZOOM / WORLD_TRANSECT probe modes. See
+# tools/world_map/src/main.rs.
 map:
     cargo run --release -p thalos_world_map
 
@@ -198,6 +217,22 @@ diag hours="24" *args:
 # `session` = a `<pid>-<unix_ms>` id, `latest` (default), or `--list`.
 perf-report session="latest":
     cargo run --release -p thalos_perfreport -- {{session}}
+
+# Agent-runnable render-cost differential. Unlike `just compare`, this keeps
+# the real offscreen game render graph running continuously without screenshot
+# readback or the capture host's 60 Hz pacing, waits for terrain/scene stability,
+# and records a four-cell foliage × custom-shadows matrix.
+perf-bisect preset="forest-stand":
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=matrix THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=4 {{capture_command}}
+    cargo run --release -p thalos_perfreport -- --headless-matrix
+
+# Marginal cost of each custom shadow camera, measured 4 -> 0 in one warmed
+# scene with foliage held resident.
+perf-shadow-bisect preset="forest-stand":
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=shadow-cascades THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=4 {{capture_command}}
+    cargo run --release -p thalos_perfreport -- --headless-shadow-cascades
 
 # CLOUD-0's repeatable five-view baseline. Each preset writes a PNG under
 # artifacts/visual/latest/ and a same-named JSONL report under artifacts/diagnostics/.

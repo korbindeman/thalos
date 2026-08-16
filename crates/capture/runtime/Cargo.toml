@@ -6,7 +6,11 @@ edition.workspace = true
 
 [dependencies]
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
-thalos_runtime = { path = "../../runtime/game" }
+thalos_runtime = {
+    path = "../../runtime/app",
+    default-features = false,
+    features = ["game", "capture"],
+}
 thalos_capture_protocol = { path = "../protocol" }
 thalos_diagnostics = { workspace = true }
 
@@ -15,3 +19,4 @@ neural-terrain = ["thalos_runtime/neural-terrain"]
 neural-terrain-default = ["neural-terrain", "thalos_runtime/neural-terrain-default"]
 dev-renderer = ["neural-terrain", "thalos_runtime/dev-renderer"]
 gpu-counters = ["thalos_runtime/gpu-counters"]
+legacy-udlod = ["thalos_runtime/legacy-udlod"]

@@ -26,6 +26,7 @@
 
 use bevy::picking::prelude::Pickable;
 use bevy::prelude::*;
+use thalos_game_state::{ActiveCraft, ActiveCraftMut};
 
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::types::{ShipParameters, VesselKind};
@@ -35,8 +36,7 @@ use thalos_world::BodyId;
 use thalos_ui::{self as ui, SPACE_XS, UiTheme, spawn_divider, spawn_menu_row, tokens};
 
 use crate::maneuver::{ManeuverPlan, SelectedNode};
-use crate::player_controller::EvaMode;
-use crate::rendering::{PlayerShip, SimulationState};
+use crate::rendering::SimulationState;
 
 use crate::spawn::{
     Homeworld, SpawnSituation, coast_placement, compute_descent_state, orbit_respawn_state,
@@ -207,9 +207,8 @@ fn handle_button_clicks(
     mut sim: ResMut<SimulationState>,
     mut active: ResMut<ActiveLocalBubble>,
     height_sources: Res<HeightSourceRegistry>,
-    mut eva_mode: ResMut<EvaMode>,
-    player_ship: Query<Entity, With<PlayerShip>>,
-    mut plan: ResMut<ManeuverPlan>,
+    active_craft: Res<ActiveCraft>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
     homeworld: Res<Homeworld>,
 ) {
@@ -226,9 +225,8 @@ fn handle_button_clicks(
             &mut sim,
             &mut active,
             &height_sources,
-            &mut eva_mode,
-            &player_ship,
-            &mut plan,
+            active_craft.0,
+            plan.get_mut().as_deref_mut(),
             &mut selected,
             homeworld.0,
         );
@@ -249,9 +247,8 @@ pub(crate) fn respawn_into(
     sim: &mut SimulationState,
     active: &mut ActiveLocalBubble,
     height_sources: &HeightSourceRegistry,
-    eva_mode: &mut EvaMode,
-    player_ship: &Query<Entity, With<PlayerShip>>,
-    plan: &mut ManeuverPlan,
+    active_root: Option<Entity>,
+    plan: Option<&mut ManeuverPlan>,
     selected: &mut SelectedNode,
     homeworld: BodyId,
 ) {
@@ -262,12 +259,14 @@ pub(crate) fn respawn_into(
     // below leave any landed `BodyFixed` state by switching to `OnRails`.
     sim.simulation.repair();
     sim.simulation.warp.reset();
-    if !plan.nodes.is_empty() {
+    if let Some(plan) = plan
+        && !plan.nodes.is_empty()
+    {
         plan.nodes.clear();
         plan.dirty = true;
     }
     selected.id = None;
-    clear_bubble(commands, active);
+    let bubble_root = clear_bubble(commands, active);
 
     match situation {
         SpawnSituation::Eva => {
@@ -277,10 +276,11 @@ pub(crate) fn respawn_into(
             // itself), so no canonical state is set here.
             sim.simulation.set_vessel_kind(VesselKind::Eva);
             sim.simulation.set_ship_params(ShipParameters::eva());
-            for entity in player_ship.iter() {
+            if let Some(entity) = active_root
+                && Some(entity) != bubble_root
+            {
                 commands.entity(entity).despawn();
             }
-            *eva_mode = EvaMode::Grounded;
             sim.simulation
                 .transition_authority(AuthorityMode::OnRails { trajectory: 0 });
         }
@@ -316,12 +316,15 @@ pub(crate) fn respawn_into(
 /// Despawn the active bubble's craft body (and any attached terrain patch) and
 /// clear the slot, so the on-demand spawner makes a fresh body next frame.
 /// Shared with the editor's Launch relaunch ([`crate::relaunch`]).
-pub(crate) fn clear_bubble(commands: &mut Commands, active: &mut ActiveLocalBubble) {
-    let Some(bubble) = active.bubble.take() else {
-        return;
-    };
+pub(crate) fn clear_bubble(
+    commands: &mut Commands,
+    active: &mut ActiveLocalBubble,
+) -> Option<Entity> {
+    let bubble = active.bubble.take()?;
+    let craft_entity = bubble.craft_entity;
     commands.entity(bubble.craft_entity).despawn();
     if let Some(terrain_entity) = bubble.terrain_entity {
         commands.entity(terrain_entity).despawn();
     }
+    Some(craft_entity)
 }

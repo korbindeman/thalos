@@ -23,9 +23,9 @@ jobs:
       - name: Pure-Rust crates must not depend on Bevy
         shell: bash
         run: |
-          # Design invariant (CLAUDE.md): world, physics_canonical, control,
-          # terrain, celestial, and texgen are pure Rust libraries with no Bevy
-          # dependency. This is
+          # Design invariant (CLAUDE.md): render_model, world,
+          # physics_canonical, control, terrain, celestial, and texgen are pure
+          # Rust libraries with no Bevy dependency. This is
           # a `cargo tree` boundary check, not a build — it stays fast and
           # catches transitive leaks (e.g. a registry dep pulling Bevy via its
           # default features) the moment they enter Cargo.lock.
@@ -35,6 +35,7 @@ jobs:
           # is present by name but pulls no Bevy engine crate.
           status=0
           for crate in \
+            thalos_render_model \
             thalos_world \
             thalos_physics_canonical \
             thalos_control \
@@ -54,6 +55,58 @@ jobs:
             fi
           done
           exit "$status"
+
+      - name: GPU foundation must not depend on applications or adapters
+        shell: bash
+        run: |
+          # The Bevy foundation may depend on Bevy and the shared diagnostics
+          # lane. It must not learn about a world, spatial adapter, gameplay,
+          # or application composition (rkit §3/§8).
+          offenders="$(cargo tree -p thalos_render_foundation -e normal \
+            | grep -E '(^| )((thalos_[a-z_]+)|korsou) v' \
+            | grep -vE 'thalos_(render_foundation|diagnostics) ' || true)"
+          if [ -n "$offenders" ]; then
+            echo "::error::thalos_render_foundation pulled in an application or adapter crate:"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "OK: thalos_render_foundation contains only shared GPU infrastructure"
+
+      - name: Render-kit dependency direction and default renderer graph
+        shell: bash
+        run: |
+          # rkit §3/§9: the pure render model cannot learn about Bevy or an
+          # application, and ordinary game/capture builds must not compile the
+          # sealed UDLOD comparison backend.
+          model_offenders="$(cargo tree -p thalos_render_model -e normal \
+            | grep -E '(^| )(bevy|thalos_(runtime|game_runtime|game_state|hud|map|physics_local|udlod)) v' || true)"
+          if [ -n "$model_offenders" ]; then
+            echo "::error::thalos_render_model crossed the pure model boundary:"
+            echo "$model_offenders"
+            exit 1
+          fi
+
+          for package in thalos_game thalos_capture_host korsou; do
+            if cargo tree -p "$package" -e normal | grep -qE '(^| )thalos_udlod v'; then
+              echo "::error::${package} compiles legacy UDLOD in its default graph"
+              exit 1
+            fi
+            echo "OK: ${package} default graph excludes thalos_udlod"
+          done
+
+          legacy_consumers="$(cargo tree -p thalos_body_render --features legacy-udlod \
+            -i thalos_udlod -e normal | tail -n +2 \
+            | grep -vE '^[├└]── thalos_body_render ' || true)"
+          if [ -n "$legacy_consumers" ]; then
+            echo "::error::a package other than thalos_body_render directly consumes thalos_udlod:"
+            echo "$legacy_consumers"
+            exit 1
+          fi
+          echo "OK: UDLOD is sealed behind thalos_body_render/legacy-udlod"
+
+      - name: Runtime capability bundles stay lightweight and buildable
+        shell: bash
+        run: bash scripts/check_runtime_capabilities.sh
 
       - name: Avian is named only by the backend-seam executor layer
         shell: bash

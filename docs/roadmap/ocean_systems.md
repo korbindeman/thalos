@@ -1,9 +1,9 @@
 # Ocean systems
 
-**Status: future world/gameplay program (2026-07-29).** The rendering foundation
-exists, but this program stays behind the neural-terrain × standard-path renderer
-keystone until explicitly pulled forward. `docs/backlog.md` is the only status
-authority.
+**Status: future world/gameplay program (2026-07-29, revised 2026-08-08 after
+the Kòrsou water transfer).** The rendering foundation exists, but this program
+stays behind the neural-terrain × standard-path renderer keystone until
+explicitly pulled forward. `docs/backlog.md` is the only status authority.
 
 This roadmap turns the ocean from an attractive surface into a traversable world.
 It joins the current rendering work in
@@ -107,6 +107,24 @@ programs (`NTR-X2f`/`NTR-X2h`) should produce depositional strands, volcanic
 islands, cliffs, rias, barrier systems and reefs. Ocean simulation consumes that
 character; it does not flatten it into one shoreline effect.
 
+Shore distance alone is not enough to carry that character. The coastal input
+to the dynamic sea and materials must expose four independent facts:
+
+- the canonical signed sea height and bathymetric profile;
+- morphology and substrate, such as depositional sand, reef/rock shelf,
+  cliff/wave-cut platform or engineered edge;
+- exposure, fetch and shelter in the active wind/swell directions; and
+- regional water optics, including absorption/scattering, turbidity or
+  suspended material where relevant, and bottom albedo in optically shallow
+  water.
+
+Those fields are stable world data. A renderer may derive filtered quantities
+from them, but it may not infer the final coast from one distance ramp. In
+particular, clear turquoise shallows must come from water-column length and the
+real seabed response under the shared atmosphere, not from a painted shoreline
+band; a cliff must suppress beach swash and turn incident energy into reflected
+water, impact foam and spray rather than receiving a universal breaker ring.
+
 Pelagos reuses the same contracts with different authored content: volcanic
 island arcs, cold blue-green water, dense living shelves, humid haze and severe
 ocean weather. Its biosphere may alter roughness, colour, foam persistence or
@@ -117,7 +135,9 @@ underwater visibility, but never through a separate Pelagos-only renderer.
 Before Pelagos depends on the program, one bounded Thalos region proves the whole
 chain:
 
-- one showcase depositional beach with a sheltered and exposed side;
+- one showcase depositional beach with a sheltered and exposed side, plus a
+  nearby rocky or cliff contact that proves the coast is process-typed rather
+  than one sand-and-foam strip;
 - one small test vessel using the canonical vessel/control path;
 - calm, moderate and storm sea states through the same simulation;
 - one moving offshore storm that is visible before arrival and leaves swell
@@ -129,6 +149,35 @@ This is not a naval-combat commitment. The vessel is an integration instrument
 and an early gameplay surface: it validates buoyancy, controls, camera motion,
 wakes, coast interaction and weather consequences. Weapon systems and pirate
 economy are outside scope.
+
+### 5.1 Kòrsou calibration corpus and transferred gates
+
+Kòrsou is the real-world calibration adapter for shared ocean mechanisms, not a
+source of planetary topology or copied Curaçao content. Its saved viewpoints
+make the visual target concrete before Thalos has a final showcase coast:
+
+| Kòrsou view | What it calibrates for Thalos |
+|---|---|
+| `Reference - Grote Knip beach` | Protected shallows, readable sand bottom, breaker sets, run-up, wet/dry material transition and vegetation exclusion. |
+| `Reference - Boka Tabla cliffs` | Direct rock contact, depth at the wall, incident-wave impact and the absence of a universal beach or foam ring. |
+| `Reference - Blue Bay reef` | Reef/shelf structure, depth-dependent colour, bottom visibility and the transition to deep water. |
+| `Reference - Caracasbaai close coast` | Metre-scale waterline continuity, nearshore wave attenuation, contact foam and the join between water and the actual terrain material. |
+| `Reference - North coast waves` | Low-eye wave silhouette, directionally coherent swell and whitecap scale. |
+| `Island aerial` plus the low-flight views | Long-range coast continuity and distance filtering: no repeating crosshatch, crawling moiré or loss of statistically stable wave energy toward the horizon. |
+
+These are camera classes, not screenshot-specific tuning targets. When the
+Thalos proving region is chosen, it receives equivalent saved viewpoints in
+the unified registry: close beach waterline, close cliff contact, elevated
+sheltered bay/reef, low open water, and aerial/horizon. Each class is captured
+under fixed sun and calm/moderate/storm inputs. The long-range classes also run
+as a deterministic moving sequence, because a still cannot expose temporal
+shimmer or moiré.
+
+The filtering acceptance is energy-based. As waves, foam, wet-sand texture or
+bottom detail become sub-pixel, they must be band-limited by the projected
+major/minor footprint. Unresolved wave slope becomes BRDF variance and
+unresolved foam/material coverage becomes a stable filtered mean; detail may
+not collapse into alternating dark/light lines, crawling noise or a flat sea.
 
 ## 6. Program
 
@@ -142,11 +191,15 @@ JONSWAP/TMA-derived fields behind the existing filtered-slope seam. Produce
 height/displacement, slope and Jacobian cascades; define the deterministic
 simulation-time contract; expose one bounded wave-query surface for physics; add
 GPU timings, spectrum/energy diagnostics and sea-state captures before selecting
-final grid sizes.
+final grid sizes. Every cascade reports resolved and omitted variance against
+the adapter-provided anisotropic footprint, so waterline-to-horizon filtering is
+a shared mechanism rather than a per-renderer anti-aliasing patch.
 
 The gate is not merely a prettier still: calm/moderate/storm authored inputs must
 produce distinct, energy-accounted fields, and render and query samples must
-agree at known body-fixed points.
+agree at known body-fixed points. The Kòrsou long-range views and equivalent
+Thalos aerial/horizon views must retain stable energy without spatial moiré or
+motion shimmer.
 
 ### OCEAN-3 — displaced sea and vessel response
 
@@ -154,23 +207,40 @@ Add a snapped camera-relative projected grid or clipmap over the analytic ocean,
 transfer omitted energy into roughness, and make one test vessel respond through
 the canonical physics/control path. Persistent foam begins from Jacobian
 compression and vertical motion; a cheap far Kelvin wake plus bounded local
-impulses proves vessel coupling.
+impulses proves vessel coupling. Vertex displacement and fragment shading read
+the same filtered field and footprint contract; geometry may not preserve a
+wave band after its shading representation has filtered it away.
 
 The player gate is a calm-to-rough-water run in which the vessel feels supported
 by the visible crests, remains controllable, and never reveals the local/global
-handoff.
+handoff. The same route is replayed from low eye to aerial distance and must not
+develop a far-water crosshatch, crawling moiré or a flat-energy gap at the
+analytic handoff.
 
-### OCEAN-4 — heavenly beach vertical
+### OCEAN-4 — heavenly coast vertical
 
-Choose one deterministic Thalos coast after the landform-province/coastal
-morphology work. Add coherent breaker wavefronts, shallow-water coupling, swash,
-foam age/advection, wet-sand drying, seabed optics, exposure-aware vegetation and
-reef/rock placement. Capture both exposed and sheltered sides under matched
-weather.
+Choose one deterministic Thalos region after the landform-province work and
+author enough coastal morphology to contain both a depositional beach and a
+rocky/cliff contact; this bounded profile may precede a general learned
+`NTR-X2h` solution. The coast package supplies bathymetric profile, morphology,
+substrate, exposure/fetch/shelter and regional optical properties rather than
+asking the shader to reconstruct them from distance alone.
 
-The gate is a continuous offshore-to-dry-sand approach: no authority seam,
-floating foam texture, universal breaker ring, translucent shelf or vegetation
-through the strand.
+Add finite-depth shoaling and refraction, coherent breaker wavefronts, bounded
+shallow-water coupling, swash/run-up, foam age/advection, wet-surface drying,
+cliff impact/spray, exposure-aware vegetation and reef/rock placement. Water
+colour combines surface Fresnel reflection with atmosphere, water-column
+absorption/scattering and filtered seabed albedo; it is calibrated in linear
+scene light across close, elevated and aerial views rather than by isolated RGB
+tints. Capture the beach's exposed/sheltered sides and the cliff contact under
+matched weather.
+
+The gate is the §5.1 matrix plus a continuous offshore-to-dry-sand approach: no
+authority seam, floating foam texture, universal breaker ring, translucent
+shelf, vegetation through the strand, colour discontinuity between ranges or
+far-distance moiré. At the cliff, waves must meet the wall with the correct
+depth/contact response instead of fading through terrain or drawing beach
+swash on rock.
 
 ### OCEAN-5 — regional storm lifecycle
 
@@ -212,18 +282,25 @@ first sight of a living reef.
 Every dynamic layer needs a reader, not merely a debug texture:
 
 - sea-state energy by cascade, significant height, dominant period/direction and
-  unresolved-variance budget;
+  unresolved-variance budget by projected footprint;
 - render/query agreement at body-fixed probes;
 - projected-grid extent, handoff weight and GPU time;
 - foam source, resident mass/age and decay balance;
 - storm id/lifecycle, forcing, translation, fetch and swell lag;
 - vessel heave/roll/pitch response, water contact and control saturation;
-- shallow-tile count, boundary-energy error and coast interaction cost.
+- coast input provenance/class, depth, substrate, exposure/fetch and shelter;
+- shallow-tile count, boundary-energy error, shoaling/refraction/impact energy
+  and coast interaction cost; and
+- water-colour terms separated into reflected environment, water-column
+  absorption/scattering and bottom contribution.
 
 Headless evidence needs deterministic `ocean-calm`, `ocean-storm`,
-`beach-exposed`, `beach-sheltered` and integrated-route framings. Moving
-acceptance requires scripted sequences plus user play because wave timing,
-camera motion and control feel cannot be judged from a still.
+`beach-exposed`, `beach-sheltered`, `coast-cliff`, `coast-close`,
+`ocean-horizon` and integrated-route framings. Kòrsou's §5.1 views remain the
+shared-mechanism calibration set; the Thalos views prove planetary composition.
+Moving acceptance requires scripted low-flight/horizon sequences plus user play
+because wave timing, camera motion, control feel and temporal moiré cannot be
+judged from a still.
 
 The first implementation phase must measure GPU and memory cost before locking
 cascade counts or resolutions. Heavy probes remain `THALOS_*` opt-in; standing
@@ -237,6 +314,9 @@ defect.
 - No second visual-only storm preset and no physics-only wave function.
 - No tides until orbital forcing or gameplay demonstrates value; the permanent
   coastline datum remains 0 m.
+- No universal distance-to-shore colour, foam or material strip as the final
+  coast representation. Distance remains one filtered input among morphology,
+  depth, substrate and exposure.
 - No naval combat commitment in the proving slice.
 - Exact test-vessel form, storm severity distribution and Pelagos underwater
   vehicle remain content decisions made at their phase gates.
@@ -254,3 +334,5 @@ defect.
 - [ADR-20260720T185958Z: one signed sea field](../adr/20260720T185958Z-water-projects-one-signed-sea-field.md)
 - [ADR-20260720T212214Z: one cloud weather field](../adr/20260720T212214Z-one-weather-field-many-cloud-projections.md)
 - [ADR-20260729T060720Z: one coupled ocean world system](../adr/20260729T060720Z-ocean-is-one-coupled-world-system.md)
+- [ADR-20260808T221912Z: shared mechanisms, explicit spatial adapters](../adr/20260808T221912Z-atmosphere-and-ocean-mechanisms-use-spatial-adapters.md)
+- [Kòrsou reference viewpoints and current data limits](../../apps/korsou/README.md#viewpoints-and-headless-captures)

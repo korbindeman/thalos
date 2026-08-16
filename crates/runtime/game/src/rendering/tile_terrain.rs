@@ -55,33 +55,45 @@
 //! left to the existing swap, so a sliver of billboard may peek past the tile
 //! limb (tiles win depth where they cover).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{
+    Arc, Mutex, OnceLock,
+    atomic::{AtomicBool, Ordering},
+};
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use thalos_body_render::tiles::material::{TileShadingParams, TileTerrainMaterial, tile_material};
 use thalos_body_render::tiles::{
-    RefinementSite, SurfaceQueryProvider, TileEye, TileEyeTarget, TileStreamSet, TileTerrainRoot,
+    RefinementSite, SurfaceQueryProvider, TileEye, TileEyeTarget, TileShadowCasterConfig,
+    TileStreamSet, TileTerrainRoot,
 };
 use thalos_body_render::{CpuPipelineHeightSource, RenderedGround, RenderedGroundHeightSource};
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_terrain::{FlattenedSurface, SurfaceQuery};
 use thalos_world::BodyId;
 
-use super::ground_terrain::TerrainFlattenRegistry;
-use super::terrain_residency::TerrainRebuildRequest;
+use super::terrain_flatten::{TerrainFlattenRegistry, TerrainRebuildRequest};
 use super::types::RealSpaceBody;
 use super::view_anchor::ViewAnchor;
 use crate::SimulationState;
+use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
+use crate::graphics_settings::GraphicsSettings;
 use crate::solar_system_state::SolarSystemState;
 use crate::terrain_registry::{BodySurfaceRegistry, RenderedGroundRegistry};
-use std::sync::Mutex;
+use thalos_render_kit::ActiveRenderPlan;
 
 /// Bodies currently owned by the tile renderer — read by
 /// `terrain_residency::try_spawn` (which may run before this plugin's
 /// systems), hence a process-global rather than a Bevy resource.
 static TILE_RENDERED: Mutex<Vec<thalos_world::BodyId>> = Mutex::new(Vec::new());
+
+/// Process-global mirror of the validated startup plan.
+///
+/// The legacy residency path asks this before ordinary Bevy resources are
+/// available at its call site. The value is written exactly once during plugin
+/// construction from [`ActiveRenderPlan`], never reparsed from the environment.
+static TILE_DRIVER_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Is `body_id` rendered by the tile path (legacy udlod stands down for it)?
 pub fn tile_rendered(body_id: BodyId) -> bool {
@@ -93,6 +105,7 @@ pub fn tile_rendered(body_id: BodyId) -> bool {
 /// Generous: the claim needs a resolved `ViewAnchor`, which lands ~1.2 s into a
 /// boot. The cap exists only so a *never*-resolving anchor degrades to legacy
 /// terrain instead of leaving the player on a body with no ground at all.
+#[cfg(feature = "legacy-udlod")]
 const TILE_CLAIM_HOLD_S: f32 = 10.0;
 
 /// Is the tile renderer about to claim its body (so a legacy near-tier atlas
@@ -107,6 +120,7 @@ const TILE_CLAIM_HOLD_S: f32 = 10.0;
 ///
 /// Scoped to the *dominant* body by the caller: every other body keeps the
 /// legacy path immediately, which is the arrangement the udlod carve-out needs.
+#[cfg(feature = "legacy-udlod")]
 pub fn tile_claim_pending() -> bool {
     if !tile_renderer_enabled() {
         return false;
@@ -129,26 +143,12 @@ pub fn tile_claim_pending() -> bool {
     true
 }
 
-/// One env check, cached. The tile renderer is the **default**;
-/// `THALOS_TILE_RENDERER=0|false|off|no` drops the process back onto the
-/// legacy udlod ground for every body — an A/B baseline (the `renderer`
-/// compare axis), not a supported production mode.
+/// Whether the validated startup plan selected cube-sphere tile terrain.
 ///
-/// Cached in a `OnceLock` because the choice is structural (it decides which
-/// ground streams at all), so it must not change mid-process — which is also
-/// why the capture host restarts when this key changes.
+/// The capture host still restarts when a plan-shaping input changes; ordinary
+/// frame code reads this plan-derived mirror and never reparses environment.
 pub fn tile_renderer_enabled() -> bool {
-    static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| {
-        std::env::var("THALOS_TILE_RENDERER")
-            .map(|v| {
-                !matches!(
-                    v.trim().to_ascii_lowercase().as_str(),
-                    "0" | "false" | "off" | "no"
-                )
-            })
-            .unwrap_or(true)
-    })
+    TILE_DRIVER_ACTIVE.load(Ordering::Relaxed)
 }
 
 /// Capture-only inspection mode for the tile material, read once from
@@ -192,11 +192,14 @@ pub struct TileTerrainDriverPlugin;
 
 impl Plugin for TileTerrainDriverPlugin {
     fn build(&self, app: &mut App) {
-        if !tile_renderer_enabled() {
-            warn!(
-                "THALOS_TILE_RENDERER=0 — LEGACY udlod ground terrain active (A/B baseline only); \
-                 unset the variable for the default standard-path tile renderer"
-            );
+        let plan = app
+            .world()
+            .get_resource::<ActiveRenderPlan>()
+            .expect("RenderPlanPlugin must be installed before TileTerrainDriverPlugin")
+            .validated();
+        TILE_DRIVER_ACTIVE.store(plan.uses_tile_terrain(), Ordering::Relaxed);
+        if !plan.uses_tile_terrain() {
+            warn!("validated render plan selected LEGACY udlod ground terrain (A/B baseline only)");
             return;
         }
         info!("standard-path tile terrain active; legacy udlod ground terrain gated off");
@@ -205,6 +208,7 @@ impl Plugin for TileTerrainDriverPlugin {
             Update,
             (
                 ensure_tile_root,
+                apply_terrain_lod,
                 update_tile_eye,
                 publish_pad_refinement_sites,
                 update_tile_material_params,
@@ -398,12 +402,13 @@ fn ensure_tile_root(
     // Terrain casts into the shared sun-shadow cascade (NTR-X6's in-band half:
     // ridges shadow valleys, hills shadow the plain, terrain shadows land on
     // structures/craft/trees through the same maps everything already samples).
-    // Each tile gets a depth-caster child on the cascade layer, drawing the
-    // SAME mesh with this bare unlit material — the cascade cameras never pay
-    // the tile layer-stack's fragment cost, and the shared mesh handle means
-    // no new per-tile GPU resource for the residency budget to count
-    // (INC-20260725T012104Z). Beyond the cascade band the far field still has
-    // no terrain shadow mechanism — that stays NTR-X6's horizon-term half.
+    // Each tile gets two depth-caster children with this bare unlit material:
+    // cascades 0–1 reuse the visible 129² mesh for contact detail; cascades 2–3
+    // draw a separately budgeted 33² twin (16× fewer surface triangles). The
+    // cascade cameras therefore never pay the tile layer-stack fragment cost,
+    // and broad terrain coverage no longer multiplies full visible geometry.
+    // Beyond the cascade band the far field still has no terrain shadow
+    // mechanism — that stays NTR-X6's horizon-term half.
     //
     // BACK faces only (`cull_mode: Front`). The cascade bias model was
     // calibrated for casters that are never their own receivers ("terrain
@@ -420,15 +425,16 @@ fn ensure_tile_root(
     // properly shadowed (the classic heightfield-caster fix). The thin band
     // that loses its cast shadow — the leeward face itself — is exactly the
     // ground `n·l` already darkens.
-    root.caster = Some((
-        std_materials.add(StandardMaterial {
+    root.caster = Some(TileShadowCasterConfig {
+        material: std_materials.add(StandardMaterial {
             base_color: Color::WHITE,
             unlit: true,
             cull_mode: Some(bevy::render::render_resource::Face::Front),
             ..default()
         }),
-        RenderLayers::layer(super::sun_shadow::SHADOW_CASTER_LAYER),
-    ));
+        near_layers: RenderLayers::layer(super::sun_shadow::SHADOW_TERRAIN_NEAR_LAYER),
+        far_layers: RenderLayers::layer(super::sun_shadow::SHADOW_TERRAIN_FAR_LAYER),
+    });
     info!(
         target: "thalos::diagnostic::tile_terrain",
         event = "installed",
@@ -573,35 +579,44 @@ const PAD_RAMP_SAMPLES: f64 = 4.0;
 fn publish_pad_refinement_sites(
     flatten_registry: Res<TerrainFlattenRegistry>,
     mut roots: Query<(&mut TileTerrainRoot, &TileTerrainBody)>,
+    mut sites: Local<Vec<RefinementSite>>,
 ) {
     for (mut root, body) in &mut roots {
         // Read-only lookup: a body with no pads yet must not be given a handle
         // here — creating one is the installer's job, not the selector's.
         let Some(handle) = flatten_registry.get(body.body_id) else {
-            root.set_refinement_sites(Vec::new());
+            root.set_refinement_sites(&[]);
             continue;
         };
         let Ok(regions) = handle.read() else {
             continue;
         };
-        let sites = regions
-            .iter()
-            .map(|region| {
-                let pad = &region.flatten;
-                // Same reach the flatten's own angular reject uses: the offset
-                // rectangle's half-diagonal plus the ramp, as an angle off the
-                // pad centre.
-                let along = pad.offset_along_m.abs() + pad.half_along_m;
-                let across = pad.offset_across_m.abs() + pad.half_across_m;
-                let reach = (along * along + across * across).sqrt() + pad.ramp_m;
-                RefinementSite {
-                    center_dir: pad.center_dir,
-                    angular_radius: (reach / pad.radius_m.max(1.0)).atan(),
-                    spacing_m: (pad.ramp_m / PAD_RAMP_SAMPLES).max(1.0),
-                }
-            })
-            .collect();
-        root.set_refinement_sites(sites);
+        sites.clear();
+        sites.extend(regions.iter().map(|region| {
+            let pad = &region.flatten;
+            // Same reach the flatten's own angular reject uses: the offset
+            // rectangle's half-diagonal plus the ramp, as an angle off the
+            // pad centre.
+            let along = pad.offset_along_m.abs() + pad.half_along_m;
+            let across = pad.offset_across_m.abs() + pad.half_across_m;
+            let reach = (along * along + across * across).sqrt() + pad.ramp_m;
+            RefinementSite {
+                center_dir: pad.center_dir,
+                angular_radius: (reach / pad.radius_m.max(1.0)).atan(),
+                spacing_m: (pad.ramp_m / PAD_RAMP_SAMPLES).max(1.0),
+            }
+        }));
+        root.set_refinement_sites(&sites);
+    }
+}
+
+fn apply_terrain_lod(graphics: Res<GraphicsSettings>, mut roots: Query<&mut TileTerrainRoot>) {
+    let lod = f64::from(graphics.terrain_lod.clamp(
+        GraphicsSettings::TERRAIN_LOD_MIN,
+        GraphicsSettings::TERRAIN_LOD_MAX,
+    ));
+    for mut root in &mut roots {
+        root.set_quality_split_scale(lod);
     }
 }
 
@@ -611,6 +626,7 @@ fn update_tile_eye(
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     roots: Query<(Entity, &TileTerrainBody), With<TileTerrainRoot>>,
+    camera: Query<(&Camera, &Projection), With<ShipCamera>>,
     mut eye: ResMut<TileEye>,
 ) {
     eye.target = None;
@@ -633,12 +649,22 @@ fn update_tile_eye(
     else {
         return;
     };
+    let vertical_focal_length_px = camera.single().ok().and_then(|(camera, projection)| {
+        let Projection::Perspective(perspective) = projection else {
+            return None;
+        };
+        let height_px = f64::from(camera.physical_viewport_size()?.y);
+        let half_fov_tan = f64::from(perspective.fov * 0.5).tan();
+        (height_px > 0.0 && half_fov_tan.is_finite() && half_fov_tan > 0.0)
+            .then_some(height_px / (2.0 * half_fov_tan))
+    });
     for (entity, body) in &roots {
         if body.body_id == resolved.body {
             eye.target = Some(TileEyeTarget {
                 root: entity,
                 cam_body: resolved.cam_body,
                 speed_m_s: resolved.speed_m_s,
+                vertical_focal_length_px,
                 body_position: state.position,
                 body_orientation: orientation,
             });

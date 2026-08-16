@@ -6,6 +6,7 @@
 
 use bevy::{math::DVec3, prelude::*};
 use thalos_control::{AttitudeDemand, ControlDemand};
+use thalos_game_state::{ActiveCraftMut, ActiveCraftRef};
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::AuthorityMode;
 use thalos_physics_canonical::orbit_planner::{
@@ -153,12 +154,15 @@ fn resolve_auto_draft(
 fn handle_orbit_target_requests(
     mut requests: MessageReader<OrbitTargetRequest>,
     mut program: ResMut<OrbitProgram>,
-    mut maneuver_plan: ResMut<ManeuverPlan>,
+    mut maneuver_plan: ActiveCraftMut<ManeuverPlan>,
     mut stage_demand: ResMut<StageDemand>,
     mut sequencer: ResMut<StageSequencer>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
 ) {
+    let Some(mut maneuver_plan) = maneuver_plan.get_mut() else {
+        return;
+    };
     for request in requests.read().copied() {
         let was_active = program.active();
         sequencer.cancel(&mut stage_demand);
@@ -410,7 +414,7 @@ fn install_orbit_plan(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn update_surface_orbit_program(
     mut program: ResMut<OrbitProgram>,
-    mut maneuver_plan: ResMut<ManeuverPlan>,
+    mut maneuver_plan: ActiveCraftMut<ManeuverPlan>,
     mut stage_demand: ResMut<StageDemand>,
     mut sequencer: ResMut<StageSequencer>,
     propulsion: Res<ActivePropulsion>,
@@ -422,6 +426,9 @@ pub(crate) fn update_surface_orbit_program(
     solar: Res<SolarSystemState>,
     clock: Res<SimClock>,
 ) {
+    let Some(mut maneuver_plan) = maneuver_plan.get_mut() else {
+        return;
+    };
     if !program.guidance_active() {
         program.demand = ControlDemand::NONE;
         program.sequence = SequenceEvent::None;
@@ -893,11 +900,14 @@ fn apply_orbit_idle_handoff(
 
 fn monitor_orbit_maneuver_program(
     mut program: ResMut<OrbitProgram>,
-    maneuver_plan: Res<ManeuverPlan>,
+    maneuver_plan: ActiveCraftRef<ManeuverPlan>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     clock: Res<SimClock>,
 ) {
+    let Some(maneuver_plan) = maneuver_plan.get() else {
+        return;
+    };
     // Gated on the program's own phase, not on a selected mode. The mode
     // check this replaces early-returned whenever anything else touched the
     // autopilot selection - leaving the program stranded in COAST forever

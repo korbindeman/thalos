@@ -200,10 +200,13 @@ pub(super) fn handle_clicks(
     brakes: Query<&Interaction, (Changed<Interaction>, With<BrakesPill>)>,
     gear_pill: Query<&Interaction, (Changed<Interaction>, With<GearPill>)>,
     mut config: ResMut<FlightConfig>,
-    mut brake: ResMut<ParkingBrake>,
-    mut gear: ResMut<GearState>,
+    mut brake: thalos_game_state::ActiveCraftMut<ParkingBrake>,
+    mut gear: thalos_game_state::ActiveCraftMut<GearState>,
     weight_on_wheels: Res<WeightOnWheels>,
 ) {
+    let (Some(mut brake), Some(mut gear)) = (brake.get_mut(), gear.get_mut()) else {
+        return;
+    };
     for (interaction, segment) in &flaps {
         if matches!(interaction, Interaction::Pressed) {
             config.flap_setting = segment.detent.min(FLAP_DETENTS);
@@ -227,8 +230,8 @@ pub(super) fn handle_clicks(
 pub(super) fn update(
     sim: Res<SimulationState>,
     flight_config: Res<FlightConfig>,
-    brake: Res<ParkingBrake>,
-    gear_state: Res<GearState>,
+    brake: thalos_game_state::ActiveCraftRef<ParkingBrake>,
+    gear_state: thalos_game_state::ActiveCraftRef<GearState>,
     theme: Res<HudTheme>,
     craft: Query<(&ShipAero, Option<&WheelSet>), With<LocalCraftBody>>,
     mut row_q: Query<
@@ -303,6 +306,9 @@ pub(super) fn update(
         ),
     >,
 ) {
+    let (Some(brake), Some(gear_state)) = (brake.get(), gear_state.get()) else {
+        return;
+    };
     // Capability of the *current* craft: flap/spoiler authority from the wing
     // aero config on the bubble body, wheel brakes from its wheel set. No
     // bubble (on rails) or not a ship → no panel.

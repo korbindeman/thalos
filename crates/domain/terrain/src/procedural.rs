@@ -30,24 +30,27 @@
 //! (hills / swell / ridged mountains) rides on that base, gated to land; the
 //! separate water renderer floods everything below 0 m.
 //!
-//! Two functions are the **plate-tectonics seams** — a later backend replaces
-//! their bodies to drive continents and mountain belts / island arcs from real
-//! plate margins, without touching the hypsometric remap or the relief cascade:
-//! [`ProceduralSurface::continentalness`] (land/sea structure) and
-//! [`ProceduralSurface::orogeny`] (where mountains are tall vs plains). The
+//! A separate cube-sphere plate graph grows irregular plates by weighted flood
+//! fill, then classifies their contacts from deterministic Euler-pole motion.
+//! Old broad collision belts and the smaller still-active subset drive
+//! [`ProceduralSurface::orogeny`]. The same structural field is exported as
+//! diffusion conditioning, so learned detail elaborates the ridges instead of a
+//! post-process stamping them onto finished terrain. Continentalness remains the
+//! sole land/sea authority: tectonics changes relief, never the coastline. The
 //! runway-siting scaffold ([`ProceduralSurface::runway_land_bias`] /
 //! [`ProceduralSurface::runway_plains_factor`]) is a temporary nudge keeping the
 //! fixed runway pad on flat inland ground until terrain-aware auto-siting lands.
 //!
-//! This is the Slice-0 generator: competent but deliberately simple. Real
-//! plate-driven structure, finer mountain placement, and the material/biome
-//! weight model are later slices; procedural shading is later still.
+//! This remains a deliberately compact analytic generator. Plate-driven macro
+//! structure is present; learned ridge morphology, island arcs/hotspots, and
+//! finer material/biome authority remain later slices.
 
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use bevy_erosion_filter::cpu::{ErosionFilterParams, erosion_filter};
 use glam::{DVec3, Vec2, Vec3};
 
+use crate::procedural_tectonics::ProceduralTectonicField;
 use crate::query::{SurfaceQuery, SurfaceSample};
 
 // ---------------------------------------------------------------------------
@@ -254,7 +257,7 @@ const LAND_MASK_W: f64 = 0.03;
 /// Authored to the lore (docs/lore/solar_system.md §II): Thalos is a
 /// **geologically old** world — eroded, subdued land that keeps typical
 /// terrain low in the lush ecological bands (the planet "looks lush" from
-/// orbit), with ruggedness supplied by the decorrelated montane regions, not
+/// orbit), with ruggedness supplied by the tectonic montane belts, not
 /// by a high-riding platform. The old 420 m + 650 m values pushed mean land
 /// toward ~1 km and let the altitude bands crush the climate palette
 /// (TM-P3 rebalance, 2026-07-20).
@@ -299,7 +302,7 @@ const BEACH_RISE_WIDTH_C: f64 = 2.5e-4;
 /// the water renderer no depth variation). Gated to deep water (see
 /// `deep_factor` in the height path) so it never churns the shelf or the coast.
 const SEABED_WL_M: f64 = 170_000.0;
-const SEABED_AMP_M: f64 = 950.0;
+const SEABED_AMP_M: f64 = 420.0;
 /// Depth band over which seabed relief fades in: none on the shelf (shallower
 /// than `SEABED_FADE_HI_M`), full in the deep (below `SEABED_FADE_LO_M`).
 const SEABED_FADE_HI_M: f64 = -300.0;
@@ -350,6 +353,11 @@ const OFFSHORE_SHALLOW_KEEP: f64 = 0.15;
 /// rock-steady waterline; on a flat coast the smoothed apron is ~`COAST_BAND_M /
 /// slope` wide, which is where the pinning is needed most.
 pub const COAST_BAND_M: f64 = 60.0;
+/// Minimum positive clearance retained on authored macro land. This is far
+/// below any rendered or collision scale; its purpose is semantic: downstream
+/// code consistently uses `height > 0` for land, so relief may approach the
+/// waterline but may not turn authored land into an ambiguous exact-zero cell.
+const MACRO_LAND_CLEARANCE_M: f64 = 0.01;
 
 /// Rolling hills layer: mid wavelength, land-masked, LOD-aware octaves.
 const HILLS_WL_M: f64 = 6_000.0;
@@ -365,9 +373,9 @@ const SWELL_AMP_M: f64 = 25.0;
 
 /// Mountain layer: ridged multifractal, LOD-aware. Its amplitude is no longer
 /// gated by base altitude — it blends `PLAINS_MTN_AMP_M → MONTANE_MTN_AMP_M`
-/// by the decorrelated [`ProceduralSurface::biome_weight`], so ruggedness is a
-/// property of *which region* you're in, not how high the continent happens to
-/// be. Land-gated only (no mountains rising out of the seabed).
+/// by plate-driven orogeny, so ruggedness is a property of tectonic province,
+/// not simply how high the continent happens to be. Land-gated only (no
+/// mountains rising out of the seabed).
 const MOUNTAIN_WL_M: f64 = 20_000.0;
 /// Ridged amplitude in plains regions (gentle — plains read as plains).
 const PLAINS_MTN_AMP_M: f64 = 220.0;
@@ -540,28 +548,31 @@ fn latitude_moisture(sin_lat: f64) -> f64 {
     MOIST_BIAS + equator + subtropic + midlat + polar
 }
 
-/// Orogeny field: a long-wavelength fBm **decorrelated** from the continent
-/// field (own seed), thresholded into a montane weight in `[0, 1]`. It governs
-/// where mountains are tall vs where the land reads as plains — ruggedness is a
-/// property of *which region* you're in, not of how high the continent happens
-/// to be. Shorter wavelength than the continents so a single continent can hold
-/// both plains and a mountain belt.
-///
-/// This is the second plate-tectonics seam (alongside [`ProceduralSurface::
-/// continentalness`]): a future backend replaces the body of [`ProceduralSurface
-/// ::orogeny`] with a warped plate-margin / island-arc structure and mountain
-/// amplitude follows it, without touching the height composition below. Per the
-/// project's coast/relief separation rule, coastline detail must never feed this
-/// field.
-const OROGENY_WL_M: f64 = 420_000.0;
-const OROGENY_OCTAVES: f64 = 4.0;
-/// Montane where the field sits in its upper range; the gap is the transition
-/// band (kept wide so the parameter blend doesn't smear character abruptly).
-const OROGENY_LO: f64 = 0.05;
-const OROGENY_HI: f64 = 0.45;
+// --- Tectonic relief structure (NTR-X2f) ----------------------------------
+//
+// Plate ownership is grown over a cube-sphere by `procedural_tectonics`, not
+// assigned to the nearest continentalness cell. That keeps the coastline and
+// tectonic graph as independent authorities while giving boundary corridors
+// the irregular, connected geometry real plate margins require.
+/// Low-amplitude inherited terranes: eroded ranges from plate systems older
+/// than the current contact graph. They restore subdued relief inside plates
+/// without competing with present/fossil boundary belts.
+const INHERITED_OROGENY_WL_M: f64 = 420_000.0;
+const INHERITED_OROGENY_OCTAVES: f64 = 4.0;
+const INHERITED_OROGENY_LO: f64 = 0.05;
+const INHERITED_OROGENY_HI: f64 = 0.45;
+const INHERITED_OROGENY_MAX: f64 = 0.12;
+/// Signed macro relief at divergent and submerged convergent margins. The land
+/// mountain belt itself is supplied by `orogeny` + the ordinary ridge cascade.
+const TECTONIC_OCEAN_RIDGE_M: f64 = 850.0;
+const TECTONIC_OCEAN_RIDGE_SWELL_M: f64 = 1_550.0;
+const TECTONIC_CONTINENTAL_RIFT_M: f64 = 260.0;
+const TECTONIC_TRENCH_M: f64 = 850.0;
+const TECTONIC_HINTERLAND_UPLIFT_M: f64 = 1_450.0;
+const TECTONIC_FORELAND_BASIN_M: f64 = 520.0;
 /// Base-elevation lift applied across montane land so ranges sit on raised
 /// ground and their peaks clear the shader's treeline/snow lines.
-const MONTANE_UPLIFT_M: f64 = 800.0;
+const MONTANE_UPLIFT_M: f64 = 2_000.0;
 
 // --- Runway-scenario siting scaffold ---------------------------------------
 //
@@ -708,6 +719,7 @@ static MASSIF_FRAMES: LazyLock<[(DVec3, DVec3, DVec3); MASSIF_SITES.len()]> = La
 const LAND_PEAK_M: f64 = LAND_PLATFORM_M
     + LAND_INTERIOR_GAIN_M
     + MONTANE_UPLIFT_M
+    + TECTONIC_HINTERLAND_UPLIFT_M
     + (MONTANE_MTN_AMP_M + MID_MOUNTAIN_AMP_M).max(MASSIF_PEAK_M)
     + HILLS_AMP_M
     + SWELL_AMP_M
@@ -717,7 +729,8 @@ const LAND_PEAK_M: f64 = LAND_PLATFORM_M
 /// worst-case land column and the abyssal ocean depth (plus seabed relief).
 /// Heights are clamped to `±HEIGHT_RANGE_M` on encode. (Widening this coarsens
 /// the u16 height-atlas quantisation everywhere — here ~0.2 m/step, acceptable.)
-const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0) as f32;
+const HEIGHT_RANGE_M: f32 =
+    LAND_PEAK_M.max(ABYSS_DEPTH_M + SEABED_AMP_M + TECTONIC_TRENCH_M + 400.0) as f32;
 
 // ---------------------------------------------------------------------------
 // Surface
@@ -772,12 +785,33 @@ const HEIGHT_RANGE_M: f32 = LAND_PEAK_M.max(ABYSS_DEPTH_M + HILLS_AMP_M + 400.0)
 //     us and silently rendering two-generations-old terrain. Bump this in the
 //     same change as any field edit — "the chart was regenerated" is not the
 //     same guarantee.
-pub const GENERATOR_VERSION: u64 = 28;
+// 29: deterministic Euler-pole motion on the existing plate cells replaces the
+//     independent orogeny noise. Convergent margins now author mountain belts;
+//     divergent ocean margins author ridges, and submerged convergent margins
+//     author trenches. Continentalness is untouched, so the coastline does not
+//     move, but every above/below-sea relief tile is new content.
+// 30: nearest-cell tectonic ownership is replaced by irregular weighted flood
+//     growth on a cube-sphere. Plate bias, preferred bearing, crustal noise and
+//     boundary-born microplates remove the polygon-sector geometry while the
+//     continentalness coastline remains byte-identical.
+// 31: visible old orogens no longer preserve a constant-width whole boundary.
+//     Regional survival and width modulation separate them into massifs, while
+//     low-amplitude inherited terranes restore subdued relief inside plates.
+// 32: convergent contacts gain asymmetric hinterland uplift and foreland
+//     lowlands, while divergent ocean contacts gain a broad ridge swell. The
+//     continuous plate process now authors whole relief provinces, not only
+//     narrow peak texture.
+// 33: every relief band's coarsest octave is footprint-gated, so sub-Nyquist
+//     hills and ridges disappear instead of aliasing into global blotches.
+//     Tectonic cores rise more clearly, inherited terranes stay subdued, and a
+//     low continuous spine connects the separately preserved peak massifs.
+pub const GENERATOR_VERSION: u64 = 33;
 
 #[derive(Debug, Clone)]
 pub struct ProceduralSurface {
     radius_m: f64,
     seed: u32,
+    tectonics: Arc<ProceduralTectonicField>,
     /// Optional baked drainage (NTR-X2q). `None` is the default and means "no
     /// rivers", so every existing construction site keeps working unchanged;
     /// the body registry attaches one when the asset is installed.
@@ -804,11 +838,41 @@ pub struct MacroSignals {
     pub sin_lat: f64,
 }
 
+/// Process-labelled plate-boundary influence at one point on the planet.
+///
+/// All weights are in `[0, 1]`. `activity` describes the boundary pair itself;
+/// the regime and province weights also include distance falloff, so plate
+/// interiors approach zero. Distances follow the irregular grown plate graph
+/// and are bilinearly sampled from its cube-sphere process field.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct TectonicSignals {
+    /// Shortest local distance to the nearest plate boundary, metres.
+    pub boundary_distance_m: f64,
+    /// Compressional-margin influence, including distance and motion strength.
+    pub convergence: f64,
+    /// Extensional-margin influence, including distance and motion strength.
+    pub divergence: f64,
+    /// Strike-slip-margin influence, including distance and motion strength.
+    pub transform: f64,
+    /// Retained present-day activity of this plate pair.
+    pub activity: f64,
+    /// Mountain-building prior consumed by the relief cascade and conditioning.
+    pub orogeny: f64,
+    /// Broad elevated province behind a convergent range core.
+    pub hinterland: f64,
+    /// Broad low province in front of a convergent range core.
+    pub foreland: f64,
+    /// Long-wavelength bathymetric swell around a divergent ocean margin.
+    pub ridge_swell: f64,
+}
+
 impl ProceduralSurface {
     pub fn new(radius_m: f32, seed: u32) -> Self {
+        let radius_m = radius_m.max(1.0) as f64;
         Self {
-            radius_m: radius_m.max(1.0) as f64,
+            radius_m,
             seed,
+            tectonics: ProceduralTectonicField::shared(radius_m, seed),
             rivers: None,
         }
     }
@@ -844,6 +908,20 @@ impl ProceduralSurface {
         }
     }
 
+    /// Tectonic structure at a body-fixed unit direction.
+    ///
+    /// This is the same field [`Self::macro_signals`] exposes through
+    /// `orogeny`, made explicit for offline atlases and regression tests. It is
+    /// independent of `lod_m`: plate provinces cannot move as tiles refine.
+    pub fn tectonic_signals(&self, dir: DVec3) -> TectonicSignals {
+        let dir = dir.normalize_or_zero();
+        if dir == DVec3::ZERO {
+            return TectonicSignals::default();
+        }
+        let p = dir * self.radius_m;
+        self.tectonic_signals_at(self.relief_warped_position(p))
+    }
+
     /// Geometric height (m above the reference radius), the montane orogeny
     /// weight, **and** the continentalness `c` at body-fixed unit direction
     /// `dir`, evaluated at `lod_m` metres per sample. Orogeny and `c` are
@@ -859,13 +937,7 @@ impl ProceduralSurface {
 
         // Relief-scale domain warp (breaks up the lattice for the hill / mountain
         // bands; the continent field warps itself at its own scale).
-        let wp = p / WARP_WL_M;
-        let warp = DVec3::new(
-            fbm(wp, self.seed ^ 0x1111, 2.0),
-            fbm(wp + DVec3::splat(31.4), self.seed ^ 0x2222, 2.0),
-            fbm(wp - DVec3::splat(17.2), self.seed ^ 0x3333, 2.0),
-        ) * WARP_AMP_M;
-        let pw = p + warp;
+        let pw = self.relief_warped_position(p);
 
         // --- Macro: continents & oceans ------------------------------------
         // Continentalness (the separable plate-tectonics seam) → bimodal
@@ -876,9 +948,11 @@ impl ProceduralSurface {
         let macro_h = hypsometric_height(c);
         let land_mask = smoothstep(CONTINENT_C0 - LAND_MASK_W, CONTINENT_C0 + LAND_MASK_W, c);
 
-        // Montane orogeny, decorrelated from the continent field, suppressed to
-        // plains around the runway site.
-        let orogeny = self.orogeny(pw) * self.runway_plains_factor(dir);
+        // Plate-motion regimes author the relief provinces. The fixed runway
+        // scenario remains deliberately sited in a broad plain.
+        let tectonics = self.tectonic_signals_at(pw);
+        let plains_factor = self.runway_plains_factor(dir);
+        let orogeny = self.orogeny(pw) * plains_factor;
 
         // --- Relief cascade riding on the macro base -----------------------
         // Montane uplift on land so ranges sit high enough to reach the shader's
@@ -890,6 +964,7 @@ impl ProceduralSurface {
         let hills_oct = octaves_for_lod(lod_m, HILLS_WL_M);
         let hills = fbm(pw / HILLS_WL_M, self.seed ^ 0x5151, hills_oct)
             * HILLS_AMP_M
+            * relief_band_gain(lod_m, HILLS_WL_M)
             * (0.18 + 0.82 * land_mask);
 
         // Lowland / seabed swell: barely land-gated so neither plains nor the
@@ -898,6 +973,7 @@ impl ProceduralSurface {
         let swell_oct = octaves_for_lod(lod_m, SWELL_WL_M);
         let swell = fbm(pw / SWELL_WL_M, self.seed ^ 0x57E1, swell_oct)
             * SWELL_AMP_M
+            * relief_band_gain(lod_m, SWELL_WL_M)
             * (0.55 + 0.45 * land_mask);
 
         // Ridged mountains: a coarse range-defining band (amplitude blends
@@ -908,9 +984,11 @@ impl ProceduralSurface {
         // hundred metres instead of melting into a single fBm's vanishing tail.
         let mtn_oct = octaves_for_lod(lod_m, MOUNTAIN_WL_M);
         let mtn_amp = lerp(orogeny, PLAINS_MTN_AMP_M, MONTANE_MTN_AMP_M) * land_mask;
-        let mtn_base = ridged(pw / MOUNTAIN_WL_M, self.seed ^ 0x9A9A, mtn_oct);
+        let mtn_base = ridged(pw / MOUNTAIN_WL_M, self.seed ^ 0x9A9A, mtn_oct)
+            * relief_band_gain(lod_m, MOUNTAIN_WL_M);
         let mid_oct = octaves_for_lod(lod_m, MID_MOUNTAIN_WL_M);
-        let mid = ridged(pw / MID_MOUNTAIN_WL_M, self.seed ^ 0x3D7B, mid_oct);
+        let mid = ridged(pw / MID_MOUNTAIN_WL_M, self.seed ^ 0x3D7B, mid_oct)
+            * relief_band_gain(lod_m, MID_MOUNTAIN_WL_M);
         let mountains =
             mtn_base * mtn_amp + mid * MID_MOUNTAIN_AMP_M * mtn_base * (orogeny * land_mask);
 
@@ -919,12 +997,33 @@ impl ProceduralSurface {
         // (`smoothstep` needs increasing edges, so invert the shallow→deep ramp.)
         let deep = 1.0 - smoothstep(SEABED_FADE_LO_M, SEABED_FADE_HI_M, macro_h);
         let seabed_oct = octaves_for_lod(lod_m, SEABED_WL_M);
-        let seabed = fbm(pw / SEABED_WL_M, self.seed ^ 0x5EAB, seabed_oct) * SEABED_AMP_M * deep;
+        let seabed = fbm(pw / SEABED_WL_M, self.seed ^ 0x5EAB, seabed_oct)
+            * SEABED_AMP_M
+            * relief_band_gain(lod_m, SEABED_WL_M)
+            * deep;
+
+        // Extensional ocean boundaries rise into mid-ocean ridges; the same
+        // process on land opens a rift valley. Submerged convergent margins cut
+        // trenches. `combine_macro_and_relief` keeps all three away from the
+        // authored zero crossing, so none can invent or move a coastline.
+        let ocean_mask = 1.0 - land_mask;
+        let tectonic_relief = plains_factor
+            * (ocean_mask
+                * (TECTONIC_OCEAN_RIDGE_M * tectonics.divergence
+                    + TECTONIC_OCEAN_RIDGE_SWELL_M * tectonics.ridge_swell
+                    - TECTONIC_TRENCH_M * tectonics.convergence)
+                + land_mask
+                    * (TECTONIC_HINTERLAND_UPLIFT_M * tectonics.hinterland
+                        - TECTONIC_FORELAND_BASIN_M * tectonics.foreland
+                        - TECTONIC_CONTINENTAL_RIFT_M * tectonics.divergence));
 
         // Combine relief with the macro base: sea-level crossings belong to the
         // LOD-invariant macro field alone — sub-sea relief shoals to awash
         // reefs instead of breaching (see `combine_macro_and_relief`).
-        let height = combine_macro_and_relief(macro_h, uplift + hills + swell + mountains + seabed);
+        let height = combine_macro_and_relief(
+            macro_h,
+            uplift + hills + swell + mountains + seabed + tectonic_relief,
+        );
 
         // Authored, erosion-sculpted mountain ranges near the runway. Additive
         // and footprint-gated (zero outside every envelope), so they don't
@@ -1260,16 +1359,9 @@ impl ProceduralSurface {
     fn canopy_climate_inputs(&self, dir: DVec3, lod_m: f32) -> (f64, f64) {
         let p = dir * self.radius_m;
         // Same relief-scale warp the height path applies before sampling
-        // orogeny — `orogeny` is defined on the warped position, so sampling it
-        // unwarped would give a *different* answer than the vertex path and
-        // reintroduce the two-fields disagreement this seam exists to end.
-        let wp = p / WARP_WL_M;
-        let warp = DVec3::new(
-            fbm(wp, self.seed ^ 0x1111, 2.0),
-            fbm(wp + DVec3::splat(31.4), self.seed ^ 0x2222, 2.0),
-            fbm(wp - DVec3::splat(17.2), self.seed ^ 0x3333, 2.0),
-        ) * WARP_AMP_M;
-        let orogeny = self.orogeny(p + warp) * self.runway_plains_factor(dir);
+        // tectonics. Sampling it unwarped would give canopy a different
+        // mountain province than geometry and diffusion conditioning.
+        let orogeny = self.orogeny(self.relief_warped_position(p)) * self.runway_plains_factor(dir);
         // Same continentalness (incl. the runway-siting bias) the height path
         // uses, so the moisture matches the baked field.
         let c = self.continentalness(p) + self.runway_land_bias(dir);
@@ -1277,14 +1369,33 @@ impl ProceduralSurface {
         (orogeny, moisture)
     }
 
-    /// Decorrelated montane-orogeny weight in `[0, 1]` at warped position `pw`.
-    /// A long-wavelength field independent of the continent field, so mountains
-    /// form their own regions rather than tracking base altitude. Kept as one
-    /// function so a future plate-margin / island-arc structure can replace the
-    /// body without touching the height composition.
+    /// Relief-warped body position shared by geometry, canopy, and the public
+    /// tectonic probe. The warp only bends belt traces by a few kilometres; it
+    /// never feeds continentalness or the signed sea field.
+    fn relief_warped_position(&self, p: DVec3) -> DVec3 {
+        let wp = p / WARP_WL_M;
+        let warp = DVec3::new(
+            fbm(wp, self.seed ^ 0x1111, 2.0),
+            fbm(wp + DVec3::splat(31.4), self.seed ^ 0x2222, 2.0),
+            fbm(wp - DVec3::splat(17.2), self.seed ^ 0x3333, 2.0),
+        ) * WARP_AMP_M;
+        p + warp
+    }
+
+    /// Plate-driven montane-orogeny weight in `[0, 1]` at warped position `pw`.
     fn orogeny(&self, pw: DVec3) -> f64 {
-        let b = fbm(pw / OROGENY_WL_M, self.seed ^ 0xB10E, OROGENY_OCTAVES);
-        smoothstep(OROGENY_LO, OROGENY_HI, b)
+        let tectonic = self.tectonic_signals_at(pw).orogeny;
+        let inherited_noise = fbm(
+            pw / INHERITED_OROGENY_WL_M,
+            self.seed ^ 0xB10E,
+            INHERITED_OROGENY_OCTAVES,
+        );
+        let inherited = smoothstep(INHERITED_OROGENY_LO, INHERITED_OROGENY_HI, inherited_noise);
+        tectonic + (1.0 - tectonic) * INHERITED_OROGENY_MAX * inherited
+    }
+
+    fn tectonic_signals_at(&self, pw: DVec3) -> TectonicSignals {
+        self.tectonics.sample(pw)
     }
 
     /// Provisional macro albedo (linear RGB) by **climate-shifted** altitude
@@ -1776,6 +1887,18 @@ fn octaves_for_lod(lod_m: f32, base_wl_m: f64) -> f64 {
     (ratio.log2() + 1.0).clamp(1.0, MAX_OCTAVES)
 }
 
+/// Visibility of a relief band's coarsest octave at the requested sample
+/// footprint. The octave ladder alone cannot provide this gate: [`fbm`] and
+/// [`ridged`] normalize their accumulated amplitude, so a fractional first
+/// octave still returns full-strength noise. Relief below two samples per
+/// wavelength must disappear rather than alias into planet-scale blotches.
+fn relief_band_gain(lod_m: f32, base_wl_m: f64) -> f64 {
+    if lod_m <= 0.0 {
+        return 1.0;
+    }
+    smoothstep(2.0, 4.0, base_wl_m / f64::from(lod_m))
+}
+
 // ---------------------------------------------------------------------------
 // Hypsometry (continentalness → signed macro height)
 // ---------------------------------------------------------------------------
@@ -1839,9 +1962,9 @@ fn hypsometric_height(c: f64) -> f64 {
 ///    strength inland/offshore, so coastal hills and the seabed keep their texture.
 ///
 /// 2. **No sea on land, no land in the sea.** Macro **land** (`macro_h >= 0`) is
-///    floored at the waterline: relief may not carve an isolated basin below sea
-///    level, so the ocean stays the single connected body the macro field defines
-///    (closed land basins are future inland lakes, not sea — deferred). Macro
+///    floored at a one-centimetre positive clearance: relief may not carve an
+///    isolated basin below sea level or leave an ambiguous exact-zero cell, so
+///    `height > 0` remains exactly equivalent to authored land. Macro
 ///    **seabed** never breaches at all: relief that would cross the surface
 ///    shoals to an awash reef saturating at [`AWASH_REEF_DEPTH_M`] below sea
 ///    level. The 0-crossing is *exclusively* the macro field's — LOD-aware
@@ -1851,7 +1974,7 @@ pub fn combine_macro_and_relief(macro_h: f64, relief: f64) -> f64 {
     let coast_fade = smoothstep(0.0, COAST_BAND_M, macro_h.abs());
     let h = macro_h + relief * coast_fade;
     if macro_h >= 0.0 {
-        return h.max(0.0);
+        return h.max(macro_h.min(MACRO_LAND_CLEARANCE_M));
     }
     // Would-be breach: fold it into an awash shoal. Continuous at h = 0
     // (→ 0⁻) and monotone in |breach|, saturating just below the surface.
@@ -2156,4 +2279,146 @@ fn massif_erosion_params() -> ErosionFilterParams {
 fn massif_erosion_offset(seed: u32) -> Vec2 {
     let h = hash3(seed as i64, 0x517E, 0x4D54, seed ^ 0xA53F);
     Vec2::new((h & 0xffff) as f32 * 13.0, (h >> 16) as f32 * 13.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const THALOS_RADIUS_M: f32 = 3_186_000.0;
+    const THALOS_SEED: u32 = 2;
+
+    fn fibonacci_dir(i: usize, count: usize) -> DVec3 {
+        let y = 1.0 - 2.0 * (i as f64 + 0.5) / count as f64;
+        let radius = (1.0 - y * y).max(0.0).sqrt();
+        let angle = std::f64::consts::PI * (3.0 - 5.0_f64.sqrt()) * i as f64;
+        DVec3::new(angle.cos() * radius, y, angle.sin() * radius)
+    }
+
+    #[test]
+    fn relief_band_gain_rejects_sub_nyquist_base_octaves() {
+        const FOOTPRINT_M: f32 = 10_000.0;
+
+        assert_eq!(relief_band_gain(0.0, 1_000.0), 1.0);
+        assert_eq!(relief_band_gain(FOOTPRINT_M, 20_000.0), 0.0);
+        assert_eq!(relief_band_gain(FOOTPRINT_M, 40_000.0), 1.0);
+        assert!((0.0..1.0).contains(&relief_band_gain(FOOTPRINT_M, 30_000.0)));
+    }
+
+    #[test]
+    fn tectonic_processes_are_deterministic_bounded_and_present() {
+        let surface = ProceduralSurface::new(THALOS_RADIUS_M, THALOS_SEED);
+        let mut regimes = [0_usize; 3];
+        let mut strong_orogeny = 0_usize;
+        const COUNT: usize = 16_384;
+
+        for i in 0..COUNT {
+            let dir = fibonacci_dir(i, COUNT);
+            let a = surface.tectonic_signals(dir);
+            let b = surface.tectonic_signals(dir);
+            assert_eq!(a, b);
+            for value in [
+                a.convergence,
+                a.divergence,
+                a.transform,
+                a.activity,
+                a.orogeny,
+                a.hinterland,
+                a.foreland,
+                a.ridge_swell,
+            ] {
+                assert!((0.0..=1.0).contains(&value), "out-of-range signal {a:?}");
+            }
+            if a.convergence > 0.08 {
+                regimes[0] += 1;
+            }
+            if a.divergence > 0.08 {
+                regimes[1] += 1;
+            }
+            if a.transform > 0.08 {
+                regimes[2] += 1;
+            }
+            if a.orogeny > 0.25 {
+                strong_orogeny += 1;
+                assert!(a.boundary_distance_m < crate::procedural_tectonics::MAX_ANCIENT_WIDTH_M);
+            }
+        }
+
+        assert!(regimes.into_iter().all(|count| count > 100), "{regimes:?}");
+        assert!(
+            strong_orogeny > 100,
+            "strong orogeny count {strong_orogeny}"
+        );
+    }
+
+    #[test]
+    fn convergent_contacts_keep_a_low_continuous_relief_spine() {
+        let surface = ProceduralSurface::new(THALOS_RADIUS_M, THALOS_SEED);
+        let mut convergent = 0_usize;
+        let mut continuous = 0_usize;
+        const COUNT: usize = 32_768;
+
+        for i in 0..COUNT {
+            let tectonics = surface.tectonic_signals(fibonacci_dir(i, COUNT));
+            if tectonics.convergence < 0.12 {
+                continue;
+            }
+            convergent += 1;
+            if tectonics.orogeny >= tectonics.convergence * 0.06 {
+                continuous += 1;
+            }
+        }
+
+        assert!(convergent > 100, "strong convergent samples: {convergent}");
+        let continuity = continuous as f64 / convergent as f64;
+        assert!(
+            continuity >= 0.80,
+            "only {:.1}% of strong convergence keeps a low orogenic spine",
+            continuity * 100.0
+        );
+    }
+
+    #[test]
+    fn inherited_terranes_restore_relief_inside_plates() {
+        let surface = ProceduralSurface::new(THALOS_RADIUS_M, THALOS_SEED);
+        let mut inherited_relief = 0_usize;
+        const COUNT: usize = 16_384;
+
+        for i in 0..COUNT {
+            let dir = fibonacci_dir(i, COUNT);
+            let tectonics = surface.tectonic_signals(dir);
+            if tectonics.boundary_distance_m <= crate::procedural_tectonics::MAX_ANCIENT_WIDTH_M {
+                continue;
+            }
+            let orogeny = surface.macro_signals(dir, 23_040.0).orogeny;
+            assert!(
+                orogeny <= INHERITED_OROGENY_MAX + 1.0e-6,
+                "plate-interior orogeny exceeds the inherited-terrain ceiling: {orogeny}"
+            );
+            if orogeny > 0.04 {
+                inherited_relief += 1;
+            }
+        }
+
+        assert!(
+            inherited_relief > 500,
+            "plate-interior inherited-relief samples: {inherited_relief}"
+        );
+    }
+
+    #[test]
+    fn composed_height_sign_matches_the_authored_coastline() {
+        let surface = ProceduralSurface::new(THALOS_RADIUS_M, THALOS_SEED);
+        const COUNT: usize = 32_768;
+        for i in 0..COUNT {
+            let dir = fibonacci_dir(i, COUNT);
+            let macro_h = surface.macro_signed_height_m(dir);
+            let height = surface.height_and_orogeny(dir, 23_040.0).0;
+            assert_eq!(
+                height > 0.0,
+                macro_h > 0.0,
+                "coast authority diverged at {dir:?}: macro {macro_h}, composed {height}"
+            );
+        }
+    }
 }

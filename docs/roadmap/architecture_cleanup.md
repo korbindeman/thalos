@@ -5,6 +5,12 @@ lifecycle, mode/state machinery, duplication/dead-code inventory). This doc is
 rationale and sequencing only — what has actually landed is in
 [`docs/backlog.md`](../backlog.md).
 
+The runtime-monolith continuation now has its own focused plan:
+[`application_runtime.md`](application_runtime.md) (`app`). It turns the
+composition layer into a lightweight feature-selected facade and migrates
+Kòrsou onto the common viewer/settings shell without importing simulation or
+gameplay.
+
 ## 1. Why
 
 The feature push (surface bases, space-center hub, launch flows, GPU grass,
@@ -304,8 +310,15 @@ persistence.
 
 **Fleet kernel landed 2026-07-25:** `Simulation` now owns the deterministic
 registry and per-vessel bookkeeping, id-addressed mutation seams, and
-active-selection compatibility wrappers. CL-E2 is unblocked; the remaining
-singletons in this section are runtime/ECS concerns.
+active-selection compatibility wrappers.
+
+**Runtime identity landed compile-clean 2026-08-09:** every projected vessel
+root and flight part now carries canonical identity; `ActiveCraft` is resolved
+from the canonical selection; gear, brake, EVA, realized-control, and maneuver
+state live on each root; staging, collider/wheel construction, rendering, and
+map markers join by `CraftId`. `PlayerShip` remains only as a synchronized
+compatibility marker for legacy camera/view systems, never as proof that a
+craft exists.
 
 **Kept singletons (deliberate, N-craft seams recorded):**
 
@@ -313,14 +326,14 @@ singletons in this section are runtime/ECS concerns.
 |---|---|---|---|
 | One canonical craft state + authority | `Simulation` (`ship_state`/`set_ship_state`/`transition_authority`) | the `place_craft` core (§C) is the sole seat-the-state path | **resolved:** deterministic `CraftId`-keyed vessel registry; current methods become active-craft wrappers |
 | One Avian bubble slot | `ActiveLocalBubble.bubble: Option<…>` | `clear_bubble` / `spawn_player_avian_body` | **resolved direction:** one dominant-body local scene with N vessel rigid bodies, not one bubble per craft |
-| The active craft entity | `PlayerShip` (+ `.single()` sites) | **`ActiveCraft`** (new) | picks the active craft among many |
-| Per-craft global resources | `GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`, `ManeuverPlan` | still global resources today | move onto each `CraftRoot` as components in CL-E2 |
+| The active craft entity | `CraftRoot` + `CraftIdentity(CraftId)` | **`ActiveCraft`** | **resolved:** canonical selection resolves to one runtime root; `PlayerShip` is a compatibility mirror only |
+| Per-craft runtime state | `GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`, `ManeuverPlan` | components on each `CraftRoot` | **resolved:** consumers use `ActiveCraftRef` / `ActiveCraftMut` or an explicit `CraftId` join |
 | Per-craft regime record | `CraftRegimeState` | **already per-craft component** (the template) | — none, already N-safe |
 
-*Verify (once the workspace builds):* full scenario matrix behaves identically —
-`ActiveCraft` is a pure add (mirrors the one craft), so nothing observable should
-change; destruction respawn / relaunch clears it to `None` during the rebuild
-window and repopulates it.
+*Verify:* full scenario matrix behaves identically; destruction respawn and
+relaunch clear/repopulate selection without deleting unrelated roots; after
+staging, ship and detached-stage map markers remain at their own canonical
+positions and gear/control changes affect only the active root.
 
 ### F. Small unifications (batch as touched) ☐
 

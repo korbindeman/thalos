@@ -307,12 +307,10 @@ mod tests {
     use thalos_terrain::TerrainConfig;
 
     #[test]
-    fn mira_renders_as_placeholder_without_terrain() {
-        // Terrain generation is intentionally disabled for Mira (no per-body
-        // generator yet), so it must parse to `TerrainConfig::None` — the
-        // discriminator `rendering::spawn` reads to route Mira to the
-        // solid-colour placeholder impostor instead of the Earth-like
-        // `ProceduralSurface`.
+    fn mira_parses_as_package_backed_feature_terrain() {
+        // Mira is the first offline package-backed terrain body. Its authored
+        // feature intent must survive parsing so the runtime can select the
+        // matching package rather than route it to a placeholder.
         let system_source = include_str!("../../../../assets/solar_system.ron");
         let mira_details = include_str!("../../../../assets/bodies/mira.ron");
 
@@ -324,16 +322,15 @@ mod tests {
         let mira = system.body_by_name("Mira").expect("Mira exists");
 
         assert!(
-            matches!(mira.terrain, TerrainConfig::None),
-            "Mira should have no procedural terrain (placeholder), got {:?}",
+            matches!(mira.terrain, TerrainConfig::Feature(_)),
+            "Mira should preserve its package-backed feature terrain, got {:?}",
             mira.terrain
         );
     }
 
     #[test]
     fn vaelen_renders_as_placeholder_without_terrain() {
-        // See `mira_renders_as_placeholder_without_terrain`. Vaelen is likewise a
-        // placeholder until a real generator exists; its retained
+        // Vaelen is a placeholder until a real generator exists; its retained
         // `terrestrial_atmosphere` must not resurrect procedural terrain.
         let system_source = include_str!("../../../../assets/solar_system.ron");
         let vaelen_details = include_str!("../../../../assets/bodies/vaelen.ron");

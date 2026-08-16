@@ -22,6 +22,7 @@
 
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use thalos_game_state::ActiveCraftRef;
 use thalos_physics_canonical::aero::{AeroConfig, evaluate_aero};
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
@@ -223,9 +224,9 @@ fn init_debug_overlay(mut store: ResMut<GizmoConfigStore>) {
     store.config_mut::<PhysicsGizmos>().0.enabled = false;
 }
 
-// The F3 toggle for `AeroGizmos` lives in `perf::overlay::toggle_debug_view`:
-// one press flips the debug view, the hitbox overlay, and these gizmos
-// together, so the three surfaces can't drift out of sync.
+// `perf::overlay` observes the shared F3 panel state for `AeroGizmos`: one
+// press flips the diagnostics view, the hitbox overlay, and these gizmos
+// together, so the three surfaces cannot drift out of sync.
 
 /// Build the whole-body aero config for a craft from its wing panels.
 ///
@@ -468,7 +469,7 @@ fn attach_ship_aero(
 /// never under warp/pause or the `BodyFixed` regime.
 #[allow(clippy::type_complexity)]
 fn apply_aero_forces(
-    realized: Res<crate::control_bus::RealizedControl>,
+    realized: ActiveCraftRef<crate::control_bus::RealizedControl>,
     sim: Res<SimulationState>,
     active: Res<ActiveLocalBubble>,
     phys_time: Res<Time<Physics>>,
@@ -490,6 +491,9 @@ fn apply_aero_forces(
         With<LocalCraftBody>,
     >,
 ) {
+    let Some(realized) = realized.get() else {
+        return;
+    };
     let Some(bubble) = active.bubble.as_ref() else {
         return;
     };

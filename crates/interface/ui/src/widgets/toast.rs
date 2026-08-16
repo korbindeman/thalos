@@ -25,6 +25,7 @@ pub struct Toast {
 
 /// The container toasts stack into (spawned by the plugin).
 #[derive(Component)]
+#[require(thalos_photo_mode::HideInPhotoMode)]
 pub struct ToastArea;
 
 pub(crate) fn setup_toast_area(mut commands: Commands) {

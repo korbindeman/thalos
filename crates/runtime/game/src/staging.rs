@@ -43,10 +43,13 @@ use thalos_shipyard::{
 use thalos_world::StateVector;
 
 use crate::SimStage;
-use crate::rendering::{PlayerShip, SimulationState};
-use crate::ship_view::{CraftIdentity, CraftPart, CraftRoot, PartVisual};
+use crate::rendering::SimulationState;
+use crate::ship_view::PartVisual;
 use crate::shrouds::{Shroud, ShroudFired};
 use crate::view::HideInMapView;
+use thalos_game_state::flight::{EvaMode, GearState, ParkingBrake, RealizedControl};
+use thalos_game_state::maneuver_plan::ManeuverPlan;
+use thalos_game_state::scene::{CraftIdentity, CraftPart, CraftRoot};
 
 pub use thalos_game_state::flight::StagingSummaries;
 
@@ -176,7 +179,7 @@ impl StageDemand {
 fn build_staging_plan(
     mut commands: Commands,
     sim: Res<SimulationState>,
-    ships: Query<Entity, (With<PlayerShip>, Without<StagingPlan>)>,
+    ships: Query<(Entity, &CraftIdentity), (With<CraftRoot>, Without<StagingPlan>)>,
     parts: Query<
         (
             Entity,
@@ -192,14 +195,14 @@ fn build_staging_plan(
     >,
     mut engine_activations: Query<(&CraftPart, &mut EngineActivation), Without<EditorPart>>,
 ) {
-    let Ok(ship) = ships.single() else {
+    let active_id = sim.simulation.active_craft_id();
+    let Some((ship, _)) = ships.iter().find(|(_, identity)| identity.0 == active_id) else {
         return;
     };
     if parts.is_empty() {
         return;
     }
 
-    let active_id = sim.simulation.active_craft_id();
     let entities: Vec<Entity> = parts
         .iter()
         .filter(|(_, owner, ..)| owner.0 == active_id)
@@ -277,7 +280,7 @@ pub(crate) fn activate_stage(
     intent: Res<GameInputIntent>,
     mut automatic: ResMut<StageDemand>,
     sim: Res<SimulationState>,
-    mut plans: Query<(Entity, &mut StagingPlan), With<PlayerShip>>,
+    mut plans: Query<(Entity, &CraftIdentity, &mut StagingPlan), With<CraftRoot>>,
     mut engine_activations: Query<(&CraftPart, &mut EngineActivation)>,
     attachments: Query<(Entity, &Attachment, &CraftPart), Without<EditorPart>>,
     surface_mounts: Query<(Entity, &SurfaceMount, &CraftPart), Without<EditorPart>>,
@@ -293,7 +296,10 @@ pub(crate) fn activate_stage(
         return;
     }
     let active_id = sim.simulation.active_craft_id();
-    let Ok((active_root, mut plan)) = plans.single_mut() else {
+    let Some((active_root, _, mut plan)) = plans
+        .iter_mut()
+        .find(|(_, identity, _)| identity.0 == active_id)
+    else {
         return;
     };
     if plan.is_spent() {
@@ -689,6 +695,11 @@ fn materialize_separated_vessels(
         let mut root = world.spawn((
             CraftRoot,
             CraftIdentity(id),
+            GearState::default(),
+            ParkingBrake::default(),
+            EvaMode::default(),
+            RealizedControl::default(),
+            ManeuverPlan::default(),
             HideInMapView,
             root_transform.clone(),
             root_cell.clone(),
@@ -1033,12 +1044,13 @@ fn recompute_ship_inertia(mut sim: ResMut<SimulationState>, parts: PartQuery) {
 /// single `thalos_shipyard` live-part enumeration ([`live_part_dry_mass_kg`]),
 /// so the HUD Δv readout counts every part kind the flight mass does.
 fn publish_staging_summaries(
-    plans: Query<&StagingPlan>,
+    plans: Query<(&CraftIdentity, &StagingPlan), With<CraftRoot>>,
     parts: PartQuery,
     sim: Res<SimulationState>,
     mut summaries: ResMut<StagingSummaries>,
 ) {
-    let Ok(plan) = plans.single() else {
+    let active_id = sim.simulation.active_craft_id();
+    let Some((_, plan)) = plans.iter().find(|(identity, _)| identity.0 == active_id) else {
         if !summaries.0.is_empty() {
             summaries.0.clear();
         }
@@ -1048,8 +1060,6 @@ fn publish_staging_summaries(
     let mut index: HashMap<Entity, usize> = HashMap::new();
     let mut summary_parts: Vec<SummaryPart> = Vec::new();
     let mut parents: Vec<Option<Entity>> = Vec::new();
-    let active_id = sim.simulation.active_craft_id();
-
     for part in parts.iter() {
         if part
             .get::<CraftPart>()

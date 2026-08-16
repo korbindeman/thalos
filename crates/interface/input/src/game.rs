@@ -260,6 +260,8 @@ pub struct GameInputIntent {
     pub orbit_pressed: bool,
     pub camera_motion: Vec2,
     pub camera_wheel: Vec2,
+    /// Freecam-specific speed gesture after device-unit normalization.
+    pub freecam_speed_scroll_lines: f32,
     pub toggle_player_controller: bool,
     pub player_move: Vec2,
     /// Edge-triggered: the player pressed jump this frame (on foot).
@@ -736,7 +738,10 @@ fn collect_camera_intent(
     intent.primary_released = completed(&primary);
     intent.orbit_pressed = held(&orbit);
     intent.camera_motion = vec2(&motion);
-    intent.camera_wheel = crate::camera_scroll_delta(vec2(&wheel), scroll.unit);
+    let wheel_delta = vec2(&wheel);
+    intent.camera_wheel = crate::camera_scroll_delta(wheel_delta, scroll.unit);
+    intent.freecam_speed_scroll_lines =
+        crate::freecam_speed_scroll_lines(wheel_delta.y, scroll.unit);
 }
 
 #[allow(clippy::too_many_arguments)]

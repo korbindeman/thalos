@@ -14,22 +14,22 @@
 use bevy::prelude::*;
 use bevy::ui::RelativeCursorPosition;
 use std::collections::HashMap;
-use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
+use thalos_physics_canonical::canonical::{AuthorityMode, CraftId, Epoch};
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::ActiveLocalBubble;
 use thalos_world::{BodyDefinition, BodyId, BodyKind};
 
 use crate::maneuver::{ManeuverPlan, SelectedNode};
-use thalos_game_state::SimulationState;
 use thalos_game_state::camera::{CameraFocus, CameraFocusTarget};
 use thalos_game_state::coords::RenderOrigin;
 use thalos_game_state::debug::{DebugMode, DebugSurfaceTeleport, low_orbit_state};
 use thalos_game_state::flight::EvaMode;
 use thalos_game_state::nav::ViewMode;
-use thalos_game_state::scene::{CelestialBody, ShipMarker};
+use thalos_game_state::scene::{CelestialBody, CraftIdentity, ShipMarker};
 use thalos_game_state::ui::GamePause;
-use thalos_game_state::ui::PhotoMode;
 use thalos_game_state::ui::ScenarioMenu;
+use thalos_game_state::{ActiveCraftMut, SimulationState};
+use thalos_photo_mode::PhotoMode;
 use thalos_ui::hud_theme::{HudTheme, panel_frame};
 use thalos_ui::{ScrollableColumn, UiButton};
 
@@ -186,19 +186,25 @@ fn rebuild_body_tree(
     state: Res<BodyTreeState>,
     debug: Res<DebugMode>,
     theme: Res<HudTheme>,
-    ship_marker: Query<&Name, With<ShipMarker>>,
+    ship_markers: Query<(Entity, &CraftIdentity, &Name), With<ShipMarker>>,
     content: Query<(Entity, Option<&Children>), With<BodyTreeContent>>,
-    mut shown: Local<Option<(BodyId, bool, bool, usize)>>,
+    mut shown: Local<Option<(BodyId, CraftId, bool, bool, usize, Option<Entity>)>>,
 ) {
     let Some(sim) = sim else {
         return;
     };
     let soi = sim.simulation.dominant_body();
+    let active_id = sim.simulation.active_craft_id();
+    let ship_marker = ship_markers
+        .iter()
+        .find(|(_, identity, _)| identity.0 == active_id);
     let key = (
         soi,
+        active_id,
         debug.enabled,
         state.collapsed_minor,
         sim.system.bodies.len(),
+        ship_marker.map(|(entity, _, _)| entity),
     );
     if *shown == Some(key) {
         return;
@@ -229,7 +235,7 @@ fn rebuild_body_tree(
         kids.sort_by_key(|b| b.id);
     }
 
-    let ship: Option<&str> = ship_marker.single().ok().map(|n| n.as_str());
+    let ship = ship_marker.map(|(_, _, name)| name.as_str());
     let debug_enabled = debug.enabled;
     let collapsed = state.collapsed_minor;
     let theme = theme.clone();
@@ -543,8 +549,8 @@ fn handle_tree_clicks(
     debug: Res<DebugMode>,
     mut surface_teleport: ResMut<DebugSurfaceTeleport>,
     mut active_bubble: Option<ResMut<ActiveLocalBubble>>,
-    mut eva_mode: ResMut<EvaMode>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut eva_mode: ActiveCraftMut<EvaMode>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
     bodies: Query<(Entity, &CelestialBody, &Transform)>,
 ) {
@@ -613,6 +619,9 @@ fn handle_tree_clicks(
         }
 
         if debug.enabled && cmd {
+            let (Some(mut eva_mode), Some(mut plan)) = (eva_mode.get_mut(), plan.get_mut()) else {
+                continue;
+            };
             teleport_to_low_orbit(
                 body_id,
                 &mut commands,

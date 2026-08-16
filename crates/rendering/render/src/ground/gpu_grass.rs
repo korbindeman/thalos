@@ -47,7 +47,7 @@ use bevy::shader::ShaderRef;
 
 use crate::ground::body_material::ShadowCascadeBlock;
 use crate::ground::height_source::HeightSource;
-use crate::ground::pipeline::material_masks_from_heights;
+use crate::ground::material_masks::material_masks_from_heights;
 use crate::ground::scatter::{ScatterClass, ScatterRegion, classify_scatter};
 use crate::ground::tile_lattice::{TileLattice, cube_face_uv, tiles_per_side};
 use crate::ground::vegetation::GrassProfile;
@@ -591,7 +591,7 @@ pub(crate) fn embed_gpu_grass_shader(app: &mut App) {
 
 /// Standalone plugin that registers [`GpuGrassMaterial`] and embeds its
 /// shader, for consumers that render the field without the full
-/// [`ThalosTerrainPlugin`](crate::ground::ThalosTerrainPlugin) (the headless
+/// [`GroundAppearancePlugin`](crate::ground::GroundAppearancePlugin) (the headless
 /// object preview). The terrain plugin registers the same material directly —
 /// don't add both.
 pub struct GpuGrassMaterialPlugin;

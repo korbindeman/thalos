@@ -116,14 +116,12 @@ mod view;
 pub mod viewpoints;
 mod vram_bar;
 mod warp_to_maneuver;
-mod window_settings;
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use bevy::app::ScheduleRunnerPlugin;
 use bevy::asset::AssetPlugin;
-use bevy::diagnostic::FrameTimeDiagnosticsPlugin;
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use bevy::render::{
@@ -132,7 +130,7 @@ use bevy::render::{
 };
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
-use thalos_body_render::BodyRenderPlugin;
+use thalos_body_render::{FarBodyRenderPlugin, PlanetaryRenderPlugin};
 use thalos_input::game::GameInputPlugin;
 use thalos_input::settings::InputSettings;
 use thalos_physics_canonical::{
@@ -143,6 +141,7 @@ use thalos_physics_canonical::{
     simulation::{Simulation, SimulationConfig},
     types::{AttitudeState, ShipParameters, VesselKind},
 };
+use thalos_render_kit::{RenderCapabilities, RenderPlan, RenderPlanPlugin, ValidatedRenderPlan};
 use thalos_world::StateVector;
 use thalos_world::parsing::load_solar_system_from_dir;
 
@@ -249,6 +248,31 @@ fn wgpu_settings_from_env() -> WgpuSettings {
     settings
 }
 
+fn selected_render_plan() -> ValidatedRenderPlan {
+    let legacy_udlod = std::env::var("THALOS_TILE_RENDERER").is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "0" | "false" | "off" | "no"
+        )
+    });
+    let plan = if legacy_udlod {
+        RenderPlan::thalos_legacy_udlod()
+    } else {
+        RenderPlan::thalos_tiles()
+    };
+    #[cfg(feature = "legacy-udlod")]
+    let capabilities = RenderCapabilities::THALOS_WITH_LEGACY;
+    #[cfg(not(feature = "legacy-udlod"))]
+    let capabilities = RenderCapabilities::THALOS;
+
+    plan.validate(capabilities).unwrap_or_else(|error| {
+        panic!(
+            "invalid Thalos render selection: {error}. The legacy comparison requires building \
+             thalos_game with `--features legacy-udlod`; ordinary builds use standard-path tiles"
+        )
+    })
+}
+
 /// Builds the canonical Thalos application from the process environment.
 ///
 /// Interactive and headless launchers both use this builder so there is one
@@ -262,6 +286,7 @@ impl AppBuilder {
     }
 
     pub fn build(self) -> App {
+        let render_plan = selected_render_plan();
         // ------------------------------------------------------------------
         // 1. Resolve and load the portable runtime content.
         // ------------------------------------------------------------------
@@ -551,13 +576,23 @@ impl AppBuilder {
         // ------------------------------------------------------------------
         // 5. Build and run the Bevy app.
         // ------------------------------------------------------------------
-        // Unified persisted preferences (window + graphics + units) from one
-        // settings.ron (project-local in debug, OS app-data in release; see
-        // `crate::settings`), plus the THALOS_WINDOW_MODE / THALOS_WINDOW_SIZE /
-        // THALOS_VSYNC session overrides. Loaded before the app so the initial
-        // window honours them.
+        // Shared application preferences shape the initial window and MSAA in
+        // both Thalos and Kòrsou. Full-game rendering, units, and HUD workspace
+        // remain in the game's settings.ron.
+        let mut app_preferences = thalos_preferences::load();
         let mut app_settings = settings::load();
+        let perf_render_overrides = graphics_settings::PerfRenderOverrides::from_env();
+        let quality_overrides = if headless {
+            thalos_preferences::QualityOverrides::default()
+        } else {
+            thalos_preferences::QualityOverrides::from_env()
+        };
+        if let Some(preset) = quality_overrides.preset {
+            app_preferences.apply_named_preset(preset);
+            app_settings.graphics.apply_preset(preset);
+        }
         if headless {
+            app_preferences = thalos_preferences::AppPreferences::default();
             let graphics = std::env::var("THALOS_SCREENSHOT_GRAPHICS")
                 .ok()
                 .map(|raw| {
@@ -566,14 +601,37 @@ impl AppBuilder {
                     )
                 })
                 .unwrap_or_default();
+            if let Some(foliage) = graphics.foliage {
+                app_preferences.graphics.foliage = foliage;
+            }
             app_settings.graphics = graphics_settings::GraphicsSettings::for_capture(graphics);
             // Capture evidence must not depend on a player's last dragged HUD
             // arrangement. The default workspace gives deterministic framing;
             // the capture preset still decides whether HUD is visible at all.
             app_settings.hud = thalos_hud::mfd::HudWorkspaceSettings::for_capture_env();
         }
-        let win_overrides = window_settings::overrides_from_env();
-        let window = window_settings::initial_window(&app_settings.window, &win_overrides);
+        let win_overrides = thalos_preferences::overrides_from_env();
+        if !headless {
+            let graphics = &app_preferences.graphics;
+            let window = &app_preferences.window;
+            let game = &app_settings.graphics;
+            eprintln!(
+                "quality {} — render {:.2}×, cap {} Hz, foliage {}, clouds {}, grass {}, terrain {:.2}×, shadows {}, window {:?} {}×{}",
+                graphics.preset.label(),
+                graphics.render_scale,
+                graphics.frame_cap_hz,
+                if graphics.foliage { "on" } else { "off" },
+                if game.clouds { "on" } else { "off" },
+                if game.grass { "on" } else { "off" },
+                game.terrain_lod,
+                game.shadow_cascades,
+                window.mode,
+                window.resolution.0,
+                window.resolution.1,
+            );
+        }
+        let window =
+            thalos_preferences::initial_window("Thalos", &app_preferences.window, &win_overrides);
         let wgpu_settings = wgpu_settings_from_env();
 
         // Headless screenshot mode renders off-screen with no window; a normal launch
@@ -665,12 +723,13 @@ impl AppBuilder {
                     .chain(),
             )
             .insert_resource(ClearColor(Color::srgb(0.02, 0.01, 0.04)))
-            // The four settings sections become separate resources (so every
-            // consumer is unchanged); `settings::AppSettingsPlugin` persists them
-            // back to the one file. Window must be inserted here (pre-app) since it
-            // shaped the initial window above.
-            .insert_resource(app_settings.window)
+            // Shared preferences and full-game settings stay separate resources;
+            // each persistence owner writes only its own file.
+            .insert_resource(app_preferences.window)
+            .insert_resource(app_preferences.graphics)
+            .insert_resource(quality_overrides)
             .insert_resource(win_overrides)
+            .insert_resource(perf_render_overrides)
             .insert_resource(app_settings.graphics)
             .insert_resource(app_settings.units)
             .insert_resource(app_settings.hud)
@@ -682,12 +741,14 @@ impl AppBuilder {
             // `default_plugins` is pre-built above (window / render / asset / log),
             // with the window + winit disabled in headless screenshot mode.
             .add_plugins(default_plugins)
-            // `BodyRenderPlugin` adds the ground terrain stack
-            // (`thalos_udlod::TerrainPlugin`, which adds `BigSpaceDefaultPlugins`
-            // unconditionally) plus impostor materials and shared shading
-            // libraries. Adding it again here would panic on duplicate
-            // registration.
-            .add_plugins(BodyRenderPlugin)
+            // Startup composition is validated before any adapter plugin
+            // installs systems. The plan is also published as a resource and
+            // emitted to the structured diagnostics lane.
+            .add_plugins(RenderPlanPlugin::new(render_plan))
+            // Explicit spatial-adapter composition. The planetary adapter owns
+            // near-body terrain and analytic composites; the far-body adapter
+            // owns orbital impostors and rings.
+            .add_plugins((PlanetaryRenderPlugin, FarBodyRenderPlugin))
             .insert_resource({
                 let mut simulation = Simulation::new(
                     ship_state,
@@ -836,27 +897,21 @@ impl AppBuilder {
             // The shared game-UI kit: design tokens, frosted-glass panels, and the
             // widget library every menu/editor screen composes (crates/interface/ui).
             .add_plugins(thalos_ui::ThalosUiPlugin)
+            .add_plugins(thalos_preferences::PreferencesPlugin::new(!headless).with_foliage(true))
+            .add_plugins(thalos_viewer::ViewerPlugin::new(!headless, "F4"))
             .add_plugins(HudPlugin)
             .add_plugins(PauseMenuPlugin)
             .add_plugins(session_loading::SessionLoadingPlugin)
             .add_plugins(main_menu::MainMenuPlugin)
-            .add_plugins(SettingsMenuPlugin)
-            // FPS/FRAME_TIME diagnostics for the F3 performance view and
-            // telemetry collectors (not part of `DefaultPlugins`).
-            .add_plugins(FrameTimeDiagnosticsPlugin::default())
-            // Always-on perf telemetry: the F3 debug view, the runtime.jsonl
-            // perf lane, and the opt-in full-rate recorder. Also owns
-            // RenderDiagnosticsPlugin (GPU pass timings) for every lane —
-            // interactive and headless.
+            // Always-on perf telemetry: selects the shared F3/frame-history
+            // core, adds game stage/memory adapters, and records runtime.jsonl
+            // plus opt-in full-rate blocks. GPU pass timings stay available in
+            // every lane, interactive and headless.
             .add_plugins(perf::PerfPlugin)
             .add_plugins(ScenarioMenuPlugin)
             .add_plugins(NavballPlugin)
             .add_plugins(PhotoModePlugin)
             .add_plugins(ScreenshotPlugin)
-            // Applies WindowSettings to the live window (mode / vsync / monitor /
-            // windowed size) and folds the user UI scale into the fractional-HiDPI
-            // crisp-text compensation.
-            .add_plugins(window_settings::WindowSettingsPlugin)
             // Graphics preferences — e.g. the volumetric-cloud toggle read by
             // `rendering::clouds::drive_clouds`. (Registers the type; the resource
             // is inserted above and persisted by `AppSettingsPlugin`.)
@@ -885,15 +940,14 @@ impl AppBuilder {
         // the player's persisted preferences. Interactive launches keep the
         // unified settings autosave; capture hosts deliberately do not.
         if !headless {
-            app.add_plugins(settings::AppSettingsPlugin);
+            app.add_plugins((SettingsMenuPlugin, settings::AppSettingsPlugin));
         }
 
-        // F8/F9 are a developer collaboration surface: the interactive app
-        // gets the egui catalog manager and the quick-save prompt, while the
-        // headless host only consumes the same authored JSON data.
+        // F8/F9 are a developer collaboration surface. The interactive app
+        // supplies the planetary adapter to the shared viewer catalog/UI;
+        // the headless host consumes the same authored JSON directly.
         if screenshot_config.is_none() {
-            app.add_plugins(viewpoints::ViewpointManagerPlugin)
-                .add_plugins(viewpoints::quick_save::QuickSaveViewpointPlugin);
+            app.add_plugins(viewpoints::ViewpointManagerPlugin);
         }
 
         // Headless screenshot: the fixed-step runner (no winit event loop) plus the
@@ -902,13 +956,24 @@ impl AppBuilder {
         // for later capture requests; the cold verification lane still exits after
         // one image.
         if let Some(config) = screenshot_config {
-            app.add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_secs_f64(
-                1.0 / 60.0,
-            )))
-            .add_plugins(screenshot::HeadlessScreenshotPlugin {
-                persistent: persistent_capture,
-            })
-            .insert_resource(config);
+            let headless_perf = perf::headless_requested();
+            let runner_interval = if headless_perf {
+                // A zero-wait loop can monopolize the main thread while asset
+                // and pipeline preparation still need background progress.
+                // One millisecond remains uncapped for every frame cost this
+                // benchmark is intended to measure.
+                Duration::from_millis(1)
+            } else {
+                Duration::from_secs_f64(1.0 / 60.0)
+            };
+            app.add_plugins(ScheduleRunnerPlugin::run_loop(runner_interval))
+                .add_plugins(screenshot::HeadlessScreenshotPlugin {
+                    persistent: persistent_capture,
+                })
+                .insert_resource(config);
+            if headless_perf {
+                app.add_plugins(perf::HeadlessPerfBenchmarkPlugin);
+            }
         }
 
         app

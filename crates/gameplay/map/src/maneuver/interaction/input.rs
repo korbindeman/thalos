@@ -15,7 +15,7 @@ use super::super::state::{
 use crate::flight_plan_view::FlightPlanView;
 use thalos_game_state::camera::ActiveCamera;
 use thalos_game_state::coords::{RenderOrigin, WorldScale};
-use thalos_game_state::{SimulationState, SolarSystemState};
+use thalos_game_state::{ActiveCraftMut, ActiveCraftRef, SimulationState, SolarSystemState};
 
 /// Enforce the invariant **a drag mode implies the primary button is held**.
 ///
@@ -34,7 +34,7 @@ use thalos_game_state::{SimulationState, SolarSystemState};
 pub(in crate::maneuver) fn end_drag_on_release(
     intent: Res<GameInputIntent>,
     mut mode: ResMut<InteractionMode>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut slide_preview: ResMut<SlidePreview>,
 ) {
     if intent.primary_pressed {
@@ -48,7 +48,9 @@ pub(in crate::maneuver) fn end_drag_on_release(
             // the next `update_selected_node_view` samples the fresh
             // prediction.
             *mode = InteractionMode::Idle;
-            plan.dirty = true;
+            if let Some(mut plan) = plan.get_mut() {
+                plan.dirty = true;
+            }
             slide_preview.world_pos = None;
             slide_preview.frame = None;
         }
@@ -71,7 +73,7 @@ pub(in crate::maneuver) fn maneuver_input(
     flight_plan_view: Res<FlightPlanView>,
     // Read-only: the one write this system used to make (`dirty` on a released
     // slide) moved to `end_drag_on_release`, so it no longer takes the lock.
-    plan: Res<ManeuverPlan>,
+    plan: ActiveCraftRef<ManeuverPlan>,
     mut mode: ResMut<InteractionMode>,
     mut selected: ResMut<SelectedNode>,
     mut node_dv: ResMut<NodeDeltaV>,
@@ -82,6 +84,9 @@ pub(in crate::maneuver) fn maneuver_input(
     ),
     mut writer: bevy::ecs::message::MessageWriter<ManeuverEvent>,
 ) {
+    let Some(plan) = plan.get() else {
+        return;
+    };
     let (hover_map, hitboxes) = picking;
 
     let pointer_on_arrow = hover_map
@@ -214,7 +219,7 @@ pub(in crate::maneuver) fn maneuver_input(
                     .map(|n| n.time)
                     .unwrap_or(0.0);
                 let branch_stack = sim.simulation.trajectory_branches();
-                let coasts = slide_search_segments(&plan, branch_stack, sel_id);
+                let coasts = slide_search_segments(plan, branch_stack, sel_id);
                 let closest = closest_trail_point_on_orbit(
                     &coasts,
                     prediction,
@@ -299,7 +304,7 @@ pub(in crate::maneuver) fn maneuver_input(
 
     if intent.primary_started && !pointer_on_arrow {
         if let Some(id) = closest_node(
-            &plan,
+            plan,
             prediction,
             sim.simulation.trajectory_branches(),
             states,
@@ -350,7 +355,10 @@ mod tests {
             ..Default::default()
         });
         world.insert_resource(mode);
-        world.insert_resource(ManeuverPlan::default());
+        let root = world
+            .spawn((thalos_game_state::CraftRoot, ManeuverPlan::default()))
+            .id();
+        world.insert_resource(thalos_game_state::ActiveCraft(Some(root)));
         world.insert_resource(SlidePreview::default());
         world.run_system_once(end_drag_on_release).unwrap();
         world
@@ -373,7 +381,10 @@ mod tests {
             ..Default::default()
         });
         world.insert_resource(InteractionMode::SlidingNode);
-        world.insert_resource(ManeuverPlan::default());
+        let root = world
+            .spawn((thalos_game_state::CraftRoot, ManeuverPlan::default()))
+            .id();
+        world.insert_resource(thalos_game_state::ActiveCraft(Some(root)));
         world.insert_resource(SlidePreview {
             world_pos: Some(Vec3::ONE),
             frame: Some(Mat3::IDENTITY),
@@ -386,7 +397,7 @@ mod tests {
         ));
         // The final rebuild must still be requested, and the drag-local pose
         // dropped — otherwise the marker stays pinned to a stale sample.
-        assert!(world.resource::<ManeuverPlan>().dirty);
+        assert!(world.get::<ManeuverPlan>(root).unwrap().dirty);
         assert!(world.resource::<SlidePreview>().world_pos.is_none());
         assert!(world.resource::<SlidePreview>().frame.is_none());
     }
@@ -399,7 +410,10 @@ mod tests {
             ..Default::default()
         });
         world.insert_resource(dragging_arrow());
-        world.insert_resource(ManeuverPlan::default());
+        let root = world
+            .spawn((thalos_game_state::CraftRoot, ManeuverPlan::default()))
+            .id();
+        world.insert_resource(thalos_game_state::ActiveCraft(Some(root)));
         world.insert_resource(SlidePreview::default());
         world.run_system_once(end_drag_on_release).unwrap();
 

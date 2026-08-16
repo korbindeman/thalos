@@ -9,5 +9,6 @@
   "mapping": "equirect",
   "planet_radius_m": 3186000.0,
   "px_m_equator": 23040.0,
+  "conditioning_generator_version": 28,
   "wrap_feather_px": 24
 }

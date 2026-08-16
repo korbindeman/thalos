@@ -2,8 +2,10 @@
 //! more than one gameplay/rendering concern reads. Renderer-specific material
 //! handles stay with the runtime's `rendering::types`.
 
+use bevy::ecs::{component::Mutable, system::SystemParam};
 use bevy::prelude::*;
 use std::collections::HashMap;
+use thalos_physics_canonical::canonical::CraftId;
 
 /// Linear-RGB tint to use as a body's planetshine emission. Populated when
 /// the body's surface info first becomes known: at bake completion for
@@ -67,32 +69,85 @@ pub struct TidallyLocked {
 #[derive(Component)]
 pub struct ShipMarker;
 
-/// Root of the player's ship in 3D space. Its children are the ship parts
-/// rendered at 1:1 meter scale in the entity's local frame; the entity's
-/// `Transform::scale` compensates so the ship renders at real size in the
-/// solar-system-wide render-units coordinate space (see
-/// [`WorldScale`](crate::coords::WorldScale)).
+/// Root of one runtime projection of a canonical vessel.
 ///
-/// Present in both views. In map view it's hidden (the flat [`ShipMarker`]
-/// billboard stands in for it); in ship view it becomes visible and the
-/// camera orbits it.
+/// A ship uses its rendered part-tree root. EVA uses its local controller
+/// body. Every root carries [`CraftIdentity`] and the per-craft runtime state
+/// components; systems that need the selected vessel resolve it through
+/// [`ActiveCraft`] instead of assuming one root exists.
+#[derive(Component, Debug, Clone, Copy, Default)]
+pub struct CraftRoot;
+
+/// Stable link from a runtime craft root, part, or map marker to canonical
+/// fleet state.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CraftIdentity(pub CraftId);
+
+/// Ownership of a flight part. Aggregations must filter by this id so a
+/// detached stage cannot contribute fuel, inertia, engines, or staging state
+/// to the selected craft.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CraftPart(pub CraftId);
+
+/// Transitional marker for the selected rendered ship root.
+///
+/// New code must use [`ActiveCraft`]. This marker remains only while the
+/// existing camera/view systems are migrated; it no longer means that a craft
+/// exists, because every vessel is represented by [`CraftRoot`].
 #[derive(Component)]
 pub struct PlayerShip;
 
 /// The craft the player is currently controlling — the **N-craft accessor seam**.
 ///
-/// Today the game has exactly one [`PlayerShip`]; this resource simply names it
-/// by entity. Its purpose is architectural: it is the single sanctioned answer to
-/// "which craft is active", so consumers read `active.0` (an `Option<Entity>`,
-/// `None` during the respawn/relaunch rebuild window) instead of assuming exactly
-/// one craft via `q.single()` — a call that *panics* the moment a second craft
-/// entity exists. When N craft land, this picks the active one and nothing else
-/// changes. New per-craft state should be a **component on this entity**, not a
-/// new global resource (see `docs/roadmap/architecture_cleanup.md` §E).
+/// The runtime resolves the canonical active [`CraftId`] to its current
+/// [`CraftRoot`]. `None` is expected during respawn/relaunch and before the EVA
+/// local body or rendered ship root has materialized. New per-craft state is a
+/// component on this entity, never a global resource.
 ///
 /// **Sole writer:** the runtime's `track_active_craft`.
-#[derive(Resource, Default)]
+#[derive(Resource, Default, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ActiveCraft(pub Option<Entity>);
+
+/// Read-only access to component `T` on the selected craft root.
+///
+/// Keeping this lookup in the blackboard makes the absence semantics and the
+/// `CraftRoot` filter identical across runtime, HUD, and map crates.
+#[derive(SystemParam)]
+pub struct ActiveCraftRef<'w, 's, T: Component> {
+    active: Res<'w, ActiveCraft>,
+    components: Query<'w, 's, &'static T, With<CraftRoot>>,
+}
+
+impl<'w, 's, T: Component> ActiveCraftRef<'w, 's, T> {
+    pub fn get(&self) -> Option<&T> {
+        self.components.get(self.active.0?).ok()
+    }
+
+    pub fn entity(&self) -> Option<Entity> {
+        self.active.0
+    }
+}
+
+/// Mutable access to component `T` on the selected craft root.
+#[derive(SystemParam)]
+pub struct ActiveCraftMut<'w, 's, T: Component<Mutability = Mutable>> {
+    active: Res<'w, ActiveCraft>,
+    components: Query<'w, 's, &'static mut T, With<CraftRoot>>,
+}
+
+impl<'w, 's, T: Component<Mutability = Mutable>> ActiveCraftMut<'w, 's, T> {
+    pub fn get(&self) -> Option<&T> {
+        self.components.get(self.active.0?).ok()
+    }
+
+    pub fn get_mut(&mut self) -> Option<Mut<'_, T>> {
+        self.components.get_mut(self.active.0?).ok()
+    }
+
+    pub fn entity(&self) -> Option<Entity> {
+        self.active.0
+    }
+}
 
 /// A procedural interstage/fairing shroud hull. Present in both the editor
 /// world (interactive: hover transparency, pick-through) and the flight
@@ -118,3 +173,44 @@ pub struct RealSpaceBody {
 /// (fuel, staging, gear, ship visuals) filter `Without<EditorPart>`.
 #[derive(Component, Debug, Clone, Copy)]
 pub struct EditorPart;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Component, Debug, PartialEq, Eq)]
+    struct RootState(u32);
+
+    fn increment_active(mut state: ActiveCraftMut<RootState>) {
+        if let Some(mut state) = state.get_mut() {
+            state.0 += 1;
+        }
+    }
+
+    #[test]
+    fn active_component_access_isolates_two_roots() {
+        let mut app = App::new();
+        app.init_resource::<ActiveCraft>()
+            .add_systems(Update, increment_active);
+        let first = app.world_mut().spawn((CraftRoot, RootState(10))).id();
+        let second = app.world_mut().spawn((CraftRoot, RootState(20))).id();
+
+        app.world_mut().resource_mut::<ActiveCraft>().0 = Some(second);
+        app.update();
+
+        assert_eq!(app.world().get::<RootState>(first), Some(&RootState(10)));
+        assert_eq!(app.world().get::<RootState>(second), Some(&RootState(21)));
+    }
+
+    #[test]
+    fn missing_active_root_does_not_fall_back_to_another_root() {
+        let mut app = App::new();
+        app.init_resource::<ActiveCraft>()
+            .add_systems(Update, increment_active);
+        let root = app.world_mut().spawn((CraftRoot, RootState(10))).id();
+
+        app.update();
+
+        assert_eq!(app.world().get::<RootState>(root), Some(&RootState(10)));
+    }
+}

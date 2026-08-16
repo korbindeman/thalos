@@ -82,7 +82,7 @@ pub(crate) fn embed_rock_shader(app: &mut App) {
 /// Lean plugin to render [`RockMaterial`] in a standalone / headless app (the
 /// object-preview tool) without the full UDLOD terrain stack: registers the
 /// material, embeds its shader, and ensures the `thalos::lighting` library is
-/// present. The game gets all this from `ThalosTerrainPlugin`.
+/// present. The game gets all this from `GroundAppearancePlugin`.
 pub struct RockMaterialPlugin;
 
 impl Plugin for RockMaterialPlugin {

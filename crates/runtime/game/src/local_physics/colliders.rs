@@ -7,6 +7,8 @@ use super::*;
 use std::collections::{HashMap, VecDeque};
 
 use bevy::math::{DMat3, DQuat, DVec3};
+use thalos_game_state::scene::CraftPart;
+use thalos_physics_canonical::canonical::CraftId;
 use thalos_physics_local::{LocalPrimitiveCollider, LocalPrimitiveShape};
 use thalos_shipyard::{
     Adapter, AirIntake, AttachNodes, Attachment, CommandPod, Decoupler, Engine, EngineGeometry,
@@ -18,6 +20,7 @@ pub(crate) type PartColliderQuery<'w, 's> = Query<
     's,
     (
         Entity,
+        &'static CraftPart,
         &'static AttachNodes,
         Option<&'static Attachment>,
         Option<&'static SurfaceMount>,
@@ -39,14 +42,21 @@ pub(crate) type PartColliderQuery<'w, 's> = Query<
 
 pub(crate) fn build_ship_collider_primitives(
     parts: &PartColliderQuery,
+    craft_id: CraftId,
 ) -> Vec<LocalPrimitiveCollider> {
-    let part_positions = compute_part_collider_positions(parts);
-    let nodes_by_entity: HashMap<Entity, &AttachNodes> =
-        parts.iter().map(|(e, nodes, ..)| (e, nodes)).collect();
+    let part_positions = compute_part_collider_positions(parts, craft_id);
+    let nodes_by_entity: HashMap<Entity, &AttachNodes> = parts
+        .iter()
+        .filter(|(_, owner, ..)| owner.0 == craft_id)
+        .map(|(e, _, nodes, ..)| (e, nodes))
+        .collect();
     let mut primitives = Vec::new();
-    for (entity, nodes, _, surface_mount, pod, dec, adapter, tank, engine, intake, wing) in
+    for (entity, owner, nodes, _, surface_mount, pod, dec, adapter, tank, engine, intake, wing) in
         parts.iter()
     {
+        if owner.0 != craft_id {
+            continue;
+        }
         let Some(part_position) = part_positions.get(&entity).copied() else {
             continue;
         };
@@ -125,14 +135,20 @@ pub(crate) fn wing_collider_primitive(
     }
 }
 
-pub(crate) fn compute_part_collider_positions(parts: &PartColliderQuery) -> HashMap<Entity, DVec3> {
+pub(crate) fn compute_part_collider_positions(
+    parts: &PartColliderQuery,
+    craft_id: CraftId,
+) -> HashMap<Entity, DVec3> {
     let mut nodes_by_entity: HashMap<Entity, &AttachNodes> = HashMap::new();
     let mut children_by_parent: HashMap<Entity, Vec<(Entity, Attachment)>> = HashMap::new();
     let mut surface_children_by_parent: HashMap<Entity, Vec<(Entity, SurfaceMount)>> =
         HashMap::new();
     let mut roots = Vec::new();
 
-    for (entity, nodes, attachment, surface_mount, ..) in parts.iter() {
+    for (entity, owner, nodes, attachment, surface_mount, ..) in parts.iter() {
+        if owner.0 != craft_id {
+            continue;
+        }
         nodes_by_entity.insert(entity, nodes);
         if let Some(attachment) = attachment {
             children_by_parent

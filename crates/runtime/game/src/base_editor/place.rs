@@ -32,11 +32,12 @@ use crate::coords::{SHIP_LAYER, SHIP_SCALE};
 use crate::game_context::{ContextHistory, GameContext};
 use crate::rendering::real_space::RealSpaceRoot;
 use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
-use crate::rendering::{PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
+use crate::rendering::{RealSpaceBody, SimulationState, SolarSystemState};
 use crate::runway::craft_extent_below;
 use crate::solar_system_state::sync_solar_system_state;
 use crate::spawn::{CraftPlacement, place_craft};
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
+use thalos_game_state::{CraftIdentity, CraftRoot};
 
 use super::{BaseEditor, BaseEditorMode, base_editor_open, cursor_body_dir};
 
@@ -875,7 +876,7 @@ fn launch_from_pad(
     solar: Res<SolarSystemState>,
     mut active_bubble: ResMut<ActiveLocalBubble>,
     mut commands: Commands,
-    ship_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
+    ship_q: Query<(Entity, &CraftIdentity, &GlobalTransform), With<CraftRoot>>,
     children_q: Query<&Children>,
     mesh_q: Query<(&GlobalTransform, &Mesh3d)>,
     meshes: Res<Assets<Mesh>>,
@@ -914,7 +915,11 @@ fn launch_from_pad(
     let Some(radius_m) = sim.system.bodies.get(body_id).map(|b| b.radius_m) else {
         return;
     };
-    let Ok((ship_entity, ship_gt)) = ship_q.single() else {
+    let active_id = sim.simulation.active_craft_id();
+    let Some((ship_entity, _, ship_gt)) = ship_q
+        .iter()
+        .find(|(_, identity, _)| identity.0 == active_id)
+    else {
         return;
     };
     // Spawn vertical (rocket nose-up). Rest on the craft's lower end, which for a

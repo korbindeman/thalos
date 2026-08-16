@@ -29,6 +29,8 @@ pub struct CloudCompositeMaterial {
     #[uniform(1)]
     pub params: BodySkyExtra,
     /// Opaque main-pass depth copied between opaque and transparent rendering.
+    /// The analytic ocean is not in this texture; the fragment shader folds
+    /// its shared sphere hit into the effective scene distance explicitly.
     #[texture(2, sample_type = "depth")]
     pub scene_depth: Handle<Image>,
     /// Canonical per-body weather cubemap used by the orbital projection.

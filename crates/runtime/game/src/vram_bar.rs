@@ -118,6 +118,9 @@ pub struct VramBarStyle {
     /// Caption text to the left of the headline. Empty hides the caption row's
     /// label, keeping the headline (F3 puts the word in its section header).
     pub caption: &'static str,
+    /// Whether to show the caption + used/total row. F3's shared memory block
+    /// already prints that baseline, so its attribution-only bar omits it.
+    pub show_header: bool,
 }
 
 /// Spawn the widget as a child of `parent`.
@@ -134,37 +137,39 @@ pub fn spawn_vram_bar(parent: &mut ChildSpawnerCommands<'_>, style: &VramBarStyl
             Name::new("VramBar"),
         ))
         .with_children(|root| {
-            // Caption + headline, pushed to opposite ends.
-            root.spawn((
-                Node {
-                    width: Val::Percent(100.0),
-                    flex_direction: FlexDirection::Row,
-                    justify_content: JustifyContent::SpaceBetween,
-                    ..default()
-                },
-                Name::new("VramBarHeader"),
-            ))
-            .with_children(|header| {
-                header.spawn((
-                    Text::new(style.caption),
-                    TextFont {
-                        font: style.font.clone(),
-                        font_size: FontSize::Px(style.font_size),
+            if style.show_header {
+                // Caption + headline, pushed to opposite ends.
+                root.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        flex_direction: FlexDirection::Row,
+                        justify_content: JustifyContent::SpaceBetween,
                         ..default()
                     },
-                    TextColor(style.label_color),
-                ));
-                header.spawn((
-                    VramHeadline,
-                    Text::new("—"),
-                    TextFont {
-                        font: style.font.clone(),
-                        font_size: FontSize::Px(style.font_size),
-                        ..default()
-                    },
-                    TextColor(style.value_color),
-                ));
-            });
+                    Name::new("VramBarHeader"),
+                ))
+                .with_children(|header| {
+                    header.spawn((
+                        Text::new(style.caption),
+                        TextFont {
+                            font: style.font.clone(),
+                            font_size: FontSize::Px(style.font_size),
+                            ..default()
+                        },
+                        TextColor(style.label_color),
+                    ));
+                    header.spawn((
+                        VramHeadline,
+                        Text::new("—"),
+                        TextFont {
+                            font: style.font.clone(),
+                            font_size: FontSize::Px(style.font_size),
+                            ..default()
+                        },
+                        TextColor(style.value_color),
+                    ));
+                });
+            }
 
             // The bar: a track with three left-aligned segments over it.
             root.spawn((

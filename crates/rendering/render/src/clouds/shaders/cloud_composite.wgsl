@@ -20,6 +20,7 @@
     CLOUD_MARCH_FADE_FRACTION,
 }
 #import thalos::lighting::{SCENE_FLUX_SCALE, SURFACE_DIRECT_SCALE}
+#import thalos::ocean_waves::ocean_sphere_hit_distance_m
 #import thalos::volumetrics::water_cloud_albedo
 
 // The diffusion-limit reflectance both tiers are anchored to now has ONE
@@ -51,6 +52,9 @@ struct CloudCompositeParams {
     ocean_low_phase:           vec4<f32>,
     ocean_high_phase:          vec4<f32>,
     ocean_slope_amplitudes:    vec4<f32>,
+    ocean_surface_wavelengths_m: vec4<f32>,
+    ocean_surface_amplitudes_m:  vec4<f32>,
+    ocean_surface_phases_rad:    vec4<f32>,
     ocean_spectrum:            vec4<f32>,
     ocean_wind_basis:          vec4<f32>,
     ocean_crosswind_basis:     vec4<f32>,
@@ -822,7 +826,21 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let oc = cam_pos - planet_center;
     let oc_len_sq = dot(oc, oc);
     let b = dot(oc, ray_dir);
-    let scene_t = scene_distance(in.clip_position.xy);
+    let opaque_scene_t = scene_distance(in.clip_position.xy);
+    // The copied scene depth contains only opaque draws. The analytic ocean is
+    // a fullscreen transparent sibling rendered immediately before this pass,
+    // so include its shared stable sphere hit explicitly. Opaque terrain wins
+    // where land stands above sea level; water wins over the seabed behind it.
+    var ocean_t = 1.0e30;
+    if cloud_params.ocean.y >= 0.5 {
+        let camera_up = normalize(oc);
+        ocean_t = ocean_sphere_hit_distance_m(
+            dot(camera_up, ray_dir),
+            cloud_params.ocean.x,
+            cloud_params.ocean.w,
+        );
+    }
+    let scene_t = min(opaque_scene_t, ocean_t);
 
     let near_sample = sample_near_cloud(in.clip_position.xy);
     let dims = textureDimensions(cloud_layer_texture);

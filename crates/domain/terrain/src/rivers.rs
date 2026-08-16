@@ -27,6 +27,7 @@ impl std::fmt::Debug for RiverField {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("backing", &self.backing)
+            .field("has_discharge", &self.discharge.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -37,6 +38,11 @@ pub struct RiverField {
     /// `255 * log10(catchment_km2) / log_decades`, 0 where there is no land.
     data: Vec<u8>,
     log_decades: f64,
+    /// Optional climate-weighted annual-mean discharge. Byte zero is no
+    /// runoff; bytes 1..=255 span the configured log10(m³/s) range.
+    discharge: Option<Vec<u8>>,
+    discharge_log_min: f64,
+    discharge_log_max: f64,
     /// Which surface backing this was baked from — `"procedural"`/`"diffusion"`.
     pub backing: String,
 }
@@ -93,6 +99,8 @@ impl RiverField {
         let width = json_num(&json, "width").ok_or("rivers sidecar: width")? as usize;
         let height = json_num(&json, "height").ok_or("rivers sidecar: height")? as usize;
         let log_decades = json_num(&json, "log_decades").unwrap_or(7.0);
+        let discharge_log_min = json_num(&json, "discharge_log_min").unwrap_or(-3.0);
+        let discharge_log_max = json_num(&json, "discharge_log_max").unwrap_or(6.0);
         let baked = json_str(&json, "backing").unwrap_or_default();
         if baked != backing {
             return Err(format!(
@@ -109,16 +117,30 @@ impl RiverField {
                 data.len()
             ));
         }
+        let discharge = match std::fs::read(json_path.with_extension("discharge.u8")) {
+            Ok(data) if data.len() == width * height => Some(data),
+            Ok(data) => {
+                return Err(format!(
+                    "river discharge payload is {} bytes, expected {width}x{height}",
+                    data.len()
+                ));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(format!("river discharge payload: {e}")),
+        };
         Ok(Some(Self {
             width,
             height,
             data,
             log_decades,
+            discharge,
+            discharge_log_min,
+            discharge_log_max,
             backing: baked,
         }))
     }
 
-    fn sample_u8(&self, dir: DVec3) -> f64 {
+    fn sample_layer_u8(&self, data: &[u8], dir: DVec3) -> f64 {
         let lat = dir.y.clamp(-1.0, 1.0).asin();
         let lon = dir.z.atan2(dir.x).rem_euclid(core::f64::consts::TAU);
         let fx = lon / core::f64::consts::TAU * self.width as f64 - 0.5;
@@ -130,7 +152,7 @@ impl RiverField {
             (((x0 as i64 + k) % m + m) % m) as usize
         };
         let yi = |k: i64| -> usize { (y0 as i64 + k).clamp(0, self.height as i64 - 1) as usize };
-        let at = |x: usize, y: usize| self.data[y * self.width + x] as f64;
+        let at = |x: usize, y: usize| data[y * self.width + x] as f64;
         let (x_0, x_1, y_0, y_1) = (xi(0), xi(1), yi(0), yi(1));
         let a = at(x_0, y_0) + (at(x_1, y_0) - at(x_0, y_0)) * tx;
         let b = at(x_0, y_1) + (at(x_1, y_1) - at(x_0, y_1)) * tx;
@@ -139,21 +161,53 @@ impl RiverField {
 
     /// Upstream catchment in km² at `dir`, 0 off-network.
     pub fn catchment_km2(&self, dir: DVec3) -> f64 {
-        let v = self.sample_u8(dir.normalize_or_zero());
+        let v = self.sample_layer_u8(&self.data, dir.normalize_or_zero());
         if v <= 0.0 {
             return 0.0;
         }
         10f64.powf(v / 255.0 * self.log_decades)
     }
 
+    /// Climate-weighted annual-mean discharge in m³/s.
+    ///
+    /// `None` identifies an older catchment-only payload. Zero means the new
+    /// runoff solve was present and found no meaningful flow at this point.
+    pub fn discharge_m3_s(&self, dir: DVec3) -> Option<f64> {
+        let data = self.discharge.as_deref()?;
+        let v = self.sample_layer_u8(data, dir.normalize_or_zero());
+        if v < 1.0 {
+            return Some(0.0);
+        }
+        let t = (v - 1.0) / 254.0;
+        Some(
+            10f64.powf(
+                self.discharge_log_min + t * (self.discharge_log_max - self.discharge_log_min),
+            ),
+        )
+    }
+
     /// Smooth ramp of catchment between two thresholds, `[0, 1]`.
-    fn ramp(&self, dir: DVec3, lo_km2: f64, hi_km2: f64) -> f64 {
+    fn catchment_ramp(&self, dir: DVec3, lo_km2: f64, hi_km2: f64) -> f64 {
         let km2 = self.catchment_km2(dir);
         if km2 <= lo_km2 {
             return 0.0;
         }
         let t =
             ((km2.log10() - lo_km2.log10()) / (hi_km2.log10() - lo_km2.log10())).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// Gate a geometric channel by climate-supplied flow. Missing discharge
+    /// preserves compatibility with older catchment-only payloads.
+    fn discharge_ramp(&self, dir: DVec3, lo_m3_s: f64, hi_m3_s: f64) -> f64 {
+        let Some(discharge) = self.discharge_m3_s(dir) else {
+            return 1.0;
+        };
+        if discharge <= lo_m3_s {
+            return 0.0;
+        }
+        let t = ((discharge.log10() - lo_m3_s.log10()) / (hi_m3_s.log10() - lo_m3_s.log10()))
+            .clamp(0.0, 1.0);
         t * t * (3.0 - 2.0 * t)
     }
 
@@ -165,7 +219,8 @@ impl RiverField {
     /// drawing every order-1 gully. A 10^3 km² head puts 3.4 % of land in
     /// channel; 3x10^4 puts 0.49 %, which is the density an atlas draws.
     pub fn corridor(&self, dir: DVec3) -> f64 {
-        self.ramp(dir, RIPARIAN_CORRIDOR_LO_KM2, RIPARIAN_CORRIDOR_HI_KM2)
+        self.catchment_ramp(dir, RIPARIAN_CORRIDOR_LO_KM2, RIPARIAN_CORRIDOR_HI_KM2)
+            * self.discharge_ramp(dir, RIPARIAN_CORRIDOR_LO_M3_S, RIPARIAN_CORRIDOR_HI_M3_S)
     }
 
     /// **Channel core** — the wet bed itself.
@@ -177,7 +232,8 @@ impl RiverField {
     /// that was the whole of the "doesn't feel hierarchical" report — so the
     /// band must vary in extent, not just in strength.
     pub fn channel(&self, dir: DVec3) -> f64 {
-        self.ramp(dir, RIPARIAN_CHANNEL_LO_KM2, RIPARIAN_CHANNEL_HI_KM2)
+        self.catchment_ramp(dir, RIPARIAN_CHANNEL_LO_KM2, RIPARIAN_CHANNEL_HI_KM2)
+            * self.discharge_ramp(dir, RIPARIAN_CHANNEL_LO_M3_S, RIPARIAN_CHANNEL_HI_M3_S)
     }
 
     /// Landcover wetness contributed by drainage, `[0, 1]` — the moisture
@@ -192,6 +248,46 @@ impl RiverField {
 /// atlas-density head, not a guess.
 const RIPARIAN_CORRIDOR_LO_KM2: f64 = 30_000.0;
 const RIPARIAN_CORRIDOR_HI_KM2: f64 = 1_000_000.0;
+const RIPARIAN_CORRIDOR_LO_M3_S: f64 = 1.0;
+const RIPARIAN_CORRIDOR_HI_M3_S: f64 = 300.0;
 /// The wet bed appears only on trunk rivers, which is what makes it narrow.
 const RIPARIAN_CHANNEL_LO_KM2: f64 = 300_000.0;
 const RIPARIAN_CHANNEL_HI_KM2: f64 = 3_000_000.0;
+const RIPARIAN_CHANNEL_LO_M3_S: f64 = 30.0;
+const RIPARIAN_CHANNEL_HI_M3_S: f64 = 3_000.0;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn field(discharge: Option<u8>) -> RiverField {
+        RiverField {
+            width: 2,
+            height: 2,
+            // ≈10^6 km² everywhere: well inside both geometric ramps.
+            data: vec![219; 4],
+            log_decades: 7.0,
+            discharge: discharge.map(|value| vec![value; 4]),
+            discharge_log_min: -3.0,
+            discharge_log_max: 6.0,
+            backing: "test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn old_payload_without_discharge_preserves_catchment_only_corridor() {
+        assert!(field(None).corridor(DVec3::X) > 0.0);
+    }
+
+    #[test]
+    fn present_discharge_suppresses_arid_channel_and_preserves_wet_one() {
+        assert_eq!(field(Some(0)).corridor(DVec3::X), 0.0);
+        assert!(field(Some(255)).corridor(DVec3::X) > 0.0);
+    }
+
+    #[test]
+    fn discharge_decodes_the_authored_log_range() {
+        let wet = field(Some(255));
+        assert_eq!(wet.discharge_m3_s(DVec3::X), Some(1_000_000.0));
+    }
+}

@@ -32,8 +32,8 @@
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
-use thalos_terrain::ProceduralSurface;
 use thalos_terrain::macro_conditioning::{COARSE_PX_M, ConditioningChart};
+use thalos_terrain::{GENERATOR_VERSION, ProceduralSurface};
 
 const THALOS_RADIUS_M: f32 = 3_186_000.0;
 const THALOS_BODY_SEED: u32 = 2;
@@ -183,7 +183,8 @@ fn main() -> std::io::Result<()> {
     let meta = format!(
         "{{\"width\":{},\"height\":{},\"px_m_equator\":{COARSE_PX_M},\
          \"radius_m\":{THALOS_RADIUS_M},\"seed\":{THALOS_BODY_SEED},\
-         \"land_fraction\":{land:.4},\"channels\":5}}\n",
+         \"land_fraction\":{land:.4},\"channels\":5,\
+         \"conditioning_generator_version\":{GENERATOR_VERSION}}}\n",
         chart.width, chart.height
     );
     std::fs::write(out_dir.join("thalos_macro.json"), meta)?;

@@ -6,6 +6,7 @@ edition.workspace = true
 
 [dependencies]
 bevy = { version = "0.19" }
+thalos_photo_mode = { path = "../photo_mode" }
 
 [[example]]
 name = "kitchen_sink"

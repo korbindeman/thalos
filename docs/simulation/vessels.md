@@ -58,14 +58,17 @@ vessel.
 ## 2. Runtime identity and ownership
 
 Every flight root carries `CraftIdentity(CraftId)` and a general `CraftRoot`
-marker. `PlayerShip`'s current double meaning—"a craft exists" and "this craft
-is active"—is split. `ActiveCraft` resolves the selected `CraftId` to its
-current root entity and is the only sanctioned active-craft lookup.
+marker. `PlayerShip` no longer means "a craft exists": it is synchronized only
+as a compatibility marker for camera/view systems still being peeled.
+`ActiveCraft` resolves the selected `CraftId` to its current root entity and is
+the sanctioned active-craft lookup; shared consumers use `ActiveCraftRef<T>` /
+`ActiveCraftMut<T>`.
 
 Parts belong to the nearest `CraftRoot` ancestor. Fuel, staging, inertia,
 colliders, engines, gear, and HUD summaries scope their queries to that root;
 no system may aggregate every non-editor `Part` in the world. Per-craft runtime
-state becomes components on the root as each consumer is migrated.
+state is component-owned by the root. The current root components are
+`GearState`, `ParkingBrake`, `EvaMode`, `RealizedControl`, and `ManeuverPlan`.
 
 `MapSnapshot` and real-space rendering project every canonical vessel. Camera
 and detailed HUD remain active-only.
@@ -173,12 +176,15 @@ fidelity; they are not prerequisites for real persistent separation.
    one world interval. A collision is treated as a world event: the fleet
    replays to the earliest contact time so every record and the shared clock
    keep the same epoch. `MapSnapshot` now copies every canonical craft.
-2. **Runtime multiplicity — vertical slice landed 2026-07-25.**
+2. **Runtime multiplicity — landed compile-clean 2026-08-09.**
    `CraftIdentity`/`CraftRoot`/`CraftPart` now bind rendered roots and flight
    parts to canonical identity. Real-space rendering syncs every root, while
    mass, propulsion, inertia, staging topology, and HUD summaries scope to the
-   active craft. Map markers, active selection, and the remaining per-craft
-   runtime resources still belong to CL-E2.
+   active craft. Root-owned gear/brake/EVA/control/maneuver state replaces the
+   five global resources; staging, relaunch, collider/wheel construction, and
+   map-marker transforms select by identity. Two-root tests cover active-state
+   isolation, absence semantics, and map-marker identity matching. Runtime
+   scenario/staging verification remains the CL-E2 handoff.
 3. **Shared local scene.** Support two aggregate rigid bodies in one body-fixed
    frame with independent authority/readback and collision.
 4. **Physical staging — visible persistence slice landed 2026-07-25.**

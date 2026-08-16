@@ -114,7 +114,7 @@ impl GameNode {
 }
 
 /// UI-side maneuver plan. Synced to `ManeuverSequence` in physics when dirty.
-#[derive(Resource, Default)]
+#[derive(Component, Default)]
 pub struct ManeuverPlan {
     pub nodes: Vec<GameNode>,
     pub dirty: bool,

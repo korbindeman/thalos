@@ -25,7 +25,7 @@
 //! and fills hollows by roughly equal amounts instead of becoming an all-fill
 //! plateau towering over the surroundings.
 //! A [`thalos_terrain::TerrainFlatten`] pad is installed via the body's shared
-//! [`crate::rendering::ground_terrain::TerrainFlattenRegistry`] handle: the
+//! [`crate::rendering::terrain_flatten::TerrainFlattenRegistry`] handle: the
 //! terrain tile provider reads it as it bakes, so the *rendered* ground — and,
 //! through the GPU-atlas height mirror, the collider and CPU height queries —
 //! level out to `E` across the pad and smoothstep-blend back to natural terrain
@@ -50,6 +50,7 @@ use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{HeightSource, ShadowedStandardMaterial, shadowed};
+use thalos_game_state::{CraftIdentity, CraftRoot};
 // Runway geometry (frame, meshes, markings, designators, materials, site math)
 // lives in `thalos_structures` (Phase 5b); this module keeps the drivers —
 // deferred placement, the collider, per-frame f64 anchoring, spaceport
@@ -70,10 +71,10 @@ use crate::SimStage;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::local_physics::PHYSICS_QUERY_TILE_LOD_M;
-use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
 use crate::rendering::sun_shadow::SHADOW_CASTER_LAYER;
-use crate::rendering::terrain_residency::TerrainRebuildRequest;
+use crate::rendering::terrain_flatten::TerrainFlattenRegistry;
+use crate::rendering::terrain_flatten::TerrainRebuildRequest;
 use crate::rendering::{PlayerShip, RealSpaceBody};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
 use crate::spawn::{CraftPlacement, SpawnSituation, coast_placement, place_craft};
@@ -383,7 +384,7 @@ fn finish_runway_spawn(
         ResMut<crate::base_editor::PavedFootprints>,
     ),
     root: Res<RealSpaceRoot>,
-    ship_root_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
+    ship_root_q: Query<(Entity, &CraftIdentity, &GlobalTransform), With<CraftRoot>>,
     children_q: Query<&Children>,
     mesh_q: Query<(&GlobalTransform, &Mesh3d)>,
     // Bundled into one tuple param to stay within Bevy's 16-param system limit.
@@ -406,6 +407,13 @@ fn finish_runway_spawn(
     let (mut flatten_registry, mut structure_registry, mut active_bubble, mut rebuild, mut paved) =
         registries;
     let body_id = sim.simulation.dominant_body();
+    let active_id = sim.simulation.active_craft_id();
+    let Some((ship_entity, _, ship_gt)) = ship_root_q
+        .iter()
+        .find(|(_, identity, _)| identity.0 == active_id)
+    else {
+        return;
+    };
     let Some(height_source) = height_sources.get(body_id) else {
         return; // terrain not resident yet — retry next frame
     };
@@ -416,11 +424,9 @@ fn finish_runway_spawn(
     // just retries instead of double-spawning the spaceport.
     let park_clearance_m = match *situation {
         SpawnSituation::Runway => {
-            let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
-                return; // ship not spawned yet — retry
-            };
             let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
             match measure_runway_clearance(
+                sim.simulation.active_craft_id(),
                 ship_entity,
                 ship_gt,
                 &children_q,
@@ -436,9 +442,6 @@ fn finish_runway_spawn(
             }
         }
         SpawnSituation::Launch => {
-            let Ok((ship_entity, ship_gt)) = ship_root_q.single() else {
-                return; // Saturn root not spawned yet — retry
-            };
             let Some(clearance) = craft_extent_below(
                 ship_entity,
                 ship_gt,
@@ -492,7 +495,9 @@ fn finish_runway_spawn(
             // Hold the freshly-parked craft on the strip. The brakes latch
             // defaults off (airborne spawns must not start with the spoilers
             // out), so the parked placement is the one spot that engages it.
-            commands.insert_resource(crate::local_physics::ParkingBrake { engaged: true });
+            commands
+                .entity(ship_entity)
+                .insert(crate::local_physics::ParkingBrake { engaged: true });
         }
         SpawnSituation::RunwayApproach => {
             place_approach(&mut sim, &body_state, &site, body_radius_m)
@@ -540,11 +545,13 @@ fn finish_runway_spawn(
     }
 
     // Both runway scenarios rest the craft on its wheels, so force the gear
-    // down — `GearState` is a persistent resource, and a respawn after the
+    // down — `GearState` persists on the active root, and a respawn after the
     // player retracted gear in flight would otherwise spawn the aircraft
     // belly-down on the strip.
     if situation.is_runway() {
-        commands.insert_resource(crate::local_physics::GearState { down: true });
+        commands
+            .entity(ship_entity)
+            .insert(crate::local_physics::GearState { down: true });
     }
 
     commands.insert_resource(site);
@@ -941,6 +948,7 @@ pub(crate) fn ensure_spaceport(
 /// ([`finish_runway_spawn`]) and the launch-select runway placement.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn measure_runway_clearance(
+    craft_id: thalos_physics_canonical::canonical::CraftId,
     ship_entity: Entity,
     ship_gt: &GlobalTransform,
     children_q: &Query<&Children>,
@@ -959,7 +967,7 @@ pub(crate) fn measure_runway_clearance(
     // zero compression left the gear unsupported for a frame and the craft tipped
     // before the spring engaged. A craft with no gear falls back to the
     // visual-mesh extent and rests on its belly.
-    match crate::local_physics::gear_contact_geometry(parts, gear_q, host_nodes) {
+    match crate::local_physics::gear_contact_geometry(parts, gear_q, host_nodes, craft_id) {
         Some((depth_m, mean_strut_length_m)) => {
             // Stiffness is now derived per wheel to achieve one common loaded
             // stroke fraction regardless of craft mass or axle load. Spawn at

@@ -8,12 +8,23 @@
 //! erosion detail. The patch evaluates detail at its own vertex spacing so
 //! the LOD plan matches the resolution the mesh can faithfully represent.
 
-use crate::ground::pipeline::rendered_height_m;
 use bevy::math::DVec3;
 use thalos_terrain::{
-    DynamicSurfaceState, HeightSource, PlanetSurface, build_terrain_patch_from_source,
+    DynamicSurfaceState, HeightSource, PlanetSurface, SurfaceQuery, build_terrain_patch_from_source,
 };
 pub use thalos_terrain::{TerrainPatchBasis, TerrainPatchConfig, TerrainPatchMesh};
+
+pub fn rendered_height_m(
+    surface: &dyn SurfaceQuery,
+    dir: bevy::math::Vec3,
+    tile_lod_m: f32,
+) -> f32 {
+    surface.sample_height_m(dir, tile_lod_m)
+}
+
+pub fn rendered_height_range(surface: &dyn SurfaceQuery) -> f32 {
+    surface.height_range_m()
+}
 
 struct BorrowedRenderedHeightSource<'a> {
     surface: &'a PlanetSurface,

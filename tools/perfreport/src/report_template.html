@@ -48,6 +48,8 @@
 <script>
 const DATA = "__DATA__";
 const G = DATA.gauges, S = DATA.spikes, B = DATA.blocks, SUM = DATA.summary;
+const CFG = SUM.configuration || {};
+const BENCH = SUM.headless_benchmark;
 
 function fmt(x, d=1) { return x == null ? "—" : (+x).toFixed(d); }
 function card(k, v) {
@@ -60,6 +62,11 @@ document.getElementById("cards").innerHTML =
   card("worst window p95", fmt(SUM.worst_window_p95_ms, 1) + " ms") +
   card("worst frame", fmt(SUM.worst_window_max_ms, 1) + " ms") +
   card("gpu mean", fmt(SUM.gpu_ms_mean, 2) + " ms") +
+  (BENCH ? card("offscreen benchmark", `${fmt(BENCH.cpu_ms_mean, 2)} ms · ${fmt(BENCH.fps, 1)} fps`) : "") +
+  (CFG.foliage_enabled == null ? "" :
+    card("render config", `foliage ${CFG.foliage_enabled ? "on" : "off"} · shadows ${CFG.shadow_cascade_budget ?? "—"}`)) +
+  (CFG.window_width_px == null ? "" :
+    card("window", `${CFG.window_width_px}×${CFG.window_height_px} · ${CFG.vsync_enabled ? "vsync" : "uncapped"}`)) +
   card("spikes", S.length) +
   card("tile MiB (last/max)", fmt(SUM.memory.tile_mib_last,0) + " / " + fmt(SUM.memory.tile_mib_max,0)) +
   card("slab MiB (last/max)", fmt(SUM.memory.slab_mib_last,0) + " / " + fmt(SUM.memory.slab_mib_max,0)) +

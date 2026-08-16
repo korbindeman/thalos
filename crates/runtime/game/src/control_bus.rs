@@ -87,7 +87,6 @@ impl Plugin for ControlBusPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<SasState>()
             .init_resource::<AttitudeControllerState>()
-            .init_resource::<RealizedControl>()
             .init_resource::<ResolvedGroundControl>()
             .add_systems(
                 Update,
@@ -115,7 +114,7 @@ pub fn realize_control(
     nav: Res<NavigationState>,
     locks: Res<ControlLocks>,
     target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     velocity_frame: Res<VelocityFrameState>,
     autoflight: (
         Res<Autopilot>,
@@ -143,8 +142,11 @@ pub fn realize_control(
     ),
     mut controller: ResMut<AttitudeControllerState>,
     mut sas: ResMut<SasState>,
-    mut realized: ResMut<RealizedControl>,
+    mut realized: thalos_game_state::ActiveCraftMut<RealizedControl>,
 ) {
+    let (Some(plan), Some(mut realized)) = (plan.get(), realized.get_mut()) else {
+        return;
+    };
     let (autopilot, land, orbit, pilot_throttle, program, burn_schedule, mut annunciation) =
         autoflight;
     let (mut sim, mut throttle, mut ground) = outputs;
@@ -183,7 +185,7 @@ pub fn realize_control(
         nav.mode,
         velocity_frame.active,
         &target,
-        &plan,
+        plan,
         &sim.simulation,
     ));
 

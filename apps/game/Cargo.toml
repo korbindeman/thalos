@@ -5,7 +5,11 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-thalos_runtime = { path = "../../crates/runtime/game" }
+thalos_runtime = {
+    path = "../../crates/runtime/app",
+    default-features = false,
+    features = ["game"],
+}
 
 [features]
 default = []
@@ -19,3 +23,4 @@ dev-renderer = ["neural-terrain", "thalos_runtime/dev-renderer"]
 profile-chrome = ["thalos_runtime/profile-chrome"]
 profile-tracy = ["thalos_runtime/profile-tracy"]
 gpu-counters = ["thalos_runtime/gpu-counters"]
+legacy-udlod = ["thalos_runtime/legacy-udlod"]

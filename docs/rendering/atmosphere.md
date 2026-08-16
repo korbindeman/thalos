@@ -6,9 +6,10 @@ clouds, ocean rendering, and image-based lighting (IBL / reflection
 probe).
 
 What runs today: gas-giant materials, Thalos's shared `BodySky` raymarched
-rocky-body atmosphere, one dedicated near/orbital cloud composite, an
-analytic-sphere water BRDF, and a CPU-painted reflection probe. Ocean and
-clouds are dedicated composites with explicit ordering around the one
+rocky-body atmosphere, Kòrsou's Bevy Earth atmosphere adapter, one dedicated
+near/orbital cloud composite, two ocean spatial adapters over shared wave
+mechanisms, and a CPU-painted reflection probe. Ocean and clouds remain
+dedicated composites with explicit ordering around Thalos's sole planetary
 atmosphere renderer.
 
 ## Status
@@ -17,8 +18,9 @@ atmosphere renderer.
 |---|---|---|
 | Gas / ice giants | `GasGiantMaterial` + `atmosphere_gen::AtmosphereParams`: cloud deck, haze, rim halo, optional Rayleigh blue gap. Storm + aurora layers stubbed. | Navigable upper atmospheres with one exterior/interior weather authority, physical flight envelope, storms, and deeper layers; see [navigable_gas_giants.md](../world/navigable_gas_giants.md). |
 | Rocky-body sky | **The shared `BodySkyMaterial` raymarch is canonical** (ADR-20260721T185221Z-custom-rocky-atmosphere). It reads the authored `AtmosphereBlock`, renders for every resident terrain view, and clips against shared opaque scene depth. `earth-reference` and `runway-atmosphere` are the orbital and surface regression probes. | Tune the orbital limb inside the shared optical model; complete terrain/atmosphere radiometric exposure unification without restoring a second renderer. |
+| Local planar sky | Kòrsou consumes `thalos_atmosphere::add_bevy_earth_atmosphere` with a `0.45` density calibration. A Curaçao/date-aware solar clock drives the same directional light used by the atmospheric sun disc, cascaded shadows, generated environment map, terrain, and water reflection. Bevy supplies aerial perspective and standard-path PBR environment lighting. Interactive time/date/rate controls live on F10 World; capture accepts deterministic `--time HH:MM`. | Add another concrete adapter only when a local application has different demonstrated needs; do not turn the planetary and planar implementations into a universal backend trait. |
 | Cloud rendering | **Dedicated cloud path:** the body-fixed compute march exports premultiplied radiance/transmittance plus hit depth; `CloudCompositeMaterial` is the sole near/orbital screen compositor and samples the same per-body weather field as `SolidPlanetMaterial`. Cloud lighting currently uses its analytic projection of the shared atmospheric coefficients. Gas-giant decks remain distinct. | Bind the shared Thalos sky/transmittance LUT explicitly while completing foreground/background atmosphere ordering, then shared cloud shadows and environment response. |
-| Oceans | One dedicated analytic-sphere `BodyOceanMaterial` path (ADR-20260720T185954Z / ADR-20260720T185958Z / ADR-20260721T050036Z): signed-field coverage, depth optics, shore response, four body-fixed mipmapped slope-texture cascades, anisotropic horizon filtering, filtered GGX energy, sparse slope-coupled foam, and atmosphere-derived sun/sky reflection. It is a sibling of the custom atmosphere and shares its optical contract. See [ocean.md](ocean.md). | Authored sea state, dynamic spectral displacement/Jacobian cascades, persistent foam, and bounded local shore/wake solvers behind the same analytic planet surface. |
+| Oceans | `thalos_ocean` supplies one authored sea-state/wave mechanism to two adapters: Thalos's analytic-sphere `BodyOceanMaterial` with signed-field coverage and custom atmosphere optics, and Kòrsou's displaced planar clipmap with real-world coast textures and Bevy PBR. See [ocean.md](ocean.md). | Dynamic spectral displacement/Jacobian cascades, persistent foam, and bounded local shore/wake solvers; Thalos keeps its analytic planet-scale surface while local adapters may use bounded geometry. |
 | Reflection probe | CPU painter: 256²×6 cubemap, change-gated at 2 s real / 0.5 s under fast warp, with sun disc + Lambert planet hemisphere + dim starfield. A detached `GeneratedEnvironmentMapLight` producer filters it; a craft-local, specular-only `LightProbe` consumes the specular output at the canonical photometric scale and cancels inherited craft attitude so the world-authored cubemap stays world-aligned. | Real-scene cubemap capture once Bevy supports omnidirectional cameras (PR #13840), or self-implemented if it bites. **Not a Phase-1 priority.** |
 
 > **Rendering vs physics.** This doc covers atmosphere *rendering* (how the sky
@@ -53,6 +55,34 @@ comparison axis, live selector, or persisted setting. Existing settings files
 may still contain the removed `legacy_body_sky` key, which Serde ignores during
 migration.
 
+### Shared authoring, explicit spatial adapters (2026-08-08)
+
+`thalos_atmosphere` is the reusable leaf. It owns the authored-to-GPU
+`AtmosphereBlock` projection used by Thalos and the concrete Bevy Earth adapter
+used by local planar applications. It does not own camera placement, scene
+depth, planet composition, or application runtime state.
+
+The adapters intentionally differ:
+
+| Adapter | Owns | Why it stays distinct |
+|---|---|---|
+| Thalos planetary | `BodySkyMaterial`, camera-relative shell raymarch, opaque-scene-depth clipping, multi-body ordering, cloud/terrain/ocean optical composition | A rotating planet and floating origin need analytic shell geometry, render-unit conversion, and body-aware composition. |
+| Kòrsou planar | Bevy `Atmosphere::earth`, a `0.45` local density calibration, generated environment lighting, and an application-owned astronomical clock at Curaçao's latitude/longitude | A recentered UTM metre frame can use Bevy's maintained standard-path sky; its long ground sightlines never curve out of the dense lower atmosphere. The adapter, rather than the reusable atmosphere leaf, owns local civil time and the east/up/north projection of the solar direction. |
+
+The density calibration belongs to the Kòrsou adapter, not authored
+`TerrestrialAtmosphere`: it compensates for planar geometry rather than
+describing a different Earth. This seam lets a future ellipsoid/geoid adapter
+reuse authored state without pretending the current two render
+implementations are interchangeable. See
+[ADR-20260808T221912Z](../adr/20260808T221912Z-atmosphere-and-ocean-mechanisms-use-spatial-adapters.md).
+
+The solar clock is a render input, not atmosphere authorship. It evaluates the
+sun from ordinal date, AST civil time, and Curaçao's real coordinates, then
+projects that direction into the active local frame. The atmosphere, direct
+light, shadow cascades, generated environment map, and ocean may not keep
+parallel sun directions. Headless capture freezes its instant so day/night
+comparisons remain reproducible.
+
 ## Goals
 
 - Read the right way at orbit and in atmosphere. Earth-like worlds
@@ -60,8 +90,10 @@ migration.
   terminators; Venus/Ashara should read as oppressive.
 - Per-body parameterization. Atmospheric optics are functions of the
   atmosphere variant chosen in the prior, never a hard branch.
-- One shading vocabulary. BRDF choice (Hapke / Lommel-Seeliger / GGX)
-  is a function of the atmosphere variant, not a per-pixel switch.
+- One Thalos body-shading vocabulary. BRDF choice (Hapke /
+  Lommel-Seeliger / GGX) is a function of the atmosphere variant, not a
+  per-pixel switch. A separate application may adapt the shared authored state
+  to a maintained local renderer such as Bevy PBR.
 - Cloud and atmosphere assets are authored or inferred at the
   `PlanetTerrainSpec` level so the same schema drives appearance from
   orbit through descent.
@@ -146,8 +178,8 @@ orbit to ground.
 ### Architecture: shared optics, one render path
 
 The atmosphere is a fullscreen quad per body (`BodySkyMaterial` in
-`crates/domain/terrain_render/src/sky_material.rs`, shader at
-`crates/domain/terrain_render/src/body_sky.wgsl`) while the real terrain LOD is
+`crates/rendering/render/src/ground/sky_material.rs`, shader at
+`crates/rendering/render/src/ground/body_sky.wgsl`) while the real terrain LOD is
 visible. It renders in `Transparent3d` with `depth_compare = Always`
 so it rasterizes on every pixel, then clips the raymarch with two
 intersections:
@@ -229,17 +261,20 @@ with LUT lookups, leave the call sites untouched.
 WebGPU forbids sampling the live depth attachment from a fragment
 shader, and our forked `thalos_udlod` does not queue into
 `Opaque3dPrepass` (the standard prepass-depth path), so the built-in
-prepass-depth texture is terrain-blind. The workaround lives in
-`crates/runtime/game/src/rendering/scene_depth.rs`:
+prepass-depth texture is terrain-blind. The shared workaround lives in
+`crates/rendering/foundation`:
 
 - A `SceneDepthImage` resource owns a `Handle<Image>` whose GPU
-  texture (`Depth32Float`, `COPY_DST | TEXTURE_BINDING`) is sized to
-  the camera viewport.
-- A render-graph node `CopySceneDepthNode` runs between
-  `Node3d::MainOpaquePass` and `Node3d::MainTransparentPass` and
-  issues `copy_texture_to_texture` from the main pass's
+  texture (`Depth32Float`, `COPY_DST | TEXTURE_BINDING |
+  RENDER_ATTACHMENT`) is sized to the selected camera viewport.
+- `SceneDepthView` marks the application-selected 3D camera; the foundation
+  extracts that marker without importing `ShipCamera` or another application
+  type.
+- The `copy_scene_depth` render system runs between Bevy's main opaque and
+  transparent passes and issues `copy_texture_to_texture` from the main pass's
   `ViewDepthTexture` (which has terrain depth written by then) into
-  the Image.
+  the Image. Under MSAA it instead runs a depth-only fullscreen resolve that
+  copies sample 0 into the same single-sample image.
 - `BodySkyMaterial` binds the Image as `texture_depth_2d` at
   `@group(3) @binding(2)`; `body_sky.wgsl` reads it via
   `textureLoad` and reconstructs view-space distance with
@@ -254,12 +289,11 @@ prepass-depth texture is terrain-blind. The workaround lives in
   the impostor path. The cloud overlay is gated to body/terrain-hit
   rays and faded in across the geometric horizon, avoiding a visible
   fixed-altitude cloud-shell tangent band on sky-only pixels.
-- The ship camera carries `depth_texture_usages = RENDER_ATTACHMENT
-  | COPY_SRC` so the copy is legal, plus `Msaa::Off` so source and
-  destination sample counts match. The `ShipCamera` component is
-  extracted to the render world via `ExtractComponentPlugin` so the
-  node's `ViewQuery` filters to that view only (the map camera and
-  any future light / shadow views don't carry it).
+- The ship camera uses `scene_depth_view_texture_usages()`
+  (`RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING`) so both paths are legal.
+  `ShipCamera` remains separately extracted for Thalos-specific SSAO and contact
+  shadows; the shared depth pass filters only on `SceneDepthView`, which the
+  map camera and light/shadow views do not carry.
 - **Near/far geometry classification is shell-segment membership, never a
   fixed distance** (INC-0003). A depth hit counts as "this body's surface"
   iff it lies inside the ray's atmosphere-shell segment (`t_scene <=` the
@@ -494,7 +528,7 @@ them at runtime is exact (no LUT rebake).
 `BodySky` applies aerial perspective to **every** opaque pixel uniformly,
 keyed on scene depth — so trees, grass, impostors, and buildings already get
 the *same* haze as terrain at the same distance (they are opaque geometry on
-`SHIP_LAYER` that writes depth before `CopySceneDepthNode`). But surface
+`SHIP_LAYER` that writes depth before the foundation copy pass). But surface
 **objects** read more saturated / higher-contrast than the ground, so at the
 same distance they pop out against terrain `BodySky` has hazed. `BodySky`
 can't help — it has only depth and can't tell an object pixel from a terrain
@@ -610,11 +644,14 @@ stages:
    renders after the canonical `BodySky` atmosphere; both take pinned slots from
    `composite_order` (see "Draw order" above), which fixes their order relative
    to each other *and* keeps both behind world transparency. Occlusion against
-   geometry (ship hull / terrain) ramps `cloud_vis` from the **per-pixel
-   nearest cloud-hit distance** to the band exit (ray-shell intersection,
-   `cloud_band_radii` in the shared per-body parameters), so geometry under a sparse deck
-   doesn't dim far-behind clouds and the ship crosses the cloud boundary
-   without a hard pop. `rendering::clouds::sync_cloud_composite_materials`
+   opaque geometry (ship hull / terrain) and the analytic ocean ramps
+   `cloud_vis` from the **per-pixel nearest cloud-hit distance** to the band exit
+   (ray-shell intersection, `cloud_band_radii` in the shared per-body
+   parameters). The ocean hit comes from the same stable ray/sphere helper as
+   `BodyOceanMaterial`, because the opaque scene-depth copy cannot contain a
+   transparent fullscreen pass. This keeps geometry under a sparse deck from
+   dimming far-behind clouds and lets the ship cross the cloud boundary without
+   a hard pop. `rendering::clouds::sync_cloud_composite_materials`
    binds the live textures on the active cloud body and blank fallbacks
    everywhere else. The current ordering still treats the already-integrated
    atmospheric radiance as wholly behind the cloud; CLOUD-4 owns the explicit
@@ -916,6 +953,10 @@ This is a switch on the body, not per-pixel.
 
 ## References
 
+- [ADR-20260808T221912Z](../adr/20260808T221912Z-atmosphere-and-ocean-mechanisms-use-spatial-adapters.md) —
+  shared atmosphere/ocean mechanisms with explicit spatial adapters.
+- [Ocean rendering](ocean.md) — shared wave mechanisms and the planar versus
+  planetary water adapters.
 - [archive/gen/planet_aesthetics.md](../archive/gen/planet_aesthetics.md) —
   visual target reference (archived). Read this before tuning M4.
 - [terrain.md](../world/terrain.md) — supplies the surface heights and ocean

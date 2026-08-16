@@ -17,7 +17,9 @@ use std::sync::{Arc, RwLock};
 
 use bevy::math::DVec3;
 use bevy::prelude::{Resource, Vec3};
-use thalos_body_render::{GpuAtlasMirrorHandle, ImpostorAlbedo, RenderedGround};
+#[cfg(feature = "legacy-udlod")]
+use thalos_body_render::GpuAtlasMirrorHandle;
+use thalos_body_render::{ImpostorAlbedo, RenderedGround};
 use thalos_physics_canonical::terrain_provider::TerrainProvider;
 #[cfg(not(debug_assertions))]
 use thalos_terrain::load_static_package_artifact;
@@ -68,6 +70,7 @@ impl RenderedGroundRegistry {
 
     /// udlod's concrete atlas handle for `body_id`, or `None` when the body is
     /// unknown or drawn by another renderer.
+    #[cfg(feature = "legacy-udlod")]
     pub fn udlod_handle(&self, body_id: BodyId) -> Option<GpuAtlasMirrorHandle> {
         self.grounds.get(&body_id)?.udlod_handle()
     }
@@ -206,6 +209,20 @@ impl BodySurfaceRegistry {
                     body.id as u32,
                 ) {
                     Ok(surface) => {
+                        match surface.conditioning_generator_version() {
+                            Some(version) if version != thalos_terrain::GENERATOR_VERSION => {
+                                bevy::log::warn!(
+                                    "Thalos learned macro relief was conditioned with terrain generator {version}, current generator is {}. The package remains usable, but it will not show the current tectonic provinces until it is regenerated",
+                                    thalos_terrain::GENERATOR_VERSION
+                                );
+                            }
+                            None => {
+                                bevy::log::warn!(
+                                    "Thalos learned macro relief has no conditioning-generator provenance. Regenerate the terrain package before using it as evidence for current tectonic structure"
+                                );
+                            }
+                            _ => {}
+                        }
                         let fingerprint =
                             thalos_terrain::GENERATOR_VERSION ^ surface.content_fingerprint;
                         bevy::log::info!(

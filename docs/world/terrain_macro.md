@@ -142,6 +142,11 @@ a fraction of the machinery:
   ramp) and its land ramp matches the eco bands — earlier tunings chased a
   map artifact (a brown 900 m hypso band the game never renders). Trust the
   map only because it mirrors the shader; keep it mirrored.
+- `just map` also writes `target/world_relief.png`: a deliberately
+  climate-independent signed-elevation atlas (blue bathymetry, green lowlands,
+  yellow uplands, brown mountains, pale summits) with restrained hillshade.
+  Use it to judge macro relief; it is a diagnostic palette, not a claim about
+  in-game surface colour.
 
 ### TM-P3 — biome rebalance, authored to lore (LANDED 2026-07-20, `GENERATOR_VERSION` 12)
 
@@ -218,21 +223,57 @@ The items and where they went:
   a `BiomeDef` generation field, landing with **BIO-2**/**BIO-5**.
 - Sea ice at the polar ocean stays a water-renderer item, tracked under BIO-6.
 
-## 5. Phase 3 — landmass & islands (DESIGN)
+## 5. Phase 3 — landmass, islands, and tectonic provinces (IN PROGRESS)
 
-`continentalness` / `orogeny` stay the two replaceable seams (their doc
-comments already promise this). Short of full plate simulation:
+`continentalness` remains the sole authored land/sea seam. `orogeny` is now a
+process-labelled structural prior rather than an independent noise mask:
 
-- **Plate margins from the Worley structure**: use the F2−F1 edge distance of
-  the existing continent cells as a margin field. Mountain belts follow
-  land-side margins (orogeny becomes margin-correlated instead of independent
-  blobs); **island arcs** follow ocean-side margins.
+- **Irregular grown plate margins — implemented 2026-08-03 (NTR-X2f).** Nine
+  major plates grow across a cube-sphere under deterministic plate bias,
+  preferred bearing, and crustal noise; three slow microplates begin in
+  contested gaps. Relative Euler-pole motion at their contacts classifies
+  convergent, divergent, and transform margins. Narrow fossil collision belts
+  express Thalos's old geology; a deterministic minority retains an active
+  core. Their visible width varies and preservation resolves at a shorter
+  regional scale, so an old curved contact survives as separated massifs rather
+  than a constant-width ridge stroke. Low-amplitude inherited terranes restore
+  subdued relief inside plates without competing with present contacts.
+  Convergent land margins drive the mountain cascade, divergent ocean margins
+  lift mid-ocean ridges, divergent land margins cut rifts, and submerged
+  convergent margins cut trenches. `ProceduralSurface::tectonic_signals`
+  exposes the continuous causal field to the atlas and the diffusion
+  conditioning path even where surface expression has eroded away.
+- **Asymmetric collision provinces — implemented 2026-08-07 (NTR-X2f).** A
+  convergent contact now authors more than its exposed peaks: one deterministic
+  plate side carries a broad elevated hinterland and the other a lower foreland
+  basin, with the preserved orogen as the rugged core between them. Divergent
+  ocean contacts carry a broad ridge swell around the axial ridge, while lower
+  generic abyssal noise fills the plate interiors. The permanent
+  `tectonic_provinces.png` atlas separates these response fields from the
+  process-regime atlas, so plate topology and height response can be diagnosed
+  independently (ADR-20260807T175108Z).
+- **Scale-correct regional character — implemented 2026-08-07 (generator 33).**
+  The octave count no longer masquerades as an anti-aliasing rule: every relief
+  band separately fades out between two and four samples per base wavelength,
+  so hills and ridge texture below map resolution cannot alias into continental
+  blotches. Inherited terranes are capped as subdued old relief; convergent
+  contacts retain a low continuous spine beneath independently preserved tall
+  massifs. At the permanent 14 km atlas scale, tectonic belts occupy 18.7 % of
+  land with mean slope 0.0067, versus 38.5 % quiet interior at 0.0009, a 7.29×
+  separation (ADR-20260807T193028Z,
+  INC-20260807T193032Z).
+- **The coastline does not participate.** Tectonic relief is composed through
+  `combine_macro_and_relief`; the sign of final height is regression-pinned to
+  `macro_signed_height_m`. This keeps the 2026-07-29 coastline-authority ADR
+  intact while allowing terrain on either side of it to reorganize.
 - **Hotspot chains**: sparse seeded points with age-decayed seamount trails —
   mid-ocean archipelagos.
 - **Shelf fragmentation**: extra coastline detail octaves gated to the shelf
   band so continental margins shed skerries/archipelagos without churning
   interiors.
-- The hypsometric remap and relief cascade stay untouched, as designed.
+- The hypsometric remap and land/sea sign composition stay untouched. Province
+  response changes only the relief added on either side of that authority.
 
-Also queued here: regional height-character variation (hills/swell amplitude
-modulated by the climate/orogeny fields, so badlands vs smooth plains exist).
+Still queued here: island arcs/hotspot chains and climate-driven character
+within the resolved regional hierarchy, so badlands and smooth plains differ
+without reintroducing planet-wide roughness.

@@ -18,7 +18,8 @@
 //! Run (defaults to Thalos: radius 3,186 km, seed 2 = its body id):
 //!   just map                    # cargo run --release -p thalos_world_map
 //! Override: `WORLD_SEED=7 WORLD_RADIUS_KM=2000 WORLD_W=4096 ...`
-//! Output: target/world_map.png (+ target/world_biomes.png in biome mode).
+//! Output: target/world_map.png + target/world_relief.png
+//! (+ target/world_biomes.png in biome mode).
 //!
 //! Also: `WORLD_ZOOM="lat,lon[,half_km]"` tangent-plane crop,
 //! `WORLD_TRANSECT="lat,lon,az_deg,length_km"` height profile (unchanged).
@@ -29,6 +30,7 @@ use thalos_terrain::query::{SurfaceQuery, SurfaceSample};
 use thalos_terrain::{DiffusionSurface, MacroBiome, ProceduralSurface};
 
 const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/world_map.png");
+const OUT_RELIEF: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/world_relief.png");
 const OUT_BIOMES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../target/world_biomes.png");
 
 // Runway site (matches `thalos_runtime::runway` / the ProceduralSurface scaffold).
@@ -198,6 +200,16 @@ fn main() {
         match DiffusionSurface::load(dir, radius_m as f32, seed) {
             Ok(s) => {
                 println!("world_map: terrain-diffusion surface ({})", dir.display());
+                match s.conditioning_generator_version() {
+                    Some(version) if version != thalos_terrain::GENERATOR_VERSION => println!(
+                        "world_map: STALE learned macro conditioning (generator {version}, current {}); tectonic provinces require a package rebake",
+                        thalos_terrain::GENERATOR_VERSION
+                    ),
+                    None => println!(
+                        "world_map: learned macro conditioning has no generator provenance; package freshness is unknown"
+                    ),
+                    _ => {}
+                }
                 let rd = std::path::Path::new("assets/terrain_packages/thalos_rivers");
                 let s = match thalos_terrain::RiverField::load(rd, "diffusion") {
                     Ok(Some(r)) => {
@@ -444,13 +456,16 @@ fn main() {
         }
     );
 
-    // Pass 2: the shaded map. Biome mode renders land in the true macro
+    // Pass 2: the shaded maps. Biome mode renders land in the true macro
     // palette (linear → sRGB) so the map IS the impostor/orbit transfer;
     // ocean keeps the legibility depth ramp (in-game water colour comes from
     // the water renderer, not the terrain albedo). Hypso mode keeps the
-    // legacy climate-shifted ramp.
+    // legacy climate-shifted ramp. The companion relief map is deliberately
+    // climate-independent: colour means signed elevation, so macro landform
+    // and bathymetry stay legible without biome colour as a confounder.
     let light = DVec3::new(-0.5, -0.4, 0.75).normalize();
     let mut img = image::RgbImage::new(w as u32, h as u32);
+    let mut relief = image::RgbImage::new(w as u32, h as u32);
     for j in 0..h {
         let (mx, my) = frame.m_per_px(radius_m, j);
         for i in 0..w {
@@ -472,16 +487,16 @@ fn main() {
                     warmth,
                 )
             };
+            let il = i.saturating_sub(1);
+            let ir = (i + 1).min(w - 1);
+            let jd = j.saturating_sub(1);
+            let ju = (j + 1).min(h - 1);
+            let dzdx = (px[j * w + ir].height_m - px[j * w + il].height_m) as f64 / (mx * 2.0);
+            let dzdy = (px[ju * w + i].height_m - px[jd * w + i].height_m) as f64 / (my * 2.0);
+            let normal = DVec3::new(-dzdx, -dzdy, 1.0).normalize();
             let shade = if z < 0.0 {
                 1.0
             } else {
-                let il = i.saturating_sub(1);
-                let ir = (i + 1).min(w - 1);
-                let jd = j.saturating_sub(1);
-                let ju = (j + 1).min(h - 1);
-                let dzdx = (px[j * w + ir].height_m - px[j * w + il].height_m) as f64 / (mx * 2.0);
-                let dzdy = (px[ju * w + i].height_m - px[jd * w + i].height_m) as f64 / (my * 2.0);
-                let normal = DVec3::new(-dzdx, -dzdy, 1.0).normalize();
                 (normal.dot(light).max(0.0) * 0.7 + 0.3).clamp(0.0, 1.0)
             };
             img.put_pixel(
@@ -493,11 +508,26 @@ fn main() {
                     (base[2] as f64 * shade) as u8,
                 ]),
             );
+
+            let relief_base = macro_relief_color(z);
+            let relief_shade = 0.72 + 0.28 * normal.dot(light).max(0.0);
+            relief.put_pixel(
+                i as u32,
+                j as u32,
+                image::Rgb([
+                    (relief_base[0] as f64 * relief_shade) as u8,
+                    (relief_base[1] as f64 * relief_shade) as u8,
+                    (relief_base[2] as f64 * relief_shade) as u8,
+                ]),
+            );
         }
     }
     mark_site(&mut img, &frame);
     img.save(OUT).expect("save png");
     println!("wrote {OUT}");
+    mark_site(&mut relief, &frame);
+    relief.save(OUT_RELIEF).expect("save relief png");
+    println!("wrote {OUT_RELIEF}");
 
     // Flat biome-class map + graticule: the tuning view (which class claims
     // which region), companion to the true-colour render.
@@ -747,6 +777,40 @@ fn hypso_color(z: f64) -> [u8; 3] {
     ramp(z, &bands)
 }
 
+/// Climate-independent signed-elevation ramp for judging macro relief.
+///
+/// This is intentionally an atlas palette rather than the in-game landcover
+/// palette: green, yellow, brown, and pale summits encode height only, while a
+/// separate blue ramp exposes shelf, slope, and abyssal bathymetry.
+fn macro_relief_color(z: f64) -> [u8; 3] {
+    if z < 0.0 {
+        return ramp(
+            z,
+            &[
+                (-6_000.0, [20, 35, 82]),
+                (-4_000.0, [31, 61, 117]),
+                (-2_000.0, [55, 101, 158]),
+                (-500.0, [91, 148, 194]),
+                (-120.0, [137, 188, 218]),
+                (0.0, [188, 221, 237]),
+            ],
+        );
+    }
+    ramp(
+        z,
+        &[
+            (0.0, [34, 108, 72]),
+            (250.0, [58, 134, 76]),
+            (750.0, [155, 166, 79]),
+            (1_500.0, [219, 181, 86]),
+            (2_500.0, [190, 108, 52]),
+            (3_500.0, [132, 72, 48]),
+            (4_200.0, [190, 185, 174]),
+            (5_000.0, [244, 245, 242]),
+        ],
+    )
+}
+
 fn ramp(z: f64, bands: &[(f64, [u8; 3])]) -> [u8; 3] {
     if z <= bands[0].0 {
         return bands[0].1;
@@ -809,4 +873,19 @@ fn moisture_tinted(base: [u8; 3], eco_z: f64, moisture: f32, warmth: f64) -> [u8
         lerp_u8(base[1], target[1], t),
         lerp_u8(base[2], target[2], t),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::macro_relief_color;
+
+    #[test]
+    fn macro_relief_palette_separates_depth_and_elevation_bands() {
+        assert_eq!(macro_relief_color(-6_000.0), [20, 35, 82]);
+        assert_eq!(macro_relief_color(-120.0), [137, 188, 218]);
+        assert_eq!(macro_relief_color(0.0), [34, 108, 72]);
+        assert_eq!(macro_relief_color(1_500.0), [219, 181, 86]);
+        assert_eq!(macro_relief_color(3_500.0), [132, 72, 48]);
+        assert_eq!(macro_relief_color(5_000.0), [244, 245, 242]);
+    }
 }

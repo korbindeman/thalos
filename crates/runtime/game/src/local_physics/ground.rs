@@ -115,7 +115,7 @@ pub(crate) fn terrain_floor_backstop(
     authority: Res<AvianAuthority>,
     backstop: Res<TerrainFloorBackstop>,
     friction: Res<SurfaceFriction>,
-    gear_state: Res<GearState>,
+    gear_state: thalos_game_state::ActiveCraftRef<GearState>,
     weight_on_wheels: Res<WeightOnWheels>,
     height_sources: Res<HeightSourceRegistry>,
     sim: Res<SimulationState>,
@@ -131,6 +131,9 @@ pub(crate) fn terrain_floor_backstop(
     >,
     mut last_emit_sim_s: Local<f64>,
 ) {
+    let Some(gear_state) = gear_state.get() else {
+        return;
+    };
     // Destroyed craft are NOT exempt: a wreck is inert debris that still needs
     // a floor. A destroyed wheeled craft has no gear forces (the gear system
     // stands down) and its hull is layer-filtered out of solver ground contact

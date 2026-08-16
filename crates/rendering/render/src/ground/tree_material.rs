@@ -179,7 +179,7 @@ impl MaterialExtension for TreeShadingExtension {
 /// Lean plugin to render [`TreeMaterial`] in a standalone / headless app (the
 /// object-preview tool, examples) **without** the full terrain stack: registers
 /// the material and ensures the shared shader libraries are present. The game
-/// gets all this from `ThalosTerrainPlugin`.
+/// gets all this from `GroundAppearancePlugin`.
 pub struct TreeMaterialPlugin;
 
 impl Plugin for TreeMaterialPlugin {

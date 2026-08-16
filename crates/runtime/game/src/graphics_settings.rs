@@ -11,75 +11,19 @@
 //! Knobs: the volumetric-cloud toggle, consumed by
 //! `rendering::clouds::drive_clouds` — when off it parks the cloud raymarch the
 //! same way an absent cloud body does, so the sky composites with no cloud
-//! layer at zero GPU cost; the grass toggle, consumed by
+//! layer at zero GPU cost; and the grass toggle, consumed by
 //! `rendering::grass::drive_grass_tiles` — when off it parks the grass clipmap
-//! (no tiles built, live tiles despawned); and the MSAA level.
+//! (no tiles built, live tiles despawned). Anti-aliasing and foliage have the
+//! same meaning in Kòrsou and live in `thalos_preferences::GraphicsPreferences`.
 
 use bevy::prelude::*;
-use bevy::render::view::Msaa;
 use serde::{Deserialize, Serialize};
 use thalos_capture_protocol::CaptureGraphicsOverrides;
+use thalos_preferences::{
+    GraphicsPreferences, QualityOverrides, QualityPreset, effective_graphics,
+};
 
 // ── Resource ───────────────────────────────────────────────────────────────────
-
-/// Multisample anti-aliasing level for the main 3D view.
-///
-/// `Off` keeps the post-process SMAA pass that [`space_camera_post_stack`] adds.
-/// Any multisampled level **replaces** SMAA (MSAA covers geometry edges, and
-/// running both just double-softens the image). Geometric specular AA in the
-/// surface shaders is always on and independent of this knob.
-///
-/// [`space_camera_post_stack`]: thalos_body_render::space_camera_post_stack
-#[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum MsaaSetting {
-    Off,
-    X2,
-    X4,
-    X8,
-}
-
-impl MsaaSetting {
-    /// Sample count (1 = disabled).
-    pub fn samples(self) -> u32 {
-        match self {
-            MsaaSetting::Off => 1,
-            MsaaSetting::X2 => 2,
-            MsaaSetting::X4 => 4,
-            MsaaSetting::X8 => 8,
-        }
-    }
-
-    /// Bevy per-camera [`Msaa`] component for this level.
-    pub fn to_msaa(self) -> Msaa {
-        match self {
-            MsaaSetting::Off => Msaa::Off,
-            MsaaSetting::X2 => Msaa::Sample2,
-            MsaaSetting::X4 => Msaa::Sample4,
-            MsaaSetting::X8 => Msaa::Sample8,
-        }
-    }
-
-    /// Whether this level is multisampled (and therefore suppresses SMAA).
-    pub fn is_multisampled(self) -> bool {
-        self.samples() > 1
-    }
-
-    pub const ALL: [MsaaSetting; 4] = [
-        MsaaSetting::Off,
-        MsaaSetting::X2,
-        MsaaSetting::X4,
-        MsaaSetting::X8,
-    ];
-
-    pub fn label(self) -> &'static str {
-        match self {
-            MsaaSetting::Off => "Off (SMAA)",
-            MsaaSetting::X2 => "MSAA 2×",
-            MsaaSetting::X4 => "MSAA 4×",
-            MsaaSetting::X8 => "MSAA 8×",
-        }
-    }
-}
 
 /// User graphics/rendering preferences. Persisted as the `graphics` section of
 /// [`crate::settings`]'s unified file.
@@ -104,33 +48,82 @@ pub struct GraphicsSettings {
     /// tiles; when off, the CPU clipmap covers the whole reach (the pre-rewrite
     /// behaviour, as a fallback). Draws nothing unless `grass` is also on.
     pub gpu_grass: bool,
-    /// Multisample anti-aliasing level for the main 3D view. `Off` keeps SMAA;
-    /// a multisampled level replaces it. See [`MsaaSetting`].
-    pub msaa: MsaaSetting,
+    /// Multiplier on tile split distance. 1.0 is the unconstrained Showcase
+    /// rule; 0.5 is the Laptop coarsening. The VRAM brake still multiplies on
+    /// top of this.
+    pub terrain_lod: f32,
+    /// Live sun-shadow cascade count, 0..=4. `THALOS_SHADOW_CASCADES` still
+    /// pins a measurement session.
+    pub shadow_cascades: u8,
 }
 
 impl Default for GraphicsSettings {
     fn default() -> Self {
-        Self {
-            clouds: true,
-            grass: true,
-            gpu_grass: true,
-            // Default off so the first run keeps the verified SMAA path; the
-            // MSAA depth-resolve path is opt-in from the Graphics tab until it
-            // has been runtime-verified.
-            msaa: MsaaSetting::Off,
-        }
+        Self::showcase()
     }
 }
 
 impl GraphicsSettings {
+    pub const TERRAIN_LOD_MIN: f32 = 1.0 / 3.0;
+    pub const TERRAIN_LOD_MAX: f32 = 1.0;
+    pub const SHADOW_CASCADES_MAX: u8 = 4;
+
+    pub fn showcase() -> Self {
+        Self {
+            clouds: true,
+            grass: true,
+            gpu_grass: true,
+            terrain_lod: 1.0,
+            shadow_cascades: Self::SHADOW_CASCADES_MAX,
+        }
+    }
+
+    pub fn laptop() -> Self {
+        Self {
+            clouds: false,
+            grass: false,
+            gpu_grass: false,
+            terrain_lod: 0.5,
+            shadow_cascades: 2,
+        }
+    }
+
+    pub fn for_preset(preset: QualityPreset) -> Option<Self> {
+        match preset {
+            QualityPreset::Showcase => Some(Self::showcase()),
+            QualityPreset::Laptop => Some(Self::laptop()),
+            QualityPreset::Custom => None,
+        }
+    }
+
+    pub fn apply_preset(&mut self, preset: QualityPreset) {
+        if let Some(stamped) = Self::for_preset(preset) {
+            *self = stamped;
+        }
+    }
+
+    pub fn matches_preset(&self, preset: QualityPreset) -> bool {
+        Self::for_preset(preset).is_some_and(|expected| self == &expected)
+    }
+
+    pub fn sanitized(mut self) -> Self {
+        self.terrain_lod = if self.terrain_lod.is_finite() {
+            self.terrain_lod
+                .clamp(Self::TERRAIN_LOD_MIN, Self::TERRAIN_LOD_MAX)
+        } else {
+            1.0
+        };
+        self.shadow_cascades = self.shadow_cascades.min(Self::SHADOW_CASCADES_MAX);
+        self
+    }
+
     /// Deterministic headless profile for one capture request.
     ///
     /// Captures never inherit the player's persisted preferences: every request
     /// starts from this type's defaults, then applies its typed patch. This also
     /// means a persistent host cannot leak one shot's settings into the next.
     pub fn for_capture(overrides: CaptureGraphicsOverrides) -> Self {
-        let mut settings = Self::default();
+        let mut settings = Self::showcase();
         if let Some(clouds) = overrides.clouds {
             settings.clouds = clouds;
         }
@@ -138,6 +131,63 @@ impl GraphicsSettings {
             settings.grass = grass;
         }
         settings
+    }
+}
+
+/// Session-only controls used to attribute interactive render cost.
+///
+/// These deliberately live beside, rather than inside, persisted preferences:
+/// a diagnostic run must not silently change the player's normal graphics
+/// setup. The effective value is recorded in every perf gauge.
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub(crate) struct PerfRenderOverrides {
+    foliage: Option<bool>,
+}
+
+impl PerfRenderOverrides {
+    pub(crate) fn from_env() -> Self {
+        let foliage = std::env::var("THALOS_PERF_FOLIAGE")
+            .ok()
+            .and_then(|raw| match parse_toggle(&raw) {
+                Some(enabled) => {
+                    eprintln!(
+                        "THALOS_PERF_FOLIAGE={} — foliage pinned for this measurement session",
+                        if enabled { "on" } else { "off" }
+                    );
+                    Some(enabled)
+                }
+                None => {
+                    eprintln!(
+                        "Unknown THALOS_PERF_FOLIAGE={raw:?}; expected on/off, true/false, or 1/0. Ignoring."
+                    );
+                    None
+                }
+            });
+        Self { foliage }
+    }
+
+    pub(crate) fn foliage_enabled(
+        &self,
+        preferences: &thalos_preferences::GraphicsPreferences,
+    ) -> bool {
+        self.foliage.unwrap_or(preferences.foliage)
+    }
+
+    /// Change the session-only foliage gate during a controlled benchmark.
+    ///
+    /// This remains separate from persisted preferences: the offscreen matrix
+    /// must never rewrite the player's graphics setup while it attributes a
+    /// render cost.
+    pub(crate) fn set_foliage(&mut self, enabled: bool) {
+        self.foliage = Some(enabled);
+    }
+}
+
+fn parse_toggle(raw: &str) -> Option<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "on" | "1" | "true" | "yes" => Some(true),
+        "off" | "0" | "false" | "no" => Some(false),
+        _ => None,
     }
 }
 
@@ -159,11 +209,38 @@ mod tests {
         let settings = GraphicsSettings::for_capture(CaptureGraphicsOverrides {
             clouds: Some(false),
             grass: None,
+            foliage: Some(false),
         });
         assert!(!settings.clouds);
         assert!(settings.grass);
         assert!(settings.gpu_grass);
-        assert_eq!(settings.msaa, MsaaSetting::Off);
+        assert_eq!(settings.terrain_lod, 1.0);
+        assert_eq!(settings.shadow_cascades, 4);
+    }
+
+    #[test]
+    fn laptop_game_bundle_parks_expensive_layers() {
+        let laptop = GraphicsSettings::laptop();
+        assert!(!laptop.clouds);
+        assert!(!laptop.grass);
+        assert_eq!(laptop.terrain_lod, 0.5);
+        assert_eq!(laptop.shadow_cascades, 2);
+        assert!(laptop.matches_preset(QualityPreset::Laptop));
+        assert!(!laptop.matches_preset(QualityPreset::Showcase));
+    }
+
+    #[test]
+    fn perf_foliage_toggle_is_typed() {
+        assert_eq!(parse_toggle("off"), Some(false));
+        assert_eq!(parse_toggle("YES"), Some(true));
+        assert_eq!(parse_toggle("sometimes"), None);
+
+        let preferences = thalos_preferences::GraphicsPreferences::default();
+        let overrides = PerfRenderOverrides {
+            foliage: Some(false),
+        };
+        assert!(preferences.foliage);
+        assert!(!overrides.foliage_enabled(&preferences));
     }
 }
 
@@ -175,7 +252,80 @@ impl Plugin for GraphicsSettingsPlugin {
     fn build(&self, app: &mut App) {
         // The resource is inserted in `main()` from the unified `settings.ron`
         // and persisted by `crate::settings::AppSettingsPlugin`; this plugin
-        // only registers the type for the reflection / debug-UI path.
-        app.register_type::<GraphicsSettings>();
+        // registers the type and keeps game knobs stamped from the shared preset.
+        app.register_type::<GraphicsSettings>().add_systems(
+            Update,
+            (
+                stamp_game_graphics_from_preset,
+                mark_custom_from_game_knobs,
+                sync_shadow_cascade_budget,
+            ),
+        );
     }
+}
+
+fn stamp_game_graphics_from_preset(
+    prefs: Res<GraphicsPreferences>,
+    overrides: Res<QualityOverrides>,
+    mut graphics: ResMut<GraphicsSettings>,
+    mut last: Local<Option<QualityPreset>>,
+) {
+    let effective = effective_graphics(&prefs, &overrides);
+    if last.is_none() {
+        if effective.preset == QualityPreset::Laptop
+            && !graphics.matches_preset(QualityPreset::Laptop)
+        {
+            graphics.apply_preset(QualityPreset::Laptop);
+        }
+        *last = Some(effective.preset);
+        return;
+    }
+    if effective.preset != QualityPreset::Custom && Some(effective.preset) != *last {
+        graphics.apply_preset(effective.preset);
+    }
+    *last = Some(effective.preset);
+}
+
+fn mark_custom_from_game_knobs(
+    graphics: Res<GraphicsSettings>,
+    overrides: Res<QualityOverrides>,
+    mut prefs: ResMut<GraphicsPreferences>,
+    mut menu: ResMut<thalos_preferences::SettingsMenu>,
+    mut seen_startup: Local<bool>,
+) {
+    if overrides.preset.is_some() || prefs.preset == QualityPreset::Custom {
+        return;
+    }
+    // The first observation is the persisted file, not a player edit. An
+    // older settings.ron (grass already off, for example) must not flip a
+    // named preset to Custom before anyone touches a knob.
+    if !*seen_startup {
+        *seen_startup = true;
+        return;
+    }
+    if !graphics.is_changed() {
+        return;
+    }
+    if !graphics.matches_preset(prefs.preset) {
+        prefs.preset = QualityPreset::Custom;
+        menu.dirty();
+    }
+}
+
+fn sync_shadow_cascade_budget(
+    graphics: Res<GraphicsSettings>,
+    overrides: Res<QualityOverrides>,
+    prefs: Res<GraphicsPreferences>,
+) {
+    if std::env::var("THALOS_SHADOW_CASCADES").is_ok() {
+        return;
+    }
+    let cascades = if overrides.preset.is_some() {
+        GraphicsSettings::for_preset(effective_graphics(&prefs, &overrides).preset)
+            .map(|settings| settings.shadow_cascades)
+            .unwrap_or(graphics.shadow_cascades)
+    } else {
+        graphics.shadow_cascades
+    };
+    crate::rendering::sun_shadow::set_cascade_budget(cascades as usize);
 }

@@ -1,0 +1,10 @@
+[package]
+name = "thalos_diagnostics_ui"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.19" }
+thalos_diagnostics = { workspace = true }
+thalos_ui = { path = "../ui" }

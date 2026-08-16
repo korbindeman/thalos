@@ -1,21 +1,24 @@
 {
-  "schema": "thalos.viewpoints.v2",
+  "schema": "thalos.viewpoints.v3",
   "viewpoints": [
     {
       "id": "blobby-clouds",
       "name": "blobby clouds",
       "description": "",
       "saved_unix_ms": 1785300435603,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3272061.9439217695,
         316268.25106022076,
         -134296.07844842586
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         -0.6009986834315509,
         0.7255994455839113,
         -0.06095399479164992,
@@ -27,7 +30,7 @@
           "focal_length_mm": 24.443914
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -41,16 +44,19 @@
       "name": "cloudy ripples",
       "description": "",
       "saved_unix_ms": 1785300479474,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3172218.497301376,
         300127.7978902047,
         205082.36375940888
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.6735076355298201,
         -0.6946901226318191,
         0.2082559203521745,
@@ -62,7 +68,7 @@
           "focal_length_mm": 24.443914
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -76,16 +82,19 @@
       "name": "dark thalos",
       "description": "",
       "saved_unix_ms": 1784933095625,
-      "body": "Thalos",
-      "spawn": "runway",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "runway",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -1369054.0661562858,
         2896639.517815519,
         -11122847.422909347
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         -0.6839427988759015,
         0.7211773650938806,
         0.08685245476022425,
@@ -97,7 +106,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -111,16 +120,19 @@
       "name": "Imported latest perspective",
       "description": "Migrated from artifacts/diagnostics/latest_perspective.json when the shared viewpoint catalog replaced the overwrite-only F8 handoff.",
       "saved_unix_ms": 1784839314385,
-      "body": "Thalos",
-      "spawn": "runway",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "runway",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3194543.2107708445,
         511525.8512686994,
         14451.1006617003
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         -0.6581656707156138,
         0.6006433981793197,
         0.4185714500537908,
@@ -132,7 +144,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -146,16 +158,19 @@
       "name": "orbit cloud check",
       "description": "",
       "saved_unix_ms": 1784939247584,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -12201996.172423258,
         2927788.258804262,
         6197241.748594731
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         -0.4756982070630596,
         0.2347044647658424,
         0.8358650087352448,
@@ -167,7 +182,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -181,16 +196,19 @@
       "name": "realism",
       "description": "",
       "saved_unix_ms": 1785102173628,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 137186.77378494368,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 137186.77378494368
+      },
+      "camera_position_m": [
         -3157430.859599902,
         418680.3108648176,
         111089.07245976594
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         -0.3741671146185254,
         0.4279126493109646,
         -0.539229711078397,
@@ -202,7 +220,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -216,16 +234,19 @@
       "name": "rough lookffff",
       "description": "",
       "saved_unix_ms": 1784931358000,
-      "body": "Thalos",
-      "spawn": "runway",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "runway",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3157154.9173677005,
         421960.84286761633,
         105759.2283324852
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         -0.6584088986468917,
         0.7477582268094374,
         -0.05542556290173473,
@@ -237,7 +258,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -251,16 +272,19 @@
       "name": "scene",
       "description": "",
       "saved_unix_ms": 1785034589144,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3156994.058472502,
         420270.8997825164,
         111132.58181867911
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.037785768738395425,
         -0.008733104568757047,
         -0.6596695368013379,
@@ -272,7 +296,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -286,16 +310,19 @@
       "name": "scene2",
       "description": "",
       "saved_unix_ms": 1785034612575,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3157175.6758905724,
         419477.6581321743,
         110583.8218768348
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.3478030248118336,
         -0.46821354215048305,
         0.493473925802329,
@@ -307,7 +334,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -321,16 +348,19 @@
       "name": "space center hill view",
       "description": "",
       "saved_unix_ms": 1785284255235,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3158333.297381494,
         412166.5571917023,
         107570.115043552
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.5366605875232613,
         -0.5985170273338211,
         0.3804227975085771,
@@ -342,7 +372,7 @@
           "focal_length_mm": 24.447268
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -356,16 +386,19 @@
       "name": "tex_look",
       "description": "",
       "saved_unix_ms": 1785038080930,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3163459.952707384,
         497963.31705217983,
         234207.66339760157
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.44733987534857383,
         -0.6092301715946875,
         0.28105881704799174,
@@ -377,7 +410,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -391,16 +424,19 @@
       "name": "Thalos 8 km",
       "description": "",
       "saved_unix_ms": 1785284804455,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3128338.4934464535,
         637459.674209958,
         165996.98248592706
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.3727289069075492,
         -0.7194691347654493,
         0.0707770140904034,
@@ -412,7 +448,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -426,16 +462,19 @@
       "name": "thin clouds",
       "description": "",
       "saved_unix_ms": 1785300394858,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3159433.066654717,
         419803.81708385656,
         106329.27427988744
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.48374363330758785,
         -0.5567280397646642,
         0.4236557263323173,
@@ -447,7 +486,7 @@
           "focal_length_mm": 24.443914
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9
@@ -461,16 +500,19 @@
       "name": "weak clouds",
       "description": "",
       "saved_unix_ms": 1785014144812,
-      "body": "Thalos",
-      "spawn": "launch",
-      "boots_hub": false,
-      "sim_time_s": 59100.0,
-      "camera_position_body_m": [
+      "frame": {
+        "kind": "authored-body-fixed",
+        "body": "Thalos",
+        "spawn": "launch",
+        "boots_hub": false,
+        "sim_time_s": 59100
+      },
+      "camera_position_m": [
         -3160836.632054684,
         415937.8424921744,
         100428.08085391368
       ],
-      "camera_rotation_body_xyzw": [
+      "camera_rotation_xyzw": [
         0.5596295750239915,
         -0.6177926608702082,
         0.3439189084390789,
@@ -482,7 +524,7 @@
           "focal_length_mm": 24.44391
         },
         "sensor": {
-          "gate_width_mm": 36.0,
+          "gate_width_mm": 36,
           "aspect": [
             16,
             9

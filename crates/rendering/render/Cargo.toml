@@ -5,7 +5,8 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-playground = []
+legacy-udlod = ["dep:thalos_udlod"]
+playground = ["legacy-udlod"]
 
 [[example]]
 name = "playground"
@@ -16,10 +17,12 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dependencies]
 thalos_body_shading = { path = "../shading" }
+thalos_ocean = { path = "../ocean" }
+thalos_vegetation = { path = "../vegetation" }
 thalos_terrain = { path = "../../domain/terrain" }
 thalos_world = { path = "../../domain/world" }
 thalos_shipyard = { path = "../../domain/construction" }
-thalos_udlod = { workspace = true }
+thalos_udlod = { workspace = true, optional = true }
 bevy = { version = "0.19", features = ["wayland", "jpeg"] }
 bevy_erosion_filter = { path = "../../domain/terrain/erosion_filter" }
 big_space = { workspace = true }

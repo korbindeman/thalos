@@ -127,6 +127,31 @@ design around procedural assumptions).
    `lore/solar_system.md` §II), the authored continent layout, and eventually
    per-body climate targets. terrain-diffusion's coarse-map → detail split is
    the natural seam: Thalos authors the coarse map, the model details it.
+   **Tectonic structure landed 2026-08-03 (NTR-X2f):** deterministic Euler-pole
+   motion on an irregular grown cube-sphere plate graph labels convergent,
+   divergent, and transform margins before `ConditioningChart` is exported.
+   Weighted growth bias, preferred bearing, crustal noise, and boundary-born
+   microplates replace the rejected nearest-cell/Voronoi geometry. Mountain
+   belts are therefore an input to generation, not displacement pasted onto its
+   output. Surface expression is intentionally less continuous than the process
+   label: variable-width regional preservation yields separated old massifs,
+   while subdued inherited terranes prevent empty plate interiors. This keeps a
+   coherent contact for diffusion to elaborate without drawing it as a uniform
+   ridge stroke in the analytic fallback.
+   **Whole-contact response landed 2026-08-07:** convergent contacts now export
+   asymmetric hinterland and foreland provinces around the preserved core, and
+   divergent ocean contacts export a broad ridge swell. This gives the model a
+   plateau/lowland/bathymetric hierarchy to elaborate instead of asking it to
+   infer that hierarchy from narrow peak texture alone
+   (ADR-20260807T175108Z).
+   Generator 33 closes the remaining macro-organization defect: whole relief
+   bands are footprint-gated, inherited terranes stay below active-range
+   strength, and a low continuous collision spine connects regionally preserved
+   massifs (ADR-20260807T193028Z). The checked-in learned chart is now explicitly
+   stamped as conditioning generator 28, and maps/runtime warn on the 28→33
+   mismatch. `target/thalos_macro` has been regenerated at 33; the external
+   terrain-diffusion producer must consume it before the neural backing can
+   claim the new relief.
 4. **Climate channels → landcover (design-level).** Upstream co-generates
    WorldClim-style climate. Evaluate learned climate as the conditioning input
    to landcover/biomes, making the hand-built macro moisture/climate pipeline
@@ -141,6 +166,19 @@ design around procedural assumptions).
    state stay ignored because the runtime does not consume them. Q10 (pixel vs
    latent storage) is still the open schema fork and now gates this workstream
    too.
+6. **Hydrology is downstream of the completed neural heightfield.** The final
+   drainage solve consumes emitted neural DEM data, never a parallel analytic
+   approximation or runtime point queries. The full-planet continuous band
+   establishes watershed topology; any finer authored neural windows re-solve
+   locally with conserved boundary inflow/outflow so detailed mountains and
+   valleys move their tributaries without changing the continental water
+   budget. Geometric catchment and climate-weighted discharge remain separate
+   package channels. Their provenance records the exact hashes of every height
+   and climate band consumed, so a terrain rebake cannot silently retain stale
+   rivers. The current 2 km `SurfaceQuery` bake is a preview/validation adapter,
+   not a shipping terrain authority. The complete work order, package contract,
+   open routing forks, and acceptance gates live in
+   [`hydro §1–§8`](../world/drainage.md).
 
 **Candidate mechanism — one field kernel, two backends (CubeCL).** The model is
 not the whole terrain. Downstream of it sits a *field cascade* every band
@@ -216,12 +254,11 @@ Nothing downstream of L2 starts.
 
 ## §6 Thalos integration sequencing (post-M5, provisional)
 
-> **Status 2026-07-25: the tile renderer is the default ground.** Steps 1–3 are
-> in, and step 5's scatter half landed; the flip inverted the gate, so
-> `THALOS_TILE_RENDERER=0` now *forces the legacy udlod path* as an A/B baseline
-> instead of tiles being opt-in. udlod keeps streaming bodies the tile driver
-> has not installed on (one body per session today) — that per-body install, the
-> remaining composites, and the open `NTR-X*` rows are what stand between here
+> **Status 2026-08-09: the tile renderer is the default ground on every body.**
+> Steps 1–3 are in, and step 5's scatter half landed. `thalos_udlod` is absent
+> from default application graphs and available only through the optional
+> `legacy-udlod` feature plus `THALOS_TILE_RENDERER=0` for matched A/B evidence.
+> The remaining composites and open `NTR-X*` rows are what stand between here
 > and step 6.
 
 Order of re-entry, to be finalized by the M5 extraction plan:
@@ -247,10 +284,76 @@ Order of re-entry, to be finalized by the M5 extraction plan:
 | Fork | Gates | Notes |
 |---|---|---|
 | Bevy/`big_space`/Solari revisions to pin together for the probe | probe M0 | probe-repo decision; report back |
-| Patch resolution + screen-space-error rule | probe M2 (distance-only placeholder shipped) → **relief-aware rule shipped in-game 2026-07-25** (`tiles::tile_ruggedness_weight`) → sharpen when provider error metadata lands | 33² vs 65² measured. The target rule is **relief-aware screen-space geometric error**, not distance: split only when refinement would move the surface by > τ px, so smooth terrain (ocean floor, plains) spends far less of the tile budget at equal distance. The error term comes from provider metadata — the package lineage already stores per-node max declared error (MIRA-0), and at M4 the neural residual band's amplitude *is* the refinement error; `HeightTile` min/max is the interim proxy. udlod precedent: `TileProvider::subdivision_scale` ≤ 1 — relief-awareness may only *remove* detail below the distance cap, never add it (scale-consistency invariant). **Shipped shape (2026-07-25):** exactly that, with the cap re-based from "everywhere" to "rugged" — `SPLIT_FACTOR` 6 is the floor, `SPLIT_FACTOR_RUGGED` 18 the cap, and ruggedness (relief ÷ arc, scale-invariant so it inherits down the tree unscaled) removes the difference on smooth ground. Error proxy is the `h_range` the mesher already measures; swap in per-node declared error / the neural residual amplitude when the package carries it. A source-detail floor (45 m ≈ Nyquist on the 90 m band) stops the boost re-meshing signal that is not there — measured, it was 2.7× the tiles for no visible change |
+| Patch resolution + screen-space-error rule | probe M2 distance rule → **relief-aware rule shipped 2026-07-25** → **package error shipped 2026-08-02** → **129² submission-density topology shipped 2026-08-14, runtime gate open** | The target rule is **relief-aware screen-space geometric error**: package metadata may remove refinement below the distance cap, never add it (scale-consistency invariant). Ruggedness (relief ÷ arc) remains the fallback where package error is unavailable, with a 45 m source-detail floor. Resolution is now 129² at L−1 in place of four 65² tiles at L. The selector preserves the established density products (384 base / 1,152 rugged samples across split distance), so the bare factors are 3/9 rather than 6/18; sample spacing and maximum detail stay fixed while entity, asset, main-pass, and shadow-twin submissions target one quarter. See §7.2 |
 | Collision at M2 or after multiscale | probe M2/M4 | leaning after-M4 per probe non-goals |
 | Q10 — package storage: pixel heights vs latent + on-device decode | §4.5 package emission; MIRA-2/3 schema freeze | carried over from *Decisions pending* |
 | Unified model architecture across body classes | after the earth-like fine-tune produces accepted Thalos terrain | companion ADR end state; resist architecture (not just stack) divergence meanwhile |
 | Learned climate channels as landcover conditioning | §4.4 evaluation | could retire TM-P2r/TM-P3b-style authored climate growth |
 | Q11 — single-source field kernel (CubeCL `#[cube]`, one Rust source compiled to GPU + CPU) vs hand-maintained WGSL/Rust pairs for the post-model cascade | opens at probe M4 (residual bands), binding at M5/extraction when collision joins as a height consumer | §4 *Candidate mechanism* |
 | Solari adoption — **shape resolved 2026-07-24** by [ADR-20260724T224242Z](../adr/20260724T224242Z-solari-scene-half-not-lighting-half.md): the *scene* half (`RaytracingScenePlugin`) yes, the *lighting* half (`SolariLightingPlugin`) never — it forces the opaque path deferred, extracts only `StandardMaterial`, and has **no sky/environment lighting at all**, which deletes the dominant surface ambient on an atmospheric body. Surfaces enter the RT scene through `Mesh3d`-less proxy entities so they keep their `ExtendedMaterial`/Hapke. **Refined 2026-07-29 by [ADR-20260729T070229Z](../adr/20260729T070229Z-rt-tiles-need-a-separate-mesh-not-a-shared-handle.md):** Solari's mesh gate is an *equality* on the attribute sequence, so craft parts share their visible mesh handle but terrain tiles (COLOR + UV_1 for the NTR-X4 layer stack) can never be eligible and need a separate RT-only twin at 1.90× a tile's VRAM — which makes near-`ViewAnchor` scoping mandatory, and makes **NTR-RT3 the first consumer**, ahead of RT2 | **NTR-RT1** — BLAS/TLAS cost against our tile streaming rate, in-game on Mira (not the probe: it has no crafts, so mirror steel is unmeasurable there). Deferred behind NTR-X4 | Consumers gated on it: NTR-RT2 (RT sun visibility → `thalos::shadow`, closing NTR-X6) and NTR-RT3 (stainless-hull reflections, the atmosphere.md mirror tier whose BLAS prerequisite the tile renderer now satisfies) |
+
+### §7.1 Package error refinement (2026-08-02)
+
+The compatibility package now supplies its retained residual displacement
+bounds to the selector. The bound is projected with the live camera's physical
+viewport and vertical focal length; a split in the ruggedness-only band is
+omitted at or below one pixel. This preserves the scale-consistency rule:
+package metadata cannot cross the distance selector's base-detail floor and
+cannot add refinement.
+
+The bound is complete rather than optimistic. Retained predictor and
+reconstruction errors compose down the package hierarchy; pruned residuals are
+zero because they are absent from the runtime surface. Airless regolith adds
+its signed amplitude envelope. A compact cube-sphere mask rejects package
+authority wherever runtime-only craters overlap, while dynamic layers and
+unsupported runtime detail retain the previous heuristic. Missing metadata is
+therefore exactly the old selector, not a guessed error.
+
+`THALOS_PACKAGE_SCREEN_ERROR=0` restores that fallback path explicitly for
+matched cold-capture performance and fidelity comparisons.
+
+### §7.2 Tile submission density (2026-08-14)
+
+The 65² topology spent most of the frame outside measured simulation stages:
+one mesh asset and entity per quadtree leaf, plus one terrain caster twin per
+shadow cascade. A settled low-altitude session held 4,722 terrain tiles and
+submitted 985 visible terrain caster twins; average frame time was 119.3 ms
+while physics, sync, and camera together accounted for 4.94 ms.
+
+The first structural cut keeps the quadtree and provider contract but changes
+one leaf from 65² at level L to 129² at L−1. `TILE_RES`, `MIN_LEVEL`, the base
+and rugged split distances, and `max_level_for` move as one invariant: ground
+sample spacing is unchanged, four former footprints become one, and aggregate
+vertices remain approximately flat. Per-tile mesh and cache payloads grow by
+about four, so byte-denominated residency/cache budgets remain the authority;
+tile-count budgets would be invalid.
+
+Acceptance is runtime evidence, not the arithmetic alone: matched framing and
+settings, no silhouette/seam regression, terrain resident and caster-twin
+counts near one quarter, and a material frame-time improvement. If submission
+counts fall without frame time moving, the next discriminator is GPU timing,
+not another LOD constant.
+
+The first exact-current-source `forest-stand` capture settled with 1,542
+resident = desired tiles at full split scale and no visible seam or missing
+terrain. Its historical same-preset receipt held 5,838 tiles, a 3.79× reduction,
+and accounted mesh residency fell from 1,979 to 1,518 MiB. The historical image
+is not a matched source revision, so this closes the topology and visual sanity
+gates, not the interactive frame-time gate. The first run also rebuilt every
+shape-invalid 65² cache entry; that migration cost must not be confused with
+steady-state frame time.
+
+The first interactive 129² run confirms the structural reduction but not a
+proportional frame win. In one stationary 70-second plateau, resident terrain
+was 1,386 tiles and the four shadow views saw 302 terrain caster twins, both
+about 29–31% of the 65² baseline. Mean frame time moved only 119.3 → 101.3 ms
+(8.4 → 9.9 fps). Physics, sync, and camera occupied about 2 ms of that settled
+frame, so tile streaming is not the floor and another selector constant is not
+the next experiment.
+
+The next discriminator is a cold foliage × custom-shadows matrix at identical
+framing. `THALOS_PERF_FOLIAGE` and `THALOS_SHADOW_CASCADES` provide the two
+independent session-only axes; `frame_gauge` records both with the window and
+other graphics settings. If neither removal accounts for the missing render
+time, the result escalates to a GPU/profile trace rather than another geometry
+guess.

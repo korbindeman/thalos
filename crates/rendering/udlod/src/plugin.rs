@@ -19,8 +19,6 @@ pub struct TerrainPlugin;
 
 impl Plugin for TerrainPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(crate::big_space::BigSpacePlugin);
-
         app.init_resource::<InternalShaders>()
             .init_resource::<TerrainViewComponents<TileTree>>()
             .init_resource::<TerrainViewComponents<TerrainModelApproximation>>()

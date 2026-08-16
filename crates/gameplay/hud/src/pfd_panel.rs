@@ -1114,7 +1114,7 @@ pub fn update_attitude_display(
     solar_system: Res<SolarSystemState>,
     velocity_frame: Res<VelocityFrameState>,
     target: Res<TargetBody>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     mut ladder_q: Query<&mut UiTransform, With<PfdLadder>>,
     mut shift_q: Query<&mut Node, With<PfdPitchShift>>,
     mut rung_q: Query<(&PfdRung, &mut Visibility), Without<PfdHeadingTick>>,
@@ -1142,6 +1142,9 @@ pub fn update_attitude_display(
     >,
     mut readout_q: Query<(&PfdReadout, &mut Text), Without<PfdHeadingTick>>,
 ) {
+    let Some(plan) = plan.get() else {
+        return;
+    };
     if *mode != NavDisplayMode::Hud {
         return;
     }
@@ -1216,7 +1219,7 @@ pub fn update_attitude_display(
         &sim_state,
         &solar_system,
         &target,
-        &plan,
+        plan,
     );
     let icon_half = MARKER_ICON_SIZE as f32 * 0.5;
     for (marker, variants, mut image, mut node, mut vis) in &mut marker_q {
@@ -1407,9 +1410,12 @@ pub fn update_tapes(
 
 pub fn update_annunciators(
     mode: Res<NavDisplayMode>,
-    realized: Res<RealizedControl>,
+    realized: thalos_game_state::ActiveCraftRef<RealizedControl>,
     mut q: Query<(&PfdAnnunciator, &mut Visibility)>,
 ) {
+    let Some(realized) = realized.get() else {
+        return;
+    };
     if *mode != NavDisplayMode::Hud {
         return;
     }

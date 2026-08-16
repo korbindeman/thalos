@@ -1,0 +1,359 @@
+{
+  "format_version": 1,
+  "source": {
+    "name": "OpenStreetMap",
+    "snapshot_utc": "2026-08-10T19:15:27Z",
+    "attribution": "© OpenStreetMap contributors",
+    "license": "ODbL 1.0",
+    "url": "https://www.openstreetmap.org/copyright",
+    "method": "Curated named place, beach, bay, landmark, and viewpoint coordinates retrieved through the Overpass API and Nominatim; relation and way coordinates are their OSM search centres. Area radii and specificity are Kòrsou presentation metadata, not OSM boundaries."
+  },
+  "places": [
+    {
+      "id": "willemstad",
+      "name": "Willemstad",
+      "kind": "locality",
+      "latitude_deg": 12.1066695,
+      "longitude_deg": -68.9351307,
+      "area_radius_m": 18000.0,
+      "area_specificity": 1,
+      "osm_type": "node",
+      "osm_id": 50033577
+    },
+    {
+      "id": "bandabou",
+      "name": "Bandabou",
+      "kind": "locality",
+      "latitude_deg": 12.3146867,
+      "longitude_deg": -69.1209260,
+      "area_radius_m": 18000.0,
+      "area_specificity": 1,
+      "osm_type": "node",
+      "osm_id": 11881250466
+    },
+    {
+      "id": "punda",
+      "name": "Punda",
+      "kind": "locality",
+      "latitude_deg": 12.1053754,
+      "longitude_deg": -68.9336622,
+      "area_radius_m": 1200.0,
+      "area_specificity": 3,
+      "osm_type": "relation",
+      "osm_id": 7237830
+    },
+    {
+      "id": "otrobanda",
+      "name": "Otrobanda",
+      "kind": "locality",
+      "latitude_deg": 12.1102585,
+      "longitude_deg": -68.9379836,
+      "area_radius_m": 1500.0,
+      "area_specificity": 3,
+      "osm_type": "relation",
+      "osm_id": 9507102
+    },
+    {
+      "id": "pietermaai",
+      "name": "Pietermaai",
+      "kind": "locality",
+      "latitude_deg": 12.1032564,
+      "longitude_deg": -68.9284747,
+      "area_radius_m": 1400.0,
+      "area_specificity": 3,
+      "osm_type": "relation",
+      "osm_id": 7237824
+    },
+    {
+      "id": "jan-thiel",
+      "name": "Jan Thiel",
+      "kind": "locality",
+      "latitude_deg": 12.0852054,
+      "longitude_deg": -68.8765615,
+      "area_radius_m": 4000.0,
+      "area_specificity": 2,
+      "osm_type": "relation",
+      "osm_id": 9507152
+    },
+    {
+      "id": "caracasbaai",
+      "name": "Caracasbaai",
+      "kind": "bay",
+      "latitude_deg": 12.0724076,
+      "longitude_deg": -68.8666035,
+      "area_radius_m": 3000.0,
+      "area_specificity": 3,
+      "waypoint_order": 2,
+      "osm_type": "node",
+      "osm_id": 3027760929
+    },
+    {
+      "id": "boca-sint-michiel",
+      "name": "Boca Sint Michiel",
+      "kind": "locality",
+      "latitude_deg": 12.1440307,
+      "longitude_deg": -68.9976138,
+      "area_radius_m": 3000.0,
+      "area_specificity": 2,
+      "osm_type": "node",
+      "osm_id": 295322113
+    },
+    {
+      "id": "sint-willibrordus",
+      "name": "Sint Willibrordus",
+      "kind": "locality",
+      "latitude_deg": 12.2168334,
+      "longitude_deg": -69.0646512,
+      "area_radius_m": 5000.0,
+      "area_specificity": 2,
+      "osm_type": "node",
+      "osm_id": 3196532179
+    },
+    {
+      "id": "tera-cora",
+      "name": "Tera Corá",
+      "kind": "locality",
+      "latitude_deg": 12.2247259,
+      "longitude_deg": -69.0274396,
+      "area_radius_m": 6000.0,
+      "area_specificity": 2,
+      "osm_type": "relation",
+      "osm_id": 9507070
+    },
+    {
+      "id": "soto",
+      "name": "Soto",
+      "kind": "locality",
+      "latitude_deg": 12.2789862,
+      "longitude_deg": -69.1101234,
+      "area_radius_m": 4500.0,
+      "area_specificity": 2,
+      "osm_type": "node",
+      "osm_id": 1149225576
+    },
+    {
+      "id": "barber",
+      "name": "Barber",
+      "kind": "locality",
+      "latitude_deg": 12.2790921,
+      "longitude_deg": -69.0789277,
+      "area_radius_m": 5500.0,
+      "area_specificity": 2,
+      "osm_type": "relation",
+      "osm_id": 9507068
+    },
+    {
+      "id": "lagun",
+      "name": "Lagún",
+      "kind": "locality",
+      "latitude_deg": 12.3208592,
+      "longitude_deg": -69.1490075,
+      "area_radius_m": 4000.0,
+      "area_specificity": 2,
+      "osm_type": "node",
+      "osm_id": 1149223842
+    },
+    {
+      "id": "santa-cruz",
+      "name": "Santa Cruz",
+      "kind": "locality",
+      "latitude_deg": 12.3046749,
+      "longitude_deg": -69.1428331,
+      "area_radius_m": 3500.0,
+      "area_specificity": 2,
+      "osm_type": "node",
+      "osm_id": 3197111449
+    },
+    {
+      "id": "westpunt",
+      "name": "Westpunt",
+      "kind": "locality",
+      "latitude_deg": 12.3701853,
+      "longitude_deg": -69.1385508,
+      "area_radius_m": 6500.0,
+      "area_specificity": 2,
+      "osm_type": "relation",
+      "osm_id": 9507059
+    },
+    {
+      "id": "queen-emma-bridge",
+      "name": "Queen Emma Bridge",
+      "kind": "landmark",
+      "latitude_deg": 12.1061045,
+      "longitude_deg": -68.9353842,
+      "waypoint_order": 1,
+      "osm_type": "way",
+      "osm_id": 894738774
+    },
+    {
+      "id": "fort-beekenburg",
+      "name": "Fort Beekenburg",
+      "kind": "landmark",
+      "latitude_deg": 12.0724736,
+      "longitude_deg": -68.8620512,
+      "waypoint_order": 3,
+      "osm_type": "way",
+      "osm_id": 520899797
+    },
+    {
+      "id": "tugboat",
+      "name": "Tugboat",
+      "kind": "beach",
+      "latitude_deg": 12.0690104,
+      "longitude_deg": -68.8616340,
+      "waypoint_order": 4,
+      "osm_type": "way",
+      "osm_id": 491897956
+    },
+    {
+      "id": "jan-thiel-beach",
+      "name": "Jan Thiel Beach",
+      "kind": "beach",
+      "latitude_deg": 12.0750245,
+      "longitude_deg": -68.8797279,
+      "waypoint_order": 5,
+      "osm_type": "node",
+      "osm_id": 3199295756
+    },
+    {
+      "id": "mambo-beach",
+      "name": "Mambo Beach",
+      "kind": "beach",
+      "latitude_deg": 12.0865395,
+      "longitude_deg": -68.8990168,
+      "waypoint_order": 6,
+      "osm_type": "way",
+      "osm_id": 395118963
+    },
+    {
+      "id": "blue-bay-beach",
+      "name": "Blue Bay Beach",
+      "kind": "beach",
+      "latitude_deg": 12.1341933,
+      "longitude_deg": -68.9846352,
+      "waypoint_order": 7,
+      "osm_type": "way",
+      "osm_id": 395119669
+    },
+    {
+      "id": "kokomo-beach",
+      "name": "Kokomo Beach",
+      "kind": "beach",
+      "latitude_deg": 12.1610025,
+      "longitude_deg": -69.0046502,
+      "waypoint_order": 8,
+      "osm_type": "way",
+      "osm_id": 313159339
+    },
+    {
+      "id": "daaibooi",
+      "name": "Daaibooi",
+      "kind": "beach",
+      "latitude_deg": 12.2121341,
+      "longitude_deg": -69.0845420,
+      "waypoint_order": 9,
+      "osm_type": "way",
+      "osm_id": 234450596
+    },
+    {
+      "id": "playa-porto-marie",
+      "name": "Playa Porto Marie",
+      "kind": "beach",
+      "latitude_deg": 12.2190215,
+      "longitude_deg": -69.0860761,
+      "waypoint_order": 10,
+      "osm_type": "way",
+      "osm_id": 313098904
+    },
+    {
+      "id": "cas-abao",
+      "name": "Cas Abao",
+      "kind": "beach",
+      "latitude_deg": 12.2278449,
+      "longitude_deg": -69.0921087,
+      "waypoint_order": 11,
+      "osm_type": "way",
+      "osm_id": 199379765
+    },
+    {
+      "id": "playa-santa-cruz",
+      "name": "Playa Santa Cruz",
+      "kind": "beach",
+      "latitude_deg": 12.3061289,
+      "longitude_deg": -69.1452822,
+      "waypoint_order": 12,
+      "osm_type": "way",
+      "osm_id": 686112399
+    },
+    {
+      "id": "playa-lagun",
+      "name": "Playa Lagun",
+      "kind": "beach",
+      "latitude_deg": 12.3182611,
+      "longitude_deg": -69.1504273,
+      "waypoint_order": 13,
+      "osm_type": "way",
+      "osm_id": 313128036
+    },
+    {
+      "id": "playa-jeremi",
+      "name": "Playa Jeremi",
+      "kind": "beach",
+      "latitude_deg": 12.3288358,
+      "longitude_deg": -69.1502147,
+      "waypoint_order": 14,
+      "osm_type": "relation",
+      "osm_id": 9519695
+    },
+    {
+      "id": "kleine-knip",
+      "name": "Kleine Knip",
+      "kind": "beach",
+      "latitude_deg": 12.3411423,
+      "longitude_deg": -69.1524507,
+      "waypoint_order": 15,
+      "osm_type": "relation",
+      "osm_id": 9519697
+    },
+    {
+      "id": "grote-knip",
+      "name": "Grote Knip",
+      "kind": "beach",
+      "latitude_deg": 12.3520377,
+      "longitude_deg": -69.1513137,
+      "waypoint_order": 16,
+      "osm_type": "way",
+      "osm_id": 144117256
+    },
+    {
+      "id": "boka-tabla",
+      "name": "Boka Tabla",
+      "kind": "lookout",
+      "latitude_deg": 12.3685473,
+      "longitude_deg": -69.1157956,
+      "waypoint_order": 17,
+      "osm_type": "node",
+      "osm_id": 9089438902
+    },
+    {
+      "id": "christoffelberg",
+      "name": "Sint-Christoffelberg",
+      "kind": "lookout",
+      "latitude_deg": 12.3366123,
+      "longitude_deg": -69.1231406,
+      "waypoint_order": 18,
+      "osm_type": "node",
+      "osm_id": 294209755
+    },
+    {
+      "id": "playa-kalki",
+      "name": "Playa Kalki",
+      "kind": "beach",
+      "latitude_deg": 12.3755108,
+      "longitude_deg": -69.1578193,
+      "waypoint_order": 19,
+      "osm_type": "way",
+      "osm_id": 313098903
+    }
+  ]
+}

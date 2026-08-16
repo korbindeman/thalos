@@ -810,7 +810,7 @@ Implementation shape:
   `thalos_physics_local`. `install_baked_planet` registers a
   `GpuAtlasMirrorHeightSource` for each procedural body, and
   `spawn_body_terrain` attaches the mirror handle to the UDLOD terrain
-  entity so `ThalosTerrainPlugin` can refresh it after tile loads /
+  entity so feature-gated `LegacyUdlodPlugin` can refresh it after tile loads /
   GPU readbacks.
 - EVA walking, EVA spawn altitude, debug surface drop, AGL terrain
   patch attach/detach/rebuild, and the HUD GND readout now route

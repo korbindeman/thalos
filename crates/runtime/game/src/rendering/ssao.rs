@@ -1,7 +1,7 @@
 //! Screen-space ambient occlusion (graphics-fidelity F5).
 //!
-//! A half-resolution hemisphere SSAO pass computed from [`SceneDepthImage`]
-//! (`rendering::scene_depth`) — the depth copy that, unlike Bevy's depth prepass,
+//! A half-resolution hemisphere SSAO pass computed from the shared
+//! [`SceneDepthImage`] — the foundation depth copy that, unlike Bevy's prepass,
 //! **sees the forked-udlod terrain**. The result ([`AoImage`]) is sampled one
 //! frame later by the terrain material and multiplied into its *ambient*
 //! occlusion only, so a ship parked in a valley, grass at a tree base, or a
@@ -10,8 +10,8 @@
 //! Why a custom pass rather than Bevy's `ScreenSpaceAmbientOcclusion`: the fork
 //! doesn't queue terrain into `Opaque3dPrepass`, so Bevy's GTAO (which reads the
 //! prepass) would be terrain-blind. `SceneDepthImage` is the only depth that sees
-//! the dominant surface, and this pass mirrors the `CopySceneDepthNode` pattern
-//! that already consumes it.
+//! the dominant surface. This pass remains Thalos-specific and consumes the
+//! application-neutral foundation resource.
 //!
 //! The whole pass runs in **view space** (camera-relative render metres), so it
 //! is f32-safe under big_space's floating origin. The AO texture is written after
@@ -19,7 +19,6 @@
 //! the next frame — a 1-frame latency invisible at planet-cam speeds.
 
 use crate::camera::ShipCamera;
-use crate::rendering::scene_depth::SceneDepthImage;
 use bevy::asset::{Assets, Handle, RenderAssetUsages};
 use bevy::camera::Camera;
 use bevy::core_pipeline::core_3d::main_transparent_pass_3d;
@@ -37,6 +36,7 @@ use bevy::render::{
     texture::GpuImage,
     view::ExtractedView,
 };
+use thalos_render_foundation::SceneDepthImage;
 
 /// AO tuning, edited live-ish (extracted to the render world each frame). Defaults
 /// are the calibration anchor; the whole set wants a `just game runway` / `landing`
@@ -119,6 +119,7 @@ impl SsaoConfig {
 
     /// The terrain-material gate value carried in `inspection.w`:
     /// 0 = skip AO, 1 = apply AO, 2 = paint raw AO (debug).
+    #[cfg(feature = "legacy-udlod")]
     pub fn terrain_flag(&self) -> f32 {
         if !self.enabled {
             0.0

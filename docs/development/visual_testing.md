@@ -29,7 +29,7 @@ Use the smallest workflow that answers the question:
 | Isolate cloud internals | `just compare <scene> cloud-tier` or `cloud-reconstruction` | registered N-way variants |
 | Check whether your edits are present | read `<image>.capture.json` | `source_floor_guaranteed: true` proves the invocation floor is included; `workspace_matches` says whether the checkout stayed exact |
 | Hand framing to/from a human | human presses F9; agent runs `just screenshot <id>` | exact body-fixed camera, lens, scene, and saved time |
-| Hand the result back to a human | write a page with `{{img:…}}` tokens, run `python3 scripts/present_embed.py <page>.html`, publish the `.embedded.html` | *Presenting results* below |
+| Hand the result back to a human | write `<page>.html.in` with image tokens, run `just publish-report <page>.html.in`, open only `<page>.html` | *Presenting results* below |
 
 ### Framing versus fidelity
 
@@ -142,12 +142,12 @@ re-view, replace, or delete instead.
 
 ### F8 — the catalog manager
 
-Press F8 while the ship/free camera, space-center hub, or another 3-D god-view
-is active. The egui manager reads `assets/viewpoints.json`. “Save current as
-new” captures the current body-fixed position, orientation, lens, legacy
-viewport/aspect, target body, and canonical boot scene under a stable id. “View” applies a
-selected entry in the running world; “Replace from current” updates its pose.
-Reload rereads agent edits without restarting the game.
+Press F8 while a 3-D viewer is active. The shared native manager reads the
+application's viewpoint catalog. “Save current as new” captures the current
+typed frame, position, orientation, lens, and application-specific replay
+context under a stable id. “View” applies a selected entry in the running
+world; “Replace from current” updates its pose. Reload rereads agent edits
+without restarting the application.
 
 “View” always enters freecam and seeds freecam's own body-fixed anchor from the
 resolved pose, including the authored lens. Do not write only the rendered
@@ -164,12 +164,8 @@ temporal slew is applied only by `just screenshot` and is called out in the
 manager status. Replacing an agent view from the current camera converts that
 entry into an exact saved pose.
 
-The manager's primary egui context is attached explicitly to the canonical
-`ShipCamera`; it does not own a second window camera. Do not use egui's implicit
-“first camera” attachment here: Thalos creates the inactive map camera before
-the ship camera. Do not add a dedicated same-window overlay camera either: even
-with a load-preserving clear mode, that extra presentation pass blacked out the
-world on the live renderer.
+The manager is ordinary `thalos_ui` attached to the application's existing UI
+camera; it does not own a second world or window camera.
 
 An agent can add or adjust the JSON with the same versioned schema, then ask the
 developer to press F8, reload, and view it. To capture a named point headlessly:
@@ -197,10 +193,12 @@ useful. The result overwrites
 the catalog entry with the newest `saved_unix_ms` and keeps writing
 `latest_perspective.png`.
 
-The catalog stores cameras in each body's authored surface-fixed frame.
-Headless replay projects the pose through the fresh body's current transform and
-uses the real `ShipCamera`, so floating-origin shifts do not change the view and
-all normal render passes remain coupled.
+The v3 catalog tags every camera as either authored-body-fixed or
+projected-local. The game projects authored poses through the fresh body's
+current transform and uses the real `ShipCamera`, so floating-origin shifts do
+not change the view. Kòrsou applies projected-local poses through its own
+planar/ellipsoid adapter. Neither application guesses the other's coordinate
+space.
 
 This is a viewpoint catalog, not a save game. Replay applies the recorded time
 to the canonical world clock, but still boots the named canonical spawn instead
@@ -276,7 +274,7 @@ readback-flush tail. A fixed frame delay is not a readback-completion contract
 | `ssao` | `off`, `on`, `raw` | No AO, normal AO application, and the raw AO field |
 | `shadow` | `cascade-only`, `contact`, `raw` | Isolate the **contact tier** (W18a) from the cascade rig: does the screen-space contact march contribute, and is a defect in the march or in how receivers apply it (ADR-20260722T111848Z) |
 | `terrain-lighting` | `lit`, `fullbright`, `geometric-normal` | Separate raster coverage from lighting, then isolate the terrain normal stack. Honoured by **both** ground renderers (udlod's material and `tile_terrain.wgsl`'s `TileShadingParams::inspect`), so the axis means the same thing whichever one owns the body |
-| `renderer` | `tiles`, `udlod` | The keystone question — the same scene through the **default** standard-path tile renderer and through the **legacy** udlod spine (`THALOS_TILE_RENDERER=0`, an A/B baseline only). Structural (the gate is a boot `OnceLock` deciding which ground streams at all), so it always runs cold |
+| `renderer` | `tiles`, `udlod` | The same scene through the **default** standard-path tile renderer and the **legacy** UDLOD baseline. Structural, so it always runs cold; the capture client automatically adds the default-off `legacy-udlod` feature only for the UDLOD variant. Ordinary game/capture builds never compile it |
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
 | `terrain-regolith-filter` | `legacy-unfiltered`, `footprint-filtered` | Matched before/after for airless procedural-detail Nyquist filtering |
 
@@ -350,7 +348,13 @@ returns.
 
 The page is a self-contained HTML file in `artifacts/reports/`
 (`<date>-<slug>.html`, gitignored like all evidence), handed back by showing it
-in the agent's in-app browser pane. Images are inlined as data URIs even though a
+in the agent's in-app browser pane. Its editable token input is
+`<date>-<slug>.html.in`. The input deliberately does not have an HTML suffix,
+so the token-bearing file cannot masquerade as the finished browser page.
+Its report body also lives in a non-rendering source wrapper: opening the input
+shows only an **Unpublished report input** warning, never a plausible report
+with visible tokens. Never open or hand it back as the result.
+Images are inlined as data URIs even though a
 local file could reference them live: `artifacts/visual/latest/` and the
 comparison dirs are overwritten on every rerun, so a page linking them would
 silently change under the reader — embedding freezes the evidence at hand-back
@@ -382,7 +386,8 @@ never has to re-learn a page. The look is a research paper, not a dashboard:
 
 ### Handing it back
 
-Write the page in `artifacts/reports/` with tokens where the captures go:
+Write `<report>.html.in` in `artifacts/reports/` with tokens where the
+captures go:
 
 ```html
 <h2>Ridge stipple, before and after</h2>
@@ -393,21 +398,25 @@ Write the page in `artifacts/reports/` with tokens where the captures go:
 Then embed it:
 
 ```bash
-python3 scripts/present_embed.py artifacts/reports/report.html --width 1400
+just publish-report artifacts/reports/report.html.in
 ```
 
-and present the result by navigating the agent browser pane to the
-`.embedded.html`'s `file://` path (pass `force: true` if the pane is showing a
-stale snapshot of an earlier file). In a session with no browser pane, publish
-the same file as a claude.ai Artifact or fall back to markdown with PNG paths.
+and present the result by navigating the agent browser pane to the canonical
+`report.html` `file://` path (pass `force: true` if the pane is showing a stale
+snapshot of an earlier file). In a session with no browser pane, publish the
+same file as a claude.ai Artifact or fall back to markdown with PNG paths.
 
-The script writes `report.embedded.html` with every token replaced by an `<img>`
-carrying a downscaled data URI (JPEG q82, or PNG when the source has alpha), and
-prints the per-image and total payload size to stderr. Open the
-`.embedded.html`; keep the token source beside it, so a recapture only costs a
-rerun of the script. Token paths resolve relative to the page, then to the
-repository root. Aim for a page in the low single-digit MB — `--width` is the
-knob.
+The command writes `report.html` with every token replaced by an `<img>` carrying
+a data URI. It fails instead of publishing if a token is malformed or unresolved,
+if no image was embedded, if any live image reference remains, or if the input
+lacks the template's unpublished-input wrapper. On success it prints `OPEN ONLY:`
+followed by the canonical file URL. With
+Pillow installed it downscales to JPEG q82, or PNG when the source has alpha;
+without Pillow it embeds the original files so publication still works. Open
+`report.html`; keep `report.html.in` beside it, so a recapture only costs a
+rerun of the command. Token paths resolve relative to the input, then to the
+repository root. Aim for a page in the low single-digit MB; `--width` is the
+underlying script's size knob when Pillow is available.
 
 What belongs on it: the matched before/after pair from one comparison run at
 identical framing and labelled (never two differently-framed stills), what you

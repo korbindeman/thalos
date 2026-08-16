@@ -49,7 +49,7 @@ pub use warp_time_panel::TimeDisplayMode;
 
 use bevy::prelude::*;
 
-use thalos_game_state::ui::not_in_photo_mode;
+use thalos_photo_mode::not_in_photo_mode;
 
 pub use input_gate::{UiKeyboardGate, UiPointerGate};
 
@@ -225,7 +225,7 @@ impl Plugin for HudPlugin {
 pub use thalos_game_state::ui::HudPanel;
 
 fn hide_in_photo_mode(
-    photo: Res<thalos_game_state::ui::PhotoMode>,
+    photo: Res<thalos_photo_mode::PhotoMode>,
     mut q: Query<&mut Visibility, With<HudPanel>>,
 ) {
     if !photo.is_changed() {

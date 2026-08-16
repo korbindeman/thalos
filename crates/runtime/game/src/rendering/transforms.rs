@@ -8,7 +8,7 @@ use big_space::prelude::CellCoord;
 use thalos_world::{BodyDefinition, BodyId};
 
 use super::screen_marker_radius;
-use super::types::{CelestialBody, ShipMarker, SimulationState, SolarSystemState};
+use super::types::{CelestialBody, CraftIdentity, ShipMarker, SimulationState, SolarSystemState};
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera, ShipCamera};
 use crate::coords::{
     MAP_SCALE, RenderFrame, RenderGhostFocus, RenderOrigin, WorldScale, to_render_pos,
@@ -216,29 +216,32 @@ pub(super) fn update_ship_position(
     focus: Res<CameraFocus>,
     photo_mode: Res<crate::photo_mode::PhotoMode>,
     camera_query: Query<&Transform, (With<ActiveCamera>, With<OrbitCamera>)>,
-    mut query: Query<(&mut Transform, &mut Visibility), (With<ShipMarker>, Without<OrbitCamera>)>,
+    mut query: Query<
+        (&CraftIdentity, &mut Transform, &mut Visibility),
+        (With<ShipMarker>, Without<OrbitCamera>),
+    >,
 ) {
     let Ok(cam_tf) = camera_query.single() else {
         return;
     };
-    let Some(craft) = snapshot.crafts.first() else {
-        return;
-    };
-    let ship_soi_body = crate::camera::find_reference_body(
-        craft.translation.position,
-        &snapshot.body_defs,
-        &snapshot.body_states,
-    );
-    let marker_visible = matches!(*view, ViewMode::Map)
-        && !photo_mode.active
-        && ship_marker_visible_in_focus(focus.target, ship_soi_body, &snapshot.body_defs);
-    let target_visibility = if marker_visible {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-
-    for (mut transform, mut visibility) in &mut query {
+    for (identity, mut transform, mut visibility) in &mut query {
+        let Some(craft) = craft_for_marker(&snapshot, identity.0) else {
+            *visibility = Visibility::Hidden;
+            continue;
+        };
+        let ship_soi_body = crate::camera::find_reference_body(
+            craft.translation.position,
+            &snapshot.body_defs,
+            &snapshot.body_states,
+        );
+        let marker_visible = matches!(*view, ViewMode::Map)
+            && !photo_mode.active
+            && ship_marker_visible_in_focus(focus.target, ship_soi_body, &snapshot.body_defs);
+        let target_visibility = if marker_visible {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
         transform.translation = to_render_pos(craft.translation.position - origin.position, &scale);
         transform.rotation = cam_tf.rotation;
         transform.scale = Vec3::splat(screen_marker_radius(
@@ -249,6 +252,13 @@ pub(super) fn update_ship_position(
             *visibility = target_visibility;
         }
     }
+}
+
+fn craft_for_marker(
+    snapshot: &MapSnapshot,
+    craft_id: thalos_physics_canonical::canonical::CraftId,
+) -> Option<&thalos_physics_canonical::canonical::CraftState> {
+    snapshot.craft(craft_id)
 }
 
 fn ship_marker_visible_in_focus(
@@ -323,8 +333,11 @@ fn surface_world_to_body_orientation(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::math::DVec3;
-    use thalos_physics_canonical::canonical::Epoch;
+    use bevy::math::{DMat3, DQuat, DVec3};
+    use thalos_physics_canonical::canonical::{
+        AuthorityMode, CraftState, Epoch, MassState, ResourceState, TranslationalState,
+    };
+    use thalos_physics_canonical::types::AttitudeState;
 
     fn body_state(position: DVec3, velocity: DVec3) -> BodyState {
         BodyState {
@@ -337,6 +350,29 @@ mod tests {
             mass_kg: 1.0,
             gm: 1.0,
             radius_m: 1.0,
+        }
+    }
+
+    fn craft_state(id: u64, position: DVec3) -> CraftState {
+        CraftState {
+            id,
+            epoch: Epoch::ZERO,
+            translation: TranslationalState {
+                position,
+                velocity: DVec3::ZERO,
+            },
+            attitude: AttitudeState {
+                orientation: DQuat::IDENTITY,
+                angular_velocity: DVec3::ZERO,
+            },
+            mass: MassState {
+                wet_mass_kg: 1.0,
+                dry_mass_kg: 1.0,
+                inertia_body_kg_m2: DMat3::IDENTITY,
+                center_of_mass_body_m: DVec3::ZERO,
+            },
+            resources: ResourceState,
+            authority: AuthorityMode::OnRails { trajectory: 0 },
         }
     }
 
@@ -360,6 +396,22 @@ mod tests {
                 "axis {axis:?} changed by {angle} rad, expected < {max_angle_rad}"
             );
         }
+    }
+
+    #[test]
+    fn map_marker_resolves_its_matching_craft_in_a_two_root_snapshot() {
+        let snapshot = MapSnapshot {
+            crafts: vec![
+                craft_state(11, DVec3::new(1.0, 0.0, 0.0)),
+                craft_state(22, DVec3::new(2.0, 0.0, 0.0)),
+            ],
+            ..default()
+        };
+
+        let craft = craft_for_marker(&snapshot, 22).unwrap();
+
+        assert_eq!(craft.id, 22);
+        assert_eq!(craft.translation.position, DVec3::new(2.0, 0.0, 0.0));
     }
 
     #[test]

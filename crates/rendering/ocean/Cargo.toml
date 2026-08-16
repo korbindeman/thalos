@@ -1,0 +1,10 @@
+[package]
+name = "thalos_ocean"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+thalos_render_model = { path = "../model" }
+thalos_world = { path = "../../domain/world" }

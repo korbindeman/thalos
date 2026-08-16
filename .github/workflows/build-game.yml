@@ -1,4 +1,5 @@
 name: Build game
+run-name: ${{ inputs.release_ref != '' && format('Release {0}', inputs.release_ref) || format('Build {0}', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -13,9 +14,16 @@ on:
         required: true
         default: false
         type: boolean
-  push:
-    tags:
-      - "v*"
+      release_ref:
+        description: "Internal: immutable tag ref supplied by the release dispatcher"
+        required: false
+        default: ""
+        type: string
+      release_sha:
+        description: "Internal: expected commit for release_ref"
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
@@ -31,10 +39,15 @@ jobs:
     outputs:
       cargo_features: ${{ steps.configuration.outputs.cargo_features }}
       use_default_features: ${{ steps.configuration.outputs.use_default_features }}
+      is_release: ${{ steps.configuration.outputs.is_release }}
+      release_tag: ${{ steps.configuration.outputs.release_tag }}
+      source_revision: ${{ steps.configuration.outputs.source_revision }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_ref || github.ref }}
 
       - name: Resolve and validate feature selection
         id: configuration
@@ -42,14 +55,11 @@ jobs:
         env:
           INPUT_CARGO_FEATURES: ${{ inputs.cargo_features }}
           INPUT_USE_DEFAULT_FEATURES: ${{ inputs.use_default_features }}
+          INPUT_RELEASE_REF: ${{ inputs.release_ref }}
+          INPUT_RELEASE_SHA: ${{ inputs.release_sha }}
         run: |
-          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            features="${INPUT_CARGO_FEATURES}"
-            use_defaults="${INPUT_USE_DEFAULT_FEATURES}"
-          else
-            features="neural-terrain-default"
-            use_defaults="false"
-          fi
+          features="${INPUT_CARGO_FEATURES}"
+          use_defaults="${INPUT_USE_DEFAULT_FEATURES}"
 
           if [[ -n "${features}" && ! "${features}" =~ ^[A-Za-z0-9_.-]+(,[A-Za-z0-9_.-]+)*$ ]]; then
             echo "Features must be a comma-separated list of Cargo feature names." >&2
@@ -60,14 +70,47 @@ jobs:
             exit 1
           fi
 
+          source_revision="$(git rev-parse HEAD)"
+          is_release="false"
+          release_tag=""
+
+          if [[ -n "${INPUT_RELEASE_REF}" || -n "${INPUT_RELEASE_SHA}" ]]; then
+            if [[ -z "${INPUT_RELEASE_REF}" || -z "${INPUT_RELEASE_SHA}" ]]; then
+              echo "release_ref and release_sha must be supplied together." >&2
+              exit 1
+            fi
+            if [[ ! "${INPUT_RELEASE_REF}" =~ ^refs/tags/v[0-9A-Za-z.+-]+$ ]]; then
+              echo "release_ref must be a refs/tags/v* ref." >&2
+              exit 1
+            fi
+            if [[ ! "${INPUT_RELEASE_SHA}" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "release_sha must be a full lowercase commit SHA." >&2
+              exit 1
+            fi
+            if [[ "${source_revision}" != "${INPUT_RELEASE_SHA}" ]]; then
+              echo "Release ref resolved to ${source_revision}, expected ${INPUT_RELEASE_SHA}." >&2
+              exit 1
+            fi
+
+            is_release="true"
+            release_tag="${INPUT_RELEASE_REF#refs/tags/}"
+          fi
+
           echo "cargo_features=${features}" >> "${GITHUB_OUTPUT}"
           echo "use_default_features=${use_defaults}" >> "${GITHUB_OUTPUT}"
+          echo "is_release=${is_release}" >> "${GITHUB_OUTPUT}"
+          echo "release_tag=${release_tag}" >> "${GITHUB_OUTPUT}"
+          echo "source_revision=${source_revision}" >> "${GITHUB_OUTPUT}"
           echo "Cargo features: ${features:-<none>}"
           echo "Use default features: ${use_defaults}"
+          echo "Source revision: ${source_revision}"
+          echo "Release tag: ${release_tag:-<manual build>}"
 
       - name: Validate release tag matches workspace version
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.configuration.outputs.is_release == 'true'
         shell: bash
+        env:
+          RELEASE_TAG: ${{ steps.configuration.outputs.release_tag }}
         run: |
           version="$(awk '
             /^\[workspace\.package\]/ { in_section = 1; next }
@@ -80,14 +123,14 @@ jobs:
               exit
             }
           ' Cargo.toml)"
-          tag="${GITHUB_REF_NAME#v}"
+          tag="${RELEASE_TAG#v}"
 
           if [[ -z "${version}" ]]; then
             echo "Could not read [workspace.package] version from Cargo.toml" >&2
             exit 1
           fi
           if [[ "${tag}" != "${version}" ]]; then
-            echo "Release tag ${GITHUB_REF_NAME} does not match workspace version ${version}" >&2
+            echo "Release tag ${RELEASE_TAG} does not match workspace version ${version}" >&2
             exit 1
           fi
 
@@ -107,21 +150,31 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
 
       - name: Install pinned Rust toolchain
         shell: pwsh
         run: rustup toolchain install 1.97.0 --profile minimal --target $env:BUILD_TARGET
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
+      - name: Restore Rust dependency cache
+        id: rust-cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: windows-${{ runner.arch }}-${{ env.BUILD_TARGET }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            windows-${{ runner.arch }}-${{ env.BUILD_TARGET }}-cargo-
+          prefix-key: v1-release
+          key: ${{ env.BUILD_TARGET }}-${{ env.BUILD_FEATURES }}-defaults-${{ env.USE_DEFAULT_FEATURES }}
+          cache-bin: "false"
+          cache-workspace-crates: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Record Rust cache result
+        shell: pwsh
+        env:
+          CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          "### Windows Rust dependency cache" >> $env:GITHUB_STEP_SUMMARY
+          "Exact hit: ``$env:CACHE_HIT``" >> $env:GITHUB_STEP_SUMMARY
+          "Target: ``$env:BUILD_TARGET``" >> $env:GITHUB_STEP_SUMMARY
 
       - name: Build game
         shell: pwsh
@@ -160,11 +213,13 @@ jobs:
       BUILD_TARGET: x86_64-pc-windows-msvc
       BUILD_ARTIFACT: thalos_game-windows-x64
       BINARY_ARTIFACT: windows-build-executable
+      SOURCE_REVISION: ${{ needs.prepare.outputs.source_revision }}
 
     steps:
       - name: Checkout runtime content
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
           lfs: true
 
       - name: Verify Git LFS objects
@@ -186,7 +241,7 @@ jobs:
             -RequestedFeatures $env:BUILD_FEATURES `
             -UseDefaultFeatures ($env:USE_DEFAULT_FEATURES -eq "true") `
             -Target $env:BUILD_TARGET `
-            -Revision $env:GITHUB_SHA
+            -Revision $env:SOURCE_REVISION
 
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
@@ -200,7 +255,7 @@ jobs:
 
   build-macos:
     name: macOS arm64
-    if: github.event_name == 'push'
+    if: needs.prepare.outputs.is_release == 'true'
     needs: prepare
     runs-on: macos-14
     env:
@@ -208,11 +263,13 @@ jobs:
       USE_DEFAULT_FEATURES: ${{ needs.prepare.outputs.use_default_features }}
       BUILD_TARGET: aarch64-apple-darwin
       BUILD_ARTIFACT: thalos_game-macos-arm64
+      SOURCE_REVISION: ${{ needs.prepare.outputs.source_revision }}
 
     steps:
       - name: Checkout runtime content
         uses: actions/checkout@v4
         with:
+          ref: ${{ needs.prepare.outputs.source_revision }}
           lfs: true
 
       - name: Verify Git LFS objects
@@ -221,16 +278,26 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.0 --profile minimal --target "${BUILD_TARGET}"
 
-      - name: Cache Cargo registry
-        uses: actions/cache@v4
+      - name: Restore Rust dependency cache
+        id: rust-cache
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-          key: macos-${{ runner.arch }}-${{ env.BUILD_TARGET }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            macos-${{ runner.arch }}-${{ env.BUILD_TARGET }}-cargo-
+          prefix-key: v1-release
+          key: ${{ env.BUILD_TARGET }}-${{ env.BUILD_FEATURES }}-defaults-${{ env.USE_DEFAULT_FEATURES }}
+          cache-bin: "false"
+          cache-workspace-crates: "false"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Record Rust cache result
+        shell: bash
+        env:
+          CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: |
+          {
+            echo "### macOS Rust dependency cache"
+            echo "Exact hit: \`${CACHE_HIT}\`"
+            echo "Target: \`${BUILD_TARGET}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
 
       - name: Build game
         shell: bash
@@ -254,7 +321,7 @@ jobs:
           cp LICENSE LICENSE-ASSETS LICENSING.md "${package}/"
           "${package}/thalos_game" --build-info > "${package}/BUILD_INFO.txt"
           printf 'revision=%s\ntarget=%s\nrequested_features=%s\nuse_default_features=%s\n' \
-            "${GITHUB_SHA}" "${BUILD_TARGET}" "${BUILD_FEATURES:-<none>}" \
+            "${SOURCE_REVISION}" "${BUILD_TARGET}" "${BUILD_FEATURES:-<none>}" \
             "${USE_DEFAULT_FEATURES}" >> "${package}/BUILD_INFO.txt"
           tar -czf "dist/${BUILD_ARTIFACT}.tar.gz" -C dist "${BUILD_ARTIFACT}"
           (cd dist && shasum -a 256 "${BUILD_ARTIFACT}.tar.gz" > "${BUILD_ARTIFACT}.tar.gz.sha256")
@@ -270,11 +337,13 @@ jobs:
 
   release:
     name: Publish GitHub prerelease
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: needs.prepare.outputs.is_release == 'true'
     needs: [prepare, package-windows, build-macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
 
     steps:
       - name: Download build artifacts
@@ -288,9 +357,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" dist/* \
+          gh release create "${RELEASE_TAG}" dist/* \
             --repo "${GITHUB_REPOSITORY}" \
             --verify-tag \
             --prerelease \
-            --title "${GITHUB_REF_NAME} pre-alpha" \
+            --title "${RELEASE_TAG} pre-alpha" \
             --generate-notes

@@ -19,6 +19,7 @@
 //! 3. Maps keyboard input to warp controls.
 
 use bevy::prelude::*;
+use thalos_game_state::ActiveCraftMut;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{AuthorityMode, Epoch};
 use thalos_physics_canonical::maneuver::ManeuverNode;
@@ -272,7 +273,10 @@ pub fn handle_warp_controls(
 /// [`NodeBurnPhase::Planned`]: crate::maneuver::NodeBurnPhase::Planned
 /// [`NodeBurnPhase::Executing`]: crate::maneuver::NodeBurnPhase::Executing
 /// [`NodeBurnPhase::Executed`]: crate::maneuver::NodeBurnPhase::Executed
-fn sync_maneuver_plan(mut plan: ResMut<ManeuverPlan>, mut sim: ResMut<SimulationState>) {
+fn sync_maneuver_plan(mut plan: ActiveCraftMut<ManeuverPlan>, mut sim: ResMut<SimulationState>) {
+    let Some(mut plan) = plan.get_mut() else {
+        return;
+    };
     if !plan.dirty {
         return;
     }

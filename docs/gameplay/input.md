@@ -199,10 +199,10 @@ keyboard are two surfaces on **one** state — movement settings push into
 
 ## UI input ownership
 
-Two UIs draw over the same 3-D view — native Bevy UI (HUD, `thalos_ui` panels
-and text fields) and the egui F8 viewpoint manager — and either can take the
-pointer or the keyboard. `hud::input_gate` folds both into **one resource per
-device**, written by `update_ui_input_gates`:
+Several native Bevy UI surfaces can draw over the same 3-D view: the HUD,
+`thalos_ui` panels and text fields, and the shared F8/F9 viewpoint UI. Any of
+them can take the pointer or keyboard. `hud::input_gate` folds their state into
+**one resource per device**, written by `update_ui_input_gates`:
 
 - `UiPointerGate.hovered` — a UI surface owns the pointer.
 - `UiKeyboardGate.text_entry()` — a text field owns the keyboard.
@@ -256,4 +256,3 @@ Enhanced input updates in `PreUpdate`. Intent resources are reset before
 `EnhancedInputSystems::Apply` and collected immediately after it.
 Simulation and presentation systems then read those intent resources
 during their normal `Update` sets.
-

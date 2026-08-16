@@ -6,6 +6,7 @@
 use super::*;
 
 use bevy::math::DVec3;
+use thalos_game_state::ActiveCraftRef;
 use thalos_physics_canonical::surface_local::{
     SurfaceAnchor, SurfaceLocalFrame, SurfaceLocalState, reanchor,
 };
@@ -53,7 +54,7 @@ use crate::rendering::SimulationState;
 pub(crate) fn snap_avian_from_canonical(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
-    eva_mode: Res<EvaMode>,
+    eva_mode: ActiveCraftRef<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut craft_q: Query<
         (
@@ -67,6 +68,9 @@ pub(crate) fn snap_avian_from_canonical(
         With<LocalCraftBody>,
     >,
 ) {
+    let Some(eva_mode) = eva_mode.get() else {
+        return;
+    };
     // KSP-style EVA *while grounded*: the player owns Avian state outright via
     // `player_controller`'s motion + terrain-clamp systems. Snapping
     // canonical → Avian here would fight those writes (canonical is
@@ -161,7 +165,7 @@ pub(crate) fn snap_avian_from_canonical(
 pub(crate) fn readback_local_craft(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
-    eva_mode: Res<EvaMode>,
+    eva_mode: ActiveCraftRef<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut diagnostics: ResMut<AvianHandoffDiagnostics>,
     craft_q: Query<(
@@ -172,6 +176,9 @@ pub(crate) fn readback_local_craft(
         &LocalCraftBody,
     )>,
 ) {
+    let Some(eva_mode) = eva_mode.get() else {
+        return;
+    };
     let Some(bubble) = active.bubble.as_ref() else {
         return;
     };

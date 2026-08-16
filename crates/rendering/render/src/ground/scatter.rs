@@ -23,11 +23,11 @@ use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use thalos_terrain::TerrainFlatten;
 
 use crate::ground::height_source::HeightSource;
-use crate::ground::pipeline::material_masks_from_heights;
+use crate::ground::material_masks::material_masks_from_heights;
 use crate::ground::rendered_height::TerrainPatchBasis;
 use crate::ground::rock_mesh::RockMeshData;
 use crate::ground::tile_lattice::{TileKey, TileLattice, cube_dir, tiles_per_side};
-use crate::ground::tree_mesh::TreeMeshData;
+use thalos_vegetation::{ImpostorInstance, TreeMeshData, combine_impostor_mesh};
 
 /// Vegetation clearance above sea level (m): grass blades, GPU grass, and
 /// scattered plants/trees all require `height > sea_level +
@@ -933,49 +933,23 @@ pub fn combine_impostor_tile_mesh(
     atlas_species: &[Option<u32>],
     grove_scale: f32,
 ) -> Option<Mesh> {
-    const CORNERS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut normals: Vec<[f32; 3]> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut uv0: Vec<[f32; 2]> = Vec::new();
-    let mut uv1: Vec<[f32; 2]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-
-    for inst in instances {
-        let Some(Some(layer)) = atlas_species.get(inst.species as usize) else {
-            continue;
-        };
-        let base = inst.root_offset_body_m.to_array();
-        let up = inst.up_body.normalize_or(Vec3::Y).to_array();
-        let yaw01 = (inst.yaw / std::f32::consts::TAU).rem_euclid(1.0);
-        let start = positions.len() as u32;
-        for corner in CORNERS {
-            positions.push(base);
-            normals.push(up);
-            // Same landcover tint as the mesh rings (g normalized to 1), so
-            // the stand keeps its ground-family hue across the LOD handoff.
-            colors.push([inst.tint_rb.x, 1.0, inst.tint_rb.y, yaw01]);
-            uv0.push(corner);
-            uv1.push([inst.scale * grove_scale.max(0.0), *layer as f32]);
-        }
-        indices.extend_from_slice(&[start, start + 1, start + 2, start, start + 2, start + 3]);
-    }
-
-    if positions.is_empty() {
-        return None;
-    }
-
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::RENDER_WORLD,
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
-    mesh.insert_indices(Indices::U32(indices));
-    Some(mesh)
+    let impostors = instances
+        .iter()
+        .filter_map(|instance| {
+            let layer = atlas_species.get(instance.species as usize)?.as_ref()?;
+            Some(ImpostorInstance {
+                position: instance.root_offset_body_m,
+                up: instance.up_body,
+                scale: instance.scale * grove_scale.max(0.0),
+                species: *layer,
+                // Preserve the planetary renderer's existing landcover tint:
+                // red/blue vary by stand while green remains normalized.
+                tint: Vec3::new(instance.tint_rb.x, 1.0, instance.tint_rb.y),
+                yaw: instance.yaw,
+            })
+        })
+        .collect::<Vec<_>>();
+    combine_impostor_mesh(&impostors)
 }
 
 // ---------------------------------------------------------------------------

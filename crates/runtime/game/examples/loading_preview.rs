@@ -37,7 +37,7 @@ use bevy::ui::IsDefaultUiCamera;
 use bevy::window::ExitCondition;
 use bevy::winit::WinitPlugin;
 
-use thalos_runtime::loading_preview::{
+use thalos_game_runtime::loading_preview::{
     LoadingScreenPreviewPlugin, LoadingTracker, PerfSamples, StepDesc, VramBarPlugin, step,
 };
 

@@ -15,8 +15,9 @@ use std::sync::Arc;
 use glam::{DVec3, Vec3};
 use serde::{Deserialize, Serialize};
 
-use crate::cubemap::{Cubemap, CubemapFace};
-use crate::query::SurfaceSample;
+use crate::cubemap::{Cubemap, CubemapFace, face_uv_to_dir};
+use crate::generic_terrestrial_field::RuntimeTerrainDetail;
+use crate::query::{SurfacePatch, SurfaceSample};
 use crate::{
     BakedSurface, DynamicSurfaceState, PlanetSurface, Region, StaticSurfaceData, SurfaceQuery,
 };
@@ -924,6 +925,7 @@ fn bincode_config()
 pub struct PackageSurface {
     manifest: Arc<TerrainPackageManifest>,
     inner: BakedSurface,
+    refinement: Arc<PackageRefinementMetadata>,
 }
 
 impl PackageSurface {
@@ -932,9 +934,11 @@ impl PackageSurface {
         surface: PlanetSurface,
         dynamic_state: DynamicSurfaceState,
     ) -> Self {
+        let refinement = Arc::new(PackageRefinementMetadata::new(&manifest, &surface));
         Self {
             manifest: Arc::new(manifest),
             inner: BakedSurface::new(Arc::new(surface), dynamic_state),
+            refinement,
         }
     }
 
@@ -968,9 +972,282 @@ impl SurfaceQuery for PackageSurface {
         self.inner.height_range_m()
     }
 
+    fn refinement_error_m(&self, patch: SurfacePatch, refined_spacing_m: f32) -> Option<f32> {
+        self.refinement.error_m(patch, refined_spacing_m)
+    }
+
     fn prewarm(&self, region: Region, lod_m: f32) {
         self.inner.prewarm(region, lod_m)
     }
+}
+
+/// Runtime index for the package's authored refinement bounds.
+///
+/// Package residuals do not describe geometry composed after the package is
+/// decoded. Airless regolith has a small global amplitude we can bound; local
+/// runtime craters are marked in a compact cubemap mask and deliberately make
+/// the answer unknown for overlapping patches. Other runtime-detail strategies
+/// and dynamic layers retain the selector's existing heuristic wholesale.
+#[derive(Clone)]
+struct PackageRefinementMetadata {
+    body_radius_m: f32,
+    base_resolution: u32,
+    level_count: u8,
+    node_errors_m: HashMap<PackageNodeAddress, f32>,
+    runtime_error_m: f32,
+    runtime_features: RuntimeFeatureMask,
+    complete: bool,
+}
+
+impl PackageRefinementMetadata {
+    fn new(manifest: &TerrainPackageManifest, surface: &PlanetSurface) -> Self {
+        let mut runtime_features = RuntimeFeatureMask::default();
+        for crater in surface.static_surface.craters.iter().filter(|crater| {
+            crater.radius_m < surface.static_surface.cubemap_bake_threshold_m
+                && crater.radius_m > 0.0
+        }) {
+            runtime_features.mark_cap(
+                crater.center,
+                (crater.influence_radius_m() / manifest.body_radius_m.max(1.0))
+                    .min(std::f32::consts::PI),
+            );
+        }
+        runtime_features.finish();
+
+        let (runtime_error_m, supported_detail) = match surface.static_surface.runtime_detail {
+            // A coarse interpolation and a refined sample can land at opposite
+            // ends of the signed detail range, hence 2× amplitude.
+            RuntimeTerrainDetail::AirlessRegolith(params) => (2.0 * params.amplitude_m.abs(), true),
+            RuntimeTerrainDetail::LegacyHmf
+            | RuntimeTerrainDetail::BasicContinental(_)
+            | RuntimeTerrainDetail::OceanicContinental(_) => (0.0, false),
+        };
+
+        let node_errors_m = manifest
+            .nodes
+            .iter()
+            .map(|node| {
+                // A pruned residual is absent from the reconstructed runtime
+                // surface, so refining cannot reveal it. For retained nodes,
+                // predictor error bounds the authored residual and geometric
+                // error covers its quantized reconstruction.
+                let error = if node.blob_index.is_some() {
+                    node.predictor_error_m + node.geometric_error_m
+                } else {
+                    0.0
+                };
+                (node.address, error)
+            })
+            .collect();
+
+        Self {
+            body_radius_m: manifest.body_radius_m,
+            base_resolution: manifest.height_pyramid.base_resolution,
+            level_count: manifest.height_pyramid.level_count,
+            node_errors_m,
+            runtime_error_m,
+            runtime_features,
+            complete: supported_detail && surface.dynamic_layers.is_empty(),
+        }
+    }
+
+    fn error_m(&self, patch: SurfacePatch, refined_spacing_m: f32) -> Option<f32> {
+        if !self.complete
+            || !refined_spacing_m.is_finite()
+            || refined_spacing_m <= 0.0
+            || self.runtime_features.overlaps(patch)?
+        {
+            return None;
+        }
+
+        let face_resolution = self.body_radius_m * std::f32::consts::FRAC_PI_2 / refined_spacing_m;
+        let target_lod = if face_resolution <= self.base_resolution as f32 {
+            0
+        } else {
+            (face_resolution / self.base_resolution as f32)
+                .log2()
+                .ceil() as u8
+        };
+
+        // Residuals at and below the refined sampling scale can all move a
+        // newly introduced vertex. Max within a level, sum across levels:
+        // residuals compose additively down the hierarchy.
+        let mut package_error_m = 0.0f32;
+        for lod in target_lod.max(1)..self.level_count {
+            package_error_m += self.max_error_at_lod(patch, lod)?;
+        }
+        Some(package_error_m + self.runtime_error_m)
+    }
+
+    fn max_error_at_lod(&self, patch: SurfacePatch, lod: u8) -> Option<f32> {
+        if patch.face >= 6
+            || patch.x >= (1u32.checked_shl(patch.level.into())?)
+            || patch.y >= (1u32.checked_shl(patch.level.into())?)
+        {
+            return None;
+        }
+
+        if lod < patch.level {
+            let shift = u32::from(patch.level - lod);
+            return self
+                .node_errors_m
+                .get(&PackageNodeAddress::Cube {
+                    face: patch.face,
+                    lod,
+                    x: patch.x >> shift,
+                    y: patch.y >> shift,
+                })
+                .copied();
+        }
+
+        let scale = 1u32.checked_shl(u32::from(lod - patch.level))?;
+        let x0 = patch.x.checked_mul(scale)?;
+        let y0 = patch.y.checked_mul(scale)?;
+        let mut max_error_m = 0.0f32;
+        for y in y0..y0 + scale {
+            for x in x0..x0 + scale {
+                max_error_m =
+                    max_error_m.max(*self.node_errors_m.get(&PackageNodeAddress::Cube {
+                        face: patch.face,
+                        lod,
+                        x,
+                        y,
+                    })?);
+            }
+        }
+        Some(max_error_m)
+    }
+}
+
+/// Integral-image occupancy of runtime-only crater influence at a fixed cube
+/// level. False positives only preserve the old selector; false negatives
+/// would make package error claim authority over geometry it does not bound.
+#[derive(Clone)]
+struct RuntimeFeatureMask {
+    cells: [Vec<u8>; 6],
+    sums: [Vec<u32>; 6],
+}
+
+impl Default for RuntimeFeatureMask {
+    fn default() -> Self {
+        let side = 1usize << Self::LEVEL;
+        Self {
+            cells: std::array::from_fn(|_| vec![0; side * side]),
+            sums: std::array::from_fn(|_| Vec::new()),
+        }
+    }
+}
+
+impl RuntimeFeatureMask {
+    const LEVEL: u8 = 8;
+
+    fn mark_cap(&mut self, center: Vec3, angular_radius: f32) {
+        let center = center.normalize_or_zero();
+        if center == Vec3::ZERO {
+            return;
+        }
+        for face in 0..6u8 {
+            self.mark_patch(face, 0, 0, 0, center, angular_radius.max(0.0));
+        }
+    }
+
+    fn mark_patch(
+        &mut self,
+        face: u8,
+        level: u8,
+        x: u32,
+        y: u32,
+        cap_center: Vec3,
+        cap_radius: f32,
+    ) {
+        let Some((center, radius)) = patch_cone(face, level, x, y) else {
+            return;
+        };
+        let separation = center.dot(cap_center).clamp(-1.0, 1.0).acos();
+        if separation > radius + cap_radius + 1.0e-5 {
+            return;
+        }
+        if level == Self::LEVEL {
+            let side = 1usize << Self::LEVEL;
+            self.cells[face as usize][y as usize * side + x as usize] = 1;
+            return;
+        }
+        let next = level + 1;
+        for dy in 0..2 {
+            for dx in 0..2 {
+                self.mark_patch(face, next, x * 2 + dx, y * 2 + dy, cap_center, cap_radius);
+            }
+        }
+    }
+
+    fn finish(&mut self) {
+        let side = 1usize << Self::LEVEL;
+        let stride = side + 1;
+        for face in 0..6 {
+            let mut sum = vec![0u32; stride * stride];
+            for y in 0..side {
+                let mut row = 0u32;
+                for x in 0..side {
+                    row += u32::from(self.cells[face][y * side + x]);
+                    sum[(y + 1) * stride + x + 1] = sum[y * stride + x + 1] + row;
+                }
+            }
+            self.sums[face] = sum;
+        }
+        self.cells = std::array::from_fn(|_| Vec::new());
+    }
+
+    fn overlaps(&self, patch: SurfacePatch) -> Option<bool> {
+        if patch.face >= 6 || self.sums[patch.face as usize].is_empty() {
+            return None;
+        }
+        let patch_side = 1u32.checked_shl(patch.level.into())?;
+        if patch.x >= patch_side || patch.y >= patch_side {
+            return None;
+        }
+        let mask_side = 1u32 << Self::LEVEL;
+        let (x0, y0, x1, y1) = if patch.level <= Self::LEVEL {
+            let scale = 1u32 << (Self::LEVEL - patch.level);
+            (
+                patch.x * scale,
+                patch.y * scale,
+                (patch.x + 1) * scale,
+                (patch.y + 1) * scale,
+            )
+        } else {
+            let shift = patch.level - Self::LEVEL;
+            let x = patch.x >> shift;
+            let y = patch.y >> shift;
+            (x, y, x + 1, y + 1)
+        };
+        debug_assert!(x1 <= mask_side && y1 <= mask_side);
+        let stride = mask_side as usize + 1;
+        let sum = &self.sums[patch.face as usize];
+        let at = |x: u32, y: u32| sum[y as usize * stride + x as usize];
+        Some(at(x1, y1) + at(x0, y0) > at(x1, y0) + at(x0, y1))
+    }
+}
+
+fn patch_cone(face: u8, level: u8, x: u32, y: u32) -> Option<(Vec3, f32)> {
+    let face = *CubemapFace::ALL.get(face as usize)?;
+    let side = 1u32.checked_shl(level.into())? as f32;
+    let u0 = x as f32 / side;
+    let v0 = y as f32 / side;
+    let u1 = (x + 1) as f32 / side;
+    let v1 = (y + 1) as f32 / side;
+    let center = face_uv_to_dir(face, (u0 + u1) * 0.5, (v0 + v1) * 0.5);
+    // In unnormalised cube coordinates the patch half-diagonal is √2/side
+    // and every face point has length >= 1. Therefore sin(theta) cannot exceed
+    // that ratio. This is deliberately looser than sampling four corners: the
+    // analytic bound covers the whole curved patch, so crater masks may retain
+    // too much old refinement but can never miss runtime geometry.
+    let sin_bound = std::f32::consts::SQRT_2 / side;
+    let radius = if sin_bound >= 1.0 {
+        std::f32::consts::PI
+    } else {
+        sin_bound.asin()
+    };
+    Some((center, radius))
 }
 
 #[cfg(test)]
@@ -988,5 +1265,183 @@ mod tests {
             load_static_package(&path, "Mira", wrong_key),
             Err(PackageError::ContentKeyMismatch { .. })
         ));
+    }
+
+    #[test]
+    fn refinement_error_sums_levels_and_takes_spatial_maxima() {
+        let mut runtime_features = RuntimeFeatureMask::default();
+        runtime_features.finish();
+        let mut node_errors_m = HashMap::new();
+        // Patch L1 (0,0) contains four L2 and sixteen L3 nodes. Every address
+        // must exist, just as package validation guarantees at runtime.
+        for lod in 2..=3u8 {
+            let scale = 1u32 << (lod - 1);
+            for y in 0..scale {
+                for x in 0..scale {
+                    node_errors_m.insert(PackageNodeAddress::Cube { face: 0, lod, x, y }, 1.0);
+                }
+            }
+        }
+        *node_errors_m
+            .get_mut(&PackageNodeAddress::Cube {
+                face: 0,
+                lod: 2,
+                x: 1,
+                y: 0,
+            })
+            .unwrap() = 7.0;
+        *node_errors_m
+            .get_mut(&PackageNodeAddress::Cube {
+                face: 0,
+                lod: 3,
+                x: 3,
+                y: 2,
+            })
+            .unwrap() = 11.0;
+
+        let radius_m = 100_000.0;
+        let metadata = PackageRefinementMetadata {
+            body_radius_m: radius_m,
+            base_resolution: 32,
+            level_count: 4,
+            node_errors_m,
+            runtime_error_m: 3.0,
+            runtime_features,
+            complete: true,
+        };
+        let target_resolution = 128.0;
+        let spacing_m = radius_m * std::f32::consts::FRAC_PI_2 / target_resolution;
+        let error = metadata
+            .error_m(
+                SurfacePatch {
+                    face: 0,
+                    level: 1,
+                    x: 0,
+                    y: 0,
+                },
+                spacing_m,
+            )
+            .unwrap();
+
+        assert_eq!(error, 7.0 + 11.0 + 3.0);
+    }
+
+    #[test]
+    fn runtime_feature_mask_invalidates_only_overlapping_patches() {
+        let center = face_uv_to_dir(CubemapFace::PosX, 0.5, 0.5);
+        let mut mask = RuntimeFeatureMask::default();
+        mask.mark_cap(center, 0.02);
+        mask.finish();
+
+        assert_eq!(
+            mask.overlaps(SurfacePatch {
+                face: CubemapFace::PosX as u8,
+                level: 8,
+                x: 128,
+                y: 128,
+            }),
+            Some(true)
+        );
+        assert_eq!(
+            mask.overlaps(SurfacePatch {
+                face: CubemapFace::NegX as u8,
+                level: 8,
+                x: 128,
+                y: 128,
+            }),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn runtime_feature_mask_is_conservative_across_cube_seams() {
+        let center = Vec3::new(1.0, 0.0, 1.0).normalize();
+        let mut mask = RuntimeFeatureMask::default();
+        mask.mark_cap(center, 0.03);
+        mask.finish();
+
+        let marked_faces = mask
+            .sums
+            .iter()
+            .filter(|sum| sum.last().copied().unwrap_or(0) > 0)
+            .count();
+        assert!(marked_faces >= 2, "seam cap must mark both adjacent faces");
+    }
+
+    #[test]
+    fn mira_package_has_bounded_regions_outside_runtime_craters() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../assets/terrain_packages/Mira.bin");
+        let loaded = load_static_package_artifact(&path, "Mira").unwrap();
+        let surface = PlanetSurface {
+            static_surface: loaded.static_surface,
+            dynamic_layers: Default::default(),
+            tectonics: None,
+        };
+        let metadata = PackageRefinementMetadata::new(&loaded.manifest, &surface);
+        let mask_side = 1usize << RuntimeFeatureMask::LEVEL;
+        let marked = metadata
+            .runtime_features
+            .sums
+            .iter()
+            .map(|sum| sum.last().copied().unwrap_or(0) as usize)
+            .sum::<usize>();
+        let total = 6 * mask_side * mask_side;
+
+        assert!(
+            marked > 0,
+            "fixture no longer exercises runtime-crater fallback"
+        );
+        assert!(
+            marked < total,
+            "runtime craters cover every package patch, leaving no safe optimization surface"
+        );
+        assert!(metadata.complete);
+    }
+
+    #[test]
+    fn flatten_decorator_preserves_refinement_metadata() {
+        struct BoundedSurface;
+        impl SurfaceQuery for BoundedSurface {
+            fn sample(&self, _dir: Vec3, _lod_m: f32) -> SurfaceSample {
+                SurfaceSample {
+                    height_m: 0.0,
+                    albedo_linear: Vec3::ZERO,
+                    roughness: 1.0,
+                    moisture: 0.0,
+                }
+            }
+
+            fn radius_m(&self) -> f32 {
+                1_000.0
+            }
+
+            fn height_range_m(&self) -> f32 {
+                10.0
+            }
+
+            fn refinement_error_m(
+                &self,
+                _patch: SurfacePatch,
+                _refined_spacing_m: f32,
+            ) -> Option<f32> {
+                Some(7.5)
+            }
+        }
+
+        let surface =
+            crate::FlattenedSurface::new(Arc::new(BoundedSurface), crate::flatten_handle());
+        assert_eq!(
+            surface.refinement_error_m(
+                SurfacePatch {
+                    face: 0,
+                    level: 3,
+                    x: 0,
+                    y: 0,
+                },
+                10.0,
+            ),
+            Some(7.5)
+        );
     }
 }

@@ -5,7 +5,7 @@
 //! elevation `E = max height + margin`, registers a `BaseSite` `FlattenTo`
 //! structure, applies the flatten, and requests a terrain rebuild so the ground
 //! levels out live (the editor pauses the sim but terrain streaming keeps
-//! running — see [`crate::rendering::terrain_residency::TerrainRebuildRequest`]).
+//! running — see [`crate::rendering::terrain_flatten::TerrainRebuildRequest`]).
 //!
 //! The cursor→surface raycast goes through the shared
 //! [`super::cursor_body_dir`], which intersects the body sphere in the
@@ -26,8 +26,8 @@ use thalos_world::BodyId;
 
 use crate::camera::{ActiveCamera, ShipCamera};
 use crate::coords::SHIP_SCALE;
-use crate::rendering::ground_terrain::TerrainFlattenRegistry;
-use crate::rendering::terrain_residency::TerrainRebuildRequest;
+use crate::rendering::terrain_flatten::TerrainFlattenRegistry;
+use crate::rendering::terrain_flatten::TerrainRebuildRequest;
 use crate::rendering::{RealSpaceBody, SimulationState, SolarSystemState};
 use crate::structures::{StructurePlacement, StructureRegistry, apply_structure_flatten};
 

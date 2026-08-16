@@ -1,0 +1,28 @@
+[package]
+name = "korsou"
+version.workspace = true
+edition.workspace = true
+description = "A lightweight real-world Curaçao terrain explorer"
+publish = false
+default-run = "korsou"
+
+[dependencies]
+anyhow = "1.0"
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thalos_atmosphere = { path = "../../crates/rendering/atmosphere" }
+thalos_diagnostics = { workspace = true }
+thalos_geodetic = { path = "../../crates/rendering/geodetic" }
+thalos_ocean = { path = "../../crates/rendering/ocean" }
+thalos_render_kit = { path = "../../crates/rendering/kit" }
+thalos_runtime = {
+    path = "../../crates/runtime/app",
+    default-features = false,
+    features = ["interactive"],
+}
+thalos_vegetation = { path = "../../crates/rendering/vegetation" }
+thalos_world = { path = "../../crates/domain/world" }
+
+[features]
+dev-renderer = ["bevy/dynamic_linking", "bevy/embedded_watcher"]

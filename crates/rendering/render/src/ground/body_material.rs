@@ -14,6 +14,7 @@
 //! doesn't need a fresh binding contract.
 
 use crate::shading::{AtmosphereBlock, SceneLighting};
+#[cfg(feature = "legacy-udlod")]
 use bevy::asset::embedded_asset;
 use bevy::math::Vec4;
 use bevy::prelude::*;
@@ -69,6 +70,14 @@ pub struct BodySkyExtra {
     pub ocean_high_phase: Vec4,
     /// Resolved slope amplitude for the 8192/1024/128/16 m cascades.
     pub ocean_slope_amplitudes: Vec4,
+    /// Resolved surface-wave geometry shared with planar ocean adapters.
+    /// xyz = wavelength/amplitude/phase for swell, wind wave, and cross wave;
+    /// w is reserved. The analytic planetary adapter consumes slope, crest,
+    /// and omitted variance while a bounded local geometry adapter may also
+    /// consume height.
+    pub ocean_surface_wavelengths_m: Vec4,
+    pub ocean_surface_amplitudes_m: Vec4,
+    pub ocean_surface_phases_rad: Vec4,
     /// x = independent swell angle from wind in the local tangent plane,
     /// y = swell energy 0..1, z = open-water foam slope onset,
     /// w = slope-field diagnostic view enable.
@@ -150,6 +159,9 @@ impl Default for BodySkyExtra {
             ocean_low_phase: Vec4::ZERO,
             ocean_high_phase: Vec4::ZERO,
             ocean_slope_amplitudes: Vec4::ZERO,
+            ocean_surface_wavelengths_m: Vec4::ZERO,
+            ocean_surface_amplitudes_m: Vec4::ZERO,
+            ocean_surface_phases_rad: Vec4::ZERO,
             ocean_spectrum: Vec4::ZERO,
             ocean_wind_basis: Vec4::ZERO,
             ocean_crosswind_basis: Vec4::ZERO,
@@ -539,6 +551,7 @@ impl Material for BodyTerrainMaterial {
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn embed_body_terrain_shader(app: &mut App) {
     embedded_asset!(app, "body_terrain.wgsl");
 }

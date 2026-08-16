@@ -37,8 +37,8 @@ use crate::coords::{SHIP_LAYER, SHIP_SCALE};
 use crate::game_context::{ContextHistory, GameContext};
 use crate::god_view::GodViewGizmos;
 use crate::loading::{AppState, LoadDestination, LoadingTracker, StepDesc, step};
-use crate::rendering::ground_terrain::TerrainFlattenRegistry;
 use crate::rendering::real_space::RealSpaceRoot;
+use crate::rendering::terrain_flatten::TerrainFlattenRegistry;
 use crate::rendering::{PlayerShip, RealSpaceBody, SimulationState, SolarSystemState};
 use crate::runway::{
     RunwaySite, SpaceportBuild, craft_extent_below, ensure_spaceport, measure_runway_clearance,
@@ -48,6 +48,7 @@ use crate::shipyard_editor::core::EditorPart;
 use crate::spawn::Homeworld;
 use crate::staging::StagingPlan;
 use crate::structures::{StructureId, StructureKind, StructurePlacement, StructureRegistry};
+use thalos_game_state::{CraftIdentity, CraftRoot};
 
 use super::place::place_on_launchpad;
 use super::{BaseEditor, BaseEditorMode, cursor_body_dir};
@@ -243,7 +244,7 @@ fn finish_launch_spaceport(
     mut flatten_registry: ResMut<TerrainFlattenRegistry>,
     mut structure_registry: ResMut<StructureRegistry>,
     mut paved: ResMut<crate::base_editor::PavedFootprints>,
-    mut rebuild: ResMut<crate::rendering::terrain_residency::TerrainRebuildRequest>,
+    mut rebuild: ResMut<crate::rendering::terrain_flatten::TerrainRebuildRequest>,
     root: Res<RealSpaceRoot>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -446,7 +447,7 @@ fn apply_launch_placement(
     mut next_ctx: Option<ResMut<NextState<GameContext>>>,
     mut history: ResMut<ContextHistory>,
     mut commands: Commands,
-    ship_q: Query<(Entity, &GlobalTransform), With<PlayerShip>>,
+    ship_q: Query<(Entity, &CraftIdentity, &GlobalTransform), With<CraftRoot>>,
     children_q: Query<&Children>,
     mesh_q: Query<(&GlobalTransform, &Mesh3d)>,
     meshes: Res<Assets<Mesh>>,
@@ -476,7 +477,11 @@ fn apply_launch_placement(
     let Some(radius_m) = sim.system.bodies.get(body_id).map(|b| b.radius_m) else {
         return;
     };
-    let Ok((ship_entity, ship_gt)) = ship_q.single() else {
+    let active_id = sim.simulation.active_craft_id();
+    let Some((ship_entity, _, ship_gt)) = ship_q
+        .iter()
+        .find(|(_, identity, _)| identity.0 == active_id)
+    else {
         return; // craft not built yet — retry
     };
     let elevation_m = target
@@ -492,6 +497,7 @@ fn apply_launch_placement(
         StructureKind::Runway { half_length_m, .. } => {
             let (parts, gear_q, host_nodes, gear_tuning) = &gear_geometry;
             let Some(clearance_m) = measure_runway_clearance(
+                sim.simulation.active_craft_id(),
                 ship_entity,
                 ship_gt,
                 &children_q,
@@ -528,8 +534,10 @@ fn apply_launch_placement(
             // `spawn_player_avian_body` rebuilds it seeded from the placed
             // state.
             crate::scenario_menu::clear_bubble(&mut commands, &mut active_bubble);
-            commands.insert_resource(crate::local_physics::ParkingBrake { engaged: true });
-            commands.insert_resource(crate::local_physics::GearState { down: true });
+            commands.entity(ship_entity).insert((
+                crate::local_physics::ParkingBrake { engaged: true },
+                crate::local_physics::GearState { down: true },
+            ));
             relight.pending = true;
         }
         StructureKind::Launchpad { .. } => {

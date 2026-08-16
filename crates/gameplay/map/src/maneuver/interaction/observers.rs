@@ -1,5 +1,6 @@
 use bevy::picking::prelude::{DragEnd, DragStart, Pointer};
 use bevy::prelude::*;
+use thalos_game_state::ActiveCraftMut;
 
 use super::super::state::{
     ArrowHandle, ArrowHitbox, BASE_ARROW_LEN, HITBOX_CAPSULE_RADIUS, InteractionMode, ManeuverPlan,
@@ -91,13 +92,15 @@ pub(in crate::maneuver) fn slide_sphere_drag_end(
     trigger: On<Pointer<DragEnd>>,
     spheres: Query<(), With<NodeSlideSphere>>,
     mut mode: ResMut<InteractionMode>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut slide_preview: ResMut<SlidePreview>,
 ) {
     if spheres.get(trigger.event().entity).is_ok() && matches!(*mode, InteractionMode::SlidingNode)
     {
         *mode = InteractionMode::Idle;
-        plan.dirty = true;
+        if let Some(mut plan) = plan.get_mut() {
+            plan.dirty = true;
+        }
         slide_preview.world_pos = None;
         slide_preview.frame = None;
     }

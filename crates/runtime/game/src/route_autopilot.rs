@@ -101,13 +101,17 @@ pub(crate) fn update_land_autopilot(
     kin: Res<LocalCraftKinematics>,
     bubble: Res<ActiveLocalBubble>,
     wow: Res<WeightOnWheels>,
-    mut gear: ResMut<GearState>,
-    mut parking_brake: ResMut<ParkingBrake>,
+    mut gear: thalos_game_state::ActiveCraftMut<GearState>,
+    mut parking_brake: thalos_game_state::ActiveCraftMut<ParkingBrake>,
     mut config: ResMut<FlightConfig>,
     mut throttle: ResMut<ThrottleState>,
     sim: Res<SimulationState>,
     clock: Res<SimClock>,
 ) {
+    let (Some(mut gear), Some(mut parking_brake)) = (gear.get_mut(), parking_brake.get_mut())
+    else {
+        return;
+    };
     // The notice ages on real time whether or not LAND is engaged — the player
     // most needs to read "GO-AROUND: not lined up" in the seconds *after* it
     // happened, which is often after a disengagement.

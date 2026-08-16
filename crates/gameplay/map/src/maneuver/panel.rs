@@ -14,9 +14,9 @@ use super::state::{ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, Selec
 use thalos_game_state::SimulationState;
 use thalos_game_state::nav::ViewMode;
 use thalos_game_state::ui::GamePause;
-use thalos_game_state::ui::PhotoMode;
 use thalos_game_state::ui::ScenarioMenu;
 use thalos_game_state::units::UnitDomain;
+use thalos_photo_mode::PhotoMode;
 use thalos_ui::hud_theme::{HudTheme, hud_button as spawn_button, panel_frame};
 
 // ── Markers ─────────────────────────────────────────────────────────────────
@@ -295,7 +295,7 @@ fn text(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_editor(
     mut selected: ResMut<SelectedNode>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     sim: Option<Res<SimulationState>>,
     node_dv: Res<NodeDeltaV>,
     view: Res<ViewMode>,
@@ -310,6 +310,10 @@ pub(super) fn update_editor(
     mut colors: Query<(&EditorField, &mut TextColor)>,
 ) {
     let map_ok = *view == ViewMode::Map && !pause.active && !scenario.open && !photo.active;
+    let Some(plan) = plan.get() else {
+        set_visibility(&mut roots, false);
+        return;
+    };
 
     // Resolve the selected node; drop a dangling selection.
     let node = selected
@@ -438,11 +442,14 @@ fn set_visibility<F: bevy::ecs::query::QueryFilter>(
 pub(super) fn handle_buttons(
     delete_q: Query<&Interaction, (Changed<Interaction>, With<DeleteButton>)>,
     nudge_q: Query<(&Interaction, &NudgeButton), Changed<Interaction>>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
     mut node_dv: ResMut<NodeDeltaV>,
     mut writer: MessageWriter<ManeuverEvent>,
 ) {
+    let Some(plan) = plan.get() else {
+        return;
+    };
     let Some(sel_id) = selected.id else {
         return;
     };

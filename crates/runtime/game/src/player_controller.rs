@@ -39,6 +39,7 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::math::{DMat3, DQuat, DVec3};
 use bevy::prelude::*;
 use big_space::prelude::{BigSpace, CellCoord, Grid};
+use thalos_game_state::ActiveCraftRef;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_canonical::canonical::{Epoch, TranslationalState};
 use thalos_physics_canonical::types::{AttitudeState, BodyState};
@@ -97,7 +98,6 @@ pub struct PlayerControllerPlugin;
 impl Plugin for PlayerControllerPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PlayerControllerState>()
-            .init_resource::<EvaMode>()
             .register_type::<EvaMode>()
             .add_systems(
                 Update,
@@ -276,7 +276,7 @@ fn step_eva_controller(
     clock: Res<SimClock>,
     input: Res<GameInputIntent>,
     view: Res<ViewMode>,
-    eva_mode: Res<EvaMode>,
+    eva_mode: ActiveCraftRef<EvaMode>,
     mut state: ResMut<PlayerControllerState>,
     mut sim: ResMut<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
@@ -291,6 +291,9 @@ fn step_eva_controller(
         With<PlayerControllerBody>,
     >,
 ) {
+    let Some(eva_mode) = eva_mode.get() else {
+        return;
+    };
     // Airborne (orbiting) EVA coasts on rails — `snap_avian_from_canonical`
     // owns the capsule. Only the grounded controller runs character physics.
     if !eva_mode.is_grounded() {

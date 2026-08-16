@@ -42,6 +42,7 @@ use thalos_udlod::math::{Coordinate, TileCoordinate};
 use thalos_udlod::prelude::*;
 use thalos_udlod::terrain_data::AttachmentData;
 
+use crate::ground::material_masks::material_masks_from_heights;
 use crate::ground::tile_synthesis_pool::{tile_eval_pool, tile_synthesis_pool};
 
 // ---------------------------------------------------------------------------
@@ -71,14 +72,6 @@ impl PipelineTileProvider {
             relief_scale: Mutex::new(HashMap::new()),
         }
     }
-}
-
-/// Vertical range (metres) the ground LOD must encode: static + dynamic +
-/// procedural detail headroom. Thin wrapper over the Query API seam
-/// ([`thalos_terrain::surface_height_range_m`]); used by `ground_terrain` to
-/// set up the thalos_udlod `TerrainModel` height bounds.
-pub fn rendered_height_range(surface: &dyn SurfaceQuery) -> f32 {
-    surface.height_range_m()
 }
 
 /// Returns the `tile_lod_m` the renderer currently uses at `world_position`
@@ -333,25 +326,6 @@ fn compute_tile_pixels(
     pixels
 }
 
-/// Canonical "what does the ground LOD render at this direction?" height query.
-///
-/// Thin wrapper over the Query API seam ([`thalos_terrain::surface_height_m`]),
-/// kept under this name so the existing consumers (terrain colliders, the
-/// character controller's height source, camera boom ray-casts, HUD altitude
-/// readouts) need no churn. The seam is the single source of truth shared with
-/// the atlas baker above.
-///
-/// Pass a small `tile_lod_m` (e.g. `0.5`) for full procedural detail near the
-/// camera; pass the patch's vertex spacing when building a coarser collider
-/// mesh so the mesh resolution matches the represented detail.
-pub fn rendered_height_m(surface: &dyn SurfaceQuery, dir: Vec3, tile_lod_m: f32) -> f32 {
-    // f32-direction convenience for the physics callers (camera ray-casts, HUD
-    // altitude, spawn-site search, the CPU height-source fallback). Near the
-    // player these read the resident atlas via the GPU mirror, which carries the
-    // f64-precise heights baked above; this CPU path is the far/coarse fallback.
-    surface.sample_height_m(dir, tile_lod_m)
-}
-
 fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32) {
     let size = size as usize;
     if size == 0 {
@@ -420,61 +394,6 @@ fn populate_material_masks(pixels: &mut [TilePixel], size: u32, tile_lod_m: f32)
 /// threshold, 0.035) and curvature (wetness/hollow) are fine-scale phenomena —
 /// compensating them repainted the plains with a brown soil mottle / the
 /// km-scale specular glint mottle respectively.
-const SLOPE_REF_STEP_M: f32 = 30.0;
-const SLOPE_SPECTRUM_EXP: f32 = 0.35;
-
-pub(crate) fn material_masks_from_heights(
-    height_m: f32,
-    h_l: f32,
-    h_r: f32,
-    h_d: f32,
-    h_u: f32,
-    step_m: f32,
-) -> [u8; 4] {
-    let grad_x = (h_r - h_l) / (2.0 * step_m);
-    let grad_y = (h_u - h_d) / (2.0 * step_m);
-    let slope = (grad_x * grad_x + grad_y * grad_y).sqrt();
-    let slope_gain = (step_m / SLOPE_REF_STEP_M)
-        .max(1.0)
-        .powf(SLOPE_SPECTRUM_EXP);
-    let laplacian = ((h_l + h_r + h_d + h_u) * 0.25 - height_m) / step_m.max(1.0);
-
-    let slope_rock = smoothstep(0.20, 0.75, slope * slope_gain);
-    let high_rock = smoothstep(2_200.0, 6_000.0, height_m);
-    let convex_rock = smoothstep(0.04, 0.20, -laplacian);
-    let rock = (slope_rock * 0.82 + high_rock * 0.18 + convex_rock * 0.16).clamp(0.0, 0.95);
-
-    let hollow = smoothstep(0.035, 0.18, laplacian);
-    let wetness = (hollow * (1.0 - smoothstep(1_500.0, 4_500.0, height_m)) * (1.0 - rock * 0.7))
-        .clamp(0.0, 1.0);
-    let soil = (smoothstep(0.035, 0.28, slope) * (1.0 - smoothstep(0.45, 0.9, slope))
-        + hollow * 0.45
-        + wetness * 0.25)
-        .clamp(0.0, 1.0)
-        * (1.0 - rock * 0.65);
-    let grass = ((1.0 - rock) * (1.0 - soil * 0.45) * (1.0 - wetness * 0.25)).clamp(0.0, 1.0);
-
-    let sum = (grass + soil + rock).max(1.0e-4);
-    [
-        quantize_unit_to_u8(grass / sum),
-        quantize_unit_to_u8(soil / sum),
-        quantize_unit_to_u8(rock / sum),
-        quantize_unit_to_u8(wetness),
-    ]
-}
-
-// WGSL-parity smoothstep, safe for descending edges. Never guard the
-// denominator with `.max(EPSILON)` — that inverts descending-edge calls into
-// a hard step (INC-0005).
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    let denom = edge1 - edge0;
-    if denom.abs() < f32::EPSILON {
-        return if x >= edge0 { 1.0 } else { 0.0 };
-    }
-    let t = ((x - edge0) / denom).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
 // ---------------------------------------------------------------------------
 // Encoding
 // ---------------------------------------------------------------------------

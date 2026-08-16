@@ -32,12 +32,16 @@
 //! normal descent.
 
 use bevy::prelude::*;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::renderer_tile_lod_m_at;
 use thalos_body_render::tiles::{TileEye, TileTerrainRoot};
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::prelude::{TerrainViewComponents, TileAtlas, TileTree};
 
+#[cfg(feature = "legacy-udlod")]
 use crate::camera::ShipCamera;
 use crate::loading::{AppState, LoadingTracker, step};
+#[cfg(feature = "legacy-udlod")]
 use crate::rendering::ground_terrain::BodyTerrain;
 use crate::rendering::tile_terrain::TileTerrainBody;
 use crate::solar_system_state::SimulationState;
@@ -171,9 +175,9 @@ fn update_surface_settle(
     sim: Res<SimulationState>,
     mut settle: ResMut<SurfaceSettle>,
     mut tracker: ResMut<LoadingTracker>,
-    tile_trees: Res<TerrainViewComponents<TileTree>>,
-    terrains: Query<(Entity, &BodyTerrain, &TileAtlas)>,
-    camera_q: Query<Entity, With<ShipCamera>>,
+    #[cfg(feature = "legacy-udlod")] tile_trees: Res<TerrainViewComponents<TileTree>>,
+    #[cfg(feature = "legacy-udlod")] terrains: Query<(Entity, &BodyTerrain, &TileAtlas)>,
+    #[cfg(feature = "legacy-udlod")] camera_q: Query<Entity, With<ShipCamera>>,
     tile_eye: Res<TileEye>,
     tile_roots: Query<(&TileTerrainRoot, &TileTerrainBody)>,
 ) {
@@ -203,7 +207,14 @@ fn update_surface_settle(
     let lod_m = if crate::rendering::tile_terrain::tile_rendered(body) {
         tile_resident_lod_under_view(body, &tile_eye, &tile_roots)
     } else {
-        resident_lod_under_view(&sim, &tile_trees, &terrains, &camera_q)
+        #[cfg(feature = "legacy-udlod")]
+        {
+            resident_lod_under_view(&sim, &tile_trees, &terrains, &camera_q)
+        }
+        #[cfg(not(feature = "legacy-udlod"))]
+        {
+            None
+        }
     };
 
     // Settle diagnostics: a JSONL event every few seconds while the gate is
@@ -213,7 +224,17 @@ fn update_surface_settle(
     let log_bucket = (settle.elapsed_s / 5.0) as u32;
     let prev_bucket = ((settle.elapsed_s - dt).max(0.0) / 5.0) as u32;
     if log_bucket != prev_bucket {
-        let view_r_km = view_radius_km(&sim, &tile_trees, &terrains, &camera_q);
+        let view_r_km = tile_eye
+            .target
+            .as_ref()
+            .map(|target| target.cam_body.length() / 1000.0)
+            .unwrap_or(f64::NAN);
+        #[cfg(feature = "legacy-udlod")]
+        let view_r_km = if crate::rendering::tile_terrain::tile_rendered(body) {
+            view_r_km
+        } else {
+            view_radius_km(&sim, &tile_trees, &terrains, &camera_q)
+        };
         info!(
             target: "thalos::diagnostic::surface_settle",
             event = "progress",
@@ -272,6 +293,7 @@ fn update_surface_settle(
 /// ground under the view". (Reading the canonical craft state instead is wrong:
 /// the runway/descent placements install the craft under `OnRails`, so its
 /// canonical translation still reads the placeholder orbit, not the surface.)
+#[cfg(feature = "legacy-udlod")]
 pub(crate) fn resident_lod_under_view(
     sim: &SimulationState,
     tile_trees: &TerrainViewComponents<TileTree>,
@@ -302,6 +324,7 @@ fn tile_resident_lod_under_view(
 /// Distance (km) from the body centre to the tile tree's view position — the
 /// settle diagnostics' "did the streamer's view reach the surface" signal.
 /// `NAN` while the tree isn't up.
+#[cfg(feature = "legacy-udlod")]
 fn view_radius_km(
     sim: &SimulationState,
     tile_trees: &TerrainViewComponents<TileTree>,

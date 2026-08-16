@@ -14,8 +14,6 @@ use bevy::log::{
 };
 use bevy::prelude::*;
 
-pub use thalos_diagnostics::session_id;
-
 /// Build the JSONL tracing layer installed alongside capture error accounting.
 ///
 /// Opening the sink also runs the one process-start housekeeping pass:

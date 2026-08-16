@@ -107,7 +107,7 @@ coefficients are authored per-type shape; only the common scale is derived.**
 systems instead of a white marbled disc, and the cruise deck has rounded lobed
 tops instead of flat plates.
 
-**Recurrence tell.** Run `cargo run --release -p thalos_runtime --example
+**Recurrence tell.** Run `cargo run --release -p thalos_game_runtime --example
 cloud_weather_probe`. The defect signature is a **nonzero value in the 0.0–0.1
 row of the TRANSFER table** together with `areal = 0.500` and `frac>0.5 = 0.000`
 in the ATTRIBUTION table — a field pinned at exactly half is a clamp, never a

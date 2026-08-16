@@ -159,16 +159,57 @@ pub fn rt_twin_of_tile(visible: &Mesh) -> Option<Mesh> {
         VertexAttributeValues::Float32x2(uv) => uv.clone(),
         _ => return None,
     };
-    let indices = match visible.indices()? {
-        Indices::U32(i) => i.clone(),
-        Indices::U16(_) => return None,
-    };
+    let indices = triangle_list_indices(visible)?;
     Some(build_rt_tile_mesh(
         positions.to_vec(),
         normals.to_vec(),
         uv0,
         indices,
     ))
+}
+
+/// Return the mesh's triangles as the `U32` list Solari requires.
+///
+/// Raster terrain uses a restart-delimited `U16` strip to avoid carrying the
+/// same shared vertices three times in its index buffer. The RT scene cannot:
+/// Solari's compatibility gate requires both a triangle list and `U32`
+/// indices. Expanding here keeps the visible path compact without making the
+/// traced surface disagree with it.
+fn triangle_list_indices(mesh: &Mesh) -> Option<Vec<u32>> {
+    match (mesh.primitive_topology(), mesh.indices()?) {
+        (PrimitiveTopology::TriangleList, Indices::U32(indices)) => Some(indices.clone()),
+        (PrimitiveTopology::TriangleList, Indices::U16(indices)) => {
+            Some(indices.iter().copied().map(u32::from).collect())
+        }
+        (PrimitiveTopology::TriangleStrip, Indices::U16(indices)) => {
+            Some(expand_triangle_strip(indices, u16::MAX))
+        }
+        (PrimitiveTopology::TriangleStrip, Indices::U32(indices)) => {
+            Some(expand_triangle_strip(indices, u32::MAX))
+        }
+        _ => None,
+    }
+}
+
+fn expand_triangle_strip<T>(indices: &[T], restart: T) -> Vec<u32>
+where
+    T: Copy + Eq + Into<u32>,
+{
+    let mut triangles = Vec::new();
+    for strip in indices.split(|index| *index == restart) {
+        for (triangle_index, window) in strip.windows(3).enumerate() {
+            let [a, b, c] = [window[0].into(), window[1].into(), window[2].into()];
+            if a == b || b == c || a == c {
+                continue;
+            }
+            if triangle_index.is_multiple_of(2) {
+                triangles.extend_from_slice(&[a, b, c]);
+            } else {
+                triangles.extend_from_slice(&[b, a, c]);
+            }
+        }
+    }
+    triangles
 }
 
 #[cfg(test)]
@@ -232,6 +273,25 @@ mod tests {
         let mut mesh = build_rt_tile_mesh(p, n, uv, i);
         mesh.insert_indices(Indices::U16(vec![0, 2, 1, 1, 2, 3]));
         assert!(!is_raytracing_eligible(&mesh));
+    }
+
+    /// Raster strips expand to the exact list Solari expects, including
+    /// primitive-restart boundaries resetting strip parity.
+    #[test]
+    fn rt_twin_expands_restart_delimited_u16_strips() {
+        let (p, n, uv, _) = grid();
+        let mut raster = Mesh::new(
+            PrimitiveTopology::TriangleStrip,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        raster.insert_attribute(Mesh::ATTRIBUTE_POSITION, p);
+        raster.insert_attribute(Mesh::ATTRIBUTE_NORMAL, n);
+        raster.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv);
+        raster.insert_indices(Indices::U16(vec![0, 2, 1, u16::MAX, 1, 2, 3]));
+
+        let twin = rt_twin_of_tile(&raster).expect("strip converts");
+        assert!(is_raytracing_eligible(&twin));
+        assert_eq!(twin.indices(), Some(&Indices::U32(vec![0, 2, 1, 1, 2, 3])));
     }
 
     /// The shipyard states the same contract in its own words

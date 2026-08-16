@@ -3,9 +3,9 @@
 > **Status: LEGACY / end-of-life.** The default ground renderer is
 > `thalos_body_render::tiles` — terrain as ordinary `Mesh` +
 > `StandardMaterial` on Bevy's standard path (keystone ADR-20260723T142945Z).
-> This crate survives as the A/B baseline (`THALOS_TILE_RENDERER=0`) and for
-> bodies the tile driver has not installed on. Defect-driven fixes only; no new
-> terrain features here.
+> This crate survives only as the optional `legacy-udlod` A/B baseline
+> (`THALOS_TILE_RENDERER=0`). It is absent from default application graphs.
+> Defect-driven fixes only; no new terrain features here.
 
 `thalos_udlod` is Thalos's in-tree UDLOD terrain renderer. It began as a
 fork of [`bevy_terrain`](https://github.com/kurtkuehnert/bevy_terrain) by

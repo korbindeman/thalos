@@ -66,7 +66,7 @@ mod cloud_site_probe {
     /// default spaceport column is authored nearly clear). Prints
     /// `THALOS_RUNWAY_SITE` candidates.
     ///
-    /// Run: `cargo test -p thalos_runtime --lib cloud_site_probe -- --ignored --nocapture`
+    /// Run: `cargo test -p thalos_game_runtime --lib cloud_site_probe -- --ignored --nocapture`
     #[test]
     #[ignore = "dev probe: prints cloudy THALOS_RUNWAY_SITE candidates"]
     fn print_cloudy_sites() {
@@ -196,7 +196,7 @@ mod cloud_site_probe {
     /// The per-bin convergence table lands in the log output (init a
     /// subscriber below so it prints).
     ///
-    /// Run: `cargo test -p thalos_runtime --lib derive_fill -- --ignored --nocapture`
+    /// Run: `cargo test -p thalos_game_runtime --lib derive_fill -- --ignored --nocapture`
     #[test]
     #[ignore = "dev probe: prints the derived cloud fill calibration"]
     fn derive_fill_calibration_probe() {

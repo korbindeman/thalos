@@ -1,4 +1,3 @@
-use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::{DQuat, DVec3};
 use bevy::prelude::*;
@@ -8,6 +7,7 @@ use thalos_body_render::HeightSource;
 use thalos_body_render::space_camera_post_stack;
 use thalos_input::game::GameInputIntent;
 use thalos_physics_local::HeightSourceRegistry;
+use thalos_render_foundation::{SceneDepthView, scene_depth_view_texture_usages};
 use thalos_world::BodyId;
 
 /// `tile_lod_m` passed to `rendered_height_m` for the camera boom's
@@ -26,7 +26,6 @@ const SURFACE_SEA_LEVEL_M: f64 = 0.0;
 use crate::camera_optics::CameraOptics;
 use crate::coords::{MAP_LAYER, SHIP_LAYER};
 use crate::freecam::FreeCam;
-use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
 use crate::rendering::{CelestialBody, PlayerShip, SimulationState, SolarSystemState};
 use crate::view::ViewMode;
 
@@ -51,7 +50,6 @@ impl Plugin for CameraPlugin {
             // `SkyRenderPlugin` draws stars additively on top.
             .insert_resource(ClearColor(Color::BLACK))
             .add_systems(Startup, spawn_camera)
-            .add_systems(Update, apply_graphics_msaa)
             .add_systems(
                 Update,
                 (
@@ -74,9 +72,8 @@ pub struct MapCamera;
 
 /// Marker for the ship-view camera (renders [`SHIP_LAYER`]).
 ///
-/// Extracted to the render world so the scene-depth-copy node
-/// (`rendering::scene_depth::CopySceneDepthNode`) can filter its
-/// `ViewQuery` to only the ship-view, skipping the map camera.
+/// Extracted for Thalos-specific render passes such as SSAO. The shared
+/// scene-depth foundation selects this same camera through [`SceneDepthView`].
 #[derive(Component, Clone, ExtractComponent)]
 pub struct ShipCamera;
 
@@ -222,16 +219,9 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
 
     let mut ship_cam = commands.spawn((
         Camera3d {
-            // Add COPY_SRC so the scene-depth-copy render-graph node
-            // (`CopySceneDepthNode` in `rendering::scene_depth`) can copy
-            // the main depth attachment into our sampleable depth Image
-            // each frame. TEXTURE_BINDING lets that node instead *bind* the
-            // depth as a `texture_depth_multisampled_2d` and resolve it when
-            // MSAA is on (single-sample copy is illegal for an MSAA source).
-            depth_texture_usages: (bevy::render::render_resource::TextureUsages::RENDER_ATTACHMENT
-                | bevy::render::render_resource::TextureUsages::COPY_SRC
-                | bevy::render::render_resource::TextureUsages::TEXTURE_BINDING)
-                .into(),
+            // The shared scene-depth foundation needs a copy source without
+            // MSAA and a sampleable source for its MSAA resolve path.
+            depth_texture_usages: scene_depth_view_texture_usages().into(),
             ..default()
         },
         Camera {
@@ -262,6 +252,8 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         space_camera_post_stack(),
         OrbitCamera,
         ShipCamera,
+        thalos_preferences::PreferencesCamera::smaa(),
+        SceneDepthView,
         CameraOptics::default(),
         // The frosted-glass UI blurs this camera's output (thalos_ui).
         thalos_ui::UiBackdropSource,
@@ -271,45 +263,9 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         RenderLayers::from_layers(&[0, SHIP_LAYER]),
         Transform::from_xyz(0.0, 0.0, 5e6).looking_at(Vec3::ZERO, Vec3::Y),
     ));
+    ship_cam.insert(thalos_viewer::ViewerCamera);
     if !map_active {
         ship_cam.insert((ActiveCamera, IsDefaultUiCamera));
-    }
-}
-
-/// Apply the [`GraphicsSettings::msaa`] level to the ship-view camera and keep
-/// SMAA mutually exclusive with it: `Off` runs the post-process SMAA pass (the
-/// default the space post stack installs), any multisampled level replaces SMAA
-/// with hardware MSAA (running both just double-softens). Scoped to the ship
-/// camera — the 3D world the aliasing shows in; the map camera keeps SMAA.
-///
-/// Only reacts when the setting changes (`Local` latch), so it doesn't churn
-/// camera components every frame.
-fn apply_graphics_msaa(
-    settings: Res<GraphicsSettings>,
-    mut commands: Commands,
-    cameras: Query<Entity, With<ShipCamera>>,
-    mut applied: Local<Option<MsaaSetting>>,
-) {
-    if *applied == Some(settings.msaa) {
-        return;
-    }
-    let mut touched_any = false;
-    for entity in &cameras {
-        let mut entity = commands.entity(entity);
-        entity.insert(settings.msaa.to_msaa());
-        if settings.msaa.is_multisampled() {
-            entity.remove::<Smaa>();
-        } else {
-            entity.insert(Smaa {
-                preset: SmaaPreset::High,
-            });
-        }
-        touched_any = true;
-    }
-    // Don't latch until the camera actually exists, so a settings load that
-    // lands before `spawn_camera` still gets applied on a later frame.
-    if touched_any {
-        *applied = Some(settings.msaa);
     }
 }
 

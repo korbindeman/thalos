@@ -170,6 +170,12 @@ pub struct CloudsPlugin;
 
 impl Plugin for CloudsPlugin {
     fn build(&self, app: &mut App) {
+        // The compositor clips its transparent cloud layer against the shared
+        // analytic-ocean hit. Keep the shader library available when this
+        // plugin is used without the full ground-render stack.
+        if !app.is_plugin_added::<thalos_ocean::OceanMechanismPlugin>() {
+            app.add_plugins(thalos_ocean::OceanMechanismPlugin);
+        }
         // `common.wgsl` is a shader library imported by `clouds_compute.wgsl`
         // as `bevy_open_world::common` (the import path is declared inside the
         // file, so the crate rename is irrelevant). The compute pipeline loads

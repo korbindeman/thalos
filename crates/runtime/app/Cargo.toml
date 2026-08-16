@@ -1,0 +1,50 @@
+[package]
+name = "thalos_runtime"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+thalos_game_runtime = { path = "../game", optional = true }
+thalos_diagnostics_ui = { path = "../../interface/diagnostics_ui", optional = true }
+thalos_photo_mode = { path = "../../interface/photo_mode", optional = true }
+thalos_preferences = { path = "../../interface/preferences", optional = true }
+thalos_ui = { path = "../../interface/ui", optional = true }
+thalos_viewer = { path = "../../interface/viewer", optional = true }
+
+[features]
+default = []
+
+# Lightweight application behavior shared by the game and Kòrsou: preferences,
+# viewer/viewpoints, diagnostics, UI, and clean-view mode.
+interactive = [
+    "dep:thalos_diagnostics_ui",
+    "dep:thalos_photo_mode",
+    "dep:thalos_preferences",
+    "dep:thalos_ui",
+    "dep:thalos_viewer",
+]
+
+# Transitional complete-game bundle. The implementation is still the existing
+# game runtime monolith, but it is now absent unless an application explicitly
+# asks for it. Later APP slices move shared interaction code out of that crate
+# without changing callers of this facade.
+game = ["interactive", "dep:thalos_game_runtime"]
+
+# Capture is additive metadata at this facade; thalos_capture_runtime owns the
+# capture state machine and explicitly selects this alongside `game`.
+capture = ["game"]
+
+# Renderer and instrumentation capabilities propagate through the one complete
+# game edge so all renderer-bearing binaries retain the established fingerprint.
+neural-terrain = ["game", "thalos_game_runtime/neural-terrain"]
+neural-terrain-default = [
+    "neural-terrain",
+    "thalos_game_runtime/neural-terrain-default",
+]
+dev-renderer = ["game", "thalos_game_runtime/dev-renderer"]
+profile-chrome = ["game", "thalos_game_runtime/profile-chrome"]
+profile-tracy = ["game", "thalos_game_runtime/profile-tracy"]
+gpu-counters = ["game", "thalos_game_runtime/gpu-counters"]
+# Default-off comparison backend for the complete game only.
+legacy-udlod = ["game", "thalos_game_runtime/legacy-udlod"]

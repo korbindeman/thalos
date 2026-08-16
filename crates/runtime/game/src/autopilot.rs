@@ -82,6 +82,7 @@
 //! [`is_active`]: Autopilot::is_active
 
 use bevy::prelude::*;
+use thalos_game_state::{ActiveCraftMut, ActiveCraftRef};
 
 use crate::SimStage;
 use crate::fuel::{PilotThrottleInput, gate_throttle_on_fuel_availability, handle_throttle_input};
@@ -189,9 +190,13 @@ pub(crate) fn publish_maneuver_autopilot_directive(
     mut schedule: ResMut<AutopilotBurnSchedule>,
     autopilot: Res<Autopilot>,
     sim: Res<SimulationState>,
-    plan: Res<ManeuverPlan>,
+    plan: ActiveCraftRef<ManeuverPlan>,
     mode: Res<InteractionMode>,
 ) {
+    let Some(plan) = plan.get() else {
+        schedule.clear();
+        return;
+    };
     if edit_blocks_maneuver_directive(&mode, plan.dirty, autopilot.state()) {
         schedule.clear();
         return;
@@ -237,8 +242,11 @@ pub(crate) fn publish_maneuver_autopilot_directive(
 /// maneuver panel keep showing the burn as it happens.
 pub(crate) fn mark_started_maneuver_nodes_executing(
     mut started: MessageReader<AutopilotBurnStarted>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
 ) {
+    let Some(mut plan) = plan.get_mut() else {
+        return;
+    };
     for event in started.read() {
         if event.id.namespace() != MANEUVER_DIRECTIVE_NAMESPACE {
             continue;
@@ -263,8 +271,11 @@ pub(crate) fn mark_started_maneuver_nodes_executing(
 /// fly the same burn twice.
 pub(crate) fn mark_completed_maneuver_nodes_executed(
     mut completed: MessageReader<AutopilotBurnCompleted>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
 ) {
+    let Some(mut plan) = plan.get_mut() else {
+        return;
+    };
     for event in completed.read() {
         if event.id.namespace() != MANEUVER_DIRECTIVE_NAMESPACE {
             continue;

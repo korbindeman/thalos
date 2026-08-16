@@ -7,7 +7,9 @@ use super::*;
 use std::collections::HashMap;
 
 use bevy::math::{DQuat, DVec3};
+use thalos_game_state::scene::CraftPart;
 use thalos_input::game::GameInputIntent;
+use thalos_physics_canonical::canonical::CraftId;
 use thalos_physics_canonical::types::VesselKind;
 use thalos_physics_local::avian::{
     AngularVelocity, ConstantAngularAcceleration, ConstantLinearAcceleration, LinearVelocity,
@@ -28,7 +30,12 @@ pub use thalos_game_state::flight::{
 pub(crate) type GearPartQuery<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static Gear, &'static SurfaceMount),
+    (
+        Entity,
+        &'static CraftPart,
+        &'static Gear,
+        &'static SurfaceMount,
+    ),
     (
         With<Part>,
         Without<crate::shipyard_editor::core::EditorPart>,
@@ -202,7 +209,13 @@ pub fn wheel_torque_ground_mask(weight_on_wheels: bool, hull_grounded: bool) -> 
 }
 
 /// Flip the parking brake on the toggle edge (B). Runs before the gear forces.
-pub(crate) fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResMut<ParkingBrake>) {
+pub(crate) fn toggle_parking_brake(
+    intent: Res<GameInputIntent>,
+    mut brake: thalos_game_state::ActiveCraftMut<ParkingBrake>,
+) {
+    let Some(mut brake) = brake.get_mut() else {
+        return;
+    };
     if intent.parking_brake_toggle {
         brake.engaged = !brake.engaged;
     }
@@ -218,8 +231,11 @@ pub(crate) fn toggle_parking_brake(intent: Res<GameInputIntent>, mut brake: ResM
 pub(crate) fn toggle_gear(
     intent: Res<GameInputIntent>,
     weight_on_wheels: Res<WeightOnWheels>,
-    mut gear: ResMut<GearState>,
+    mut gear: thalos_game_state::ActiveCraftMut<GearState>,
 ) {
+    let Some(mut gear) = gear.get_mut() else {
+        return;
+    };
     if intent.gear_toggle {
         let target = !gear.down;
         set_gear_down(&mut gear, &weight_on_wheels, target);
@@ -249,9 +265,10 @@ pub(crate) fn gear_contact_geometry(
     parts: &PartColliderQuery,
     gear_q: &GearPartQuery,
     host_nodes: &Query<&AttachNodes>,
+    craft_id: CraftId,
 ) -> Option<(f64, f64)> {
-    let positions = compute_part_collider_positions(parts);
-    let wheels = build_wheel_set(gear_q, host_nodes, &positions);
+    let positions = compute_part_collider_positions(parts, craft_id);
+    let wheels = build_wheel_set(gear_q, host_nodes, &positions, craft_id);
     if wheels.is_empty() {
         return None;
     }
@@ -268,9 +285,13 @@ pub(crate) fn build_wheel_set(
     gear_q: &GearPartQuery,
     host_nodes: &Query<&AttachNodes>,
     positions: &HashMap<Entity, DVec3>,
+    craft_id: CraftId,
 ) -> Vec<Wheel> {
     let mut wheels = Vec::new();
-    for (gear_entity, gear, mount) in gear_q.iter() {
+    for (gear_entity, owner, gear, mount) in gear_q.iter() {
+        if owner.0 != craft_id {
+            continue;
+        }
         let Ok(nodes) = host_nodes.get(mount.parent) else {
             continue;
         };
@@ -451,8 +472,8 @@ pub(crate) fn apply_landing_gear_forces(
     active: Res<ActiveLocalBubble>,
     authority: Res<AvianAuthority>,
     tuning: Res<GearTuning>,
-    gear_state: Res<GearState>,
-    parking_brake: Res<ParkingBrake>,
+    gear_state: thalos_game_state::ActiveCraftRef<GearState>,
+    parking_brake: thalos_game_state::ActiveCraftRef<ParkingBrake>,
     ground_control: Res<crate::control_bus::ResolvedGroundControl>,
     spatial: SpatialQuery,
     sim: Res<SimulationState>,
@@ -473,6 +494,9 @@ pub(crate) fn apply_landing_gear_forces(
     >,
     mut last_emit_sim_s: Local<f64>,
 ) {
+    let (Some(gear_state), Some(parking_brake)) = (gear_state.get(), parking_brake.get()) else {
+        return;
+    };
     // Default to airborne; any loaded wheel below flips this true. Cleared up
     // front so every early-return path (not owning translation, no gear, etc.)
     // correctly reports "no weight on wheels" and "no compression".

@@ -30,17 +30,19 @@ use bevy::tasks::{Task, block_on, poll_once};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
 
 use thalos_body_render::{
-    AU_M, GrassParams, LIGHT_AT_1AU, RockMaterial, RockMeshData, RockMeshParams, TerrainShadingStyle,
-    TileKey, TileLattice, VegLayer, VegScatterInput, VegSpeciesPlacement, build_rock_mesh_data,
-    build_scatter_tile, combine_rock_tile_mesh, fallback_shadow_map, veg_scatter_pool,
+    AU_M, GrassParams, LIGHT_AT_1AU, RockMaterial, RockMeshData, RockMeshParams,
+    TerrainShadingStyle, TileKey, TileLattice, VegLayer, VegScatterInput, VegSpeciesPlacement,
+    build_rock_mesh_data, build_scatter_tile, combine_rock_tile_mesh, fallback_shadow_map,
+    veg_scatter_pool,
 };
 use thalos_physics_local::HeightSourceRegistry;
 use thalos_world::BodyId;
 
 use crate::SimStage;
 use crate::coords::SHIP_LAYER;
-use crate::rendering::ground_terrain::{TerrainFlattenRegistry, terrain_shading_style_for};
+use crate::rendering::ground_terrain::terrain_shading_style_for;
 use crate::rendering::real_space::{RealSpaceRoot, real_space_grid};
+use crate::rendering::terrain_flatten::TerrainFlattenRegistry;
 use crate::rendering::types::CameraExposure;
 use crate::rendering::view_anchor::ViewAnchor;
 use crate::solar_system_state::{SimulationState, SolarSystemState, sync_solar_system_state};

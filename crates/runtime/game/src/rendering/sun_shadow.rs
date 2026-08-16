@@ -72,10 +72,19 @@ use thalos_world::BodyId;
 use crate::camera::ShipCamera;
 use crate::solar_system_state::{SimulationState, SolarSystemState};
 
-/// Render layer the sun-shadow cameras render. Casters (tree mesh tiles, craft
-/// parts) are made visible to them by adding this layer alongside `SHIP_LAYER`.
-/// 6/7 are the impostor-bake layers; 8 is the first free index.
+static CASCADE_BUDGET: std::sync::OnceLock<std::sync::atomic::AtomicUsize> =
+    std::sync::OnceLock::new();
+
+/// Common render layer every sun-shadow camera sees. Structures, craft, and
+/// rocks use it.
 pub const SHADOW_CASTER_LAYER: usize = 8;
+/// Full-resolution terrain twins, seen only by cascades 0–1.
+pub const SHADOW_TERRAIN_NEAR_LAYER: usize = 9;
+/// Coarse terrain twins, seen only by cascades 2–3.
+pub const SHADOW_TERRAIN_FAR_LAYER: usize = 10;
+/// Bounded exact foliage casters, seen only by cascades 0–2. Cascade 2 covers
+/// the complete foliage grounding band, so cascade 3 cannot add useful detail.
+pub const SHADOW_FOLIAGE_LAYER: usize = 11;
 
 /// Per-cascade square resolution. 4096² at the extents below is ~0.03 m/texel
 /// for the near cascade and ~2.0 m for the far one.
@@ -92,25 +101,47 @@ const SHADOW_MAP_SIZE: u32 = 4096;
 /// lane's `frame_gauge` — which is what ranks the levers in
 /// BL-20260731T202656Z. Drives the `shadows` compare axis.
 ///
-/// Read once: a `OnceLock`, so it needs a cold run / capture-host restart, same
-/// as `THALOS_TILE_RENDERER`.
-fn cascade_budget() -> usize {
-    static BUDGET: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
-    *BUDGET.get_or_init(|| {
-        let Ok(raw) = std::env::var("THALOS_SHADOW_CASCADES") else {
-            return CASCADE_COUNT;
-        };
-        match raw.trim().parse::<usize>() {
-            Ok(n) if n <= CASCADE_COUNT => {
-                warn!("THALOS_SHADOW_CASCADES={n} — shadow cascades capped (measurement mode)");
-                n
-            }
-            _ => {
-                warn!("THALOS_SHADOW_CASCADES={raw:?} is not 0..={CASCADE_COUNT}; ignoring");
-                CASCADE_COUNT
-            }
+/// Read once for ordinary sessions, so an environment change needs a cold run /
+/// capture-host restart, same as `THALOS_TILE_RENDERER`. The controlled
+/// headless cost matrix is the sole live writer.
+pub(crate) fn cascade_budget() -> usize {
+    CASCADE_BUDGET
+        .get_or_init(|| std::sync::atomic::AtomicUsize::new(configured_cascade_budget()))
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn configured_cascade_budget() -> usize {
+    let Ok(raw) = std::env::var("THALOS_SHADOW_CASCADES") else {
+        return CASCADE_COUNT;
+    };
+    match raw.trim().parse::<usize>() {
+        Ok(n) if n <= CASCADE_COUNT => {
+            warn!("THALOS_SHADOW_CASCADES={n} — shadow cascades capped (measurement mode)");
+            n
         }
-    })
+        _ => {
+            warn!("THALOS_SHADOW_CASCADES={raw:?} is not 0..={CASCADE_COUNT}; ignoring");
+            CASCADE_COUNT
+        }
+    }
+}
+
+/// Change the live cascade ceiling. The environment pin
+/// (`THALOS_SHADOW_CASCADES`) still wins at process start; quality settings
+/// and the offscreen cost matrix write through this afterwards.
+pub(crate) fn set_cascade_budget(budget: usize) {
+    CASCADE_BUDGET
+        .get_or_init(|| std::sync::atomic::AtomicUsize::new(configured_cascade_budget()))
+        .store(
+            budget.min(CASCADE_COUNT),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+}
+
+/// Change the live cascade ceiling for the controlled offscreen cost matrix.
+/// Ordinary sessions still read the environment once and never call this.
+pub(crate) fn set_cascade_budget_for_benchmark(budget: usize) {
+    set_cascade_budget(budget);
 }
 
 /// BASELINE half-width (m) of each cascade's box **on the ground**, near→far,
@@ -168,20 +199,13 @@ const CASCADE_MAX_CASTER_M: [f32; CASCADE_COUNT] = [60.0, 120.0, 400.0, 1200.0];
 const SHADOW_BACK_DISTANCE_M: f32 = 150.0;
 const SHADOW_NEAR_M: f32 = 0.5;
 
-/// Per-cascade MINIMUM half-extents (m), keyed to the vegetation CASTER band:
-/// tree tiles cast into the rig only out to `TREE_SHADOW_CASTER_MAX_M` (6 km —
-/// rings 0–1 in `rendering/vegetation.rs`; the coarse far rings are sub-pixel
-/// and no longer cast), so shadows "running out" inside that band is a
-/// coverage bug, while beyond it nothing exists to cast. Cascades 0 and 1 keep
-/// their small footprint-scaled boxes (crisp craft / near-field shadows);
-/// cascade 2 always spans the mesh-tree ring (2.4 km + fade); cascade 3 always
-/// spans the whole caster band. The footprint scale still grows any of them
-/// further when
-/// the vantage demands it. (Previously 6.5 / 23.5 km to chase the 22 km
-/// impostor band — ~3.2 / 11.5 m per texel, which made every shadow past the
-/// near cascade a coarse blob. The far field beyond the caster band belongs to
-/// the heightfield horizon term (W12), not to stretched cascades — the
-/// MSFS-style shadow-map / terrain-shadow split.)
+/// Per-cascade MINIMUM half-extents (m). Cascades 0 and 1 keep their small
+/// footprint-scaled boxes for craft and near-field detail. Cascades 2 and 3
+/// retain broad terrain coverage for relief shadows. Detailed foliage no
+/// longer determines these extents: only bounded crown proxies inside 900 m
+/// cast, while the far vegetation field belongs to the heightfield horizon
+/// term (W12). The footprint scale still grows any cascade when the vantage
+/// demands it.
 const CASCADE_MIN_HALF_M: [f32; CASCADE_COUNT] = [0.0, 0.0, 3_000.0, 6_500.0];
 
 /// CAP on the depth margin (m) bracketing terrain relief above/below the
@@ -575,7 +599,11 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     });
 
     for index in 0..CASCADE_COUNT {
-        // Each camera needs a colour attachment (we only read the depth).
+        // Each camera needs a colour attachment even though the shadow rig only
+        // reads depth. Keep that throwaway target single-channel: RGBA8 spent
+        // 256 MiB across four 4096² cascades and wrote four channels for pixels
+        // no consumer ever samples. R8 preserves the identical depth pass while
+        // cutting the discarded colour allocation and bandwidth by 75%.
         let mut color = Image::new_uninit(
             Extent3d {
                 width: SHADOW_MAP_SIZE,
@@ -583,7 +611,7 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 depth_or_array_layers: 1,
             },
             TextureDimension::D2,
-            TextureFormat::Rgba8Unorm,
+            TextureFormat::R8Unorm,
             RenderAssetUsages::RENDER_WORLD,
         );
         color.texture_descriptor.usage =
@@ -593,6 +621,15 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         // Spawn-time baseline only — `update_sun_shadow_camera` overwrites this
         // every frame with the live square-on-ground extents (U ≠ V).
         let half = CASCADE_HALF_EXTENTS_M[index];
+        let terrain_layer = if index < 2 {
+            SHADOW_TERRAIN_NEAR_LAYER
+        } else {
+            SHADOW_TERRAIN_FAR_LAYER
+        };
+        let mut layers = vec![SHADOW_CASTER_LAYER, terrain_layer];
+        if index < 3 {
+            layers.push(SHADOW_FOLIAGE_LAYER);
+        }
         commands.spawn((
             Camera3d {
                 // COPY_SRC so the node can copy this camera's depth into its map
@@ -620,7 +657,7 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 ..OrthographicProjection::default_3d()
             }),
             Msaa::Off,
-            bevy::camera::visibility::RenderLayers::layer(SHADOW_CASTER_LAYER),
+            bevy::camera::visibility::RenderLayers::from_layers(&layers),
             SunShadowCascade {
                 index: index as u32,
             },

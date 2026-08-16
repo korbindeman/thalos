@@ -1,6 +1,7 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
 use big_space::prelude::*;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_physics_canonical::types::BodyState;
 
@@ -141,6 +142,7 @@ pub(super) fn attach_player_ship_to_big_space(
     }
 }
 
+#[cfg(feature = "legacy-udlod")]
 pub(super) fn update_real_space_body_positions(
     cache: Res<SolarSystemState>,
     grid: Query<&Grid, With<BigSpace>>,
@@ -175,6 +177,36 @@ pub(super) fn update_real_space_body_positions(
     }
 }
 
+#[cfg(not(feature = "legacy-udlod"))]
+pub(super) fn update_real_space_body_positions(
+    cache: Res<SolarSystemState>,
+    grid: Query<&Grid, With<BigSpace>>,
+    mut bodies: Query<(
+        &RealSpaceBody,
+        Option<&TidallyLocked>,
+        &mut CellCoord,
+        &mut Transform,
+    )>,
+) {
+    let Some(states) = cache.states.as_deref() else {
+        return;
+    };
+    let Ok(root_grid) = grid.single() else {
+        return;
+    };
+
+    for (body, lock, mut cell, mut transform) in &mut bodies {
+        let Some(state) = states.get(body.body_id) else {
+            continue;
+        };
+        let (next_cell, local, rotation) = body_transform(state, lock, states, root_grid);
+        *cell = next_cell;
+        transform.translation = local;
+        transform.rotation = rotation.as_quat();
+    }
+}
+
+#[cfg(feature = "legacy-udlod")]
 fn write_body_transform(
     state: &BodyState,
     lock: Option<&TidallyLocked>,
@@ -184,15 +216,20 @@ fn write_body_transform(
     transform: &mut Transform,
     precise: &mut PreciseRotation,
 ) {
-    let (next_cell, local) = grid.translation_to_grid(state.position);
+    let (next_cell, local, rotation) = body_transform(state, lock, states, grid);
     *cell = next_cell;
     transform.translation = local;
+    transform.rotation = rotation.as_quat();
+    precise.0 = rotation;
+}
 
-    // One f64 source feeds both rotations: the grid's f32 `Transform.rotation`
-    // (big_space / udlod's low-precision far vertex path) and the f64
-    // `PreciseRotation` (udlod's high-precision near Taylor path). Writing both
-    // from the same value in the same system keeps the two precision paths from
-    // slipping at the LOD swap.
+fn body_transform(
+    state: &BodyState,
+    lock: Option<&TidallyLocked>,
+    states: &[BodyState],
+    grid: &Grid,
+) -> (CellCoord, Vec3, bevy::math::DQuat) {
+    let (cell, local) = grid.translation_to_grid(state.position);
     let rotation = surface_body_to_world_orientation_f64(state.id, lock, states).unwrap_or_else(|| {
         warn!(
             "could not resolve surface orientation for body {}; falling back to ephemeris orientation",
@@ -200,8 +237,7 @@ fn write_body_transform(
         );
         state.orientation.normalize()
     });
-    transform.rotation = rotation.as_quat();
-    precise.0 = rotation;
+    (cell, local, rotation)
 }
 
 #[cfg(test)]
@@ -228,22 +264,10 @@ mod tests {
             gm: 1.0,
             radius_m: 1.0,
         };
-        let mut cell = CellCoord::ZERO;
-        let mut transform = Transform::default();
-        let mut precise = PreciseRotation(DQuat::IDENTITY);
-
-        write_body_transform(
-            &state,
-            None,
-            &[state],
-            &grid,
-            &mut cell,
-            &mut transform,
-            &mut precise,
-        );
+        let (cell, local, _rotation) = body_transform(&state, None, &[state], &grid);
 
         assert!(cell.x != 0);
-        assert!(transform.translation.length() <= REAL_SPACE_CELL_SIZE_M);
+        assert!(local.length() <= REAL_SPACE_CELL_SIZE_M);
     }
 
     #[test]

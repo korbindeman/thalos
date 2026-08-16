@@ -1,4 +1,4 @@
-// F3 debug-view performance graph (see game/src/perf/overlay.rs).
+// Shared F3 performance graph (see crates/interface/diagnostics_ui/src/graph.rs).
 //
 // One quad renders a whole sample ring from uniform arrays:
 //   mode 0 — CPU frame-time bars (budget-coloured) + GPU-time line, with

@@ -19,12 +19,12 @@
 //! authored coverage is a planet that renders overcast whatever the climate
 //! says.
 //!
-//! Run: `cargo run -p thalos_runtime --example cloud_weather_probe`
+//! Run: `cargo run -p thalos_game_runtime --example cloud_weather_probe`
 //! Output: `artifacts/diagnostics/cloud_weather/*.png` + stdout histograms.
 
 use bevy::math::Vec3;
 use thalos_body_render::{FillCalibrationInput, derive_fill_calibration};
-use thalos_runtime::solar_system_state::CloudWeatherField;
+use thalos_game_runtime::solar_system_state::CloudWeatherField;
 use thalos_world::CloudClimate;
 
 // 2048 wide puts one probe pixel at ~9.8 km on Thalos's equator — the same
@@ -227,7 +227,7 @@ fn main() {
         weather_texels: &field.texels,
         strata_texels: &field.surface_density_texels,
         face_size: face,
-        coverage_scale: thalos_runtime::solar_system_state::CLOUD_COVERAGE_SCALE,
+        coverage_scale: thalos_game_runtime::solar_system_state::CLOUD_COVERAGE_SCALE,
         density: 0.0026,
         detail_strength: 0.16,
         base_edge_softness: 0.055,
@@ -338,7 +338,7 @@ fn main() {
     for d in 0..10 {
         let lo = d as f32 / 10.0;
         let hi = (d + 1) as f32 / 10.0;
-        let sel: Vec<&thalos_runtime::solar_system_state::WeatherTraceSample> = traces
+        let sel: Vec<&thalos_game_runtime::solar_system_state::WeatherTraceSample> = traces
             .iter()
             .filter(|s| s.coverage >= lo && s.coverage < hi)
             .collect();
@@ -346,7 +346,7 @@ fn main() {
             continue;
         }
         let n = sel.len() as f32;
-        let m = |f: fn(&thalos_runtime::solar_system_state::WeatherTraceSample) -> f32| {
+        let m = |f: fn(&thalos_game_runtime::solar_system_state::WeatherTraceSample) -> f32| {
             sel.iter().map(|s| f(s)).sum::<f32>() / n
         };
         let hot = sel.iter().filter(|s| s.trace.areal_fraction > 0.5).count() as f32 / n;

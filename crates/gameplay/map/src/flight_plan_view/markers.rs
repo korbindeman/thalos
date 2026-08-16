@@ -23,8 +23,8 @@ use crate::map_view::MapSnapshot;
 use thalos_game_state::camera::ActiveCamera;
 use thalos_game_state::coords::screen_marker_radius;
 use thalos_game_state::coords::{RenderOrigin, WorldScale, sample_render_pos};
-use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HideInShipView;
+use thalos_photo_mode::HideInPhotoMode;
 
 use super::FlightPlanView;
 

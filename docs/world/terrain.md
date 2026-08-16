@@ -35,8 +35,8 @@ height authority.
   entities on Bevy's standard path, sampling the body's `SurfaceQuery` directly.
   The in-tree `thalos_udlod` fork (UDLOD on an ellipsoidal cube-sphere via the
   `TileProvider` seam, custom Hapke BRDF, not Bevy PBR) is the **legacy**
-  renderer it replaced — still wired for bodies the tile driver has not
-  installed on and as the `THALOS_TILE_RENDERER=0` baseline. See
+  renderer it replaced. It is absent from default builds and available only as
+  the feature-gated `THALOS_TILE_RENDERER=0` comparison baseline. See
   *Rendering: ground LOD*.
 - **Consumers** — colliders (Avian trimesh from tile height), relief shadows
   (baked horizon attachment), dynamic features (static substrate + cheap
@@ -99,6 +99,12 @@ in [mira_airless_mvp.md](mira_airless_mvp.md). The superseded compiler design is
 (`terrain-generation-legacy.md`, the pipeline spec + migration, and the `gen/`
 research surveys) and is reference only.
 
+Thalos drainage is a post-generation derivation from the completed neural
+heightfield, with any accepted carve residual folded back into the final height
+package before runtime tiles are emitted. Its basin, lake, river, provenance,
+and verification contract lives in [drainage.md](drainage.md); runtime tile
+sampling never substitutes for that authoritative solve.
+
 The one hard rule generation owes its consumers: **the static substrate is the
 expensive, immutable/cached layer; anything time-varying is a cheap additive
 overprint that must not invalidate the static package or base cache.**
@@ -111,13 +117,14 @@ overprint that must not invalidate the static package or base cache.**
 > `thalos_runtime::rendering::tile_terrain`; its anatomy is in
 > [architecture.md](../architecture.md) (*`tiles`*) and its plan in
 > [`ntr §6`](../roadmap/neural_terrain_renderer.md). What follows still applies
-> to bodies the tile driver has not installed on and to the
+> only to a binary built with `legacy-udlod` and selecting the
 > `THALOS_TILE_RENDERER=0` A/B baseline, and is retained because the *contract*
 > (provider-first tiles, cube-sphere addressing, the height authority) carried
 > over. Do not extend the udlod stack; defect-driven fixes only.
 
-Thalos uses the in-tree `thalos_udlod` fork for surface-scale terrain
-rendering. The fork began as Kurt Kühnert's `bevy_terrain`, which was
+The optional comparison build uses the in-tree `thalos_udlod` fork for
+surface-scale terrain rendering. The fork began as Kurt Kühnert's
+`bevy_terrain`, which was
 shaped around rendering finite preprocessed raster datasets. Thalos keeps the
 provider abstraction rather than that fixed dataset format: tiles may come from
 the current runtime generator, a package-backed surface, or cache layers without
@@ -810,7 +817,7 @@ vacuum-black floor (with a small ambient floor for playability).
 3. **Volumetric cloud shadows** — a dynamic, low-res sun-projected cloud
    transmittance term (the `cloud_transmittance` factor above); it also feeds
    god rays through the `BodySky` atmosphere pass (depth-coupled via
-   `SceneDepthImage`). Owned by the atmosphere/cloud system — see
+   `SceneDepthImage`). Owned by the shared GPU foundation — see
    [atmosphere.md](../rendering/atmosphere.md).
 4. **Contact / crevice** — SSAO: screen-space, pipeline-agnostic, covers terrain
    and objects uniformly with no custom plumbing.

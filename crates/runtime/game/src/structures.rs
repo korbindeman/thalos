@@ -7,7 +7,7 @@
 //! [`apply_structure_flatten`] is the one path that makes a structure "stick to
 //! the terrain": for a [`StructurePlacement::FlattenTo`] site it installs a
 //! [`TerrainFlatten`] pad through the body's shared
-//! [`crate::rendering::ground_terrain::TerrainFlattenRegistry`] handle, so the
+//! [`crate::rendering::terrain_flatten::TerrainFlattenRegistry`] handle, so the
 //! rendered ground — and, via the GPU-atlas height mirror, the collider and CPU
 //! height queries — level out across the footprint and smoothstep-blend back to
 //! natural terrain over the ramp. The runway populates this registry; a future
@@ -21,7 +21,7 @@ use bevy::prelude::*;
 use thalos_terrain::{FlattenRegion, TerrainFlatten};
 use thalos_world::BodyId;
 
-use crate::rendering::ground_terrain::TerrainFlattenRegistry;
+use crate::rendering::terrain_flatten::TerrainFlattenRegistry;
 
 pub use thalos_game_state::structures::{
     BaseId, BaseRecord, Facility, StructureId, StructureKind, StructurePlacement,

@@ -1,0 +1,7 @@
+[package]
+name = "thalos_geodetic"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

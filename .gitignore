@@ -42,3 +42,4 @@ tools/agent_scratch/
 .claude/
 # Baked drainage raster (NTR-X2q) — 50 MB, regenerate with examples/bake_rivers.rs
 assets/terrain_packages/thalos_rivers/*.u8
+reference/

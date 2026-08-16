@@ -4,7 +4,7 @@
 
 use bevy::math::{DVec3, Vec3};
 use bevy::prelude::*;
-use thalos_physics_canonical::canonical::{CraftState, Epoch};
+use thalos_physics_canonical::canonical::{CraftId, CraftState, Epoch};
 use thalos_physics_canonical::trajectory::{FlightPlan, TrajectoryBranchStack};
 use thalos_physics_canonical::types::{BodyState, BodyStates};
 use thalos_world::{BodyDefinition, BodyId};
@@ -53,6 +53,7 @@ pub struct MapSnapshot {
     pub body_states: BodyStates,
     pub body_defs: Vec<BodyDefinition>,
     pub crafts: Vec<CraftState>,
+    pub active_craft_id: Option<CraftId>,
     pub flight_plan: Option<FlightPlan>,
     pub branch_stack: Option<TrajectoryBranchStack>,
     pub prediction_version: u64,
@@ -62,6 +63,14 @@ pub struct MapSnapshot {
 }
 
 impl MapSnapshot {
+    pub fn craft(&self, craft_id: CraftId) -> Option<&CraftState> {
+        self.crafts.iter().find(|craft| craft.id == craft_id)
+    }
+
+    pub fn active_craft(&self) -> Option<&CraftState> {
+        self.craft(self.active_craft_id?)
+    }
+
     pub fn context(
         &self,
         origin: &RenderOrigin,

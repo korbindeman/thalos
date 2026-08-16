@@ -122,7 +122,7 @@ pub struct SasState {
 /// matching reaction-wheel command lands directly in the simulation's
 /// `ControlInput::torque_command` (consumed by `apply_local_forces`), so it is
 /// not mirrored here.
-#[derive(Resource, Debug, Default, Clone, Copy)]
+#[derive(Component, Debug, Default, Clone, Copy)]
 pub struct RealizedControl {
     /// Aero control-surface deflections fed to `evaluate_aero`.
     pub aero: ControlInputs,
@@ -171,8 +171,8 @@ pub struct WheelSet {
 /// spoilers out); the parked runway placement engages it explicitly so a
 /// freshly-spawned aircraft holds on the strip
 /// (`runway::finish_runway_spawn`). Reflect-registered (for a future debug UI).
-#[derive(Resource, Clone, Copy, Debug, Default, Reflect)]
-#[reflect(Resource)]
+#[derive(Component, Clone, Copy, Debug, Default, Reflect)]
+#[reflect(Component)]
 pub struct ParkingBrake {
     pub engaged: bool,
 }
@@ -201,8 +201,8 @@ pub struct WeightOnWheels {
 /// gear extended, and orbit/EVA craft have no wheels so the state is moot.
 /// Retraction is interlocked against weight-on-wheels (see [`toggle_gear`]).
 /// Reflect-registered (for a future debug UI).
-#[derive(Resource, Clone, Copy, Debug, Reflect)]
-#[reflect(Resource)]
+#[derive(Component, Clone, Copy, Debug, Reflect)]
+#[reflect(Component)]
 pub struct GearState {
     pub down: bool,
 }
@@ -230,8 +230,8 @@ pub const PHYSICS_QUERY_TILE_LOD_M: f32 = 0.5;
 /// coarse surface↔orbit switch, not the per-frame grounded/airborne state,
 /// which lives in [`ActivePlayerController::grounded`].)
 /// Defaults to `Grounded` to match the startup surface spawn.
-#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
-#[reflect(Resource)]
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
+#[reflect(Component)]
 pub enum EvaMode {
     #[default]
     Grounded,

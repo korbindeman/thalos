@@ -6,6 +6,7 @@
 //! generation only when `Running` is entered.
 
 use bevy::prelude::*;
+use thalos_game_state::{ActiveCraft, ActiveCraftMut};
 use thalos_physics_local::{ActiveLocalBubble, HeightSourceRegistry};
 
 use crate::content::ContentRoot;
@@ -15,9 +16,8 @@ use crate::loading::{
     world_load_steps,
 };
 use crate::maneuver::{ManeuverPlan, SelectedNode};
-use crate::player_controller::EvaMode;
 use crate::relaunch::{RelaunchRequest, RelaunchSpec};
-use crate::rendering::{PlayerShip, SimulationState};
+use crate::rendering::SimulationState;
 use crate::runway::RunwayPlacement;
 use crate::scenario_menu::respawn_into;
 use crate::space_center::HubSpaceportBuild;
@@ -77,12 +77,11 @@ fn apply_session_load_request(
     respawn: (
         ResMut<ActiveLocalBubble>,
         Res<HeightSourceRegistry>,
-        ResMut<EvaMode>,
-        ResMut<ManeuverPlan>,
+        ActiveCraftMut<ManeuverPlan>,
         ResMut<SelectedNode>,
         Res<Homeworld>,
+        Res<ActiveCraft>,
     ),
-    player_ship: Query<Entity, With<PlayerShip>>,
     load: (
         ResMut<LoadingTracker>,
         ResMut<LoadDestination>,
@@ -132,7 +131,7 @@ fn apply_session_load_request(
     sim.simulation
         .set_sim_time(crate::runway::canonical_epoch_s(plan.situation).unwrap_or(0.0));
 
-    let (mut active, height_sources, mut eva_mode, mut maneuver, mut selected, homeworld) = respawn;
+    let (mut active, height_sources, mut maneuver, mut selected, homeworld, active_craft) = respawn;
     let (mut tracker, mut destination, mut settle, mut runway, mut relaunch, mut descent) = load;
     let (_world_state, mut next_world) = world;
     let (mut initial_context, mut history, mut hub_build) = session_ui;
@@ -181,9 +180,8 @@ fn apply_session_load_request(
                     &mut sim,
                     &mut active,
                     &height_sources,
-                    &mut eva_mode,
-                    &player_ship,
-                    &mut maneuver,
+                    active_craft.0,
+                    maneuver.get_mut().as_deref_mut(),
                     &mut selected,
                     homeworld.0,
                 );
@@ -213,9 +211,8 @@ fn apply_session_load_request(
             &mut sim,
             &mut active,
             &height_sources,
-            &mut eva_mode,
-            &player_ship,
-            &mut maneuver,
+            active_craft.0,
+            maneuver.get_mut().as_deref_mut(),
             &mut selected,
             homeworld.0,
         );

@@ -24,20 +24,22 @@ mod ocean;
 pub(crate) mod plume;
 pub(crate) mod real_space;
 pub(crate) mod reentry;
+pub(crate) mod terrain_flatten;
 pub(crate) mod tile_cache;
 // Scattered pebble/rock decoration is disabled — no rocks on the surface.
 // Re-enable by uncommenting this and the `RockScatterPlugin` registration below.
 // mod rocks;
-mod scene_depth;
 mod spawn;
 pub(crate) mod ssao;
 pub(crate) mod sun_shadow;
+#[cfg(feature = "legacy-udlod")]
 pub(crate) mod terrain_residency;
 pub(crate) mod tile_terrain;
 pub(crate) mod transforms;
 mod types;
 mod vapor_cone;
 mod vegetation;
+pub(crate) use vegetation::VegetationShadowStats;
 pub(crate) mod view_anchor;
 
 /// Cascade count shared by **every** game `DirectionalLight` that can cast
@@ -54,10 +56,9 @@ use body_lod::{LastClick, double_click_focus_system, focus_camera_on_homeworld, 
 /// runs the spawn-time derivation without booting a capture.
 #[cfg(test)]
 pub(crate) use clouds::derive_body_fill_calibration as derive_body_fill_calibration_for_probe;
-use ground_terrain::{
-    pause_surface_terrain_streaming_at_high_warp, sync_body_render_lod,
-    update_body_terrain_atmosphere,
-};
+#[cfg(feature = "legacy-udlod")]
+use ground_terrain::pause_surface_terrain_streaming_at_high_warp;
+use ground_terrain::{sync_body_render_lod, update_body_terrain_atmosphere};
 use lighting::{
     sync_film_grain_to_exposure, update_camera_exposure, update_moon_light,
     update_solid_planet_params, update_sun_light,
@@ -69,8 +70,8 @@ use real_space::{
     RealSpaceOrigin, attach_player_ship_to_big_space, attach_ship_camera_to_big_space,
     setup_big_space, update_real_space_body_positions,
 };
-use scene_depth::SceneDepthPlugin;
 use spawn::spawn_bodies;
+#[cfg(feature = "legacy-udlod")]
 use terrain_residency::TerrainResidencyPlugin;
 use thalos_map::trails::{draw_orbits, recompute_orbit_trails};
 use transforms::{update_body_positions, update_ship_position};
@@ -83,6 +84,7 @@ pub use types::{
 use crate::SimStage;
 use crate::solar_system_state::sync_solar_system_state;
 use bevy::prelude::*;
+use thalos_render_foundation::SceneDepthPlugin;
 
 pub use thalos_game_state::coords::screen_marker_radius;
 // Re-export so existing `use crate::rendering::{RenderFrame, RenderOrigin}` sites keep working.
@@ -92,6 +94,9 @@ pub struct RenderingPlugin;
 
 impl Plugin for RenderingPlugin {
     fn build(&self, app: &mut App) {
+        #[cfg(feature = "legacy-udlod")]
+        app.add_plugins(TerrainResidencyPlugin);
+
         app.add_plugins(view_anchor::ViewAnchorPlugin)
             .add_plugins(SceneDepthPlugin)
             .add_plugins(ssao::SsaoPlugin)
@@ -102,10 +107,9 @@ impl Plugin for RenderingPlugin {
             // Must precede the terrain plugins: they spawn terrain (and thus ask
             // for cached providers) and the registry has to exist by then.
             .add_plugins(tile_cache::TileCachePlugin)
-            .add_plugins(TerrainResidencyPlugin)
             // NTR-X1: standard-path tile terrain driver — the DEFAULT ground
-            // renderer (it gates legacy udlod's try_spawn per body). No-op
-            // only under the THALOS_TILE_RENDERER=0 legacy escape hatch.
+            // renderer on every body. It is a no-op only when a validated
+            // legacy render plan is selected in a `legacy-udlod` build.
             .add_plugins(tile_terrain::TileTerrainDriverPlugin)
             // `map_terrain` deleted 2026-07-26: the map has rendered the baked
             // impostor billboard at every distance since `bake_impostor_albedo_cube`
@@ -130,6 +134,8 @@ impl Plugin for RenderingPlugin {
             .insert_resource(RenderFrame::default())
             .insert_resource(PlanetshineTints::default())
             .insert_resource(CameraExposure::default())
+            .init_resource::<terrain_flatten::TerrainFlattenRegistry>()
+            .init_resource::<terrain_flatten::TerrainRebuildRequest>()
             .register_type::<CameraExposure>()
             .register_type::<ground_terrain::AtmosphereTuning>()
             .init_resource::<ground_terrain::AtmosphereTuning>()
@@ -154,7 +160,8 @@ impl Plugin for RenderingPlugin {
             // scenario boot QUEUES `Live` from a `Startup` system (never
             // `insert_state(Live)` at build — Bevy runs the initial
             // `StateTransition` BEFORE `PreStartup`, which would fire this
-            // chain before `setup_big_space` / `setup_scene_depth_image`
+            // chain before `setup_big_space` / the foundation's scene-depth
+            // image setup
             // commands — which `spawn_bodies` reads — are flushed; see
             // `main.rs`). The queued transition applies at the first regular
             // `StateTransition`, same frame, after `Startup`. A bare menu boot
@@ -196,10 +203,7 @@ impl Plugin for RenderingPlugin {
                     // (atmosphere vantage) from a single camera-to-body
                     // distance. Must run after `update_real_space_body_positions`
                     // (for current body world positions).
-                    pause_surface_terrain_streaming_at_high_warp,
-                    sync_body_render_lod
-                        .after(update_real_space_body_positions)
-                        .after(pause_surface_terrain_streaming_at_high_warp),
+                    sync_body_render_lod.after(update_real_space_body_positions),
                     // `update_body_terrain_atmosphere` moved to PostUpdate
                     // (see below) so it reads body GlobalTransforms after
                     // big_space's `TransformSystems::Propagate` finishes
@@ -250,6 +254,12 @@ impl Plugin for RenderingPlugin {
                     .after(bevy::transform::TransformSystems::Propagate)
                     .after(clouds::drive_clouds),
             );
+
+        #[cfg(feature = "legacy-udlod")]
+        app.add_systems(
+            Update,
+            pause_surface_terrain_streaming_at_high_warp.in_set(SimStage::Sync),
+        );
     }
 }
 

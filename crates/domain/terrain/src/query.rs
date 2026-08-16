@@ -171,6 +171,21 @@ pub struct Region {
     pub angular_radius_rad: f32,
 }
 
+/// One quadtree patch on the canonical cube-sphere.
+///
+/// This is deliberately a terrain-domain address rather than a renderer tile
+/// key. Providers whose authored data is hierarchical can use it to answer
+/// refinement questions without making [`SurfaceQuery`] depend on a rendering
+/// crate. Face order matches [`crate::cubemap::CubemapFace`]; `y = 0` is the
+/// top edge of the face, as in the package height pyramid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SurfacePatch {
+    pub face: u8,
+    pub level: u8,
+    pub x: u32,
+    pub y: u32,
+}
+
 /// The seam every consumer evaluates the surface through.
 ///
 /// Consumers hold a `&dyn SurfaceQuery` so the backing implementation can be
@@ -263,6 +278,17 @@ pub trait SurfaceQuery: Send + Sync {
     /// procedural-detail headroom. Consumers size their height encoding from
     /// this.
     fn height_range_m(&self) -> f32;
+
+    /// Conservative maximum surface displacement (metres) that one more
+    /// refinement step can reveal inside `patch` at `refined_spacing_m`.
+    ///
+    /// `Some(error)` lets a screen-space selector omit a split once that error
+    /// projects below its pixel threshold. `None` means the backing cannot
+    /// bound every geometric contributor there, so callers must retain their
+    /// existing heuristic. The default is intentionally conservative.
+    fn refinement_error_m(&self, _patch: SurfacePatch, _refined_spacing_m: f32) -> Option<f32> {
+        None
+    }
 
     /// Hint the backing to materialise `region` at `lod_m` asynchronously.
     /// No-op for the baked backing (everything is already resident).
@@ -714,6 +740,10 @@ impl SurfaceQuery for FlattenedSurface {
 
     fn height_range_m(&self) -> f32 {
         self.inner.height_range_m()
+    }
+
+    fn refinement_error_m(&self, patch: SurfacePatch, refined_spacing_m: f32) -> Option<f32> {
+        self.inner.refinement_error_m(patch, refined_spacing_m)
     }
 
     fn prewarm(&self, region: Region, lod_m: f32) {

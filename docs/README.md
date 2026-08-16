@@ -7,9 +7,10 @@ else is grouped by role or primary subsystem; this file is the canonical map.
 
 | Document | Authority |
 |----------|-----------|
+| [Project purpose](purpose.md) | **North star:** the game, internal world foundation, secondary applications, and the boundaries between them |
 | [Backlog](backlog.md) | **Execution:** the status-tracked queue, the answer to “what’s next?”, and the only status authority |
 | [Architecture](architecture.md) | **Codebase:** workspace layout, ownership, dependency boundaries, and the crate/module anatomy |
-| [Gameplay](gameplay.md) | **Product:** pillars, core loop, progression, and long-horizon player experience |
+| [Gameplay](gameplay.md) | **Primary application:** the spaceflight game's pillars, core loop, progression, and long-horizon player experience |
 | [Documentation map](README.md) | **Navigation:** where each kind of knowledge belongs |
 
 Use the [roadmap](roadmap/) for active sprint strategy, a subsystem spec for the
@@ -24,9 +25,12 @@ for superseded reference material.
 Active strategy and sequencing, not implementation detail.
 
 - [Neural terrain × standard-path renderer](roadmap/neural_terrain_renderer.md) — **keystone / primary sprint**: paired diffusion terrain + Bevy-standard-path renderer, probe milestones, extraction plan.
+- [Stabilization and distribution](roadmap/stabilization.md) — near-future planet-pipeline readiness, declared pre-alpha fallbacks, acceptance profiles, and the player distribution boundary.
 - [Architecture cleanup](roadmap/architecture_cleanup.md) — background consolidation sprint (demoted from primary 2026-07-23).
+- [Lightweight application runtime](roadmap/application_runtime.md) — capability-selected common shell for the game and Kòrsou; simulation and gameplay are opt-in bundles.
 - [Graphics fidelity](roadmap/graphics_fidelity.md) — one-world rendering strategy; spine-port items frozen by the keystone triage, composites continue.
 - [Ocean systems](roadmap/ocean_systems.md) — future world/gameplay program: a shared weather-driven sea, vessels, beaches, storms, and the Thalos proving slice before Pelagos.
+- [Flexible render-kit architecture](roadmap/render_kit_architecture.md) — shared appearance mechanisms, explicit planar/planetary/ellipsoid adapters, validated composition, and deterministic renderer A/B sequencing.
 - [Mira learned terrain](roadmap/mira_learned_terrain.md) — L1–L6 milestones, visual gates, dataset growth, compute ledger, evidence; paused after L2 closure per the keystone.
 - [Cinematics](roadmap/cinematics.md) — one sequence document sampled as stills, keyframes, or video; in-game director/replay and scriptable craft control. Widens and supersedes `CAP-4`.
 
@@ -68,6 +72,7 @@ Celestial content and the physical surface of bodies.
 - [Navigable gas giants](world/navigable_gas_giants.md) — pressure-datum world model, shared atmosphere authority, exterior/interior rendering, and flight envelope.
 - [Terrain contract](world/terrain.md)
 - [Macro terrain: climate and landcover fields](world/terrain_macro.md)
+- [Drainage](world/drainage.md) — post-neural watersheds, lakes, river carving, package outputs, and inland water sequence (`hydro`)
 - [Biomes — the terrain authority](world/biomes.md) (`bio`)
 - [Mira airless terrain MVP](world/mira_airless_mvp.md)
 - [Vegetation](world/vegetation.md)
@@ -92,6 +97,7 @@ How to build, inspect, capture, and verify the project.
 - [Bevy 0.19 notes](development/bevy.md)
 - [Build speed and agent workflow](development/build_speed.md)
 - [Capture architecture](development/capture.md)
+- [Quality profiles](development/quality_profiles.md) — Showcase / Laptop developer bundles, first-run Mac default, capture isolation
 - [Tooling](development/tooling.md)
 - [Visual testing and agent capture quickstart](development/visual_testing.md)
 
@@ -157,11 +163,13 @@ then findings into rows, incidents, or a stated non-action
 |--------|-----------|
 | bare `§N` | a section of the current document |
 | `ntr §N` | [neural terrain × standard-path renderer](roadmap/neural_terrain_renderer.md) |
+| `stab §N` | [stabilization and distribution](roadmap/stabilization.md) |
 | `clean §N` | [architecture cleanup](roadmap/architecture_cleanup.md) |
 | `gfx §N` | [graphics fidelity](roadmap/graphics_fidelity.md) |
 | `sea §N` | [ocean systems](roadmap/ocean_systems.md) |
 | `cine §N` | [cinematics: director, replay, scripted control](roadmap/cinematics.md) |
 | `cloud §N` | [clouds](rendering/clouds.md) |
+| `hydro §N` | [drainage](world/drainage.md) |
 | `giant §N` | [navigable gas giants](world/navigable_gas_giants.md) |
 | `ADR-YYYYMMDDTHHMMSSZ-slug` | [architecture decisions](adr/) |
 | `INC-YYYYMMDDTHHMMSSZ-slug` | [incidents](incidents/), plus frozen legacy `INC-NNNN` |

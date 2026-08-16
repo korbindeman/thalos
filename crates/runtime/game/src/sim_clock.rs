@@ -37,7 +37,7 @@
 //!
 //! **What must *not* move onto the driven clock:** anything measuring real
 //! elapsed time — frame cost, streaming holds, timeouts. Those take `Instant`
-//! deltas directly (see `perf::collect_frame` and the capture driver's
+//! deltas directly (see `thalos_diagnostics_ui::FrameSamples` and the capture driver's
 //! streaming/brake holds). A wall-clock measurement hung off `Time<Real>` reads
 //! as a lie the moment the clock is driven, which is why those two moved in the
 //! same change that introduced this mode.

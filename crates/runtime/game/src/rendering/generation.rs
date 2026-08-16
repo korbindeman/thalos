@@ -17,7 +17,9 @@ use bevy::prelude::*;
 use thalos_body_render::{BodyOceanMaterial, CloudCompositeMaterial};
 use thalos_physics_local::HeightSourceRegistry;
 
-use crate::terrain_registry::{BodySurfaceRegistry, RenderedGroundRegistry};
+use crate::terrain_registry::BodySurfaceRegistry;
+#[cfg(feature = "legacy-udlod")]
+use crate::terrain_registry::RenderedGroundRegistry;
 
 use super::types::PlanetshineTints;
 
@@ -26,6 +28,7 @@ use super::types::PlanetshineTints;
 #[derive(SystemParam)]
 pub(super) struct ProceduralInstallExtras<'w> {
     pub(super) height_sources: ResMut<'w, HeightSourceRegistry>,
+    #[cfg(feature = "legacy-udlod")]
     pub(super) rendered_ground: ResMut<'w, RenderedGroundRegistry>,
     pub(super) surfaces: Res<'w, BodySurfaceRegistry>,
 }

@@ -77,7 +77,7 @@ fn sync_maneuver_precision_context(
 /// mid-drag.
 fn update_selected_node_view(
     selected: Res<SelectedNode>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     sim: Option<Res<thalos_game_state::SimulationState>>,
     body_states: Res<thalos_game_state::SolarSystemState>,
     origin: Res<thalos_game_state::coords::RenderOrigin>,
@@ -94,6 +94,12 @@ fn update_selected_node_view(
         selected_view.frame = Some(frame);
         return;
     }
+
+    let Some(plan) = plan.get() else {
+        selected_view.world_pos = None;
+        selected_view.frame = None;
+        return;
+    };
 
     let Some(ref sim) = sim else {
         selected_view.world_pos = None;
@@ -113,7 +119,7 @@ fn update_selected_node_view(
 
     match helpers::selected_node_world_and_frame(
         selected.id,
-        &plan,
+        plan,
         prediction,
         sim.simulation.trajectory_branches(),
         states,
@@ -139,7 +145,6 @@ pub struct ManeuverPlugin;
 impl Plugin for ManeuverPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<ManeuverEvent>()
-            .init_resource::<ManeuverPlan>()
             .init_resource::<NodeDeltaV>()
             .init_resource::<SelectedNode>()
             .init_resource::<SelectedNodeView>()
@@ -175,19 +180,19 @@ impl Plugin for ManeuverPlugin {
                     manage_arrow_handles
                         .after(update_selected_node_view)
                         .run_if(
-                            thalos_game_state::ui::not_in_photo_mode
+                            thalos_photo_mode::not_in_photo_mode
                                 .and_then(thalos_game_state::nav::in_map_view),
                         ),
                     update_arrow_transforms.after(manage_arrow_handles).run_if(
-                        thalos_game_state::ui::not_in_photo_mode
+                        thalos_photo_mode::not_in_photo_mode
                             .and_then(thalos_game_state::nav::in_map_view),
                     ),
                     manage_node_markers.after(update_selected_node_view).run_if(
-                        thalos_game_state::ui::not_in_photo_mode
+                        thalos_photo_mode::not_in_photo_mode
                             .and_then(thalos_game_state::nav::in_map_view),
                     ),
                     update_snap_indicator.after(maneuver_input).run_if(
-                        thalos_game_state::ui::not_in_photo_mode
+                        thalos_photo_mode::not_in_photo_mode
                             .and_then(thalos_game_state::nav::in_map_view),
                     ),
                 )

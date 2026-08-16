@@ -14,17 +14,36 @@ use thalos_body_render::{
 
 pub use crate::solar_system_state::{SimulationState, SolarSystemState};
 pub use thalos_game_state::scene::{
-    ActiveCraft, CameraExposure, CelestialBody, PlanetshineTints, PlayerShip, RealSpaceBody,
-    ShipMarker, TidallyLocked,
+    ActiveCraft, CameraExposure, CelestialBody, CraftIdentity, CraftRoot, PlanetshineTints,
+    PlayerShip, RealSpaceBody, ShipMarker, TidallyLocked,
 };
 
-/// Sole writer of [`ActiveCraft`]: mirror the (currently single) [`PlayerShip`]
-/// entity into it each frame, `None` when no craft exists (the respawn/relaunch
-/// rebuild window). Centralises the one `q.single()` so every other consumer can
-/// take the active craft by id without its own single-craft assumption; when N
-/// craft exist this is where "which is active" is decided.
-pub fn track_active_craft(ships: Query<Entity, With<PlayerShip>>, mut active: ResMut<ActiveCraft>) {
-    let current = ships.iter().next();
+/// Sole writer of [`ActiveCraft`]: resolve the canonical active [`CraftIdentity`]
+/// to its runtime [`CraftRoot`]. `None` is expected during relaunch and before
+/// an EVA local body has materialized.
+pub fn track_active_craft(
+    mut commands: Commands,
+    sim: Res<SimulationState>,
+    roots: Query<(Entity, &CraftIdentity, Has<PlayerShip>), With<CraftRoot>>,
+    mut active: ResMut<ActiveCraft>,
+) {
+    let active_id = sim.simulation.active_craft_id();
+    let mut current = None;
+    for (entity, identity, selected_marker) in &roots {
+        let selected = identity.0 == active_id;
+        if selected {
+            current = Some(entity);
+        }
+        match (selected, selected_marker) {
+            (true, false) => {
+                commands.entity(entity).insert(PlayerShip);
+            }
+            (false, true) => {
+                commands.entity(entity).remove::<PlayerShip>();
+            }
+            _ => {}
+        }
+    }
     if active.0 != current {
         active.0 = current;
     }

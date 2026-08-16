@@ -107,8 +107,8 @@ fn log_main_assets(
     }
     let tile_resident: usize = tile_roots.iter().map(|r| r.resident_count()).sum();
     let tile_bytes: usize = tile_roots.iter().map(|r| r.resident_bytes()).sum();
-    // One root today (the tile driver takes one body per session); summing keeps
-    // the line correct when per-body install lands.
+    // Report the tightest active brake across every body while the byte totals
+    // above remain process-wide sums.
     let split_scale = tile_roots
         .iter()
         .map(|r| r.split_scale())

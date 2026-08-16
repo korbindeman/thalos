@@ -9,6 +9,21 @@ is the **foundation** this plan generalizes — its tile lattice, deterministic
 hashed placement, shared placement gate, f64 per-tile anchoring, and
 async-build/revision-rebuild lifecycle are reused verbatim by every layer here.
 
+> **Shared impostor-first woody path landed (2026-08-10), GPU verification
+> pending.** `thalos_vegetation` now owns the complete topology-independent
+> octahedral mechanism: atlas layout and targets, LOD0 capture bake, standard
+> material, bounds, and the four-vertex/six-index root batch. Kòrsou uses this
+> representation for every streamed shrub/tree. The visible cards remain
+> excluded from Bevy's cascaded shadow caster set; deterministic tree roots now
+> also feed coarse shadow-only crowns inside a bounded 760 m camera radius.
+> Its dense placement is unchanged. Thalos uses the same batch and bake
+> mechanism, retaining its planetary cloud/shadow material adapter and real mesh
+> LODs only when projected size plus low AGL justify them.
+> The former planetary atlas helpers, bake material/rig, and duplicate batch
+> builder are deleted. Tests pin the per-root geometry cost; Kòrsou F3 reports
+> roots, impostor vertices, and bake readiness. See
+> ADR-20260810T194324Z-woody-vegetation-is-impostor-first.
+
 > **Status: Phases 0–2 landed (2026-06-25), runtime-unverified.** Shipped:
 > the shared `tile_lattice` + `placement_gate` + `scatter` foundation (Phase 0);
 > grass blade-LOD geometry + the **clipmap rings that take grass to the horizon**
@@ -338,6 +353,10 @@ older `TerrainFlatten` `nearest_flatten` exclusion.
 - **Lifecycle:** active-body pick (nearest `Vegetated` body with a
   `HeightSource`), nearest-first build dispatch, hysteresis despawn, periodic
   revision-driven rebuild when ground under a tile moves > 5 cm.
+- **User control:** `GraphicsPreferences::foliage` parks the tree/shrub clipmap,
+  cancels pending builds, and despawns its live tiles. Grass blades remain under
+  their independent `GraphicsSettings::grass` control; terrain landcover color
+  is unchanged by either geometry toggle.
 
 **Hard ring at ~100 m** is the first thing this plan removes.
 
@@ -347,6 +366,12 @@ older `TerrainFlatten` `nearest_flatten` exclusion.
 
 ### 3.1 Code layout
 
+- **`crates/rendering/vegetation`** — topology-independent woody mechanism:
+  procedural species payloads and foliage material atlas; hemisphere-octahedral
+  atlas layout, capture shader and one-shot bake rig; generic standard-path
+  impostor material; bounds helpers; and the canonical four-vertex root batch.
+  Thalos and Kòrsou consume it through different spatial adapters. Placement,
+  streaming topology, terrain handoff, and shadow policy remain adapter-owned.
 - **`crates/rendering/render/src/ground/tile_lattice.rs`** *(new, refactor)* — the
   cube-sphere lattice math (`cube_face_uv` / `cube_dir` / `tile_frame` /
   `tiles_per_side` / `tile_uv_span`), lifted out of `vegetation.rs` into a
@@ -356,21 +381,21 @@ older `TerrainFlatten` `nearest_flatten` exclusion.
 - **`crates/rendering/render/src/ground/scatter.rs`** *(new, pure)* —
   `VegLayer`, `VegSpeciesPlacement`, `VegInstance`, `VegScatterTile`,
   `build_scatter_tile`, `clump_field`, the shared `placement_gate` helper, the
-  instanced material (`VegInstancedMaterial`), and the foliage impostor material
-  (`FoliageImpostorMaterial`). No Bevy beyond mesh/material types, like
-  `vegetation.rs`.
+  planetary placement classification, and adapters from planetary instances to
+  shared vegetation batches. No atlas or impostor representation is defined
+  here.
 - **`crates/rendering/render/src/ground/vegetation.rs`** *(existing)* — keeps the
   grass blade/clump megamesh builder + `GrassMaterial`. Gains blade-LOD
   variants (7-vert → 3-vert → crossed-quad clump).
-- **`crates/runtime/game/src/rendering/vegetation.rs`** *(new, driver)* — the unified
-  driver: `SpeciesLibrary` resource + drive / finalize / anchor / rebuild / LOD
-  systems, a generalization of today's `grass.rs`. Hosts trees and shrubs
-  first; grass folds in at Phase 4.
+- **`crates/runtime/game/src/rendering/vegetation.rs`** *(driver)* — the
+  planetary `SpeciesLibrary`, projected-size/AGL LOD selection, clipmap drive /
+  finalize / anchor / rebuild systems, and the cloud/custom-shadow material
+  adapter. It calls the shared bake rig and batch mechanism.
 - **`crates/runtime/game/src/rendering/grass.rs`** *(existing)* — stays as the grass
   driver until Phase 4 folds it into the unified driver.
-- **Impostor bake** lives near `scatter.rs` (foliage octahedral atlas), distinct
-  from the top-level `body_render::impostor` module (distant *planet*
-  billboards) to avoid confusion.
+- **Impostor bake** lives in `thalos_vegetation`, distinct from
+  `body_render::impostor` (distant *planet* billboards). The planetary and
+  planar adapters provide species and placement but do not reimplement capture.
 
 ### 3.2 Shared foundations (reused by every layer)
 
@@ -749,8 +774,10 @@ mid-to-far forests.
 
 ### 7.1 As implemented (2026-06-25)
 
-Engine side in `body_render/src/ground/tree_impostor.rs` (+ `tree_impostor.wgsl`,
-`tree_bake.wgsl`); driver + bake orchestration in
+Shared engine side in `crates/rendering/vegetation/src/impostor.rs` (+
+`impostor_bake.wgsl` and the generic `impostor_standard.wgsl`). The planetary
+lighting adapter remains in `body_render/src/ground/tree_impostor.rs` +
+`assets/shaders/tree_impostor_standard.wgsl`; its driver is
 `game/src/rendering/vegetation.rs`. The far band is selected when a
 representative tree projects below 40 px, or whenever the view is above the
 150 m AGL mesh ceiling; that LOD3 slot swaps mesh → impostor once the atlas is
@@ -770,7 +797,7 @@ ready.
   `tick_impostor_bake` tears it down and flags the band ready; the atlases retain
   the captured content. Normals are stored **object-local** (not world) so the
   runtime re-lights each tree in its own terrain frame.
-- **Runtime.** `combine_impostor_tile_mesh` emits one quad per tree (base in
+- **Runtime.** `combine_impostor_mesh` emits one quad per root (base in
   `POSITION` — degenerate for the standard prepass, so impostors never touch a
   custom prepass pipeline; terrain up in `NORMAL`; corner in `UV_0`;
   `(scale, species)` in `UV_1`; `(tint, yaw)` in `COLOR`). The vertex billboards
@@ -788,12 +815,19 @@ ready.
 - **Coarse impostor clipmap ring** — ✅ landed 2026-06-27 (see the status note at
   the top). Coarse grove rings (tile 500/1000/2000 m, `spacing_scale ≈
   grove_scale ≈ tile/200`) extend reach ~4.8 → ~22 km at a bounded quad count.
+- **Bounds and shadows.** Both adapters install padded explicit AABBs because
+  the source mesh is degenerate before vertex expansion. Kòrsou's visible cards
+  remain outside Bevy's cascaded caster set because the standard opaque shadow
+  pass sees their rectangular bounds rather than their atlas alpha. Trees
+  instead contribute one six-vertex/eight-triangle crown proxy on a shadow-only
+  layer while their 128 m cell is within 760 m of the camera; shrubs are omitted.
+  Planetary impostors remain `NotShadowCaster` on Bevy's path and only bounded
+  near rings enter the custom sun-shadow layer.
 - **Deferred (follow-ups):** true depth-channel parallax (the channel is baked
-  but the runtime blend doesn't ray-offset yet); per-tile frustum-cull `Aabb`
-  (impostor meshes are `RENDER_WORLD`, so currently never frustum-culled — fine
-  while clumping keeps far clearings empty, revisit if draw count bites);
-  reaching past ~22 km from high altitude is the **terrain-albedo handoff**'s job
-  (§9), not more impostor rings.
+  but the runtime blend doesn't ray-offset yet); reaching past ~22 km from high
+  altitude is the **terrain-albedo handoff**'s job (§9), not more impostor rings;
+  compute compaction/indirect is measurement-triggered, not required by the
+  shared contract.
 
 ---
 
@@ -872,14 +906,18 @@ impostor + wind-weight bundle per species) is unchanged either way.
 
 ## 12. Shadows
 
-- **Near mesh LODs** cast CSM shadows (`casts_shadows_to_lod` cutoff per
-  species) — trees especially need contact with the ground to feel planted.
-  Note the craft-shadow-caster-layer gotcha: casters must share the light's
-  render layer.
-- **Impostors** in rings 0–1 (out to `TREE_SHADOW_CASTER_MAX_M`, 6 km) both
-  cast into cascades 1–2 *and* sample them (2026-07-30 — a card that casts a
-  shadow it cannot receive reads as bright trees on dark ground). Rings 2–3
-  neither cast nor receive; the far field belongs to the W12 horizon term.
+- **Visible tree meshes and impostors do not cast.** Their alpha foliage
+  materials multiplied through four custom shadow cameras cost 18.29 ms in the
+  settled `forest-stand` matrix while the same foliage cost 1.57 ms in the main
+  view. They remain shadow receivers.
+- **Nearby trees use bounded opaque crown proxies.** Ring-0 tree placements
+  within 760 m produce one six-vertex/eight-triangle octahedron per tree,
+  batched by the existing 200 m tile on the shadow-only layer. A 900 m despawn
+  radius supplies hysteresis; shrubs and farther rings do not cast. This keeps
+  grounding near the view without making the 22 km visible carpet part of the
+  shadow budget (ADR-20260814T152332Z).
+- **Far vegetation shadowing** belongs to the W12 horizon term rather than
+  stretched cascades or detailed leaf silhouettes.
 - **Grass** stays `NotShadowCaster` (as shipped); receiving soft AO/contact
   shadows near roots is a later polish item.
 

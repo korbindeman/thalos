@@ -1,6 +1,8 @@
 //! Always-on lightweight performance telemetry.
 //!
-//! One collector ([`PerfSamples`]) feeds three consumers:
+//! The shared [`thalos_diagnostics_ui::FrameSamples`] collector feeds the F3
+//! frame graph and this module's structured recorder. [`PerfSamples`] adds the
+//! game-only stage and memory gauges consumed by:
 //!
 //! - the **F3 debug view** ([`overlay`]) — live text stats + graph shaders;
 //! - the **perf lane** of `artifacts/diagnostics/runtime.jsonl` — a 2 s
@@ -15,19 +17,24 @@
 //! rendering of the recorded lane: `just perf-report` (tools/perfreport).
 
 pub mod gpu_images;
+mod headless;
 pub mod overlay;
+
+pub(crate) use headless::{HeadlessPerfBenchmarkPlugin, requested as headless_requested};
 
 use std::time::Instant;
 
-use bevy::diagnostic::{DiagnosticsStore, EntityCountDiagnosticsPlugin};
+use bevy::diagnostic::DiagnosticsStore;
 use bevy::prelude::*;
-use bevy::render::diagnostic::{MeshAllocatorDiagnosticPlugin, RenderDiagnosticsPlugin};
+use bevy::render::diagnostic::MeshAllocatorDiagnosticPlugin;
+use bevy::window::PrimaryWindow;
 
 use crate::SimStage;
 
-/// Frame-history ring length: ~8.5 s at 60 fps. Also the window the graph
-/// shader displays and the pre-context a spike dump carries.
-pub const RING_LEN: usize = 512;
+/// Shared frame-history length; retained under the game perf module for the
+/// recorder's spike-window contract and compatibility with existing readers.
+pub use thalos_diagnostics_ui::FRAME_HISTORY_LEN as RING_LEN;
+pub use thalos_diagnostics_ui::{entity_count, format_bytes as fmt_bytes, format_mib as fmt_mib};
 /// Memory-history ring length; sampled every [`MEM_SAMPLE_EVERY_FRAMES`]
 /// frames, so 256 entries ≈ 2 minutes — long enough to see a leak's slope.
 pub const MEM_RING_LEN: usize = 256;
@@ -44,19 +51,12 @@ const SPIKE_POST_FRAMES: u32 = 60;
 /// produces a few representative dumps, not megabytes of them.
 const SPIKE_COOLDOWN_FRAMES: u64 = 300;
 
-/// One authority for "how is this process performing right now".
+/// Game-specific performance gauges beside the shared frame-history authority.
 ///
-/// Written only by [`collect_frame`] / [`sample_gauges`]; the F3 overlay and
-/// the JSONL recorder are readers.
+/// Written only by the stage markers and [`sample_gauges`]; the Thalos F3
+/// extension and JSONL recorder are readers.
 #[derive(Resource)]
 pub struct PerfSamples {
-    /// Index the next frame sample is written to.
-    head: usize,
-    /// Number of valid samples (saturates at [`RING_LEN`]).
-    filled: usize,
-    cpu_ms: [f32; RING_LEN],
-    gpu_ms: [f32; RING_LEN],
-
     /// Wall time of the SimStage regions last frame (upper bounds: the
     /// parallel executor may interleave unrelated systems into a region).
     pub stage_physics_ms: f32,
@@ -94,10 +94,6 @@ pub struct PerfSamples {
 impl Default for PerfSamples {
     fn default() -> Self {
         Self {
-            head: 0,
-            filled: 0,
-            cpu_ms: [0.0; RING_LEN],
-            gpu_ms: [0.0; RING_LEN],
             stage_physics_ms: 0.0,
             stage_sync_ms: 0.0,
             stage_camera_ms: 0.0,
@@ -119,32 +115,11 @@ impl Default for PerfSamples {
 }
 
 impl PerfSamples {
-    fn push_frame(&mut self, cpu_ms: f32, gpu_ms: f32) {
-        self.cpu_ms[self.head] = cpu_ms;
-        self.gpu_ms[self.head] = gpu_ms;
-        self.head = (self.head + 1) % RING_LEN;
-        self.filled = (self.filled + 1).min(RING_LEN);
-    }
-
     fn push_mem(&mut self, tile_mib: f32, slab_mib: f32) {
         self.tile_mib_ring[self.mem_head] = tile_mib;
         self.slab_mib_ring[self.mem_head] = slab_mib;
         self.mem_head = (self.mem_head + 1) % MEM_RING_LEN;
         self.mem_filled = (self.mem_filled + 1).min(MEM_RING_LEN);
-    }
-
-    pub fn frame_count(&self) -> usize {
-        self.filled
-    }
-
-    /// The `n` most recent frame samples, oldest first. `n` is clamped to the
-    /// available history.
-    pub fn recent(&self, n: usize) -> impl Iterator<Item = (f32, f32)> + '_ {
-        let n = n.min(self.filled);
-        (0..n).map(move |i| {
-            let idx = (self.head + RING_LEN - n + i) % RING_LEN;
-            (self.cpu_ms[idx], self.gpu_ms[idx])
-        })
     }
 
     /// The `n` most recent memory samples (tile MiB, slab MiB), oldest first.
@@ -237,13 +212,9 @@ impl Plugin for PerfPlugin {
         app.init_resource::<PerfSamples>()
             .init_resource::<StageMarks>()
             .init_resource::<PerfRecorder>()
-            .add_plugins(EntityCountDiagnosticsPlugin::default())
+            .add_plugins(thalos_diagnostics_ui::DiagnosticsPanelPlugin)
             .add_plugins(MeshAllocatorDiagnosticPlugin)
             .add_plugins(gpu_images::GpuImageBytesDiagnosticPlugin)
-            // GPU pass timings (`render/<pass>/elapsed_gpu` in the
-            // DiagnosticsStore). Cheap timestamp queries; previously only the
-            // headless capture app added this.
-            .add_plugins(RenderDiagnosticsPlugin)
             .add_systems(
                 Update,
                 (
@@ -255,7 +226,12 @@ impl Plugin for PerfPlugin {
                     fold_stage_marks.after(SimStage::Camera),
                 ),
             )
-            .add_systems(PostUpdate, (collect_frame, sample_gauges, record).chain())
+            .add_systems(
+                PostUpdate,
+                (sample_gauges, record)
+                    .chain()
+                    .after(thalos_diagnostics_ui::DiagnosticsPanelPostUpdateSet::SampleFrame),
+            )
             .add_plugins(overlay::DebugViewPlugin);
     }
 }
@@ -280,51 +256,6 @@ fn fold_stage_marks(mut marks: ResMut<StageMarks>, mut samples: ResMut<PerfSampl
         samples.stage_camera_ms = (now - t2).as_secs_f32() * 1000.0;
     }
     *marks = StageMarks::default();
-}
-
-/// Sum of the top-level `render/<pass>/elapsed_gpu` diagnostics, in ms.
-///
-/// Only 3-component paths are summed: nested pass spans would double-count
-/// their parents. Values lag a frame or two behind (GPU timestamp readback).
-pub fn gpu_frame_ms(store: &DiagnosticsStore) -> f32 {
-    let mut total = 0.0f64;
-    for diag in store.iter() {
-        let path = diag.path().as_str();
-        if !path.starts_with("render/") || !path.ends_with("/elapsed_gpu") {
-            continue;
-        }
-        if path.bytes().filter(|&b| b == b'/').count() != 2 {
-            continue;
-        }
-        if let Some(v) = diag.value()
-            && v.is_finite()
-        {
-            total += v;
-        }
-    }
-    total as f32
-}
-
-/// Frame cost is a **wall-clock** quantity, so it is measured with `Instant`
-/// like the stage marks above — never from `Time<Real>`, which the offline
-/// render drives to a fixed step (`sim_clock::SimClockDrive`). Under a driven
-/// clock this gauge would otherwise report a flat 16.67 ms while frames
-/// genuinely took 300 ms, and the perf lane would be confidently wrong.
-fn collect_frame(
-    store: Res<DiagnosticsStore>,
-    mut previous: Local<Option<Instant>>,
-    mut samples: ResMut<PerfSamples>,
-) {
-    let now = Instant::now();
-    let Some(last) = previous.replace(now) else {
-        return; // first frame
-    };
-    let cpu_ms = (now - last).as_secs_f32() * 1000.0;
-    if cpu_ms <= 0.0 {
-        return;
-    }
-    let gpu_ms = gpu_frame_ms(&store);
-    samples.push_frame(cpu_ms, gpu_ms);
 }
 
 fn sample_gauges(
@@ -389,33 +320,6 @@ fn sample_gauges(
     samples.push_mem(tile_mib, slab_mib);
 }
 
-/// `"820 MiB"` / `"3.2 GiB"` — one unit switch so a five-digit MiB figure never
-/// pushes a readout column out of line.
-///
-/// Shared by the F3 debug view and the loading screen so the same quantity is
-/// never spelled two ways on two screens.
-pub fn fmt_mib(mib: f32) -> String {
-    if mib >= 1024.0 {
-        format!("{:.1} GiB", mib / 1024.0)
-    } else {
-        format!("{mib:.0} MiB")
-    }
-}
-
-/// [`fmt_mib`] for a byte count.
-pub fn fmt_bytes(bytes: u64) -> String {
-    fmt_mib(bytes as f32 / (1024.0 * 1024.0))
-}
-
-/// Read the entity-count diagnostic (registered by
-/// [`EntityCountDiagnosticsPlugin`]) out of the store.
-pub fn entity_count(store: &DiagnosticsStore) -> u64 {
-    store
-        .get(&EntityCountDiagnosticsPlugin::ENTITY_COUNT)
-        .and_then(|d| d.value())
-        .unwrap_or(0.0) as u64
-}
-
 /// Format ring samples as a compact comma-joined string field for JSONL
 /// (arrays of numbers aren't a native tracing field type; one short string
 /// keeps a 180-frame dump to ~1.3 KB).
@@ -434,24 +338,47 @@ fn join_ms(values: impl Iterator<Item = f32>) -> String {
 fn record(
     store: Res<DiagnosticsStore>,
     mut samples: ResMut<PerfSamples>,
+    frames: Res<thalos_diagnostics_ui::FrameSamples>,
     mut recorder: ResMut<PerfRecorder>,
+    graphics: Res<crate::graphics_settings::GraphicsSettings>,
+    preferences: Res<thalos_preferences::GraphicsPreferences>,
+    perf_overrides: Res<crate::graphics_settings::PerfRenderOverrides>,
+    window_settings: Res<thalos_preferences::WindowSettings>,
+    window_overrides: Res<thalos_preferences::WindowSettingsOverrides>,
+    primary_window: Query<&Window, With<PrimaryWindow>>,
 ) {
     recorder.frame += 1;
     let frame = recorder.frame;
 
-    let latest_cpu_ms = samples.recent(1).next().map(|(cpu, _)| cpu).unwrap_or(0.0);
+    let latest_cpu_ms = frames.latest().map(|(cpu, _)| cpu).unwrap_or(0.0);
 
     // ── Tier A: aggregated gauge every ~2 s ─────────────────────────────
-    if frame.is_multiple_of(GAUGE_EVERY_FRAMES) && samples.frame_count() > 0 {
+    if frame.is_multiple_of(GAUGE_EVERY_FRAMES) && frames.frame_count() > 0 {
         let window = GAUGE_EVERY_FRAMES as usize;
-        let mut cpu: Vec<f32> = samples.recent(window).map(|(c, _)| c).collect();
-        let gpu_mean = samples.recent(window).map(|(_, g)| g).sum::<f32>() / cpu.len() as f32;
+        let mut cpu: Vec<f32> = frames.recent(window).map(|(c, _)| c).collect();
+        let mut gpu_sum = 0.0_f32;
+        let mut gpu_samples = 0_u32;
+        for (_, gpu_ms) in frames.recent(window) {
+            if gpu_ms > 0.0 {
+                gpu_sum += gpu_ms;
+                gpu_samples += 1;
+            }
+        }
+        let gpu_timing_available = gpu_samples > 0;
+        let gpu_mean = if gpu_timing_available {
+            gpu_sum / gpu_samples as f32
+        } else {
+            0.0
+        };
         cpu.sort_by(|a, b| a.total_cmp(b));
         let n = cpu.len();
         let mean = cpu.iter().sum::<f32>() / n as f32;
         let median = cpu[n / 2];
         let p95 = cpu[(n * 95 / 100).min(n - 1)];
         let max = cpu[n - 1];
+        let foliage_enabled = perf_overrides.foliage_enabled(&preferences);
+        let vsync_enabled = window_overrides.vsync.unwrap_or(window_settings.vsync);
+        let window = primary_window.single().ok();
         samples.median_cpu_ms = median;
         info!(
             target: "thalos::diagnostic::perf",
@@ -462,6 +389,21 @@ fn record(
             cpu_ms_p95 = f64::from(p95),
             cpu_ms_max = f64::from(max),
             gpu_ms_mean = f64::from(gpu_mean),
+            gpu_timing_available,
+            foliage_enabled,
+            clouds_enabled = graphics.clouds,
+            grass_enabled = graphics.grass,
+            gpu_grass_enabled = graphics.gpu_grass,
+            quality_preset = preferences.preset.label(),
+            render_scale = f64::from(preferences.render_scale),
+            frame_cap_hz = u64::from(preferences.frame_cap_hz),
+            terrain_lod = f64::from(graphics.terrain_lod),
+            msaa_samples = u64::from(preferences.msaa.samples()),
+            shadow_cascade_budget = crate::rendering::sun_shadow::cascade_budget() as u64,
+            vsync_enabled,
+            has_primary_window = window.is_some(),
+            window_width_px = window.map_or(0, |window| window.resolution.physical_width()) as u64,
+            window_height_px = window.map_or(0, |window| window.resolution.physical_height()) as u64,
             physics_ms = f64::from(samples.stage_physics_ms),
             sync_ms = f64::from(samples.stage_sync_ms),
             camera_ms = f64::from(samples.stage_camera_ms),
@@ -486,9 +428,9 @@ fn record(
         recorder.spike_peak_ms = recorder.spike_peak_ms.max(latest_cpu_ms);
         recorder.spike_countdown -= 1;
         if recorder.spike_countdown == 0 {
-            let dump_len = 180usize.min(samples.frame_count());
-            let cpu_str = join_ms(samples.recent(dump_len).map(|(c, _)| c));
-            let gpu_str = join_ms(samples.recent(dump_len).map(|(_, g)| g));
+            let dump_len = 180usize.min(frames.frame_count());
+            let cpu_str = join_ms(frames.recent(dump_len).map(|(c, _)| c));
+            let gpu_str = join_ms(frames.recent(dump_len).map(|(_, g)| g));
             info!(
                 target: "thalos::diagnostic::perf",
                 event = "spike",
@@ -502,7 +444,7 @@ fn record(
             );
             recorder.last_spike_frame = frame;
         }
-    } else if samples.frame_count() == RING_LEN
+    } else if frames.frame_count() == RING_LEN
         && samples.median_cpu_ms > 0.0
         && frame.saturating_sub(recorder.last_spike_frame) > SPIKE_COOLDOWN_FRAMES
     {
@@ -516,10 +458,10 @@ fn record(
     // ── Full-rate blocks (opt-in) ───────────────────────────────────────
     if recorder.full_rate
         && frame.is_multiple_of(BLOCK_FRAMES as u64)
-        && samples.frame_count() >= BLOCK_FRAMES
+        && frames.frame_count() >= BLOCK_FRAMES
     {
-        let cpu_str = join_ms(samples.recent(BLOCK_FRAMES).map(|(c, _)| c));
-        let gpu_str = join_ms(samples.recent(BLOCK_FRAMES).map(|(_, g)| g));
+        let cpu_str = join_ms(frames.recent(BLOCK_FRAMES).map(|(c, _)| c));
+        let gpu_str = join_ms(frames.recent(BLOCK_FRAMES).map(|(_, g)| g));
         info!(
             target: "thalos::diagnostic::perf",
             event = "frame_block",

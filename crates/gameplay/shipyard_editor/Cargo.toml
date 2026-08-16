@@ -19,5 +19,6 @@ thalos_body_render = { path = "../../rendering/render" }
 thalos_body_shading = { path = "../../rendering/shading" }
 thalos_game_state = { path = "../state" }
 thalos_input = { path = "../../interface/input" }
+thalos_photo_mode = { path = "../../interface/photo_mode" }
 thalos_shipyard = { path = "../../domain/construction" }
 thalos_ui = { path = "../../interface/ui" }

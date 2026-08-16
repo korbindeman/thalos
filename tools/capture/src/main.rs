@@ -15,7 +15,7 @@ use thalos_capture_protocol::{
     CAPTURE_PRESETS, CAPTURE_PROTOCOL_SCHEMA, CaptureAction, CaptureCameraOverride, CaptureClock,
     CaptureGraphicsOverrides, CaptureGraphicsSettings, CaptureRequest, CaptureResponse,
     CaptureServerState, CaptureSourceSnapshot, CaptureTerrainResidency, CapturedCameraState,
-    ViewpointCatalog,
+    RenderPlan, ViewpointCatalog,
 };
 use uuid::Uuid;
 
@@ -140,6 +140,8 @@ struct CaptureReceipt<'a> {
     workspace_relation: &'static str,
     camera: Option<CapturedCameraState>,
     graphics: CaptureGraphicsSettings,
+    /// Validated restart-time renderer composition; mandatory for new evidence.
+    render_plan: RenderPlan,
     /// Ground residency at readback — whether this image is the detail the
     /// preset authored, or the tile memory brake's coarser stand-in. Absent on
     /// the legacy udlod path, where there is no such thing to report.
@@ -878,6 +880,10 @@ fn capture_once(
                 recoverable: true,
             })?;
             let terrain = response.terrain;
+            let render_plan = response.render_plan.ok_or_else(|| CaptureFailure {
+                message: "capture succeeded without a validated render plan".into(),
+                recoverable: true,
+            })?;
             write_capture_receipt(
                 &path,
                 CaptureReceipt {
@@ -895,6 +901,7 @@ fn capture_once(
                     workspace_matches,
                     camera: response.camera,
                     graphics: effective_graphics,
+                    render_plan,
                     terrain,
                     clock: response.clock,
                 },
@@ -1173,6 +1180,8 @@ fn reset_build_state() -> Result<(), String> {
             "-p",
             "thalos_runtime",
             "-p",
+            "thalos_game_runtime",
+            "-p",
             "thalos_capture_runtime",
             "-p",
             "thalos_capture_host",
@@ -1219,12 +1228,20 @@ fn start_server_once_inner(
     // whatever changed, sets up the bevy_dylib search path for its child
     // (the INC-0008 contract), and stays resident as the launcher process
     // whose tree `stop` terminates.
+    let host_features = if overrides
+        .get("THALOS_TILE_RENDERER")
+        .is_some_and(|value| matches!(value.trim(), "0" | "false" | "off" | "no"))
+    {
+        "dev-renderer,legacy-udlod"
+    } else {
+        "dev-renderer"
+    };
     let command = vec![
         "run",
         "-p",
         "thalos_capture_host",
         "--features",
-        "dev-renderer",
+        host_features,
     ]
     .into_iter()
     .map(str::to_owned)
@@ -2602,7 +2619,7 @@ mod tests {
                 "--focal-length",
                 "85",
                 "--graphics",
-                "clouds=off,grass=on",
+                "clouds=off,grass=on,foliage=off",
                 "--set",
                 "THALOS_SSAO=off",
             ]
@@ -2627,6 +2644,7 @@ mod tests {
                 graphics: CaptureGraphicsOverrides {
                     clouds: Some(false),
                     grass: Some(true),
+                    foliage: Some(false),
                 },
             }
         );

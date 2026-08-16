@@ -10,7 +10,7 @@ use thalos_input::game::GameInputIntent;
 use thalos_world::BodyKind;
 
 use super::screen_marker_radius;
-use super::types::{BodyIcon, BodyMesh, CelestialBody, ShipMarker, SimulationState};
+use super::types::{BodyIcon, BodyMesh, CelestialBody, CraftIdentity, ShipMarker, SimulationState};
 use crate::camera::{ActiveCamera, CameraFocus, CameraFocusTarget, OrbitCamera};
 use crate::coords::{RenderGhostFocus, RenderOrigin, WorldScale};
 use crate::flight_plan_view::GhostBody;
@@ -243,7 +243,7 @@ pub(super) fn double_click_focus_system(
         Without<CelestialBody>,
     >,
     ship_marker: Query<
-        (Entity, &Transform, &Visibility),
+        (Entity, &CraftIdentity, &Transform, &Visibility),
         (
             With<ShipMarker>,
             Without<CelestialBody>,
@@ -420,7 +420,9 @@ pub(super) fn double_click_focus_system(
     // as a billboard so it competes with body billboards by camera
     // distance (a body in front of the ship still wins). 12 px floor
     // mirrors the bodies' fallback hit so the small icon stays clickable.
-    if let Ok((_, ship_transform, ship_visibility)) = ship_marker.single()
+    if let Some((_, _, ship_transform, ship_visibility)) = ship_marker
+        .iter()
+        .find(|(_, identity, _, _)| identity.0 == sim.simulation.active_craft_id())
         && *ship_visibility != Visibility::Hidden
     {
         let cam_dist = cam_world.distance(ship_transform.translation);

@@ -1,0 +1,356 @@
+{
+  "schema": "thalos.viewpoints.v3",
+  "viewpoints": [
+    {
+      "id": "caracasbaai-mid",
+      "name": "caracasbaai mid",
+      "description": "",
+      "saved_unix_ms": 1786393275719,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        8832.030729569007,
+        10.619050760073256,
+        14621.545857495972
+      ],
+      "camera_rotation_xyzw": [
+        -0.005976998651254791,
+        -0.8789463771984957,
+        0.01101918635980742,
+        -0.4767558274722298
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.44391
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "east-low-flight",
+      "name": "East low flight",
+      "description": "",
+      "saved_unix_ms": 2,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        11925.0,
+        764.6675000190735,
+        5220.0
+      ],
+      "camera_rotation_xyzw": [
+        -0.045897289926107095,
+        0.6714563954002973,
+        0.04173379609647259,
+        0.7384429823059168
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "island-aerial",
+      "name": "Island aerial",
+      "description": "",
+      "saved_unix_ms": 1,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        -30545.25,
+        46335.0,
+        45922.5
+      ],
+      "camera_rotation_xyzw": [
+        -0.32740667204097185,
+        -0.2671296914057968,
+        -0.09705648295501744,
+        0.9011252067215196
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "reference-blue-bay-reef",
+      "name": "Reference - Blue Bay reef",
+      "description": "",
+      "saved_unix_ms": 5,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        -4367.595389462699,
+        220.0,
+        9370.318681348052
+      ],
+      "camera_rotation_xyzw": [
+        -0.12470642769809356,
+        -0.3372027594811872,
+        -0.04511731953419797,
+        0.9320445447332986
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "reference-boka-tabla-cliffs",
+      "name": "Reference - Boka Tabla cliffs",
+      "description": "",
+      "saved_unix_ms": 4,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        -19429.45941084215,
+        240.0,
+        -18601.75551879552
+      ],
+      "camera_rotation_xyzw": [
+        -0.029632236622540855,
+        -0.9646167944620784,
+        -0.1237978193912707,
+        0.2308906024688241
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "reference-caracasbaai-close-coast",
+      "name": "Reference - Caracasbaai close coast",
+      "description": "",
+      "saved_unix_ms": 7,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        8893.890319693666,
+        2.918633222674541,
+        14708.662248452052
+      ],
+      "camera_rotation_xyzw": [
+        0.021464151816200795,
+        -0.680325212487669,
+        -0.019940070378093352,
+        -0.732324579017894
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "reference-grote-knip-beach",
+      "name": "Reference - Grote Knip beach",
+      "description": "",
+      "saved_unix_ms": 3,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        -23142.52930603651,
+        180.0,
+        -16091.772135408974
+      ],
+      "camera_rotation_xyzw": [
+        -0.10349377480277,
+        -0.6140750098105845,
+        -0.08167093731141768,
+        0.7781585821038527
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "reference-north-coast-waves",
+      "name": "Reference - North coast waves",
+      "description": "",
+      "saved_unix_ms": 6,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        -18455.762449858714,
+        8.0,
+        -19496.63776142391
+      ],
+      "camera_rotation_xyzw": [
+        -0.0005813755325878566,
+        0.04389454524077897,
+        0.00002554383886555406,
+        0.9990360004765132
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "rough-coast",
+      "name": "rough coast",
+      "description": "",
+      "saved_unix_ms": 1786679836057,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        8052.849841656291,
+        22.430602512374165,
+        15241.295791035382
+      ],
+      "camera_rotation_xyzw": [
+        0.012546939843893932,
+        0.1361290289402479,
+        0.00172419263018257,
+        -0.9906101599217085
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.44391
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "west-low-flight",
+      "name": "West low flight",
+      "description": "",
+      "saved_unix_ms": 0,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        -15195.0,
+        670.8610191345215,
+        -3660.0
+      ],
+      "camera_rotation_xyzw": [
+        -0.03361718575108448,
+        -0.7389435817573496,
+        -0.03697093129468017,
+        0.6719117635828384
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    }
+  ],
+  "scripted_viewpoints": []
+}

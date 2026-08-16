@@ -39,6 +39,7 @@ use bevy::prelude::*;
 use thalos_body_render::tiles::{
     CachedTileProvider, SurfaceTileCache, TerrainTileProvider, TileNamespaceFn,
 };
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::prelude::{
     AttachmentConfig, DiskTileCacheProvider, MemoryTileCacheProvider, NamespaceFn, SharedTileCache,
     TerrainConfig, TileProvider, prune_tile_cache, static_namespace,
@@ -53,17 +54,19 @@ use thalos_world::BodyId;
 /// gigabytes. This tier only has to smooth short-lived churn (a tier swap, a
 /// flatten rebuild); the disk tier below it is what makes a revisit cheap, and it
 /// costs no RAM at all.
+#[cfg(feature = "legacy-udlod")]
 const MEMORY_CACHE_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 
 /// Ceiling for the on-disk tile cache. Generous — tiles are only written for
 /// places the player actually went, and the fixed-site scenarios (the spaceport)
 /// re-address the same few hundred tiles every run.
+#[cfg(feature = "legacy-udlod")]
 const DISK_CACHE_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 
 /// RAM budget for retained tile-renderer payloads, across all bodies.
 ///
-/// A tile-renderer payload is ~107 KB (67² halo grid × heights + albedo + bands),
-/// so this retains ~1,800 tiles. It only has to smooth churn — the disk tier is
+/// A tile-renderer payload is ~402 KiB (131² halo grid × heights + albedo + bands),
+/// so this retains ~480 tiles. It only has to smooth churn — the disk tier is
 /// what makes a revisit or a second boot cheap, and the OS page cache backs that
 /// at no cost in this process's footprint. Deliberately modest: the box has
 /// already OOM'd once on tile residency (INC-20260725T012104Z) and the user runs
@@ -71,8 +74,9 @@ const DISK_CACHE_BUDGET_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const SURFACE_MEMORY_CACHE_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 
 /// Ceiling for the tile-renderer's on-disk cache. Larger than udlod's because
-/// its payloads are ~50× smaller per tile while a surface view wants thousands
-/// of them (~790 MB for one settled spaceport view).
+/// its payloads are still much smaller per tile while a surface view wants
+/// hundreds to low thousands of them (~the same aggregate payload as the former
+/// four-times-more-numerous 65² topology).
 const SURFACE_DISK_CACHE_BUDGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 
 /// Per-body in-memory tile caches, plus the disk-cache location.
@@ -88,8 +92,10 @@ const SURFACE_DISK_CACHE_BUDGET_BYTES: u64 = 6 * 1024 * 1024 * 1024;
 /// home for.
 #[derive(Resource)]
 pub struct TileCacheRegistry {
+    #[cfg(feature = "legacy-udlod")]
     memory: HashMap<BodyId, SharedTileCache>,
     /// `None` disables disk caching (`THALOS_TILE_CACHE=0`).
+    #[cfg(feature = "legacy-udlod")]
     disk_root: Option<PathBuf>,
     /// Tile-renderer (`body_render::tiles`) equivalents of the two above.
     surface_memory: HashMap<BodyId, Arc<SurfaceTileCache>>,
@@ -107,7 +113,9 @@ impl Default for TileCacheRegistry {
                 .unwrap_or_else(|| PathBuf::from("user/surfacetilecache"))
         });
         Self {
+            #[cfg(feature = "legacy-udlod")]
             memory: HashMap::new(),
+            #[cfg(feature = "legacy-udlod")]
             disk_root,
             surface_memory: HashMap::new(),
             surface_disk_root,
@@ -117,6 +125,7 @@ impl Default for TileCacheRegistry {
 
 impl TileCacheRegistry {
     /// The body's shared in-memory cache, created empty on first use.
+    #[cfg(feature = "legacy-udlod")]
     fn memory_cache(&mut self, body_id: BodyId) -> SharedTileCache {
         self.memory.entry(body_id).or_default().clone()
     }
@@ -131,6 +140,7 @@ impl TileCacheRegistry {
     /// would file those flattened tiles under the un-flattened key and serve them
     /// as pristine terrain next session. Pass `None` for terrain with no flatten
     /// layer (the map view).
+    #[cfg(feature = "legacy-udlod")]
     pub fn wrap_provider(
         &mut self,
         body_id: BodyId,
@@ -240,6 +250,7 @@ impl TileCacheRegistry {
     /// **If you add an input to tile synthesis, add it to one of these halves.** A
     /// missing input means stale tiles get served as if fresh — the one failure
     /// mode this whole design exists to make impossible.
+    #[cfg(feature = "legacy-udlod")]
     fn namespace_fn(
         &self,
         body_id: BodyId,
@@ -318,10 +329,12 @@ fn hash_flatten_regions(regions: &[FlattenRegion]) -> u64 {
 
 /// Total CPU bytes one cached tile payload occupies for this config: every
 /// attachment's full mip chain.
+#[cfg(feature = "legacy-udlod")]
 fn tile_payload_bytes(config: &TerrainConfig) -> usize {
     config.attachments.iter().map(attachment_bytes).sum()
 }
 
+#[cfg(feature = "legacy-udlod")]
 fn attachment_bytes(cfg: &AttachmentConfig) -> usize {
     let pixel_size = match cfg.format {
         thalos_body_render::udlod::prelude::AttachmentFormat::Rgb8 => 3,
@@ -366,6 +379,7 @@ fn disk_cache_root() -> Option<PathBuf> {
 /// cache from growing without bound across sessions and bodies.
 fn prune_disk_cache(registry: Res<TileCacheRegistry>) {
     let mib = |bytes: u64| bytes as f64 / (1024.0 * 1024.0);
+    #[cfg(feature = "legacy-udlod")]
     if let Some(root) = &registry.disk_root {
         let freed = prune_tile_cache(root, DISK_CACHE_BUDGET_BYTES);
         if freed > 0 {

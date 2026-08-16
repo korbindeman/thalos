@@ -19,12 +19,14 @@ pub mod field_surface;
 pub mod generic_terrestrial_field;
 pub mod height;
 pub mod height_generator;
+pub mod hydrology;
 pub mod icosphere;
 pub mod macro_conditioning;
 pub mod noise;
 pub mod package;
 pub mod pipeline;
 pub mod procedural;
+mod procedural_tectonics;
 pub mod query;
 pub mod rivers;
 pub mod sample;
@@ -70,13 +72,13 @@ pub use package::{
     load_static_package_artifact, write_static_package,
 };
 pub use procedural::{
-    COAST_BAND_M, GENERATOR_VERSION, MacroBiome, MacroSignals, ProceduralSurface,
+    COAST_BAND_M, GENERATOR_VERSION, MacroBiome, MacroSignals, ProceduralSurface, TectonicSignals,
     climate_cold_lift_m, climate_warmth, combine_macro_and_relief,
 };
 pub use query::{
     BakedSurface, FlattenHandle, FlattenRegion, FlattenedSurface, MaterialBands, Region,
-    SurfaceQuery, SurfaceRef, TerrainFlatten, flatten_handle, nearest_flatten, surface_height_m,
-    surface_height_range_m, surface_normal, surface_sample,
+    SurfacePatch, SurfaceQuery, SurfaceRef, TerrainFlatten, flatten_handle, nearest_flatten,
+    surface_height_m, surface_height_range_m, surface_normal, surface_sample,
 };
 pub use rivers::RiverField;
 pub use sample::{

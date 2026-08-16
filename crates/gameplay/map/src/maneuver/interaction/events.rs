@@ -1,5 +1,6 @@
 use bevy::math::DVec3;
 use bevy::prelude::*;
+use thalos_game_state::{ActiveCraftMut, ActiveCraftRef};
 
 use super::super::state::{
     GameNode, ManeuverEvent, ManeuverPlan, NodeBurnPhase, NodeDeltaV, SelectedNode,
@@ -8,12 +9,16 @@ use super::super::state::{
 /// Sync NodeDeltaV when selection changes.
 pub(in crate::maneuver) fn sync_node_delta_v(
     selected: Res<SelectedNode>,
-    plan: Res<ManeuverPlan>,
+    plan: ActiveCraftRef<ManeuverPlan>,
     mut node_dv: ResMut<NodeDeltaV>,
 ) {
     if !selected.is_changed() {
         return;
     }
+    let Some(plan) = plan.get() else {
+        *node_dv = NodeDeltaV::default();
+        return;
+    };
     if let Some(id) = selected.id {
         if let Some(node) = plan.nodes.iter().find(|n| n.id == id) {
             node_dv.prograde = node.delta_v.x;
@@ -39,10 +44,13 @@ pub(in crate::maneuver) fn sync_node_delta_v(
 /// `dirty = true` so the trajectory always reflects the released position.
 pub(in crate::maneuver) fn handle_maneuver_events(
     mut events: bevy::ecs::message::MessageReader<ManeuverEvent>,
-    mut plan: ResMut<ManeuverPlan>,
+    mut plan: ActiveCraftMut<ManeuverPlan>,
     mut selected: ResMut<SelectedNode>,
     time: Res<Time<Real>>,
 ) {
+    let Some(mut plan) = plan.get_mut() else {
+        return;
+    };
     for event in events.read() {
         match event.clone() {
             ManeuverEvent::PlaceNode {

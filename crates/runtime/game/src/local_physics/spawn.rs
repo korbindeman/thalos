@@ -6,6 +6,7 @@
 use super::*;
 
 use bevy::math::{DQuat, DVec3};
+use thalos_game_state::ActiveCraftMut;
 use thalos_physics_canonical::canonical::{AuthorityMode, TranslationalState};
 use thalos_physics_canonical::surface_local::SurfaceLocalFrame;
 use thalos_physics_canonical::types::{AttitudeState, VesselKind};
@@ -22,8 +23,11 @@ use thalos_world::BodyId;
 
 use crate::debug::DebugMode;
 use crate::player_controller::{EvaMode, PlayerControllerBody};
-use crate::rendering::{PlayerShip, SimulationState};
+use crate::rendering::SimulationState;
 use crate::view::ViewMode;
+use thalos_game_state::flight::{GearState, ParkingBrake, RealizedControl};
+use thalos_game_state::maneuver_plan::ManeuverPlan;
+use thalos_game_state::scene::{CraftIdentity, CraftRoot};
 
 /// Spawn the player's Avian rigid body the first time the simulation is
 /// ready to host it. Ships live in the **surface-local frame** (a body-fixed
@@ -34,7 +38,7 @@ use crate::view::ViewMode;
 /// until its SLF fold-in.
 ///
 /// Two vessel kinds spawn through this single seam, KSP-style:
-/// - `VesselKind::Ship`: waits for `PlayerShip` + ship params, then
+/// - `VesselKind::Ship`: waits for the active `CraftRoot` + ship params, then
 ///   spawns a compound collider built from the rendered ship parts.
 /// - `VesselKind::Eva`: spawns a 1.8 m capsule with rotation locked and
 ///   walking-friendly friction. The same entity carries
@@ -49,7 +53,7 @@ pub(crate) fn spawn_player_avian_body(
     mut active: ResMut<ActiveLocalBubble>,
     mut sim: ResMut<SimulationState>,
     height_sources: Res<HeightSourceRegistry>,
-    player_ship: Query<&GlobalTransform, With<PlayerShip>>,
+    craft_roots: Query<&CraftIdentity, With<CraftRoot>>,
     parts: PartColliderQuery,
     gear_q: GearPartQuery,
     host_nodes: Query<&AttachNodes>,
@@ -177,12 +181,12 @@ pub(crate) fn spawn_player_avian_body(
 
     let craft_entity = match vessel_kind {
         VesselKind::Ship => {
-            if player_ship.iter().next().is_none() {
+            if !craft_roots.iter().any(|identity| identity.0 == craft.id) {
                 return;
             }
-            let collider_primitives = build_ship_collider_primitives(&parts);
-            let part_positions = compute_part_collider_positions(&parts);
-            let wheels = build_wheel_set(&gear_q, &host_nodes, &part_positions);
+            let collider_primitives = build_ship_collider_primitives(&parts, craft.id);
+            let part_positions = compute_part_collider_positions(&parts, craft.id);
+            let wheels = build_wheel_set(&gear_q, &host_nodes, &part_positions, craft.id);
             let entity = spawn_local_craft_body(
                 &mut commands,
                 LocalCraftSpawn {
@@ -266,6 +270,13 @@ pub(crate) fn spawn_player_avian_body(
                 },
             );
             commands.entity(entity).remove::<Collider>().insert((
+                CraftRoot,
+                CraftIdentity(craft.id),
+                GearState::default(),
+                ParkingBrake::default(),
+                EvaMode::default(),
+                RealizedControl::default(),
+                ManeuverPlan::default(),
                 RigidBody::Kinematic,
                 CustomPositionIntegration,
                 LockedAxes::ROTATION_LOCKED,
@@ -391,7 +402,7 @@ pub(crate) fn debug_surface_drop(
     height_sources: Res<HeightSourceRegistry>,
     config: Res<LocalBubbleConfig>,
     mut active: ResMut<ActiveLocalBubble>,
-    mut eva_mode: ResMut<EvaMode>,
+    mut eva_mode: ActiveCraftMut<EvaMode>,
     mut sim: ResMut<SimulationState>,
     mut craft_q: Query<
         (
@@ -411,6 +422,9 @@ pub(crate) fn debug_surface_drop(
     };
     let Some(height_source) = height_sources.get(body_id) else {
         warn!("debug surface drop requested before Thalos height source is available");
+        return;
+    };
+    let Some(mut eva_mode) = eva_mode.get_mut() else {
         return;
     };
 

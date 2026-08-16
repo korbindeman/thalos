@@ -8,9 +8,9 @@ use crate::flight_plan_view::FlightPlanView;
 use thalos_game_state::camera::ActiveCamera;
 use thalos_game_state::coords::screen_marker_radius;
 use thalos_game_state::coords::{RenderOrigin, WorldScale};
-use thalos_game_state::ui::HideInPhotoMode;
 use thalos_game_state::ui::HideInShipView;
 use thalos_game_state::{SimulationState, SolarSystemState};
+use thalos_photo_mode::HideInPhotoMode;
 
 /// Spawn the snap indicator (hidden by default).
 pub(in crate::maneuver) fn spawn_snap_indicator(
@@ -82,7 +82,7 @@ pub(in crate::maneuver) fn manage_node_markers(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    plan: Res<ManeuverPlan>,
+    plan: thalos_game_state::ActiveCraftRef<ManeuverPlan>,
     selected: Res<SelectedNode>,
     sim: Option<Res<SimulationState>>,
     body_states: Res<SolarSystemState>,
@@ -99,6 +99,12 @@ pub(in crate::maneuver) fn manage_node_markers(
     >,
     mut markers: Query<(Entity, &NodeMarkerDisc, &mut Transform, &mut Visibility)>,
 ) {
+    let Some(plan) = plan.get() else {
+        for (entity, _, _, _) in &mut markers {
+            commands.entity(entity).despawn();
+        }
+        return;
+    };
     let Ok(cam_tf) = camera_q.single() else {
         return;
     };

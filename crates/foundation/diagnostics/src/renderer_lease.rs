@@ -227,6 +227,9 @@ impl RendererLease {
         }
         let mut file = fs::OpenOptions::new()
             .create(true)
+            // Preserve the current owner's metadata until this process owns
+            // the flock; `write_owner_to` truncates only after acquisition.
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&owner_path)?;
@@ -275,6 +278,7 @@ impl Drop for RendererLease {
     }
 }
 
+#[cfg(windows)]
 fn write_owner(path: &Path, owner: &RendererOwner) -> io::Result<()> {
     let mut file = fs::OpenOptions::new()
         .create(true)

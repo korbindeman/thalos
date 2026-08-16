@@ -22,15 +22,19 @@ use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
 use bevy::light::cascade::CascadeShadowConfigBuilder;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
+#[cfg(feature = "legacy-udlod")]
 use bevy::math::DQuat;
 use bevy::prelude::*;
 use big_space::prelude::Grid;
+#[cfg(not(feature = "legacy-udlod"))]
+use thalos_body_render::CpuPipelineHeightSource;
+#[cfg(feature = "legacy-udlod")]
 use thalos_body_render::udlod::prelude::PreciseRotation;
 use thalos_body_render::{
     AtmosphereBlock, CloudCompositeMaterial, GasGiantLayers, GasGiantMaterial, GasGiantParams,
-    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RenderedGroundHeightSource, RingLayers,
-    RingMaterial, RingParams, SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial,
-    SolidPlanetParams, bake_coast_bathymetry_cube, bake_impostor_albedo, bake_multi_scatter_lut,
+    MULTI_SCATTER_LUT_HEIGHT, MULTI_SCATTER_LUT_WIDTH, RingLayers, RingMaterial, RingParams,
+    SceneLighting, SolidPlanetHaloMaterial, SolidPlanetMaterial, SolidPlanetParams,
+    bake_coast_bathymetry_cube, bake_impostor_albedo, bake_multi_scatter_lut,
     bake_ocean_slope_texture, blank_coast_cube, blank_impostor_cube, build_ring_mesh,
     cloud_weather_image, coast_bathymetry_cube_from_bytes, ocean_packet_phase_speeds,
 };
@@ -44,7 +48,6 @@ use super::generation::{ProceduralInstallExtras, WorldStateAssets};
 use super::ground_terrain::{BodySky, RealSpaceImpostor};
 use super::ocean::BodyOcean;
 use super::real_space::{RealSpaceRoot, real_space_grid};
-use super::scene_depth::SceneDepthImage;
 use super::types::{
     BodyIcon, BodyMesh, CelestialBody, GasGiantMaterials, MapRingMaterial, MoonLight,
     RealSpaceBody, ShipBodyMesh, ShipRingMaterial, SimulationState, SolidPlanetMaterials, SunLight,
@@ -56,6 +59,7 @@ use crate::solar_system_state::{CloudWeatherField, SolarSystemState};
 use crate::terrain_registry::ImpostorAlbedoRegistry;
 use crate::view::HideInShipView;
 use std::sync::Arc;
+use thalos_render_foundation::SceneDepthImage;
 
 // (Bake cache-key + local-bake-dir helpers removed in 0b-1 — procedural bodies
 // generate terrain at runtime and need no bake.)
@@ -264,6 +268,7 @@ pub(super) fn spawn_bodies(
                 // udlod's high-precision Taylor vertex path. Set each frame
                 // alongside the f32 rotation in `update_real_space_body_positions`;
                 // identity until then matches the spawn-time f32 rotation.
+                #[cfg(feature = "legacy-udlod")]
                 PreciseRotation(DQuat::IDENTITY),
                 Name::new(format!("{} Real Space", body.name)),
                 ChildOf(real_root.entity),
@@ -728,13 +733,23 @@ pub(super) fn spawn_bodies(
             // `Option`), which is the truthful answer when the surface could
             // not be constructed.
             if let Some(surface) = &body_surface {
-                let height_source = RenderedGroundHeightSource::new_udlod(Arc::clone(surface));
-                procedural_install
-                    .rendered_ground
-                    .insert(body.id, height_source.rendered_ground());
-                procedural_install
-                    .height_sources
-                    .insert(body.id, Arc::new(height_source));
+                #[cfg(feature = "legacy-udlod")]
+                {
+                    let height_source = thalos_body_render::RenderedGroundHeightSource::new_udlod(
+                        Arc::clone(surface),
+                    );
+                    procedural_install
+                        .rendered_ground
+                        .insert(body.id, height_source.rendered_ground());
+                    procedural_install
+                        .height_sources
+                        .insert(body.id, Arc::new(height_source));
+                }
+                #[cfg(not(feature = "legacy-udlod"))]
+                procedural_install.height_sources.insert(
+                    body.id,
+                    Arc::new(CpuPipelineHeightSource::new(Arc::clone(surface))),
+                );
             }
             world_state.planetshine.by_body.insert(
                 body.id,

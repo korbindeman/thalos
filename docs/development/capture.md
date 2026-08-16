@@ -141,10 +141,11 @@ renderer.
 
 Automation defaults are intentionally safer than the interactive renderer:
 
-- viewpoint schema v2 stores typed lens/sensor state and no output pixels;
-  implicit replay currently fits that sensor aspect inside 1920×1080 until
-  named fidelity profiles land, while `--size` may choose another matching
-  pixel extent but may not silently change the saved sensor aspect;
+- viewpoint schema v3 stores a typed authored-body-fixed or projected-local
+  frame plus lens/sensor state and no output pixels; implicit replay currently
+  fits that sensor aspect inside 1920×1080 until named fidelity profiles land,
+  while `--size` may choose another matching pixel extent but may not silently
+  change the saved sensor aspect;
 - headless capture defaults the machine-wide tile-mesh allowance to 2 GiB
   (`THALOS_TILE_BUDGET_MB` remains an expert override). Because that is *half*
   what an interactive session gets, the tile memory brake is reachable here, and
@@ -279,7 +280,7 @@ CaptureSpec
   timeline          simulation time, frame rate, duration, preroll
   warmup            scene and temporal convergence policy
   render_overrides  typed SSAO/cloud/terrain/ocean/debug variants
-  graphics          typed partial graphics preferences (clouds, grass, ...)
+  graphics          typed partial graphics preferences (clouds, grass, foliage, ...)
   diagnostics       requested logs, timings and debug channels
 ```
 
@@ -290,7 +291,8 @@ protocol.
 `CaptureRequest::graphics` is the first concrete slice of that typed settings
 surface. The runtime resolves it from `GraphicsSettings::default()` for every
 request and the receipt records the effective values. Direct cold launches may
-temporarily use `THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=on`; the persistent
+temporarily use
+`THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=on,foliage=off`; the persistent
 controller translates `--graphics` directly into the typed request.
 
 Protocol v3 also publishes the boot-compatible preset set and exact source
@@ -377,10 +379,12 @@ advanced; it does not invalidate the capture or prove whether a particular
 later edit was consumed. Comparison manifests reference every variant receipt
 and carry a comparison-wide source-before/source-after match.
 
-The interactive launcher also installs F2 plus the F8 egui viewpoint manager.
-The portable capture protocol owns the versioned `assets/viewpoints.json` types,
-so the manager, agent edits, CLI, and headless runtime share one schema. Exact
-saved poses and agent-scripted views are both catalog entries. Procedural
+The interactive launcher also installs F2 plus the shared native F8/F9
+viewpoint UI from `thalos_viewer`. The Bevy-free schema lives in
+`thalos_render_model` and is reexported by the portable capture protocol, so
+both applications, agent edits, the CLI, and the headless runtime share one
+catalog model without making an interactive application depend on capture.
+Exact saved poses and agent-scripted views are both catalog entries. Procedural
 drivers remain runtime behavior for searches and diagnostic setup, but they are
 capabilities selected by catalog data rather than a second public view list.
 An exact saved pose also carries its canonical `sim_time_s`; headless replay

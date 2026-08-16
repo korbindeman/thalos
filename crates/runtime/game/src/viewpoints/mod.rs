@@ -1,32 +1,22 @@
-//! Shared authored viewpoints, the interactive F8 manager, and the F9
-//! quick-save prompt.
+//! Shared saved-viewpoint integration for the planetary game.
 //!
-//! The JSON catalog is source data: agents may edit it directly, while the
-//! in-game manager performs the same CRUD operations. Headless capture reads
-//! these types through `thalos_capture_protocol` and reuses [`pose_viewpoint`].
-//!
-//! Two entry points, one core: F8 opens the full catalog manager, F9 saves the
-//! current view in one keypress. Both frame the camera through
-//! [`capture_current_viewpoint`] and commit through [`write_catalog`] — the
-//! quick path parameterizes that core, it does not fork it.
+//! Catalog persistence, F8/F9 UI, validation, and CRUD live in
+//! `thalos_viewer`. This module is only the authored-body-fixed adapter and
+//! the scripted-driver bridge required by the full game.
 
-pub mod quick_save;
-
-use std::{env, fs, path::PathBuf};
+use std::{env, path::PathBuf};
 
 use bevy::{
     math::{DQuat, DVec3},
     prelude::*,
 };
-use bevy_egui::{
-    EguiContexts, EguiGlobalSettings, EguiPlugin, EguiPrimaryContextPass, PrimaryEguiContext, egui,
-};
 use big_space::prelude::{BigSpace, CellCoord, Grid};
-use thalos_capture_protocol::{
-    Viewpoint, ViewpointCatalog, ViewpointSpawn, viewpoint_id_from_name,
-};
-use thalos_input::game::GameInputIntent;
+use thalos_capture_protocol::{Viewpoint, ViewpointCatalog, ViewpointFrame, ViewpointSpawn};
 use thalos_physics_local::HeightSourceRegistry;
+use thalos_viewer::{
+    CurrentViewpoint, PendingViewpointApply, ViewpointApplyTarget, ViewpointSet, ViewpointSnapshot,
+    ViewpointUiState,
+};
 
 use crate::{
     bridge::WarpLimits,
@@ -53,33 +43,11 @@ pub fn catalog_path() -> PathBuf {
 }
 
 pub fn load_catalog() -> Result<ViewpointCatalog, String> {
-    let path = catalog_path();
-    let bytes =
-        fs::read(&path).map_err(|error| format!("could not read {}: {error}", path.display()))?;
-    let catalog: ViewpointCatalog = serde_json::from_slice(&bytes)
-        .map_err(|error| format!("could not parse {}: {error}", path.display()))?;
-    catalog.validate()?;
-    Ok(catalog)
+    thalos_viewer::read_viewpoint_catalog(&catalog_path())
 }
 
 pub fn write_catalog(catalog: &ViewpointCatalog) -> Result<(), String> {
-    catalog.validate()?;
-    let path = catalog_path();
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("could not create {}: {error}", parent.display()))?;
-    }
-    let mut canonical = catalog.clone();
-    canonical
-        .viewpoints
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    canonical
-        .scripted_viewpoints
-        .sort_by(|left, right| left.id.cmp(&right.id));
-    let mut json = serde_json::to_vec_pretty(&canonical)
-        .map_err(|error| format!("could not encode viewpoint catalog: {error}"))?;
-    json.push(b'\n');
-    fs::write(&path, json).map_err(|error| format!("could not write {}: {error}", path.display()))
+    thalos_viewer::write_viewpoint_catalog(&catalog_path(), catalog)
 }
 
 pub fn resolve_viewpoint(raw: &str) -> Result<Viewpoint, String> {
@@ -112,9 +80,17 @@ pub fn viewpoint_scene_name(viewpoint: &Viewpoint) -> String {
     format!("viewpoint:{}", viewpoint.id)
 }
 
-// Free-function conversions: both types are now foreign here (the scenario
-// enum lives in `thalos_game_state`, the wire enum in the capture protocol),
-// so `From` impls hit the orphan rule.
+pub fn authored_context(
+    viewpoint: &Viewpoint,
+) -> Result<(&str, ViewpointSpawn, bool, f64), String> {
+    viewpoint.authored_body().ok_or_else(|| {
+        format!(
+            "viewpoint {} uses projected-local space and cannot boot the planetary game",
+            viewpoint.id
+        )
+    })
+}
+
 pub(crate) fn viewpoint_spawn_of(value: SpawnSituation) -> ViewpointSpawn {
     match value {
         SpawnSituation::ShipOrbit => ViewpointSpawn::Orbit,
@@ -147,568 +123,132 @@ pub struct ViewpointManagerPlugin;
 
 impl Plugin for ViewpointManagerPlugin {
     fn build(&self, app: &mut App) {
-        app.add_plugins(EguiPlugin::default())
-            // Thalos creates the map camera before the ship camera. Egui's
-            // default "first camera wins" behavior therefore attaches its
-            // primary context to an inactive camera during normal flight.
-            .insert_resource(EguiGlobalSettings {
-                auto_create_primary_context: false,
-                ..default()
-            })
-            .init_resource::<ViewpointManager>()
-            // CameraPlugin creates both world cameras during Startup. Attach
-            // after those commands have applied so egui has one explicit
-            // presentation owner and never relies on camera creation order.
-            .add_systems(PostStartup, attach_viewpoint_manager_to_ship_camera)
-            .add_systems(Update, toggle_viewpoint_manager)
-            .add_systems(EguiPrimaryContextPass, draw_viewpoint_manager);
+        app.add_plugins(thalos_viewer::ViewpointPlugin::new(catalog_path(), true))
+            .configure_sets(
+                Update,
+                ViewpointSet::Snapshot.after(crate::SimStage::Camera),
+            )
+            .add_systems(
+                Update,
+                project_current_viewpoint.in_set(ViewpointSet::Snapshot),
+            )
+            .add_systems(Update, apply_pending_viewpoint.in_set(ViewpointSet::Apply));
     }
-}
-
-fn attach_viewpoint_manager_to_ship_camera(
-    mut commands: Commands,
-    camera: Single<Entity, With<ShipCamera>>,
-) {
-    commands.entity(*camera).insert(PrimaryEguiContext);
-}
-
-#[derive(Resource)]
-pub struct ViewpointManager {
-    pub open: bool,
-    catalog: ViewpointCatalog,
-    selected: Option<String>,
-    edit_id: String,
-    edit_name: String,
-    edit_description: String,
-    status: Option<(bool, String)>,
-}
-
-impl Default for ViewpointManager {
-    fn default() -> Self {
-        Self {
-            open: false,
-            catalog: ViewpointCatalog::default(),
-            selected: None,
-            edit_id: String::new(),
-            edit_name: "New viewpoint".to_owned(),
-            edit_description: String::new(),
-            status: None,
-        }
-    }
-}
-
-fn toggle_viewpoint_manager(input: Res<GameInputIntent>, mut manager: ResMut<ViewpointManager>) {
-    if !input.save_perspective {
-        return;
-    }
-    manager.open = !manager.open;
-    if manager.open {
-        reload_manager(&mut manager);
-    }
-}
-
-#[derive(Clone, Copy)]
-enum ManagerAction {
-    Reload,
-    Create,
-    SaveMetadata,
-    ReplaceCamera,
-    Apply,
-    Delete,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn draw_viewpoint_manager(
-    mut contexts: EguiContexts,
-    mut manager: ResMut<ViewpointManager>,
+fn project_current_viewpoint(
     view_anchor: Res<ViewAnchor>,
+    sim: Res<SimulationState>,
+    solar: Res<SolarSystemState>,
+    situation: Res<SpawnSituation>,
+    space_center: Option<Res<crate::space_center::SpaceCenter>>,
+    cameras: Query<(&CellCoord, &Transform, &CameraOptics), (With<ShipCamera>, With<ActiveCamera>)>,
+    mut current: ResMut<CurrentViewpoint>,
+) {
+    let snapshot = capture_current_snapshot(
+        &view_anchor,
+        &sim,
+        &solar,
+        *situation,
+        space_center.as_deref(),
+        &cameras,
+    )
+    .ok();
+    if current.0 != snapshot {
+        current.0 = snapshot;
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_pending_viewpoint(
+    mut pending: ResMut<PendingViewpointApply>,
+    mut ui: ResMut<ViewpointUiState>,
     sim: Res<SimulationState>,
     solar: Res<SolarSystemState>,
     height_sources: Res<HeightSourceRegistry>,
     structures: Res<StructureRegistry>,
     surfaces: Res<BodySurfaceRegistry>,
     warp_limits: Res<WarpLimits>,
-    mut freecam: ResMut<FreeCam>,
-    situation: Res<SpawnSituation>,
-    space_center: Option<Res<crate::space_center::SpaceCenter>>,
     root: Single<&Grid, With<BigSpace>>,
-    mut cameras: ParamSet<(
-        Query<(&CellCoord, &Transform, &CameraOptics), (With<ShipCamera>, With<ActiveCamera>)>,
-        Query<
-            (
-                &mut CellCoord,
-                &mut Transform,
-                &mut Projection,
-                &mut CameraOptics,
-            ),
-            (With<ShipCamera>, With<ActiveCamera>),
-        >,
-    )>,
-) -> Result {
-    if !manager.open {
-        return Ok(());
-    }
-
-    let mut open = manager.open;
-    let mut action = None;
-    let entries = manager
-        .catalog
-        .viewpoints
-        .iter()
-        .map(|viewpoint| {
-            (
-                viewpoint.id.clone(),
-                viewpoint.name.clone(),
-                "saved".to_owned(),
-            )
-        })
-        .chain(manager.catalog.scripted_viewpoints.iter().map(|viewpoint| {
-            (
-                viewpoint.id.clone(),
-                viewpoint.name.clone(),
-                "agent".to_owned(),
-            )
-        }))
-        .collect::<Vec<_>>();
-
-    egui::Window::new("Viewpoint manager")
-        .open(&mut open)
-        .default_width(680.0)
-        .default_height(500.0)
-        .resizable(true)
-        .show(contexts.ctx_mut()?, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("F8 viewpoints").strong());
-                if ui.button("Reload file").clicked() {
-                    action = Some(ManagerAction::Reload);
-                }
-                ui.label(catalog_path().display().to_string());
-            });
-            ui.separator();
-
-            ui.columns(2, |columns| {
-                columns[0].set_min_width(210.0);
-                columns[0].heading("Catalog");
-                egui::ScrollArea::vertical().id_salt("viewpoint-list").show(
-                    &mut columns[0],
-                    |ui| {
-                        if entries.is_empty() {
-                            ui.weak("No viewpoints yet.");
-                        }
-                        for (id, name, kind) in &entries {
-                            let selected = manager.selected.as_deref() == Some(id.as_str());
-                            if ui
-                                .selectable_label(selected, format!("{name}  [{kind}]\n{id}"))
-                                .clicked()
-                            {
-                                select_viewpoint(&mut manager, id);
-                            }
-                        }
-                    },
-                );
-
-                columns[1].heading(if manager.selected.is_some() {
-                    "Selected viewpoint"
-                } else {
-                    "New viewpoint"
-                });
-                columns[1].label("Name");
-                columns[1].text_edit_singleline(&mut manager.edit_name);
-                columns[1].label("Stable id");
-                columns[1].text_edit_singleline(&mut manager.edit_id);
-                columns[1].label("Description");
-                columns[1].text_edit_multiline(&mut manager.edit_description);
-                columns[1].add_space(8.0);
-
-                if let Some(selected_id) = manager.selected.as_deref()
-                    && let Some(viewpoint) = manager.catalog.find(selected_id)
-                {
-                    columns[1].label(format!(
-                        "{} · {:?}{} · t={:.3}s · {:.0} mm · {}:{} sensor",
-                        viewpoint.body,
-                        viewpoint.spawn,
-                        if viewpoint.boots_hub { " · hub" } else { "" },
-                        viewpoint.sim_time_s,
-                        viewpoint.optics.lens.focal_length_mm,
-                        viewpoint.optics.sensor.aspect[0],
-                        viewpoint.optics.sensor.aspect[1],
-                    ));
-                } else if let Some(selected_id) = manager.selected.as_deref()
-                    && let Some(viewpoint) = manager.catalog.find_scripted(selected_id)
-                {
-                    columns[1].label(format!(
-                        "Agent-authored scripted view · driver {}",
-                        viewpoint.driver
-                    ));
-                }
-
-                columns[1].horizontal_wrapped(|ui| {
-                    if manager.selected.is_none() {
-                        if ui.button("Save current as new").clicked() {
-                            action = Some(ManagerAction::Create);
-                        }
-                    } else {
-                        if ui.button("View").clicked() {
-                            action = Some(ManagerAction::Apply);
-                        }
-                        if ui.button("Replace from current").clicked() {
-                            action = Some(ManagerAction::ReplaceCamera);
-                        }
-                        if ui.button("Save name / id / notes").clicked() {
-                            action = Some(ManagerAction::SaveMetadata);
-                        }
-                        if ui
-                            .add(
-                                egui::Button::new("Delete")
-                                    .fill(egui::Color32::from_rgb(105, 32, 32)),
-                            )
-                            .clicked()
-                        {
-                            action = Some(ManagerAction::Delete);
-                        }
-                    }
-                });
-                if manager.selected.is_some() && columns[1].button("Create another").clicked() {
-                    manager.selected = None;
-                    manager.edit_id.clear();
-                    manager.edit_name = "New viewpoint".to_owned();
-                    manager.edit_description.clear();
-                }
-            });
-
-            if let Some((ok, message)) = &manager.status {
-                ui.separator();
-                ui.colored_label(
-                    if *ok {
-                        egui::Color32::LIGHT_GREEN
-                    } else {
-                        egui::Color32::LIGHT_RED
-                    },
-                    message,
-                );
-            }
-            ui.separator();
-            ui.weak(
-                "Saved views record an exact body-fixed camera, lens, and simulation time. \
-                 Headless replay uses that time unless its caller overrides it. Agent views \
-                 reuse the procedural focus/framing driver and canonical boot scene.",
-            );
-        });
-    manager.open = open;
-
-    let Some(action) = action else {
-        return Ok(());
+    mut freecam: ResMut<FreeCam>,
+    mut camera: Query<
+        (
+            &mut CellCoord,
+            &mut Transform,
+            &mut Projection,
+            &mut CameraOptics,
+        ),
+        (With<ShipCamera>, With<ActiveCamera>),
+    >,
+) {
+    let Some(target) = pending.take() else {
+        return;
     };
-    let result = match action {
-        ManagerAction::Reload => {
-            reload_manager(&mut manager);
-            return Ok(());
-        }
-        ManagerAction::Create => {
-            let readable_cameras = cameras.p0();
-            create_from_current(
-                &mut manager,
-                &view_anchor,
-                &sim,
-                &solar,
-                *situation,
-                space_center.as_deref(),
-                &readable_cameras,
-            )
-        }
-        ManagerAction::SaveMetadata => save_metadata(&mut manager),
-        ManagerAction::ReplaceCamera => {
-            let readable_cameras = cameras.p0();
-            replace_from_current(
-                &mut manager,
-                &view_anchor,
-                &sim,
-                &solar,
-                *situation,
-                space_center.as_deref(),
-                &readable_cameras,
-            )
-        }
-        ManagerAction::Apply => {
-            let selected = manager
-                .selected
-                .clone()
-                .ok_or_else(|| "select a viewpoint first".to_owned());
-            selected.and_then(|selected_id| {
-                let mut writable_cameras = cameras.p1();
-                let (mut cell, mut transform, mut projection, mut optics) = writable_cameras
-                    .single_mut()
-                    .map_err(|_| "the active 3-D camera is unavailable".to_owned())?;
-                let return_optics = optics.spec();
-                let resolved = if let Some(viewpoint) = manager.catalog.find(&selected_id) {
-                    let body_id = sim
-                        .system
-                        .bodies
-                        .iter()
-                        .position(|body| body.name.eq_ignore_ascii_case(&viewpoint.body))
-                        .ok_or_else(|| {
-                            format!("viewpoint body {:?} is not authored", viewpoint.body)
-                        })?;
-                    let message = pose_viewpoint(
-                        viewpoint,
-                        &sim.system.bodies,
-                        &solar,
-                        &root,
-                        &mut cell,
-                        &mut transform,
-                        &mut projection,
-                        &mut optics,
-                    )?;
-                    Ok((body_id, message))
-                } else if let Some(viewpoint) = manager.catalog.find_scripted(&selected_id) {
-                    crate::screenshot::pose_scripted_viewpoint(
-                        &viewpoint.driver,
-                        &sim,
-                        &solar,
-                        &height_sources,
-                        &structures,
-                        &surfaces,
-                        &root,
-                        &mut cell,
-                        &mut transform,
-                    )
-                } else {
-                    Err(format!(
-                        "{selected_id:?} changed on disk; reload the catalog"
-                    ))
-                };
-                let (body_id, message) = resolved?;
-                let states = solar
-                    .states
-                    .as_deref()
-                    .ok_or_else(|| "the solar-system state is not ready yet".to_owned())?;
-                let body_state = states
-                    .get(body_id)
-                    .ok_or_else(|| format!("body state {body_id} is unavailable"))?;
-                let camera_world = root.grid_position_double(&cell, &transform);
-                freecam.activate_at_world_pose(
-                    body_id,
-                    body_state,
-                    camera_world,
-                    transform.rotation.as_dquat(),
+    let result = (|| {
+        let (mut cell, mut transform, mut projection, mut optics) = camera
+            .single_mut()
+            .map_err(|_| "the active 3-D camera is unavailable".to_owned())?;
+        let return_optics = optics.spec();
+        let (body_id, message) = match target {
+            ViewpointApplyTarget::Saved(viewpoint) => {
+                let (body, _, _, _) = authored_context(&viewpoint)?;
+                let body_id = sim
+                    .system
+                    .bodies
+                    .iter()
+                    .position(|definition| definition.name.eq_ignore_ascii_case(body))
+                    .ok_or_else(|| format!("viewpoint body {body:?} is not authored"))?;
+                let message = pose_viewpoint(
+                    &viewpoint,
+                    &sim.system.bodies,
+                    &solar,
+                    &root,
+                    &mut cell,
+                    &mut transform,
+                    &mut projection,
+                    &mut optics,
+                )?;
+                (body_id, message)
+            }
+            ViewpointApplyTarget::Scripted(viewpoint) => {
+                crate::screenshot::pose_scripted_viewpoint(
+                    &viewpoint.driver,
                     &sim,
-                    &warp_limits,
-                    return_optics,
-                );
-                Ok(format!("{message}; freecam active"))
-            })
-        }
-        ManagerAction::Delete => delete_selected(&mut manager),
-    };
-    manager.status = Some(match result {
-        Ok(message) => (true, message),
-        Err(error) => (false, error),
-    });
-    Ok(())
-}
-
-fn reload_manager(manager: &mut ViewpointManager) {
-    match load_catalog() {
-        Ok(catalog) => {
-            manager.catalog = catalog;
-            if manager
-                .selected
-                .as_deref()
-                .is_some_and(|id| !manager.catalog.contains(id))
-            {
-                manager.selected = None;
+                    &solar,
+                    &height_sources,
+                    &structures,
+                    &surfaces,
+                    &root,
+                    &mut cell,
+                    &mut transform,
+                )?
             }
-            if let Some(id) = manager.selected.clone() {
-                select_viewpoint(manager, &id);
-            }
-            manager.status = Some((true, "Reloaded viewpoints.json".to_owned()));
-        }
-        Err(error) => manager.status = Some((false, error)),
-    }
-}
-
-fn select_viewpoint(manager: &mut ViewpointManager, id: &str) {
-    if let Some(viewpoint) = manager.catalog.find(id) {
-        manager.selected = Some(viewpoint.id.clone());
-        manager.edit_id = viewpoint.id.clone();
-        manager.edit_name = viewpoint.name.clone();
-        manager.edit_description = viewpoint.description.clone();
-    } else if let Some(viewpoint) = manager.catalog.find_scripted(id) {
-        manager.selected = Some(viewpoint.id.clone());
-        manager.edit_id = viewpoint.id.clone();
-        manager.edit_name = viewpoint.name.clone();
-        manager.edit_description = viewpoint.description.clone();
-    }
-}
-
-fn create_from_current(
-    manager: &mut ViewpointManager,
-    view_anchor: &ViewAnchor,
-    sim: &SimulationState,
-    solar: &SolarSystemState,
-    situation: SpawnSituation,
-    space_center: Option<&crate::space_center::SpaceCenter>,
-    cameras: &Query<
-        (&CellCoord, &Transform, &CameraOptics),
-        (With<ShipCamera>, With<ActiveCamera>),
-    >,
-) -> Result<String, String> {
-    let name = manager.edit_name.trim();
-    if name.is_empty() {
-        return Err("give the viewpoint a name first".to_owned());
-    }
-    let requested_id = if manager.edit_id.trim().is_empty() {
-        viewpoint_id_from_name(name)
-    } else {
-        manager.edit_id.trim().to_ascii_lowercase()
-    };
-    let mut catalog = load_catalog()?;
-    if catalog.contains(&requested_id) {
-        return Err(format!("viewpoint id {requested_id:?} already exists"));
-    }
-    let viewpoint = capture_current_viewpoint(
-        requested_id.clone(),
-        name.to_owned(),
-        manager.edit_description.trim().to_owned(),
-        view_anchor,
-        sim,
-        solar,
-        situation,
-        space_center,
-        cameras,
-    )?;
-    viewpoint.validate()?;
-    catalog.viewpoints.push(viewpoint);
-    write_catalog(&catalog)?;
-    manager.catalog = catalog;
-    select_viewpoint(manager, &requested_id);
-    Ok(format!(
-        "Saved {requested_id}; agents can run `just screenshot {requested_id}`"
-    ))
-}
-
-fn save_metadata(manager: &mut ViewpointManager) -> Result<String, String> {
-    let old_id = manager
-        .selected
-        .clone()
-        .ok_or_else(|| "select a viewpoint first".to_owned())?;
-    let new_id = manager.edit_id.trim().to_ascii_lowercase();
-    let new_name = manager.edit_name.trim().to_owned();
-    let new_description = manager.edit_description.trim().to_owned();
-    let mut catalog = load_catalog()?;
-    if new_id != old_id && catalog.contains(&new_id) {
-        return Err(format!("viewpoint id {new_id:?} already exists"));
-    }
-    if let Some(viewpoint) = catalog
-        .viewpoints
-        .iter_mut()
-        .find(|viewpoint| viewpoint.id == old_id)
-    {
-        viewpoint.id = new_id.clone();
-        viewpoint.name = new_name;
-        viewpoint.description = new_description;
-        viewpoint.validate()?;
-    } else if let Some(viewpoint) = catalog
-        .scripted_viewpoints
-        .iter_mut()
-        .find(|viewpoint| viewpoint.id == old_id)
-    {
-        viewpoint.id = new_id.clone();
-        viewpoint.name = new_name;
-        viewpoint.description = new_description;
-        viewpoint.validate()?;
-    } else {
-        return Err(format!("{old_id:?} changed on disk; reload the catalog"));
-    }
-    write_catalog(&catalog)?;
-    manager.catalog = catalog;
-    select_viewpoint(manager, &new_id);
-    Ok(format!("Saved metadata for {new_id}"))
-}
-
-fn replace_from_current(
-    manager: &mut ViewpointManager,
-    view_anchor: &ViewAnchor,
-    sim: &SimulationState,
-    solar: &SolarSystemState,
-    situation: SpawnSituation,
-    space_center: Option<&crate::space_center::SpaceCenter>,
-    cameras: &Query<
-        (&CellCoord, &Transform, &CameraOptics),
-        (With<ShipCamera>, With<ActiveCamera>),
-    >,
-) -> Result<String, String> {
-    let old_id = manager
-        .selected
-        .clone()
-        .ok_or_else(|| "select a viewpoint first".to_owned())?;
-    let replacement = capture_current_viewpoint(
-        manager.edit_id.trim().to_ascii_lowercase(),
-        manager.edit_name.trim().to_owned(),
-        manager.edit_description.trim().to_owned(),
-        view_anchor,
-        sim,
-        solar,
-        situation,
-        space_center,
-        cameras,
-    )?;
-    replacement.validate()?;
-    let mut catalog = load_catalog()?;
-    if replacement.id != old_id && catalog.contains(&replacement.id) {
-        return Err(format!("viewpoint id {:?} already exists", replacement.id));
-    }
-    let new_id = replacement.id.clone();
-    if let Some(entry) = catalog
-        .viewpoints
-        .iter_mut()
-        .find(|viewpoint| viewpoint.id == old_id)
-    {
-        *entry = replacement;
-    } else {
-        let before = catalog.scripted_viewpoints.len();
-        catalog
-            .scripted_viewpoints
-            .retain(|viewpoint| viewpoint.id != old_id);
-        if catalog.scripted_viewpoints.len() == before {
-            return Err(format!("{old_id:?} changed on disk; reload the catalog"));
-        }
-        catalog.viewpoints.push(replacement);
-    }
-    write_catalog(&catalog)?;
-    manager.catalog = catalog;
-    select_viewpoint(manager, &new_id);
-    Ok(format!("Replaced {new_id} from the current camera"))
-}
-
-fn delete_selected(manager: &mut ViewpointManager) -> Result<String, String> {
-    let id = manager
-        .selected
-        .clone()
-        .ok_or_else(|| "select a viewpoint first".to_owned())?;
-    let mut catalog = load_catalog()?;
-    let before = catalog.viewpoints.len() + catalog.scripted_viewpoints.len();
-    catalog.viewpoints.retain(|viewpoint| viewpoint.id != id);
-    catalog
-        .scripted_viewpoints
-        .retain(|viewpoint| viewpoint.id != id);
-    if catalog.viewpoints.len() + catalog.scripted_viewpoints.len() == before {
-        return Err(format!("{id:?} changed on disk; reload the catalog"));
-    }
-    write_catalog(&catalog)?;
-    manager.catalog = catalog;
-    manager.selected = None;
-    manager.edit_id.clear();
-    manager.edit_name = "New viewpoint".to_owned();
-    manager.edit_description.clear();
-    Ok(format!("Deleted {id}"))
+        };
+        let states = solar
+            .states
+            .as_deref()
+            .ok_or_else(|| "the solar-system state is not ready yet".to_owned())?;
+        let body_state = states
+            .get(body_id)
+            .ok_or_else(|| format!("body state {body_id} is unavailable"))?;
+        let camera_world = root.grid_position_double(&cell, &transform);
+        freecam.activate_at_world_pose(
+            body_id,
+            body_state,
+            camera_world,
+            transform.rotation.as_dquat(),
+            &sim,
+            &warp_limits,
+            return_optics,
+        );
+        Ok(format!("{message}; freecam active"))
+    })();
+    ui.report(result);
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn capture_current_viewpoint(
-    id: String,
-    name: String,
-    description: String,
+fn capture_current_snapshot(
     view_anchor: &ViewAnchor,
     sim: &SimulationState,
     solar: &SolarSystemState,
@@ -718,7 +258,7 @@ pub(crate) fn capture_current_viewpoint(
         (&CellCoord, &Transform, &CameraOptics),
         (With<ShipCamera>, With<ActiveCamera>),
     >,
-) -> Result<Viewpoint, String> {
+) -> Result<ViewpointSnapshot, String> {
     let anchor = view_anchor
         .resolved
         .ok_or_else(|| "the 3-D view is not anchored to a terrain body yet".to_owned())?;
@@ -755,24 +295,32 @@ pub(crate) fn capture_current_viewpoint(
         transform.rotation.w as f64,
     );
     let rotation_body = (surface_q.inverse() * rotation_world).normalize();
-    Ok(Viewpoint {
-        id,
-        name,
-        description,
-        saved_unix_ms: crate::screenshot::timestamp_millis(),
-        body: body.name.clone(),
-        spawn: viewpoint_spawn_of(situation),
-        boots_hub: space_center.is_some_and(|hub| hub.open),
-        sim_time_s: sim.simulation.sim_time(),
-        camera_position_body_m: camera_body.to_array(),
-        camera_rotation_body_xyzw: [
-            rotation_body.x,
-            rotation_body.y,
-            rotation_body.z,
-            rotation_body.w,
-        ],
+    Ok(ViewpointSnapshot {
+        frame: ViewpointFrame::AuthoredBodyFixed {
+            body: body.name.clone(),
+            spawn: viewpoint_spawn_of(situation),
+            boots_hub: space_center.is_some_and(|hub| hub.open),
+            sim_time_s: sim.simulation.sim_time(),
+        },
+        camera_position_m: camera_body.to_array(),
+        camera_rotation_xyzw: rotation_body.to_array(),
         optics: optics.spec(),
+        suggested_name: suggested_name(&body.name, Some(anchor.agl_m)),
     })
+}
+
+fn suggested_name(body: &str, agl_m: Option<f64>) -> String {
+    match agl_m {
+        Some(agl) if agl.is_finite() => {
+            let agl = agl.max(0.0);
+            if agl < 1_000.0 {
+                format!("{body} {} m", (agl / 10.0).round() as i64 * 10)
+            } else {
+                format!("{body} {} km", (agl / 1_000.0).round() as i64)
+            }
+        }
+        _ => body.to_owned(),
+    }
 }
 
 /// Re-project an authored viewpoint through the current body's surface frame.
@@ -786,41 +334,73 @@ pub fn pose_viewpoint(
     projection: &mut Projection,
     optics: &mut CameraOptics,
 ) -> Result<String, String> {
+    let (body, _, _, _) = authored_context(viewpoint)?;
     let body_id = bodies
         .iter()
-        .position(|body| body.name.eq_ignore_ascii_case(&viewpoint.body))
-        .ok_or_else(|| format!("viewpoint body {:?} is not authored", viewpoint.body))?;
+        .position(|definition| definition.name.eq_ignore_ascii_case(body))
+        .ok_or_else(|| format!("viewpoint body {body:?} is not authored"))?;
     let states = solar
         .states
         .as_deref()
         .ok_or_else(|| "the solar-system state is not ready yet".to_owned())?;
     let body_state = states
         .get(body_id)
-        .ok_or_else(|| format!("body state for {:?} is unavailable", viewpoint.body))?;
+        .ok_or_else(|| format!("body state for {body:?} is unavailable"))?;
     let surface_q =
         crate::rendering::transforms::surface_orientation_authored(bodies, body_id, states)
             .unwrap_or_else(|| body_state.orientation.normalize());
-    let camera_body = DVec3::from_array(viewpoint.camera_position_body_m);
-    let rotation_body = DQuat::from_xyzw(
-        viewpoint.camera_rotation_body_xyzw[0],
-        viewpoint.camera_rotation_body_xyzw[1],
-        viewpoint.camera_rotation_body_xyzw[2],
-        viewpoint.camera_rotation_body_xyzw[3],
-    )
-    .normalize();
+    let camera_body = DVec3::from_array(viewpoint.camera_position_m);
+    let rotation_body = DQuat::from_array(viewpoint.camera_rotation_xyzw).normalize();
     let camera_world = body_state.position + surface_q * camera_body;
     let rotation_world = (surface_q * rotation_body).normalize();
     let (next_cell, local) = root.translation_to_grid(camera_world);
     *cell = next_cell;
     transform.translation = local;
-    transform.rotation = Quat::from_xyzw(
-        rotation_world.x as f32,
-        rotation_world.y as f32,
-        rotation_world.z as f32,
-        rotation_world.w as f32,
-    )
-    .normalize();
+    transform.rotation = rotation_world.as_quat();
     optics.set_spec(viewpoint.optics)?;
     optics.apply_to_projection(projection);
     Ok(format!("Viewing {}", viewpoint.id))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn viewpoint_spawn_conversion_round_trips_every_scene() {
+        for situation in [
+            SpawnSituation::ShipOrbit,
+            SpawnSituation::PolarOrbit,
+            SpawnSituation::Eva,
+            SpawnSituation::Landing,
+            SpawnSituation::FinalApproach,
+            SpawnSituation::Runway,
+            SpawnSituation::RunwayApproach,
+            SpawnSituation::Launch,
+            SpawnSituation::Cruise,
+        ] {
+            assert_eq!(
+                situation_of_viewpoint(viewpoint_spawn_of(situation)),
+                situation
+            );
+        }
+    }
+
+    #[test]
+    fn planetary_adapter_rejects_a_projected_local_viewpoint() {
+        let viewpoint = Viewpoint {
+            id: "westpunt".into(),
+            name: "Westpunt".into(),
+            description: String::new(),
+            saved_unix_ms: 1,
+            frame: ViewpointFrame::ProjectedLocal {
+                reference: "EPSG:32619".into(),
+            },
+            camera_position_m: [1.0, 2.0, 3.0],
+            camera_rotation_xyzw: [0.0, 0.0, 0.0, 1.0],
+            optics: thalos_capture_protocol::CameraOptics::default(),
+        };
+
+        assert!(authored_context(&viewpoint).is_err());
+    }
 }

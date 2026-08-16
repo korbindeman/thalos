@@ -14,7 +14,9 @@
 //! `Grid` so it inherits orbital motion) lands in Stage 2.
 
 use bevy::{math::DVec3, prelude::*};
-use thalos_body_render::{PlaygroundMaterial, SyntheticTileProvider, ThalosTerrainPlugin};
+use thalos_body_render::{
+    GroundAppearancePlugin, LegacyUdlodPlugin, PlaygroundMaterial, SyntheticTileProvider,
+};
 use thalos_udlod::prelude::*;
 
 /// Mira-scale body so the synthetic ridge field reads at roughly the right
@@ -32,7 +34,8 @@ fn main() {
             DefaultPlugins
                 .build()
                 .disable::<bevy::transform::TransformPlugin>(),
-            ThalosTerrainPlugin,
+            GroundAppearancePlugin,
+            LegacyUdlodPlugin,
             TerrainMaterialPlugin::<PlaygroundMaterial>::default(),
             TerrainDebugPlugin,
         ))

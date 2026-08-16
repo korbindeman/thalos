@@ -47,8 +47,8 @@ use thalos_world::AtmosphereSample;
 
 use crate::SimStage;
 use crate::rendering::SimulationState;
-use crate::ship_view::CraftPart;
 use crate::sim_clock::SimClock;
+use thalos_game_state::scene::CraftPart;
 
 pub use thalos_game_state::flight::ThrottleState;
 

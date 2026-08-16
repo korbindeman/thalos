@@ -57,9 +57,9 @@ use crate::ground::body_material::BodySkyExtra;
 pub struct BodySkyMaterial {
     pub atmosphere: AtmosphereBlock,
     pub atmosphere_extra: BodySkyExtra,
-    /// Scene-depth texture written by the game crate's `CopySceneDepthNode`
-    /// each frame between `Node3d::MainOpaquePass` and
-    /// `Node3d::MainTransparentPass`. Sampled with `textureLoad` in the
+    /// Scene-depth texture written by `thalos_render_foundation` each frame
+    /// between Bevy's main opaque and transparent passes. Sampled with
+    /// `textureLoad` in the
     /// fragment shader to clip the atmosphere raymarch at opaque geometry,
     /// which is what produces aerial perspective on terrain pixels.
     pub scene_depth: Handle<Image>,

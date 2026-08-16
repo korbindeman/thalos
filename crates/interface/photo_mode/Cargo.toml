@@ -1,0 +1,8 @@
+[package]
+name = "thalos_photo_mode"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+bevy = "0.19"

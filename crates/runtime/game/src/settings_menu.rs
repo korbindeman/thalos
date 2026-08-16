@@ -1,132 +1,27 @@
-//! Settings overlay (native Bevy UI).
+//! Game-specific contributors to the shared application settings modal.
 //!
-//! Opens from the pause menu / start screen via the "SETTINGS" button. A
-//! centred modal with a tab strip; the body is rebuilt from the current tab +
-//! model whenever the tab changes, the menu opens, or a structural edit bumps
-//! [`SettingsMenu::rebuild`] (HOTAS add/remove, device-mode switch). Interactive
-//! widgets come from [`thalos_ui`]; per-tab apply systems read
-//! `Changed<Widget>` and write the backing resource (value-compared, so an open
-//! tab never churns change detection).
-//!
-//! - **Window** — live-edits the persisted [`WindowSettings`].
-//! - **Graphics** — live-edits the persisted [`GraphicsSettings`].
-//! - **Keyboard / Mouse / Controller** — read-only binding lists.
-//! - **HOTAS** — live-editable axis configuration (`InputSettings`); the runtime
-//!   reader polls `InputSettings` each frame, so changes apply immediately.
-//!
-//! **Escape priority:** the chain in `pause_menu` checks `SettingsMenu::open`
-//! before `GamePause::active`, so Escape closes this panel while leaving the
-//! pause backdrop up.
+//! Window behavior and anti-aliasing live in `thalos_preferences`. This module
+//! adds only settings that belong to the full game: simulation rendering,
+//! measurement units, input binding reference pages, and HOTAS controls.
 
-use bevy::picking::Pickable;
 use bevy::prelude::*;
-use bevy::ui::RelativeCursorPosition;
-use bevy::window::{Monitor, PrimaryMonitor};
 use thalos_input::settings::{
     AxisSpec, BindingSection, BindingSpec, HotasAxisBinding, HotasDeviceSelector, InputSettings,
 };
-
+pub use thalos_preferences::SettingsMenu;
+use thalos_preferences::{
+    SettingsMenuSet, SettingsPage, SettingsPageBuild, register_settings_page,
+};
 use thalos_ui::{
-    self as ui, ButtonVariant, ScrollableColumn, SliderFormat, UiButton, UiCheckbox, UiCycle,
-    UiSlider, UiTextField, UiTheme, spawn_button, spawn_checkbox_row, spawn_cycle_row,
-    spawn_divider, spawn_slider_row, spawn_text_field, tokens,
+    ButtonVariant, SliderFormat, UiCheckbox, UiCycle, UiSlider, UiTextField, UiTheme, spawn_button,
+    spawn_checkbox_row, spawn_cycle_row, spawn_slider_row, spawn_text_field, tokens,
 };
 
-use crate::graphics_settings::{GraphicsSettings, MsaaSetting};
+use crate::graphics_settings::GraphicsSettings;
 use crate::units_settings::{AviationUnits, UnitSystem, UnitsSettings};
-use crate::window_settings::{
-    MonitorChoice, RESOLUTION_PRESETS, UI_SCALE_MAX, UI_SCALE_MIN, WindowModeSetting,
-    WindowSettings, WindowSettingsOverrides,
-};
-
-// ── Resource ──────────────────────────────────────────────────────────────────
-
-#[derive(Resource, Default)]
-pub struct SettingsMenu {
-    pub open: bool,
-    tab: Tab,
-    /// Bumped to force a tab-body rebuild after a structural change (HOTAS
-    /// add/remove, device-mode switch, reset-to-defaults).
-    rebuild: u32,
-}
-
-impl SettingsMenu {
-    fn dirty(&mut self) {
-        self.rebuild = self.rebuild.wrapping_add(1);
-    }
-}
-
-#[derive(Default, PartialEq, Eq, Clone, Copy)]
-enum Tab {
-    #[default]
-    Window,
-    Graphics,
-    Units,
-    Keyboard,
-    Mouse,
-    Controller,
-    Hotas,
-}
-
-impl Tab {
-    const ALL: [Tab; 7] = [
-        Tab::Window,
-        Tab::Graphics,
-        Tab::Units,
-        Tab::Keyboard,
-        Tab::Mouse,
-        Tab::Controller,
-        Tab::Hotas,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Tab::Window => "Window",
-            Tab::Graphics => "Graphics",
-            Tab::Units => "Units",
-            Tab::Keyboard => "Keyboard",
-            Tab::Mouse => "Mouse",
-            Tab::Controller => "Controller",
-            Tab::Hotas => "HOTAS",
-        }
-    }
-}
 
 const HOTAS_AXES: [&str; 4] = ["pitch", "yaw", "roll", "throttle"];
 
-// ── Markers ─────────────────────────────────────────────────────────────────
-
-#[derive(Component)]
-struct SettingsRoot;
-
-#[derive(Component)]
-struct SettingsTabBody;
-
-#[derive(Component, Clone, Copy)]
-struct TabButton(Tab);
-
-#[derive(Component)]
-struct CloseButton;
-
-// Window tab
-#[derive(Component)]
-struct WindowModeControl;
-#[derive(Component)]
-struct ResolutionControl {
-    values: Vec<(u32, u32)>,
-}
-#[derive(Component)]
-struct MonitorControl {
-    names: Vec<Option<String>>,
-}
-#[derive(Component)]
-struct VsyncControl;
-#[derive(Component)]
-struct UiScaleControl;
-#[derive(Component)]
-struct ResetWindowControl;
-
-// Graphics tab
 #[derive(Component)]
 struct CloudsControl;
 #[derive(Component)]
@@ -134,17 +29,17 @@ struct GrassControl;
 #[derive(Component)]
 struct GpuGrassControl;
 #[derive(Component)]
-struct MsaaControl;
+struct TerrainLodControl;
+#[derive(Component)]
+struct ShadowCascadesControl;
 #[derive(Component)]
 struct ResetGraphicsControl;
 
-// Units tab
 #[derive(Component)]
 struct UnitsControl;
 #[derive(Component)]
 struct AviationUnitsControl;
 
-// HOTAS tab
 #[derive(Component)]
 struct HotasEnabledControl;
 #[derive(Component)]
@@ -172,374 +67,83 @@ struct HotasRemoveControl {
     axis: &'static str,
 }
 
-// ── Plugin ────────────────────────────────────────────────────────────────────
-
+/// Adds the full game's sections to the common settings host.
 pub struct SettingsMenuPlugin;
 
 impl Plugin for SettingsMenuPlugin {
     fn build(&self, app: &mut App) {
-        app.init_resource::<SettingsMenu>()
-            .add_systems(Startup, setup_ui.after(thalos_ui::init_ui_theme))
-            .add_systems(
-                Update,
-                (
-                    sync_visibility,
-                    handle_close_click,
-                    handle_tab_clicks,
-                    update_tab_latches,
-                    rebuild_tab_body,
-                    apply_window_controls,
-                    apply_graphics_controls,
-                    apply_units_controls,
-                    apply_hotas_controls,
-                ),
-            );
-    }
-}
-
-// ── Setup ─────────────────────────────────────────────────────────────────────
-
-fn setup_ui(mut commands: Commands, theme: Res<UiTheme>) {
-    commands
-        .spawn((
-            Node {
-                position_type: PositionType::Absolute,
-                left: Val::Px(0.0),
-                right: Val::Px(0.0),
-                top: Val::Px(0.0),
-                bottom: Val::Px(0.0),
-                justify_content: JustifyContent::Center,
-                align_items: AlignItems::Center,
-                ..default()
+        for page in [
+            SettingsPage {
+                id: "graphics",
+                label: "Graphics",
+                order: 10,
             },
-            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.45)),
-            // Above the pause menu backdrop (z 100) so settings stacks over it.
-            GlobalZIndex(110),
-            Pickable {
-                is_hoverable: false,
-                should_block_lower: true,
+            SettingsPage {
+                id: "units",
+                label: "Units",
+                order: 20,
             },
-            Visibility::Hidden,
-            SettingsRoot,
-            Name::new("SettingsMenu"),
-        ))
-        .with_children(|root| {
-            root.spawn((
-                Node {
-                    width: Val::Px(560.0),
-                    height: Val::Px(540.0),
-                    max_height: Val::Percent(92.0),
-                    ..ui::panel_node()
-                },
-                theme.glass_heavy(),
-                Name::new("SettingsPanel"),
-            ))
-            .with_children(|panel| {
-                // Title row + close.
-                panel
-                    .spawn(Node {
-                        width: Val::Percent(100.0),
-                        flex_direction: FlexDirection::Row,
-                        justify_content: JustifyContent::SpaceBetween,
-                        align_items: AlignItems::Center,
-                        ..default()
-                    })
-                    .with_children(|row| {
-                        row.spawn(theme.title("SETTINGS"));
-                        spawn_button(row, &theme, CloseButton, "×", ButtonVariant::Bare, 24.0);
-                    });
-
-                spawn_divider(panel);
-
-                // Tab strip.
-                panel
-                    .spawn(Node {
-                        width: Val::Percent(100.0),
-                        flex_direction: FlexDirection::Row,
-                        column_gap: Val::Px(4.0),
-                        flex_wrap: FlexWrap::Wrap,
-                        row_gap: Val::Px(4.0),
-                        ..default()
-                    })
-                    .with_children(|strip| {
-                        for tab in Tab::ALL {
-                            spawn_button(
-                                strip,
-                                &theme,
-                                TabButton(tab),
-                                tab.label(),
-                                ButtonVariant::Ghost,
-                                24.0,
-                            );
-                        }
-                    });
-
-                spawn_divider(panel);
-
-                // Scrollable body (children rebuilt per tab).
-                panel.spawn((
-                    Node {
-                        width: Val::Percent(100.0),
-                        flex_grow: 1.0,
-                        flex_direction: FlexDirection::Column,
-                        row_gap: Val::Px(6.0),
-                        overflow: Overflow::scroll_y(),
-                        ..default()
-                    },
-                    ScrollPosition::default(),
-                    RelativeCursorPosition::default(),
-                    Interaction::None,
-                    ScrollableColumn,
-                    SettingsTabBody,
-                    Name::new("SettingsTabBody"),
-                ));
-            });
-        });
-}
-
-// ── Chrome systems ──────────────────────────────────────────────────────────
-
-fn sync_visibility(menu: Res<SettingsMenu>, mut roots: Query<&mut Visibility, With<SettingsRoot>>) {
-    if !menu.is_changed() {
-        return;
-    }
-    let target = if menu.open {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    };
-    for mut vis in &mut roots {
-        if *vis != target {
-            *vis = target;
+            SettingsPage {
+                id: "keyboard",
+                label: "Keyboard",
+                order: 30,
+            },
+            SettingsPage {
+                id: "mouse",
+                label: "Mouse",
+                order: 40,
+            },
+            SettingsPage {
+                id: "controller",
+                label: "Controller",
+                order: 50,
+            },
+            SettingsPage {
+                id: "hotas",
+                label: "HOTAS",
+                order: 60,
+            },
+        ] {
+            register_settings_page(app, page);
         }
+
+        app.add_systems(
+            Update,
+            build_game_sections.in_set(SettingsMenuSet::BuildSections),
+        )
+        .add_systems(
+            Update,
+            (
+                apply_graphics_controls,
+                apply_units_controls,
+                apply_hotas_controls,
+            )
+                .in_set(SettingsMenuSet::Apply),
+        );
     }
 }
 
-fn handle_close_click(
-    interactions: Query<&Interaction, (Changed<Interaction>, With<CloseButton>)>,
-    mut menu: ResMut<SettingsMenu>,
-) {
-    for interaction in &interactions {
-        if matches!(interaction, Interaction::Pressed) {
-            menu.open = false;
-        }
-    }
-}
-
-fn handle_tab_clicks(
-    interactions: Query<(&Interaction, &TabButton), Changed<Interaction>>,
-    mut menu: ResMut<SettingsMenu>,
-) {
-    for (interaction, tab) in &interactions {
-        if matches!(interaction, Interaction::Pressed) && menu.tab != tab.0 {
-            menu.tab = tab.0;
-        }
-    }
-}
-
-fn update_tab_latches(menu: Res<SettingsMenu>, mut tabs: Query<(&TabButton, &mut UiButton)>) {
-    for (tab, mut button) in &mut tabs {
-        let latched = tab.0 == menu.tab;
-        if button.latched != latched {
-            button.latched = latched;
-        }
-    }
-}
-
-// ── Tab body rebuild ──────────────────────────────────────────────────────────
-
-#[allow(clippy::too_many_arguments)]
-fn rebuild_tab_body(
+fn build_game_sections(
     mut commands: Commands,
-    menu: Res<SettingsMenu>,
+    mut builds: MessageReader<SettingsPageBuild>,
     theme: Res<UiTheme>,
-    window: Res<WindowSettings>,
-    overrides: Res<WindowSettingsOverrides>,
     graphics: Res<GraphicsSettings>,
     units: Res<UnitsSettings>,
     input: Res<InputSettings>,
-    monitors: Query<(&Monitor, Has<PrimaryMonitor>)>,
-    body: Query<(Entity, Option<&Children>), With<SettingsTabBody>>,
-    mut shown: Local<Option<(bool, Tab, u32)>>,
 ) {
-    let key = (menu.open, menu.tab, menu.rebuild);
-    if *shown == Some(key) {
-        return;
+    for build in builds.read() {
+        commands
+            .entity(build.body)
+            .with_children(|body| match build.id {
+                "graphics" => build_graphics_tab(body, &theme, &graphics),
+                "units" => build_units_tab(body, &theme, &units),
+                "keyboard" => build_binding_tab(body, &theme, &input, BindingKind::Keyboard),
+                "mouse" => build_binding_tab(body, &theme, &input, BindingKind::Mouse),
+                "controller" => build_binding_tab(body, &theme, &input, BindingKind::Controller),
+                "hotas" => build_hotas_tab(body, &theme, &input),
+                _ => {}
+            });
     }
-    *shown = Some(key);
-
-    let Ok((body_entity, children)) = body.single() else {
-        return;
-    };
-    if let Some(children) = children {
-        for child in children.iter() {
-            commands.entity(child).despawn();
-        }
-    }
-    if !menu.open {
-        return;
-    }
-
-    let theme = theme.clone();
-    commands
-        .entity(body_entity)
-        .with_children(|b| match menu.tab {
-            Tab::Window => build_window_tab(b, &theme, &window, &overrides, &monitors),
-            Tab::Graphics => build_graphics_tab(b, &theme, &graphics),
-            Tab::Units => build_units_tab(b, &theme, &units),
-            Tab::Keyboard => build_binding_tab(b, &theme, &input, BindingKind::Keyboard),
-            Tab::Mouse => build_binding_tab(b, &theme, &input, BindingKind::Mouse),
-            Tab::Controller => build_binding_tab(b, &theme, &input, BindingKind::Controller),
-            Tab::Hotas => build_hotas_tab(b, &theme, &input),
-        });
-}
-
-// ── Window tab ────────────────────────────────────────────────────────────────
-
-fn build_window_tab(
-    b: &mut ChildSpawnerCommands<'_>,
-    theme: &UiTheme,
-    settings: &WindowSettings,
-    overrides: &WindowSettingsOverrides,
-    monitors: &Query<(&Monitor, Has<PrimaryMonitor>)>,
-) {
-    // Mode.
-    if let Some(mode) = overrides.mode {
-        pinned_row(b, theme, "Mode", mode_label(mode), "THALOS_WINDOW_MODE");
-    } else {
-        let index = match settings.mode {
-            WindowModeSetting::Windowed => 0,
-            WindowModeSetting::Borderless => 1,
-            WindowModeSetting::Exclusive => 2,
-        };
-        spawn_cycle_row(
-            b,
-            theme,
-            "Mode",
-            vec!["Windowed".into(), "Borderless".into(), "Fullscreen".into()],
-            index,
-            WindowModeControl,
-        );
-    }
-
-    // Resolution (windowed).
-    if let Some((w, h)) = overrides.resolution {
-        pinned_row(
-            b,
-            theme,
-            "Resolution",
-            format!("{w} × {h}"),
-            "THALOS_WINDOW_SIZE",
-        );
-    } else {
-        let mut values: Vec<(u32, u32)> = RESOLUTION_PRESETS.to_vec();
-        if !values.contains(&settings.resolution) {
-            values.insert(0, settings.resolution);
-        }
-        let index = values
-            .iter()
-            .position(|&r| r == settings.resolution)
-            .unwrap_or(0);
-        let options = values.iter().map(|(w, h)| format!("{w} × {h}")).collect();
-        spawn_cycle_row(
-            b,
-            theme,
-            "Resolution",
-            options,
-            index,
-            ResolutionControl { values },
-        );
-        note(
-            b,
-            theme,
-            "Applies in windowed mode; drag-resizing updates it too.",
-        );
-    }
-
-    // Monitor.
-    let mut choices: Vec<MonitorChoice> = monitors
-        .iter()
-        .filter_map(|(monitor, primary)| {
-            let name = monitor.name.clone()?;
-            let label = format!(
-                "{name} — {}×{}{}",
-                monitor.physical_width,
-                monitor.physical_height,
-                if primary { " (primary)" } else { "" },
-            );
-            Some(MonitorChoice { name, label })
-        })
-        .collect();
-    choices.sort_by(|a, b| a.name.cmp(&b.name));
-
-    let mut options = vec!["Primary".to_string()];
-    let mut names: Vec<Option<String>> = vec![None];
-    for choice in &choices {
-        options.push(choice.label.clone());
-        names.push(Some(choice.name.clone()));
-    }
-    let mut index = match settings.monitor.as_deref() {
-        None => 0,
-        Some(wanted) => names
-            .iter()
-            .position(|n| n.as_deref() == Some(wanted))
-            .unwrap_or(usize::MAX),
-    };
-    // Persisted-but-unplugged monitor: keep it selectable so it round-trips.
-    if index == usize::MAX
-        && let Some(wanted) = settings.monitor.as_deref()
-    {
-        options.push(format!("{wanted} (not connected)"));
-        names.push(Some(wanted.to_string()));
-        index = names.len() - 1;
-    }
-    spawn_cycle_row(
-        b,
-        theme,
-        "Monitor",
-        options,
-        index,
-        MonitorControl { names },
-    );
-    note(b, theme, "Used by the fullscreen modes.");
-
-    // VSync.
-    if let Some(vsync) = overrides.vsync {
-        let label = if vsync { "On" } else { "Off" };
-        pinned_row(b, theme, "VSync", label.to_string(), "THALOS_VSYNC");
-    } else {
-        spawn_checkbox_row(b, theme, "VSync", settings.vsync, VsyncControl);
-    }
-
-    // UI scale.
-    spawn_slider_row(
-        b,
-        theme,
-        "UI scale",
-        UiSlider {
-            min: UI_SCALE_MIN,
-            max: UI_SCALE_MAX,
-            value: settings.ui_scale,
-            step: 0.05,
-            format: SliderFormat::Scale2,
-        },
-        UiScaleControl,
-    );
-
-    spacer(b);
-    spawn_button(
-        b,
-        theme,
-        ResetWindowControl,
-        "Reset to defaults",
-        ButtonVariant::Ghost,
-        26.0,
-    );
-    note(
-        b,
-        theme,
-        "Saved to user/settings.ron. THALOS_WINDOW_MODE / _SIZE / _VSYNC override for one session.",
-    );
 }
 
 // ── Graphics tab ────────────────────────────────────────────────────────────────
@@ -549,6 +153,7 @@ fn build_graphics_tab(
     theme: &UiTheme,
     settings: &GraphicsSettings,
 ) {
+    section_header(b, theme, "GAME RENDERING");
     spawn_checkbox_row(
         b,
         theme,
@@ -588,21 +193,48 @@ fn build_graphics_tab(
     );
 
     spacer(b);
-
-    let index = MsaaSetting::ALL
-        .iter()
-        .position(|m| *m == settings.msaa)
-        .unwrap_or(0);
-    let options = MsaaSetting::ALL
-        .iter()
-        .map(|m| m.label().to_string())
-        .collect();
-    spawn_cycle_row(b, theme, "Anti-aliasing", options, index, MsaaControl);
+    spawn_slider_row(
+        b,
+        theme,
+        "Terrain detail",
+        UiSlider {
+            min: GraphicsSettings::TERRAIN_LOD_MIN,
+            max: GraphicsSettings::TERRAIN_LOD_MAX,
+            value: settings.terrain_lod,
+            step: 0.05,
+            format: SliderFormat::Scale2,
+        },
+        TerrainLodControl,
+    );
     note(
         b,
         theme,
-        "MSAA smooths geometry edges and (via alpha-to-coverage) tree-leaf edges; \
-         any level replaces the SMAA post pass.",
+        "Coarsens streamed terrain. 1.00× is Showcase; 0.50× is the Laptop default.",
+    );
+
+    spacer(b);
+    let shadow_index = settings.shadow_cascades as usize;
+    let shadow_options = (0..=GraphicsSettings::SHADOW_CASCADES_MAX)
+        .map(|count| {
+            if count == 0 {
+                "Off".to_string()
+            } else {
+                format!("{count}")
+            }
+        })
+        .collect();
+    spawn_cycle_row(
+        b,
+        theme,
+        "Shadow cascades",
+        shadow_options,
+        shadow_index,
+        ShadowCascadesControl,
+    );
+    note(
+        b,
+        theme,
+        "Each cascade is a 4096² depth pass. Laptop uses 2. THALOS_SHADOW_CASCADES still pins a session.",
     );
 
     spacer(b);
@@ -610,11 +242,11 @@ fn build_graphics_tab(
         b,
         theme,
         ResetGraphicsControl,
-        "Reset to defaults",
+        "Reset to Showcase",
         ButtonVariant::Ghost,
         26.0,
     );
-    note(b, theme, "Saved to user/graphics.ron.");
+    note(b, theme, "Saved to settings.ron.");
 }
 
 // ── Units tab ─────────────────────────────────────────────────────────────────────
@@ -1020,66 +652,14 @@ fn build_hotas_axis_empty(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, axi
 
 // ── Apply systems ───────────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn apply_window_controls(
-    mut settings: ResMut<WindowSettings>,
-    mut menu: ResMut<SettingsMenu>,
-    mode_q: Query<&UiCycle, (Changed<UiCycle>, With<WindowModeControl>)>,
-    res_q: Query<(&UiCycle, &ResolutionControl), Changed<UiCycle>>,
-    monitor_q: Query<(&UiCycle, &MonitorControl), Changed<UiCycle>>,
-    vsync_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<VsyncControl>)>,
-    scale_q: Query<&UiSlider, (Changed<UiSlider>, With<UiScaleControl>)>,
-    reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetWindowControl>)>,
-) {
-    for cycle in &mode_q {
-        let mode = match cycle.index {
-            0 => WindowModeSetting::Windowed,
-            1 => WindowModeSetting::Borderless,
-            _ => WindowModeSetting::Exclusive,
-        };
-        if settings.mode != mode {
-            settings.mode = mode;
-        }
-    }
-    for (cycle, control) in &res_q {
-        if let Some(&value) = control.values.get(cycle.index)
-            && settings.resolution != value
-        {
-            settings.resolution = value;
-        }
-    }
-    for (cycle, control) in &monitor_q {
-        if let Some(name) = control.names.get(cycle.index)
-            && settings.monitor != *name
-        {
-            settings.monitor = name.clone();
-        }
-    }
-    for checkbox in &vsync_q {
-        if settings.vsync != checkbox.checked {
-            settings.vsync = checkbox.checked;
-        }
-    }
-    for slider in &scale_q {
-        if (settings.ui_scale - slider.value).abs() > 1.0e-4 {
-            settings.ui_scale = slider.value;
-        }
-    }
-    for interaction in &reset_q {
-        if matches!(interaction, Interaction::Pressed) {
-            *settings = WindowSettings::default();
-            menu.dirty();
-        }
-    }
-}
-
 fn apply_graphics_controls(
     mut settings: ResMut<GraphicsSettings>,
     mut menu: ResMut<SettingsMenu>,
     clouds_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
     grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
     gpu_grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GpuGrassControl>)>,
-    msaa_q: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
+    terrain_q: Query<&UiSlider, (Changed<UiSlider>, With<TerrainLodControl>)>,
+    shadows_q: Query<&UiCycle, (Changed<UiCycle>, With<ShadowCascadesControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
     for checkbox in &clouds_q {
@@ -1097,16 +677,20 @@ fn apply_graphics_controls(
             settings.gpu_grass = checkbox.checked;
         }
     }
-    for cycle in &msaa_q {
-        if let Some(&msaa) = MsaaSetting::ALL.get(cycle.index)
-            && settings.msaa != msaa
-        {
-            settings.msaa = msaa;
+    for slider in &terrain_q {
+        if (settings.terrain_lod - slider.value).abs() > 1.0e-4 {
+            settings.terrain_lod = slider.value;
+        }
+    }
+    for cycle in &shadows_q {
+        let value = cycle.index as u8;
+        if value <= GraphicsSettings::SHADOW_CASCADES_MAX && settings.shadow_cascades != value {
+            settings.shadow_cascades = value;
         }
     }
     for interaction in &reset_q {
         if matches!(interaction, Interaction::Pressed) {
-            *settings = GraphicsSettings::default();
+            *settings = GraphicsSettings::showcase();
             menu.dirty();
         }
     }
@@ -1254,55 +838,6 @@ fn note(b: &mut ChildSpawnerCommands<'_>, theme: &UiTheme, text: &str) {
         },
         TextColor(tokens::TEXT_DIM),
     ));
-}
-
-fn pinned_row(
-    b: &mut ChildSpawnerCommands<'_>,
-    theme: &UiTheme,
-    label: &str,
-    value: String,
-    env_var: &str,
-) {
-    b.spawn(Node {
-        width: Val::Percent(100.0),
-        flex_direction: FlexDirection::Row,
-        column_gap: Val::Px(8.0),
-        align_items: AlignItems::Center,
-        ..default()
-    })
-    .with_children(|row| {
-        row.spawn((
-            Text::new(label.to_string()),
-            TextFont {
-                font: theme.font_ui.clone(),
-                font_size: FontSize::Px(11.0),
-                ..default()
-            },
-            TextColor(tokens::TEXT_DIM),
-            Node {
-                width: Val::Px(120.0),
-                ..default()
-            },
-        ));
-        row.spawn((
-            Text::new(format!("{value}  (pinned by {env_var})")),
-            TextFont {
-                font: theme.font_ui.clone(),
-                font_size: FontSize::Px(11.0),
-                ..default()
-            },
-            TextColor(tokens::TEXT_DIM),
-        ));
-    });
-}
-
-fn mode_label(mode: WindowModeSetting) -> String {
-    match mode {
-        WindowModeSetting::Windowed => "Windowed",
-        WindowModeSetting::Borderless => "Borderless",
-        WindowModeSetting::Exclusive => "Fullscreen",
-    }
-    .to_string()
 }
 
 // ── Binding spec filters / formatting ─────────────────────────────────────────
