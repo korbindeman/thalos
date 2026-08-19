@@ -43,8 +43,9 @@
 //            over open plains while trees clustered elsewhere.
 //   meadow — everything else: the canonical albedo with fine grass mottle.
 //
-// Selection inputs come through the standard mesh pipeline's spare vertex
-// channels (see `tiles::build_tile_mesh`):
+// Selection inputs are reconstructed by `tile_displacement.wgsl` from the
+// resident tile's GPU atlas slot, then handed to this fragment through the
+// standard mesh pipeline's vertex channels:
 //   uv      = wrapped body-fixed position .xy   (metres, mod TILE_WRAP_M)
 //   uv_b.x  = wrapped body-fixed position .z
 //   uv_b.y  = canonical ECOLOGICAL altitude (m) — geometric height plus the
@@ -95,7 +96,8 @@ struct TileShadingParams {
     style: u32,
     // Capture-only inspection mode (mirror of udlod's
     // `THALOS_TERRAIN_INSPECTION`): 0 = lit, 1 = fullbright, 2 = geometric
-    // normal. See the Rust `TileShadingParams::inspect`.
+    // normal, 4 = baked base colour before procedural layers. See the Rust
+    // `TileShadingParams::inspect`.
     inspect: u32,
     _pad1: u32,
     _pad2: u32,
@@ -670,12 +672,23 @@ fn material_layers(
     let cosg_j = cosg + jitter * SLOPE_JITTER;
 
     // Canonical altitude lines, jittered by a low-frequency field so they
-    // follow local terrain instead of drawing contour rings. Both come from
-    // `thalos::landcover`, i.e. the exact altitudes the macro palette cuts.
-    let line_jitter = (fbm3_periodic(p / 384.0, 3, TILE_WRAP_M / 384.0) - 0.5) * 2.0;
-    let alt_j = eco_altitude_m + line_jitter * 260.0;
-    let alpine = alpine_weight(alt_j);
-    let snow_band = snowline_weight(alt_j);
+    // follow local terrain instead of drawing contour rings. The jitter is
+    // bounded to ±260 m. Below both bands even its maximum cannot change
+    // either weight, so evaluating three octaves per lowland fragment is pure
+    // waste. The conservative +260 m probe makes this an exact early-out, not
+    // an approximation: transition and alpine/snow fragments still execute
+    // the original field unchanged.
+    var alpine = 0.0;
+    var snow_band = 0.0;
+    if alpine_weight(eco_altitude_m + 260.0) > 0.0
+        || snowline_weight(eco_altitude_m + 260.0) > 0.0
+    {
+        let line_jitter =
+            (fbm3_periodic(p / 384.0, 3, TILE_WRAP_M / 384.0) - 0.5) * 2.0;
+        let alt_j = eco_altitude_m + line_jitter * 260.0;
+        alpine = alpine_weight(alt_j);
+        snow_band = snowline_weight(alt_j);
+    }
 
     // Rock on two independent grounds: steep ground anywhere (cliff bands in
     // the forested flanks) and alpine ground that is not a bench. The alpine
@@ -701,9 +714,16 @@ fn material_layers(
 
     // Snow: above the canonical snowline, sharpened by a noise-broken line
     // and shed from steep ground so rock ribs poke through (reference pt. 5).
-    let snow_break = (fbm3_periodic(p / 128.0, 3, TILE_WRAP_M / 128.0) - 0.5) * 2.0;
     let shed = smoothstep(SNOW_SHED_COS, SNOW_HOLD_COS, cosg + 0.04 * jitter);
-    let snow_m = smoothstep(0.30, 0.60, snow_band + 0.28 * snow_break) * shed;
+    var snow_m = 0.0;
+    // `snow_break` is in [-1, 1]. At snow_band <= 0.02 even its positive rail
+    // reaches only the smoothstep's zero edge (0.30), so the three-octave
+    // evaluation cannot affect the result and is skipped exactly.
+    if snow_band > 0.02 {
+        let snow_break =
+            (fbm3_periodic(p / 128.0, 3, TILE_WRAP_M / 128.0) - 0.5) * 2.0;
+        snow_m = smoothstep(0.30, 0.60, snow_band + 0.28 * snow_break) * shed;
+    }
 
     // Forest: canonical canopy coverage, gated off rock/snow and steep ground —
     // and off the alpine zone, which is above the treeline by definition.
@@ -1132,6 +1152,16 @@ fn fragment(
         let q = tile_params.orient;
         let n_body = quat_rotate(quat_conj(q), n);
         let footprint_m = length(fwidth(p));
+
+        // Material-cost diagnostic: return the baked tile colour before any
+        // procedural layers. Unlike fullbright below, this keeps geometry,
+        // visibility, and the main opaque pass constant while removing only
+        // `material_layers`, so the warmed headless benchmark can attribute
+        // the terrain floor without relying on unavailable Metal timestamps.
+        if tile_params.inspect == 4u {
+            out.color = vec4<f32>(pbr_input.material.base_color.rgb, 1.0);
+            return out;
+        }
 
         let layers = material_layers(
             p,

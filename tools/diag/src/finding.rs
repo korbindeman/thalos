@@ -210,6 +210,12 @@ pub const SLOW_FRAME_MS: f64 = 33.3;
 /// hitch: 3 gauges ≈ 6 s, 10 ≈ 20 s of sustained sub-30 fps.
 pub const SLOW_GAUGES_WATCH: usize = 3;
 pub const SLOW_GAUGES_ATTENTION: usize = 10;
+/// Wall time from tile-root installation to the first complete resident ground
+/// cover. Five seconds is already a visible startup pause on a warm cache; ten
+/// seconds means either the bootstrap policy regressed or cold synthesis / mesh
+/// admission is no longer keeping up.
+pub const TILE_FIRST_COVERAGE_MS_WATCH: f64 = 5_000.0;
+pub const TILE_FIRST_COVERAGE_MS_ATTENTION: f64 = 10_000.0;
 /// Memory the render-mesh slabs plus tile residency grew across one session.
 /// Growth on this scale is the open accumulation question behind the tile OOM
 /// (INC-20260725T012104Z), so it is checked explicitly rather than left to a
@@ -322,6 +328,13 @@ pub const TILE_BRAKE_SCALE: f64 = 0.999;
 /// each one is ~one second spent in the state; 2+ means sustained carrying
 /// rather than a single touchdown transient.
 pub const GEAR_BACKSTOP_CARRY_EVENTS_ATTENTION: usize = 2;
+
+/// Scene-depth copy skip. One or two records can be the resize seam after a
+/// window change; three means the 3D target and the sampleable depth image
+/// stayed different for about a second (the copy logs once per 60 skipped
+/// frames). That hang paints opaque sky over every pixel above the geometric
+/// horizon — ship tops and mountains vanish (INC-20260817T014132Z).
+pub const SCENE_DEPTH_COPY_SKIP_ATTENTION: usize = 3;
 
 #[cfg(test)]
 mod tests {

@@ -9,9 +9,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::graphics::{
     GraphicsPreferenceCapabilities, GraphicsPreferences, MsaaSetting, QualityOverrides, apply_msaa,
-    apply_render_scale, cap_frame_rate,
+    cap_frame_rate,
 };
 use crate::menu::{SettingsMenu, SettingsMenuPlugin, SettingsPage, register_settings_page};
+use crate::render_scale::{RenderScalePlugin, RenderScaleState};
 use crate::window::{WindowSettings, WindowSettingsOverrides, WindowSettingsPlugin};
 
 const DEV_PREFERENCES_PATH: &str = "user/preferences.ron";
@@ -206,6 +207,7 @@ fn save_to(path: &Path, preferences: &AppPreferences) -> io::Result<()> {
 pub struct PreferencesPlugin {
     interactive: bool,
     foliage: bool,
+    clouds: bool,
 }
 
 impl PreferencesPlugin {
@@ -213,6 +215,7 @@ impl PreferencesPlugin {
         Self {
             interactive,
             foliage: false,
+            clouds: false,
         }
     }
 
@@ -230,6 +233,13 @@ impl PreferencesPlugin {
         self.foliage = enabled;
         self
     }
+
+    /// Expose and drive the shared clouds preference for applications whose
+    /// composition includes a concrete cloud adapter.
+    pub const fn with_clouds(mut self, enabled: bool) -> Self {
+        self.clouds = enabled;
+        self
+    }
 }
 
 impl Plugin for PreferencesPlugin {
@@ -238,9 +248,11 @@ impl Plugin for PreferencesPlugin {
             .init_resource::<WindowSettingsOverrides>()
             .init_resource::<GraphicsPreferences>()
             .init_resource::<QualityOverrides>()
+            .init_resource::<RenderScaleState>()
             .init_resource::<SettingsMenu>()
             .insert_resource(GraphicsPreferenceCapabilities {
                 foliage: self.foliage,
+                clouds: self.clouds,
             })
             .add_systems(Update, apply_msaa);
 
@@ -251,7 +263,7 @@ impl Plugin for PreferencesPlugin {
         if !app.is_plugin_added::<thalos_ui::ThalosUiPlugin>() {
             app.add_plugins(thalos_ui::ThalosUiPlugin);
         }
-        app.add_plugins((WindowSettingsPlugin, SettingsMenuPlugin));
+        app.add_plugins((WindowSettingsPlugin, SettingsMenuPlugin, RenderScalePlugin));
         register_settings_page(
             app,
             SettingsPage {
@@ -268,7 +280,7 @@ impl Plugin for PreferencesPlugin {
                 order: 10,
             },
         );
-        app.add_systems(Update, (apply_render_scale, cap_frame_rate, autosave));
+        app.add_systems(Update, (cap_frame_rate, autosave));
     }
 }
 
@@ -295,6 +307,17 @@ fn autosave(
 mod tests {
     use super::*;
     use crate::graphics::QualityPreset;
+
+    #[test]
+    fn headless_plugin_exposes_identity_render_scale_state() {
+        let mut app = App::new();
+        app.add_plugins(PreferencesPlugin::headless());
+
+        assert_eq!(
+            *app.world().resource::<RenderScaleState>(),
+            RenderScaleState::default()
+        );
+    }
 
     #[test]
     fn round_trip_preserves_shared_sections() {

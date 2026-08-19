@@ -128,8 +128,12 @@ struct MsaaControl;
 struct FoliageControl;
 
 #[derive(Component)]
+struct CloudsControl;
+
+#[derive(Component)]
 struct ResetGraphicsControl {
     foliage: bool,
+    clouds: bool,
 }
 
 pub struct SettingsMenuPlugin;
@@ -607,7 +611,7 @@ fn build_graphics_section(
             note(
                 body,
                 &theme,
-                "Does not change UI density. OS HiDPI stays. THALOS_SCALE still pins one session.",
+                "3D resolution only. UI stays at OS HiDPI. 0.50× halves scene fill and upscales.",
             );
 
             spacer(body);
@@ -657,15 +661,25 @@ fn build_graphics_section(
                 &theme,
                 "MSAA smooths geometry edges. Off restores this application's post-process AA.",
             );
-            if capabilities.foliage {
+            if capabilities.foliage || capabilities.clouds {
                 spacer(body);
                 section_header(body, &theme, "WORLD DETAIL");
-                spawn_checkbox_row(body, &theme, "Foliage", settings.foliage, FoliageControl);
-                note(
-                    body,
-                    &theme,
-                    "Off removes trees and shrubs and stops their cell or tile builds.",
-                );
+                if capabilities.foliage {
+                    spawn_checkbox_row(body, &theme, "Foliage", settings.foliage, FoliageControl);
+                    note(
+                        body,
+                        &theme,
+                        "Off removes trees and shrubs and stops their cell or tile builds.",
+                    );
+                }
+                if capabilities.clouds {
+                    spawn_checkbox_row(body, &theme, "Clouds", settings.clouds, CloudsControl);
+                    note(
+                        body,
+                        &theme,
+                        "Off parks the volumetric cloud march so the sky stays clear.",
+                    );
+                }
             }
             spacer(body);
             spawn_button(
@@ -673,6 +687,7 @@ fn build_graphics_section(
                 &theme,
                 ResetGraphicsControl {
                     foliage: capabilities.foliage,
+                    clouds: capabilities.clouds,
                 },
                 "Reset to Showcase",
                 ButtonVariant::Ghost,
@@ -735,6 +750,7 @@ fn apply_window_controls(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_graphics_controls(
     mut settings: ResMut<GraphicsPreferences>,
     mut menu: ResMut<SettingsMenu>,
@@ -743,6 +759,7 @@ fn apply_graphics_controls(
     frame_cap: Query<(&UiCycle, &FrameCapControl), Changed<UiCycle>>,
     cycles: Query<&UiCycle, (Changed<UiCycle>, With<MsaaControl>)>,
     foliage: Query<&UiCheckbox, (Changed<UiCheckbox>, With<FoliageControl>)>,
+    clouds: Query<&UiCheckbox, (Changed<UiCheckbox>, With<CloudsControl>)>,
     reset: Query<(&Interaction, &ResetGraphicsControl), Changed<Interaction>>,
 ) {
     for (cycle, control) in &presets {
@@ -782,6 +799,12 @@ fn apply_graphics_controls(
             mark_custom_and_refresh(&mut settings, &mut menu);
         }
     }
+    for checkbox in &clouds {
+        if settings.clouds != checkbox.checked {
+            settings.clouds = checkbox.checked;
+            mark_custom_and_refresh(&mut settings, &mut menu);
+        }
+    }
     for (interaction, control) in &reset {
         if matches!(interaction, Interaction::Pressed) {
             let defaults = GraphicsPreferences::showcase();
@@ -791,7 +814,11 @@ fn apply_graphics_controls(
             settings.frame_cap_hz = defaults.frame_cap_hz;
             if control.foliage {
                 settings.foliage = defaults.foliage;
-            } else {
+            }
+            if control.clouds {
+                settings.clouds = defaults.clouds;
+            }
+            if !control.foliage || !control.clouds {
                 settings.mark_custom_if_knobs_changed();
             }
             menu.dirty();

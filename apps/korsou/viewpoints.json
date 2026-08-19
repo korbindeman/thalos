@@ -2,6 +2,41 @@
   "schema": "thalos.viewpoints.v3",
   "viewpoints": [
     {
+      "id": "beach-close",
+      "name": "beach-close",
+      "description": "",
+      "saved_unix_ms": 1786858611756,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        8694.093831806733,
+        2.366375684738159,
+        14577.918908337608
+      ],
+      "camera_rotation_xyzw": [
+        0.039646243133854835,
+        0.8234034759945338,
+        0.057974164359611266,
+        -0.5630931427324394
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.44391
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
       "id": "caracasbaai-mid",
       "name": "caracasbaai mid",
       "description": "",
@@ -60,6 +95,41 @@
         "lens": {
           "model": "full-frame-horizontal",
           "focal_length_mm": 24.443914
+        },
+        "sensor": {
+          "gate_width_mm": 36.0,
+          "aspect": [
+            16,
+            9
+          ],
+          "crop": "full"
+        }
+      }
+    },
+    {
+      "id": "fucked-coast",
+      "name": "fucked coast",
+      "description": "",
+      "saved_unix_ms": 1786945825456,
+      "frame": {
+        "kind": "projected-local",
+        "reference": "EPSG:32619-curacao-local"
+      },
+      "camera_position_m": [
+        8603.084788752009,
+        38.95754885430097,
+        14465.782490506264
+      ],
+      "camera_rotation_xyzw": [
+        0.057042323417790655,
+        -0.7271181164078054,
+        -0.06086727319097642,
+        -0.6814254127818835
+      ],
+      "optics": {
+        "lens": {
+          "model": "full-frame-horizontal",
+          "focal_length_mm": 24.44391
         },
         "sensor": {
           "gate_width_mm": 36.0,
@@ -299,7 +369,7 @@
         0.012546939843893932,
         0.1361290289402479,
         0.00172419263018257,
-        -0.9906101599217085
+        -0.9906101599217084
       ],
       "optics": {
         "lens": {

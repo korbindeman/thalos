@@ -123,8 +123,8 @@ struct CloudOverlay {
 }
 
 fn reconstruct_ray(pixel: vec2<f32>) -> vec3<f32> {
-    let ndc_x = (pixel.x / view.viewport.z) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (pixel.y / view.viewport.w) * 2.0;
+    let ndc_x = (pixel.x / view.main_pass_viewport.z) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (pixel.y / view.main_pass_viewport.w) * 2.0;
     let cam_right = view.world_from_view[0].xyz;
     let cam_up = view.world_from_view[1].xyz;
     let cam_fwd = -view.world_from_view[2].xyz;
@@ -140,8 +140,8 @@ fn scene_distance(pixel: vec2<f32>) -> f32 {
     if depth <= 0.0 {
         return 1.0e30;
     }
-    let ndc_x = (pixel.x / view.viewport.z) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (pixel.y / view.viewport.w) * 2.0;
+    let ndc_x = (pixel.x / view.main_pass_viewport.z) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (pixel.y / view.main_pass_viewport.w) * 2.0;
     let view_h = view.view_from_clip * vec4<f32>(ndc_x, ndc_y, depth, 1.0);
     return length(view_h.xyz / view_h.w);
 }
@@ -149,7 +149,7 @@ fn scene_distance(pixel: vec2<f32>) -> f32 {
 fn sample_near_cloud(pixel: vec2<f32>) -> vec4<f32> {
     let dims = textureDimensions(cloud_layer_texture);
     let cloud_res = vec2<f32>(dims);
-    let uv = pixel / view.viewport.zw;
+    let uv = pixel / view.main_pass_viewport.zw;
     let p = uv * cloud_res - 0.5;
     let base = floor(p);
     let f = p - base;
@@ -416,7 +416,7 @@ fn sample_orbital_cloud(
 
     // Per-pixel angle of THIS full-resolution pass — the far tier's own
     // sampling/LOD footprint.
-    let pixel_angle = 2.0 / max(view.viewport.z * view.clip_from_view[0][0], 1.0);
+    let pixel_angle = 2.0 / max(view.main_pass_viewport.z * view.clip_from_view[0][0], 1.0);
     // Ownership, however, must reproduce the MARCHER's budget law, and the
     // marcher's pixel is the resolution-scaled cloud target's, not this
     // pass's: at the default 2/3 scale the two angles differ by 1.5×, which
@@ -844,7 +844,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
 
     let near_sample = sample_near_cloud(in.clip_position.xy);
     let dims = textureDimensions(cloud_layer_texture);
-    let uv = in.clip_position.xy / view.viewport.zw;
+    let uv = in.clip_position.xy / view.main_pass_viewport.zw;
     let ref_coord = clamp(
         vec2<i32>(uv * vec2<f32>(dims)),
         vec2<i32>(0),

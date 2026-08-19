@@ -18,15 +18,23 @@ be interpreted as measured geographic detail.
 
 ## Coastline data
 
-The coastline source at `data/source/curacao-coastline-osm.json` is an
-OpenStreetMap snapshot retrieved through the Overpass API on 2026-08-07. The
-derived signed-distance field under `assets/terrain/curacao/` is built from OSM
-ways tagged `natural=coastline`.
+The coastline topology at `data/source/curacao-coastline-osm.json` is an
+OpenStreetMap snapshot retrieved through the Overpass API on 2026-08-07.
+`data/source/curacao-coastline-rings.json` keeps those OSM land/sea rings and
+densifies long chords with Sentinel-2 NDWI waterline crossings. The baker
+writes both polylines and a signed-distance field under
+`assets/terrain/curacao/`.
 
 > © OpenStreetMap contributors
 
 OpenStreetMap data is available under the Open Data Commons Open Database
 License (ODbL) 1.0: <https://www.openstreetmap.org/copyright>
+
+The Sentinel-2 densification uses L2A Cloud Optimized GeoTIFFs from Element 84 /
+AWS Earth Search, scenes `S2B_19PEP_20250220_0_L2A` and
+`S2C_19PDP_20260613_0_L2A`.
+
+> Contains modified Copernicus Sentinel-2 data (ESA)
 
 ## Place and waypoint data
 

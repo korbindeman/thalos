@@ -20,10 +20,14 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
+use super::gpu::TileGpuImages;
 use crate::ShadowCascadeBlock;
 use crate::clouds::CloudShadowBlock;
 
 pub type TileTerrainMaterial = ExtendedMaterial<StandardMaterial, TileShadingExtension>;
+pub type TileCasterMaterial = ExtendedMaterial<StandardMaterial, TileCasterExtension>;
+
+const TILE_DISPLACEMENT_SHADER: &str = "shaders/tile_displacement.wgsl";
 
 /// Mirror of the WGSL `TileShadingParams` (declaration order is the contract).
 #[derive(Clone, Copy, ShaderType, Debug)]
@@ -33,7 +37,8 @@ pub struct TileShadingParams {
     /// Capture-only inspection mode, mirroring udlod's
     /// `THALOS_TERRAIN_INSPECTION` so one compare axis reads both renderers:
     /// 0 = lit, 1 = fullbright (emit the layer stack's albedo, no lighting),
-    /// 2 = geometric normal (drop the detail-normal offsets).
+    /// 2 = geometric normal (drop the detail-normal offsets), 4 = baked base
+    /// colour before the procedural layer stack (performance attribution).
     ///
     /// Fullbright is the one that separates "the paint is wrong" from "the
     /// light is wrong" — the question a rendered frame alone cannot answer,
@@ -154,9 +159,29 @@ pub struct TileShadingExtension {
     #[texture(108)]
     #[sampler(109)]
     pub contact_shadow_map: Handle<Image>,
+    /// Exact body-local positions + ecological altitude, one array layer per
+    /// resident tile. Rgba32Float is intentionally unfilterable: every patch
+    /// resolution visits an exact subset of the authoritative 129² samples.
+    #[texture(111, dimension = "2d_array", sample_type = "float", filterable = false)]
+    pub tile_position_atlas: Handle<Image>,
+    /// Linear macro albedo + canopy coverage, quantized to Rgba8Unorm.
+    #[texture(112, dimension = "2d_array")]
+    pub tile_surface_atlas: Handle<Image>,
 }
 
 impl MaterialExtension for TileShadingExtension {
+    fn vertex_shader() -> ShaderRef {
+        TILE_DISPLACEMENT_SHADER.into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        TILE_DISPLACEMENT_SHADER.into()
+    }
+
+    fn deferred_vertex_shader() -> ShaderRef {
+        TILE_DISPLACEMENT_SHADER.into()
+    }
+
     fn fragment_shader() -> ShaderRef {
         "shaders/tile_terrain.wgsl".into()
     }
@@ -166,15 +191,56 @@ impl MaterialExtension for TileShadingExtension {
     }
 }
 
+/// Bare shadow material extension. It binds the same atlases and uses the
+/// exact same vertex entry point as the visible material, while retaining
+/// `StandardMaterial`'s cheap depth-only/ordinary fragment behavior.
+#[derive(Asset, AsBindGroup, TypePath, Clone, Default)]
+pub struct TileCasterExtension {
+    #[texture(111, dimension = "2d_array", sample_type = "float", filterable = false)]
+    pub tile_position_atlas: Handle<Image>,
+    #[texture(112, dimension = "2d_array")]
+    pub tile_surface_atlas: Handle<Image>,
+}
+
+impl MaterialExtension for TileCasterExtension {
+    fn vertex_shader() -> ShaderRef {
+        TILE_DISPLACEMENT_SHADER.into()
+    }
+
+    fn prepass_vertex_shader() -> ShaderRef {
+        TILE_DISPLACEMENT_SHADER.into()
+    }
+
+    fn deferred_vertex_shader() -> ShaderRef {
+        TILE_DISPLACEMENT_SHADER.into()
+    }
+}
+
 /// Wrap a base `StandardMaterial` into the tile material with the given
 /// shading style and default (fallback) shadow state — the game's
 /// `sun_shadow::sync_shadow_receivers` patches the live cascade in each frame.
-pub fn tile_material(base: StandardMaterial, params: TileShadingParams) -> TileTerrainMaterial {
+pub fn tile_material(
+    base: StandardMaterial,
+    params: TileShadingParams,
+    atlases: &TileGpuImages,
+) -> TileTerrainMaterial {
     TileTerrainMaterial {
         base,
         extension: TileShadingExtension {
             params,
+            tile_position_atlas: atlases.position.clone(),
+            tile_surface_atlas: atlases.surface.clone(),
             ..Default::default()
+        },
+    }
+}
+
+pub fn tile_caster_material(base: StandardMaterial, atlases: &TileGpuImages) -> TileCasterMaterial {
+    TileCasterMaterial {
+        base,
+        extension: TileCasterExtension {
+            tile_position_atlas: atlases.position.clone(),
+            tile_surface_atlas: atlases.surface.clone(),
         },
     }
 }

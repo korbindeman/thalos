@@ -40,14 +40,15 @@ remain clear. F3 reports root count, compact vertex count, atlas readiness, and
 the active shadow-cell/triangle budget.
 
 The shoreline is independent of the DEM. OpenStreetMap `natural=coastline`
-ways are assembled into closed rings, reprojected to UTM 19N, and baked into a
-15 m signed-distance field. Mixed coastline tiles always use the fixed visual
-LOD. Their zero-contour edges are projected back onto that field and subdivided
-to at most 3 m before the land triangles are clipped. Gentle measured ground
-meets sea level; steep elevated ground ends in a dedicated coast face that
-continues below wave troughs. Synthetic rock displacement fades in from 8 to
-36 m inland instead of redrawing the authored coast lip. Camera LOD therefore
-cannot change the island silhouette or create ocean wedges.
+rings are densified with Sentinel-2 NDWI waterline crossings, reprojected to
+UTM 19N, and baked as polylines plus a 15 m signed-distance field. Runtime
+clips mixed triangles with the distance field, then snaps the visible
+waterline to those polylines and subdivides them to at most 3 m. Waterline
+vertices sit at sea level. Inland vertices keep GLO-30; the mesher does not
+invent beach or cliff profiles. Synthetic rock displacement fades in from 8
+to 36 m inland instead of redrawing the coast lip. Mixed coastline tiles
+always use the fixed visual LOD, so camera LOD cannot change the island
+silhouette or create ocean wedges.
 
 The sea is Kòrsou's planar adapter over `thalos_ocean`. Thirteen
 camera-centered clipmap levels provide real nearby displacement, while the
@@ -70,6 +71,11 @@ and advance at 60×; headless capture freezes that deterministic instant unless
 uses the same authored-atmosphere leaf through its custom scene-depth-aware
 adapter; see the canonical [atmosphere
 contract](../../docs/rendering/atmosphere.md).
+
+Volumetric clouds use the shared `thalos_clouds` marcher through a local Earth
+shell: the same weather cube and near-volume raymarch as Thalos, composited
+against this explorer's scene depth. A Caribbean climate seeds trade-wind
+cumulus. F10 Graphics parks the pass; Laptop quality turns it off.
 
 ## Run
 
@@ -175,8 +181,8 @@ Run `cargo run -p korsou -- --help` for the compact command reference.
 ## Rebuild the terrain assets
 
 The checked-in source rasters are the two public Copernicus GLO-30 COG tiles
-covering Curaçao. The checked-in Overpass JSON is the attributed OSM coastline
-snapshot used by the baker. Rebuild the projected assets with:
+covering Curaçao. The checked-in coastline rings are OSM topology densified
+with Sentinel-2 NDWI. Rebuild the projected assets with:
 
 The pure-Rust baker does not require GDAL. It reads GeoTIFF georeferencing,
 crops to the Curaçao explorer bounds, reprojects to WGS 84 / UTM zone 19N
@@ -184,17 +190,24 @@ crops to the Curaçao explorer bounds, reprojects to WGS 84 / UTM zone 19N
 LODs, and records the source, projected, ellipsoid, and vertical CRS plus the
 explicit `h = H + N` height relation in `metadata.json`. It also
 bakes the maximum approximation error for native terrain nodes, land/water
-coverage through visual level 6, and the quantized shoreline field. Runtime LOD
-selection projects the metre errors into pixels while keeping mixed coast tiles
-at the fixed shoreline level.
+coverage through visual level 6, the coastline polylines, and the quantized
+shoreline field. Runtime LOD selection projects the metre errors into pixels
+while keeping mixed coast tiles at the fixed shoreline level.
 
 An OpenTopography download of the same product can be used instead:
 
 ```bash
 cargo run -p korsou_terrain_baker -- apps/korsou/assets/terrain/curacao \
-  --coastline apps/korsou/data/source/curacao-coastline-osm.json \
+  --coastline apps/korsou/data/source/curacao-coastline-rings.json \
   apps/korsou/data/source/Copernicus_DSM_COG_10_N12_00_W069_00_DEM.tif \
   apps/korsou/data/source/Copernicus_DSM_COG_10_N12_00_W070_00_DEM.tif
+```
+
+To rebuild the densified rings from OSM plus Sentinel-2 COGs (needs numpy and
+rasterio; not a runtime dependency):
+
+```bash
+python3 tools/korsou_terrain_baker/extract_sentinel_shoreline.py
 ```
 
 OpenTopography's clipped API requires a user key, so the repository source data
@@ -213,10 +226,12 @@ uses the credential-free public AWS mirror of the identical 2021 product.
   samples a 7.5 m grid, and a bounded refinement band preserves the authored
   shoreline through that mesh, so near ground does not collapse into visibly
   coarse triangles. Neither refinement creates measured sub-30 m elevation.
-- The OSM coastline is substantially better than a DEM threshold, but its
-  piecewise-linear rendered contour is limited by the 15 m shoreline field.
-  Tides, exact beach profiles, cliffs, salt flats, and inland water still need
-  dedicated data and material rules.
+- The mapped OSM+Sentinel-2 waterline is substantially better than a DEM
+  threshold, but it is still a photographed instant inside a 40 m OSM
+  corridor. It cannot invent missing coves, reefs, or surveyed beach/cliff
+  profiles. GLO-30 remains 30 m inland of that waterline. Tides, exact
+  profiles, salt flats, and inland water still need dedicated data and
+  material rules.
 - Place labels use curated point coverage and specificity, not polygonal
   neighbourhood boundaries. They are meant to answer "what area am I near?",
   not to perform cadastral or administrative reverse geocoding.
@@ -236,8 +251,8 @@ uses the credential-free public AWS mirror of the identical 2021 product.
   That flat projected frame is a product decision, not an interim substitute for
   a planetary coordinate system.
 
-See [LICENSING.md](LICENSING.md) for the required Copernicus and OpenStreetMap
-attribution.
+See [LICENSING.md](LICENSING.md) for the required Copernicus DEM, Sentinel-2,
+and OpenStreetMap attribution.
 
 See [CONTEXT.md](CONTEXT.md) for the project boundary and module map.
 The workspace decision is recorded in

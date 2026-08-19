@@ -33,9 +33,9 @@
 //! The handle is read per tile *bake*, so a pad installed while tiles are
 //! already resident over it (the base editor's runtime flatten) needs those
 //! tiles dropped to re-bake; the tile path does not consume
-//! [`TerrainRebuildRequest`] for that yet (NTR-X2b). Boot is unaffected — the
-//! runway's pad is installed before the view moves to the site, so the tiles
-//! that stream in there bake level from the start.
+//! [`TerrainRebuildRequest`] for that yet (NTR-X2b). A deferred surface boot
+//! holds the tile eye until placement finishes, so the first tiles stream at
+//! the pad after the flatten exists and bake level from the start.
 //!
 //! The same handle also drives [`publish_pad_refinement_sites`], which turns
 //! every pad into a `RefinementSite` floor on the tile selector. Baking a tile
@@ -62,10 +62,12 @@ use std::sync::{
 
 use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
-use thalos_body_render::tiles::material::{TileShadingParams, TileTerrainMaterial, tile_material};
+use thalos_body_render::tiles::material::{
+    TileCasterMaterial, TileShadingParams, TileTerrainMaterial, tile_caster_material, tile_material,
+};
 use thalos_body_render::tiles::{
-    RefinementSite, SurfaceQueryProvider, TileEye, TileEyeTarget, TileShadowCasterConfig,
-    TileStreamSet, TileTerrainRoot,
+    RefinementSite, SurfaceQueryProvider, TileEye, TileEyeTarget, TileGpuStore,
+    TileShadowCasterConfig, TileStreamSet, TileTerrainRoot,
 };
 use thalos_body_render::{CpuPipelineHeightSource, RenderedGround, RenderedGroundHeightSource};
 use thalos_physics_local::HeightSourceRegistry;
@@ -79,6 +81,7 @@ use crate::SimulationState;
 use crate::camera::ShipCamera;
 use crate::coords::SHIP_LAYER;
 use crate::graphics_settings::GraphicsSettings;
+use crate::loading::{LoadingTracker, step};
 use crate::solar_system_state::SolarSystemState;
 use crate::terrain_registry::{BodySurfaceRegistry, RenderedGroundRegistry};
 use thalos_render_kit::ActiveRenderPlan;
@@ -171,6 +174,7 @@ fn inspection_mode() -> u32 {
             // material" was really this match arm warning and falling through).
             "fullbright" | "albedo" | "on" | "1" => 1,
             "geo-normal" | "geometric-normal" | "smooth-normal" | "2" => 2,
+            "base-color" | "baked-albedo" | "4" => 4,
             // udlod's `legacy-regolith` has no tile-path meaning; render lit
             // rather than warn, so the shared axis stays usable.
             "legacy-regolith" | "unfiltered-regolith" => 0,
@@ -264,7 +268,8 @@ fn ensure_tile_root(
     mut existing: Query<(Entity, &mut TileTerrainRoot, &TileTerrainBody)>,
     mut handoff: ResMut<TileRootHandoff>,
     mut materials: ResMut<Assets<TileTerrainMaterial>>,
-    mut std_materials: ResMut<Assets<StandardMaterial>>,
+    mut caster_materials: ResMut<Assets<TileCasterMaterial>>,
+    mut gpu_store: ResMut<TileGpuStore>,
     mut rebuild: ResMut<TerrainRebuildRequest>,
     mut rendered_ground: ResMut<RenderedGroundRegistry>,
     mut height_sources: ResMut<HeightSourceRegistry>,
@@ -296,7 +301,7 @@ fn ensure_tile_root(
         // children of the big_space root, so nothing else would ever despawn
         // them), then drop the body's claim so `terrain_residency` is free to
         // take it back if the legacy feature is compiled in.
-        let released = root.release_all();
+        let released = root.release_all(&mut gpu_store);
         let released_count = released.len();
         for tile in released {
             commands.entity(tile).despawn();
@@ -355,6 +360,7 @@ fn ensure_tile_root(
     let radius_m = resolved.radius_m;
     // Every tile shares one material — levels differ only in geometry (the
     // per-level render lift the mesher bakes in, `tiles::LEVEL_RENDER_LIFT_M`).
+    let atlases = gpu_store.images();
     let tile_mat = materials.add(tile_material(
         StandardMaterial {
             base_color: Color::WHITE,
@@ -363,6 +369,7 @@ fn ensure_tile_root(
             ..default()
         },
         params,
+        &atlases,
     ));
     // Structure pads level the ground through the body's *shared* flatten
     // handle — the same object the runway and the base editor write and udlod
@@ -403,8 +410,9 @@ fn ensure_tile_root(
     // ridges shadow valleys, hills shadow the plain, terrain shadows land on
     // structures/craft/trees through the same maps everything already samples).
     // Each tile gets two depth-caster children with this bare unlit material:
-    // cascades 0–1 reuse the visible 129² mesh for contact detail; cascades 2–3
-    // draw a separately budgeted 33² twin (16× fewer surface triangles). The
+    // cascades 0–1 track the visible patch LOD; cascades 2–3 use the shared 33²
+    // patch (16× fewer surface triangles than 129²). Both fetch the same atlas
+    // positions through the same vertex shader as the visible surface. The
     // cascade cameras therefore never pay the tile layer-stack fragment cost,
     // and broad terrain coverage no longer multiplies full visible geometry.
     // Beyond the cascade band the far field still has no terrain shadow
@@ -426,12 +434,15 @@ fn ensure_tile_root(
     // that loses its cast shadow — the leeward face itself — is exactly the
     // ground `n·l` already darkens.
     root.caster = Some(TileShadowCasterConfig {
-        material: std_materials.add(StandardMaterial {
-            base_color: Color::WHITE,
-            unlit: true,
-            cull_mode: Some(bevy::render::render_resource::Face::Front),
-            ..default()
-        }),
+        material: caster_materials.add(tile_caster_material(
+            StandardMaterial {
+                base_color: Color::WHITE,
+                unlit: true,
+                cull_mode: Some(bevy::render::render_resource::Face::Front),
+                ..default()
+            },
+            &atlases,
+        )),
         near_layers: RenderLayers::layer(super::sun_shadow::SHADOW_TERRAIN_NEAR_LAYER),
         far_layers: RenderLayers::layer(super::sun_shadow::SHADOW_TERRAIN_FAR_LAYER),
     });
@@ -627,9 +638,19 @@ fn update_tile_eye(
     solar: Res<SolarSystemState>,
     roots: Query<(Entity, &TileTerrainBody), With<TileTerrainRoot>>,
     camera: Query<(&Camera, &Projection), With<ShipCamera>>,
+    render_scale: Res<thalos_preferences::RenderScaleState>,
+    tracker: Res<LoadingTracker>,
     mut eye: ResMut<TileEye>,
 ) {
     eye.target = None;
+    // Deferred-placement boots seed a parking-orbit placeholder until the
+    // craft sits down. Streaming that view latches a whole-planet bootstrap
+    // the loading screen then waits on, for tiles the pad drop discards.
+    // Hold the eye until the real state exists; orbit/EVA have no placement
+    // step and stream immediately.
+    if tracker.has_step(step::PLACEMENT) && !tracker.is_step_complete(step::PLACEMENT) {
+        return;
+    }
     let Some(resolved) = anchor.resolved else {
         return;
     };
@@ -653,7 +674,7 @@ fn update_tile_eye(
         let Projection::Perspective(perspective) = projection else {
             return None;
         };
-        let height_px = f64::from(camera.physical_viewport_size()?.y);
+        let height_px = f64::from(render_scale.physical_viewport(camera)?.y);
         let half_fov_tan = f64::from(perspective.fov * 0.5).tan();
         (height_px > 0.0 && half_fov_tan.is_finite() && half_fov_tan > 0.0)
             .then_some(height_px / (2.0 * half_fov_tan))

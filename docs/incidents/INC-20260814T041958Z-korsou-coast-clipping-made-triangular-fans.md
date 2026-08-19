@@ -1,5 +1,9 @@
 # INC-20260814T041958Z: Kòrsou coast clipping made triangular fans
 
+> Follow-up: the dedicated face described here was emitted as a deep skirt on
+> every coast and regressed beaches. Its replacement is documented in
+> `INC-20260816T061109Z-korsou-coast-skirts-made-beach-walls.md`.
+
 ## Symptom
 
 At the Caracasbaai waterline, long straight coast edges and large triangular
@@ -23,16 +27,18 @@ gentle beaches became retaining walls.
 
 ## Fix and recurrence tell
 
-Clipped zero-contour edges are now projected back onto the same authored field
-and subdivided to at most 3 m. The land surface keeps a grade-weighted DEM coast
-height, while a separate coast skirt covers steep faces and extends below wave
-troughs. Gentle low-grade shores still meet sea level. Synthetic displacement
-is zero at the coast and fades in from 8 to 36 m inland, so it can add rock
-character without moving the waterline.
+Clipped zero-contour edges are projected back onto the same authored field and
+subdivided to at most 3 m. A local profile connects the waterline to the first
+30 m DEM cell. Gentle shores meet sea level without a separate face; an
+already elevated near-shore cell may produce a dedicated cliff face. Synthetic
+displacement is zero at the coast and fades in from 8 to 36 m inland, so it can
+add rock character without moving the waterline. The failed unconditional
+skirt and wide inland reconstruction are detailed in the follow-up incident.
 
 The recurrence checks are:
 
-- `caracasbaai_cliff_coast_uses_a_vertical_face_instead_of_a_triangular_ramp`;
+- `coast_profile_uses_only_the_nearest_dem_cell`;
 - `caracasbaai_beach_meets_water_without_a_retaining_wall`;
+- `inland_hills_do_not_create_a_vertical_coast_face`;
 - `real_coastline_boundary_is_watertight_and_subdivided`;
 - `synthetic_detail_is_deterministic_and_coast_safe`.

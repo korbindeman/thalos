@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 use bevy::anti_alias::smaa::{Smaa, SmaaPreset};
 use bevy::anti_alias::taa::TemporalAntiAliasing;
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use serde::{Deserialize, Serialize};
 
 /// Named quality bundle. Showcase is the canonical look; Laptop is the
@@ -102,8 +101,12 @@ pub struct GraphicsPreferences {
     /// Render the application's woody foliage layer. Applications that do not
     /// supply a foliage adapter keep this value persisted but omit its control.
     pub foliage: bool,
-    /// Reserved 3D resolution fraction. 1.0 is native window pixels.
-    /// This must not change the window scale factor: UI stays at OS HiDPI.
+    /// Render volumetric clouds. Applications that do not supply a cloud
+    /// adapter keep this value persisted but omit its control.
+    pub clouds: bool,
+    /// Fraction of the window's physical pixels used by the 3D main target.
+    /// 1.0 is native. UI stays at OS HiDPI on a separate camera when this
+    /// is below 1.0.
     pub render_scale: f32,
     /// Frames per second ceiling. `0` leaves the rate uncapped.
     pub frame_cap_hz: u32,
@@ -121,6 +124,7 @@ impl GraphicsPreferences {
             preset: QualityPreset::Showcase,
             msaa: MsaaSetting::Off,
             foliage: true,
+            clouds: true,
             render_scale: 1.0,
             frame_cap_hz: FRAME_CAP_OFF,
         }
@@ -130,10 +134,9 @@ impl GraphicsPreferences {
         Self {
             preset: QualityPreset::Laptop,
             msaa: MsaaSetting::Off,
-            foliage: false,
-            // Keep OS HiDPI. A scale-factor override here made the HUD 1× on
-            // Retina. Laptop cuts cost with parked layers, not the window.
-            render_scale: 1.0,
+            foliage: true,
+            clouds: true,
+            render_scale: 0.5,
             frame_cap_hz: 30,
         }
     }
@@ -192,6 +195,7 @@ impl GraphicsPreferences {
     fn shared_knobs_match(&self, other: &Self) -> bool {
         self.msaa == other.msaa
             && self.foliage == other.foliage
+            && self.clouds == other.clouds
             && (self.render_scale - other.render_scale).abs() < 1.0e-3
             && self.frame_cap_hz == other.frame_cap_hz
     }
@@ -248,6 +252,7 @@ pub fn effective_graphics(
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub(crate) struct GraphicsPreferenceCapabilities {
     pub foliage: bool,
+    pub clouds: bool,
 }
 
 /// Post-process anti-aliasing restored when hardware MSAA is disabled.
@@ -329,23 +334,6 @@ pub(crate) fn apply_msaa(
     }
 }
 
-/// Keep the window on the OS HiDPI scale so UI stays at normal density.
-///
-/// `render_scale` used to write `scale_factor_override`, which also scaled
-/// Bevy UI. Laptop does not change the window. `THALOS_SCALE` still pins
-/// one session.
-pub(crate) fn apply_render_scale(mut windows: Query<&mut Window, With<PrimaryWindow>>) {
-    if std::env::var("THALOS_SCALE").is_ok() {
-        return;
-    }
-    let Ok(mut window) = windows.single_mut() else {
-        return;
-    };
-    if window.resolution.scale_factor_override().is_some() {
-        window.resolution.set_scale_factor_override(None);
-    }
-}
-
 pub(crate) fn cap_frame_rate(
     settings: Res<GraphicsPreferences>,
     overrides: Res<QualityOverrides>,
@@ -379,8 +367,9 @@ mod tests {
     }
 
     #[test]
-    fn foliage_is_enabled_by_default() {
+    fn signature_world_layers_are_enabled_by_default() {
         assert!(GraphicsPreferences::default().foliage);
+        assert!(GraphicsPreferences::default().clouds);
     }
 
     #[test]
@@ -393,21 +382,22 @@ mod tests {
     }
 
     #[test]
-    fn laptop_bundle_is_cheaper_than_showcase() {
+    fn laptop_bundle_preserves_world_fidelity_at_lower_resolution_and_frame_rate() {
         let laptop = GraphicsPreferences::laptop();
         assert_eq!(laptop.preset, QualityPreset::Laptop);
-        assert!(!laptop.foliage);
-        assert_eq!(laptop.render_scale, 1.0);
+        assert!(laptop.foliage);
+        assert!(laptop.clouds);
+        assert_eq!(laptop.render_scale, 0.5);
         assert_eq!(laptop.frame_cap_hz, 30);
     }
 
     #[test]
     fn editing_a_stamped_knob_becomes_custom() {
         let mut prefs = GraphicsPreferences::laptop();
-        prefs.foliage = true;
+        prefs.foliage = false;
         prefs.mark_custom_if_knobs_changed();
         assert_eq!(prefs.preset, QualityPreset::Custom);
-        assert!(prefs.foliage);
+        assert!(!prefs.foliage);
     }
 
     #[test]

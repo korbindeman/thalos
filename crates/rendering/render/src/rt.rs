@@ -33,19 +33,14 @@
 //!   POSITION + NORMAL + UV_0 + U32 indices, so one `generate_tangents()` call
 //!   lands them exactly on the gate. The RT proxy can share the visible mesh
 //!   handle: one BLAS, no duplicated geometry.
-//! - **Terrain tiles cannot, ever.** `tiles::build_tile_mesh` also writes
-//!   COLOR and UV_1, which carry the NTR-X4 spare-channel contract that
-//!   `tile_terrain.wgsl` reads (albedo, forest band weight, wrapped position z,
-//!   ecological altitude). Adding TANGENT yields `{0,1,2,3,4,5}`, still not the
-//!   required `{0,1,2,4}`. Tiles therefore need a **separate, RT-only mesh
-//!   asset** — real duplicated geometry with a real VRAM cost, which is what
-//!   makes near-radius-only RT proxies a necessity rather than an optimisation.
-//!
-//! Moving albedo/bands off the vertex stream into per-tile textures *would*
-//! make the visible mesh eligible, and is recorded here as considered and
-//! rejected: it rewrites the NTR-X4 layer stack to save a mesh whose cost the
-//! near-radius scoping already bounds, and the RT scene's `StandardMaterial`
-//! could not read those channels anyway.
+//! - **Terrain cannot share the raster mesh with RT.** Raster entities use a
+//!   shared address-only patch mesh and fetch exact positions plus material
+//!   channels from an array atlas selected through `MeshTag`. Solari builds a
+//!   BLAS from static vertex buffers; it neither executes vertex displacement
+//!   nor resolves a per-instance atlas layer. Terrain therefore still needs a
+//!   **separate, RT-only mesh asset**, extracted from the same CPU tile payload
+//!   so raster and traced geometry agree. Its duplicated geometry cost keeps
+//!   near-radius-only RT proxies mandatory.
 
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, MeshVertexAttributeId, PrimitiveTopology, VertexAttributeValues};
@@ -66,9 +61,8 @@ pub const RT_ATTRIBUTE_IDS: [MeshVertexAttributeId; 4] = [
 /// GPU bytes per vertex of an RT-eligible mesh: POSITION 12 + NORMAL 12 +
 /// UV_0 8 + TANGENT 16.
 ///
-/// The denominator for any RT-geometry budget, for the same reason
-/// `tiles::TILE_VERTEX_BYTES` exists: a *count* of RT proxies looks harmless
-/// and silently means gigabytes.
+/// The denominator for any RT-geometry budget: a *count* of proxies looks
+/// harmless and silently means gigabytes.
 pub const RT_VERTEX_BYTES: usize = 12 + 12 + 8 + 16;
 
 /// Mirror of `bevy_solari::scene::blas::is_mesh_raytracing_compatible`, minus

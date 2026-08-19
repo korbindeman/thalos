@@ -1,5 +1,6 @@
 use std::{fs, path::Path};
 
+use super::coast::CoastPolylines;
 use anyhow::{Context, Result, ensure};
 use bevy::prelude::Resource;
 use serde::Deserialize;
@@ -12,6 +13,7 @@ pub struct TerrainDataset {
     pub metadata: TerrainMetadata,
     levels: Vec<TerrainLevel>,
     coast_distances: Vec<i16>,
+    coast_polylines: CoastPolylines,
     land_bounds_local_m: [f64; 4],
 }
 
@@ -21,7 +23,7 @@ impl TerrainDataset {
             .with_context(|| format!("read {}/metadata.json", asset_dir.display()))?;
         let metadata: TerrainMetadata = serde_json::from_slice(&metadata_bytes)?;
         ensure!(
-            metadata.format_version == 5,
+            metadata.format_version == 6,
             "unsupported terrain format; rebuild with `korsou_terrain_baker`"
         );
         ensure!(!metadata.levels.is_empty(), "terrain has no height levels");
@@ -53,6 +55,8 @@ impl TerrainDataset {
         ensure!(!metadata.coastline.license.is_empty());
         ensure!(metadata.coastline.way_count > 0);
         ensure!(metadata.coastline.node_count > 0);
+        ensure!(!metadata.coastline.polyline_file.is_empty());
+        ensure!(metadata.coastline.polyline_vertex_count > 0);
         ensure!(metadata.coastline.distance_units_per_metre > 0.0);
         ensure!(metadata.coastline.distance_spacing_m > 0.0);
         ensure!(metadata.coastline.distance_width > 1);
@@ -114,12 +118,32 @@ impl TerrainDataset {
             min_grid_z + max_land_z as f64 * spacing,
         ];
 
+        let coast_polylines =
+            CoastPolylines::load(&asset_dir.join(&metadata.coastline.polyline_file))?;
+        ensure!(
+            coast_polylines.vertex_count() == metadata.coastline.polyline_vertex_count,
+            "coastline polyline vertex count does not match metadata"
+        );
+
         Ok(Self {
             metadata,
             levels,
             coast_distances,
+            coast_polylines,
             land_bounds_local_m,
         })
+    }
+
+    pub fn nearest_coast_point(&self, local_x: f64, local_z: f64) -> [f64; 2] {
+        self.coast_polylines.nearest_point(local_x, local_z)
+    }
+
+    pub fn coast_path(&self, start: [f64; 2], end: [f64; 2], max_edge_m: f64) -> Vec<[f64; 2]> {
+        self.coast_polylines.path(start, end, max_edge_m)
+    }
+
+    pub fn distance_to_coast_line_m(&self, local_x: f64, local_z: f64) -> f64 {
+        self.coast_polylines.distance_m(local_x, local_z)
     }
 
     pub fn land_bounds_local_m(&self) -> [f64; 4] {
@@ -299,6 +323,8 @@ pub struct CoastlineMetadata {
     pub source_url: String,
     pub attribution: String,
     pub license: String,
+    pub polyline_file: String,
+    pub polyline_vertex_count: usize,
     pub distance_file: String,
     pub distance_width: usize,
     pub distance_height: usize,

@@ -16,13 +16,12 @@
 //!    screen is still up. The sim runs as usual during loading, so the parked
 //!    aircraft settles onto its gear and the tile streamer refines the ground
 //!    there — all hidden. The placement calls [`SurfaceSettle::mark_placed`].
-//! 2. [`update_surface_settle`] watches the resident tile resolution *directly
-//!    under the view* ([`renderer_tile_lod_m_at`] at the tile tree's own view
-//!    position); once it has refined and plateaued (stopped getting finer for a
-//!    handful of frames), or a safety timeout elapses, it flips
-//!    [`SurfaceSettle::done`] and completes the loading tracker's
-//!    [`step::SETTLE`] step, which the loading screen's reveal waits on — so
-//!    the first visible frame is already flush and stable.
+//! 2. [`update_surface_settle`] waits for the tile root's first complete
+//!    resident cover (`coverage_ready`, so the impostor can hand off) and for
+//!    the ground *under the view* to reach [`SETTLE_TARGET_LOD_M`]. Further
+//!    sharpening after that target does not hold the screen — it continues
+//!    behind the first visible frame. A safety timeout still reveals rather
+//!    than hang.
 //!
 //! Only the **parked** `Runway` start is gated. Every other start (orbit,
 //! descents, EVA, and the airborne `RunwayApproach`) is a no-op here. The
@@ -48,10 +47,10 @@ use crate::solar_system_state::SimulationState;
 use crate::spawn::SpawnSituation;
 
 /// Consecutive frames the resident tile resolution at the spawn point must hold
-/// at its finest (stop getting finer) before the site counts as settled. A
-/// little over a second at the slow loading-frame rate — long enough that the
-/// last, deepest tile has finished loading and the height mirror/atlas upload
-/// have caught up, not so long the reveal drags.
+/// at (or finer than) [`SETTLE_TARGET_LOD_M`] before the site counts as
+/// settled. Further splits past that target do not reset the count: the pad is
+/// already flat enough to reveal, and remaining rings stream in behind the
+/// first frame. A little over a second at the slow loading-frame rate.
 const SETTLE_STABLE_FRAMES: u32 = 12;
 
 /// Safety ceiling on the settle wait, measured from the moment the surface
@@ -246,23 +245,16 @@ fn update_surface_settle(
         );
     }
 
-    match lod_m {
-        // Got meaningfully finer this frame: streaming is still refining the
-        // ground here. Record the new best and reset the plateau counter.
-        Some(m) if m < settle.best_lod_m * 0.999 => {
-            settle.best_lod_m = m;
-            settle.stable_frames = 0;
-        }
-        // Held at (or near) the finest resolution seen: count toward settled.
-        Some(_) => {
-            settle.stable_frames += 1;
-        }
-        // No resident tile at the point yet (terrain entity not up, or the
-        // camera hasn't reached the site): keep waiting.
-        None => {
-            settle.stable_frames = 0;
-        }
-    }
+    let mut best_lod_m = settle.best_lod_m;
+    let mut stable_frames = settle.stable_frames;
+    note_settle_lod(
+        lod_m,
+        &mut best_lod_m,
+        &mut stable_frames,
+        SETTLE_TARGET_LOD_M,
+    );
+    settle.best_lod_m = best_lod_m;
+    settle.stable_frames = stable_frames;
 
     // Publish a progress estimate to the loading screen: how close the
     // resident resolution is to the target (log-ish via the ratio), plus
@@ -274,8 +266,11 @@ fn update_surface_settle(
         tracker.set_detail(step::SETTLE, format!("{:.0} m/texel", settle.best_lod_m));
     }
 
-    let plateaued =
-        settle.best_lod_m <= SETTLE_TARGET_LOD_M && settle.stable_frames >= SETTLE_STABLE_FRAMES;
+    let coverage_ready = crate::rendering::tile_terrain::tile_rendered(body)
+        && tile_roots.iter().any(|(root, _)| root.coverage_ready());
+    let plateaued = coverage_ready
+        && settle.best_lod_m <= SETTLE_TARGET_LOD_M
+        && settle.stable_frames >= SETTLE_STABLE_FRAMES;
     if plateaued || settle.elapsed_s >= MAX_SETTLE_S {
         settle.done = true;
         tracker.complete(step::SETTLE);
@@ -321,6 +316,35 @@ fn tile_resident_lod_under_view(
     root.resident_spacing_m_at(target.cam_body.normalize())
 }
 
+/// One settle-gate sample. Once the ground is at least as fine as
+/// `target_lod_m`, further splits do not reset the plateau — the loading
+/// screen may reveal while the streamer keeps sharpening.
+fn note_settle_lod(
+    lod_m: Option<f32>,
+    best_lod_m: &mut f32,
+    stable_frames: &mut u32,
+    target_lod_m: f32,
+) {
+    match lod_m {
+        Some(m) if m <= target_lod_m => {
+            if m < *best_lod_m {
+                *best_lod_m = m;
+            }
+            *stable_frames += 1;
+        }
+        Some(m) if m < *best_lod_m * 0.999 => {
+            *best_lod_m = m;
+            *stable_frames = 0;
+        }
+        Some(_) => {
+            *stable_frames += 1;
+        }
+        None => {
+            *stable_frames = 0;
+        }
+    }
+}
+
 /// Distance (km) from the body centre to the tile tree's view position — the
 /// settle diagnostics' "did the streamer's view reach the surface" signal.
 /// `NAN` while the tree isn't up.
@@ -342,4 +366,30 @@ fn view_radius_km(
         return f64::NAN;
     };
     tree.view_position().length() / 1000.0
+}
+
+#[cfg(test)]
+mod settle_lod_tests {
+    #[test]
+    fn reaching_the_target_lod_ignores_further_splits() {
+        let mut best = 200.0_f32;
+        let mut stable = 0_u32;
+        // Coarse → at floor → finer than floor. The last step must not reset.
+        for lod in [120.0, 80.0, 40.0, 12.0] {
+            super::note_settle_lod(Some(lod), &mut best, &mut stable, 50.0);
+        }
+        assert!(best <= 12.0);
+        assert!(
+            stable >= 2,
+            "once under 50 m/texel, extra splits still count as stable, got {stable}"
+        );
+    }
+
+    #[test]
+    fn missing_tiles_reset_the_hold() {
+        let mut best = 40.0_f32;
+        let mut stable = 6_u32;
+        super::note_settle_lod(None, &mut best, &mut stable, 50.0);
+        assert_eq!(stable, 0);
+    }
 }

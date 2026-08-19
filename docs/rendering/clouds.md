@@ -153,11 +153,14 @@ near/mid view march      orbital optical-   CloudSunTransmittance
         CloudComposite + shared lighting/shadow/environment consumers
 ```
 
-Render mechanism belongs under `thalos_body_render::clouds`; the game-side
-driver only selects bodies/views and projects simulation state into render
-inputs. The current vendored crate should be absorbed during the ownership
-slice, retaining its MIT attribution and license, rather than growing a second
-top-level rendering subsystem beside `thalos_body_render`.
+Render mechanism belongs under `thalos_clouds` (compute, weather cubes,
+sun-transmittance cascade). The game-side driver in `thalos_game_runtime`
+selects bodies/views and projects simulation state into those inputs; the
+planetary `BodySky` composite stays in `thalos_body_render`. Kòrsou is the
+second consumer: a local Earth-shell adapter writes the same
+`CameraMatrices` / `CloudsConfig` contract and composites only the near
+volume against copied scene depth. The vendored MIT/evroon attribution
+travels with `thalos_clouds`.
 
 ## 3. Data and rendering model
 

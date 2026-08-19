@@ -161,7 +161,7 @@ crates/
     shading/                    # thalos_body_shading: shared shading model
     ocean/                      # wave clock, geometry/slope mechanisms + WGSL
     vegetation/                 # topology-independent woody mesh + atlas payload
-    clouds/                     # (planned, Phase 5c) volumetric-cloud composite
+    clouds/                     # thalos_clouds: volumetric compute + weather cubes
     udlod/                      # LEGACY terrain-render backend (EOL)
   interface/
     input/
@@ -388,13 +388,14 @@ ADR-20260721T194629Z-first-class-headless-capture-runtime.
       toward `capture/`, but is scenario-coupled; last in line, possibly
       staying in runtime.
   - **5c — split `body_render` along composite lines** (opportunistic):
-    `thalos_clouds` first (self-contained: own shaders, uniforms, compute —
-    the clearest "one thing" in the repo); `tiles` possibly becomes its own
-    crate when the NTR M5 extraction lands (it is the landing pad anyway).
-    This *composes with* Phase 4, it does not contradict it: Phase 4 moves
-    render mechanisms out of runtime into the rendering layer; 5c organizes
-    the rendering layer into focused composite crates. `thalos_udlod` is
-    never split — it is deleted.
+    `thalos_clouds` landed with the Kòrsou cloud adapter (compute, weather
+    cubes, sun-transmittance cascade; the BodySky composite stays in
+    `thalos_body_render`). `tiles` possibly becomes its own crate when the
+    NTR M5 extraction lands (it is the landing pad anyway). This *composes
+    with* Phase 4, it does not contradict it: Phase 4 moves render mechanisms
+    out of runtime into the rendering layer; 5c organizes the rendering layer
+    into focused composite crates. `thalos_udlod` is never split — it is
+    deleted.
   - **Deliberately untouched:** `physics_canonical` (cohesive math),
     `thalos_terrain` (until diffusion replaces the generator — that rework is
     the natural split moment), the runtime `rendering/` drivers (the Phase-4
@@ -1497,16 +1498,18 @@ grid, entirely on Bevy's standard render path.
   `body_terrain.wgsl` for tooling, sharing `TreeMaterial`'s cascade binding
   layout so one shadow rig feeds both.
 
-**`clouds`** — spherical, body-fixed volumetric cloud render mechanism.
+**`thalos_clouds`** — spherical, body-fixed volumetric cloud compute mechanism.
 - Owns the absorbed `bevy-volumetric-clouds` compute pipeline, generated
   Perlin-Worley/Worley textures, cloud colour/distance targets, and cloud-local
-  temporal history; upstream MIT attribution lives beside the module.
+  temporal history; upstream MIT attribution lives in the crate.
 - Consumes a cube `CloudWeatherMap` uploaded from the active body's canonical
   `CloudWeatherField`. It does not create weather or choose a body.
 - The game-side `rendering::clouds` driver selects the nearest authored cloudy
-  body and projects `CloudClimate`/environment state into view uniforms. Near
-  composition stays in `BodySkyMaterial`; the first orbit projection is in
-  `SolidPlanetMaterial`. See ADR-20260720T212214Z-one-weather-field-many-cloud-projections and `docs/rendering/clouds.md`.
+  body and projects `CloudClimate`/environment state into view uniforms. The
+  planetary composite stays in `thalos_body_render`; Kòrsou writes the same
+  camera/config contract for a local Earth shell. See
+  ADR-20260720T212214Z-one-weather-field-many-cloud-projections and
+  `docs/rendering/clouds.md`.
 
 `body_render` is the **sole direct consumer** of the Thalos-owned
 `thalos_udlod`; both its optional dependency and its

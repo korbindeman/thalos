@@ -26,6 +26,7 @@ members = [
     "crates/offline/terrain_learned",
     "crates/offline/texgen",
     "crates/rendering/render",
+    "crates/rendering/clouds",
     "crates/rendering/atmosphere",
     "crates/rendering/foundation",
     "crates/rendering/geodetic",

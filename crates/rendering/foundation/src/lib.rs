@@ -10,6 +10,7 @@ use bevy::camera::Camera;
 use bevy::core_pipeline::core_3d::{main_opaque_pass_3d, main_transparent_pass_3d};
 use bevy::core_pipeline::{Core3d, Core3dSystems};
 use bevy::image::Image;
+use bevy::log::info;
 use bevy::prelude::*;
 use bevy::render::{
     RenderApp, RenderStartup,
@@ -44,6 +45,15 @@ pub struct SceneDepthImage {
     pub handle: Handle<Image>,
 }
 
+/// Physical size scene-pass targets should use when the 3D main target is
+/// smaller than the window. `None` means the camera's native viewport.
+///
+/// Sole writer: the shared render-scale path in `thalos_preferences`.
+#[derive(Resource, Clone, Copy, Debug, Default)]
+pub struct SceneViewportOverride {
+    pub physical: Option<UVec2>,
+}
+
 /// Installs the scene-depth image lifecycle and the opaque-to-transparent copy
 /// pass for the view carrying [`SceneDepthView`].
 pub struct SceneDepthPlugin;
@@ -51,7 +61,8 @@ pub struct SceneDepthPlugin;
 impl Plugin for SceneDepthPlugin {
     fn build(&self, app: &mut App) {
         embedded_asset!(app, "msaa_depth_resolve.wgsl");
-        app.add_plugins(ExtractComponentPlugin::<SceneDepthView>::default())
+        app.init_resource::<SceneViewportOverride>()
+            .add_plugins(ExtractComponentPlugin::<SceneDepthView>::default())
             .add_systems(Startup, setup_scene_depth_image)
             .add_systems(Update, resize_scene_depth_image);
 
@@ -82,6 +93,7 @@ fn copy_scene_depth(
     pipeline_cache: Res<PipelineCache>,
     render_device: Res<RenderDevice>,
     mut ctx: RenderContext,
+    mut skip_log: Local<(u32, u32, u32, u32, u32)>,
 ) {
     let (depth, _selected_view) = view.into_inner();
 
@@ -93,10 +105,42 @@ fn copy_scene_depth(
     };
 
     // Resize crosses the main/render-world seam asynchronously. Skip the
-    // mismatched frame; the main-world resize system closes the gap.
+    // mismatched frame; the main-world resize system closes the gap. A
+    // persistent mismatch (Laptop 0.5× 3D vs a full-window depth image) leaves
+    // empty depth, and the sky composite paints opaque air over the ship and
+    // mountains. Log the skip so `just diag` can tell a one-frame seam from
+    // that hang.
     let src_size = depth.texture.size();
     let dst_size = dest.texture.size();
     if src_size.width != dst_size.width || src_size.height != dst_size.height {
+        let same = skip_log.0 == src_size.width
+            && skip_log.1 == src_size.height
+            && skip_log.2 == dst_size.width
+            && skip_log.3 == dst_size.height;
+        let count = if same {
+            skip_log.4.saturating_add(1)
+        } else {
+            1
+        };
+        *skip_log = (
+            src_size.width,
+            src_size.height,
+            dst_size.width,
+            dst_size.height,
+            count,
+        );
+        if !same || count == 1 || count.is_multiple_of(60) {
+            info!(
+                target: "thalos::diagnostic::scene_depth",
+                event = "depth_copy_skipped",
+                src_width = src_size.width,
+                src_height = src_size.height,
+                dst_width = dst_size.width,
+                dst_height = dst_size.height,
+                skip_count = count,
+                "scene depth copy skipped; sizes differ"
+            );
+        }
         return;
     }
 
@@ -215,6 +259,7 @@ fn setup_scene_depth_image(mut commands: Commands, mut images: ResMut<Assets<Ima
 
 fn resize_scene_depth_image(
     scene_depth: Option<Res<SceneDepthImage>>,
+    override_size: Res<SceneViewportOverride>,
     mut images: ResMut<Assets<Image>>,
     cameras: Query<&Camera, With<SceneDepthView>>,
 ) {
@@ -224,7 +269,10 @@ fn resize_scene_depth_image(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let Some(viewport) = camera.physical_viewport_size() else {
+    let Some(viewport) = override_size
+        .physical
+        .or_else(|| camera.physical_viewport_size())
+    else {
         return;
     };
     if viewport.x == 0 || viewport.y == 0 {

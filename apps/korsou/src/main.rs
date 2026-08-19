@@ -1,6 +1,7 @@
 mod camera;
 mod capture;
 mod cli;
+mod clouds;
 mod diagnostics;
 mod foliage;
 mod ocean;
@@ -28,6 +29,7 @@ use thalos_render_kit::{RenderCapabilities, RenderPlan, RenderPlanPlugin};
 use camera::TerrainCameraPlugin;
 use capture::CapturePlugin;
 use cli::{CliAction, RunConfig, SpatialMode};
+use clouds::CloudsPlugin;
 use diagnostics::DiagnosticsPlugin;
 use foliage::FoliagePlugin;
 use ocean::OceanPlugin;
@@ -137,7 +139,8 @@ fn run() -> Result<AppExit> {
 
     app.add_plugins(
         thalos_runtime::preferences::PreferencesPlugin::new(!headless)
-            .with_foliage(spatial == SpatialMode::Planar),
+            .with_foliage(spatial == SpatialMode::Planar)
+            .with_clouds(true),
     )
     .add_plugins(thalos_runtime::viewer::ViewerPlugin::new(
         !headless, "ACTIVE",
@@ -155,6 +158,7 @@ fn run() -> Result<AppExit> {
     if spatial == SpatialMode::Planar {
         app.add_plugins((FoliagePlugin, OceanPlugin));
     }
+    app.add_plugins(CloudsPlugin);
     if !headless {
         app.add_plugins((DiagnosticsPlugin, KorsouPhotoModePlugin));
     }
@@ -193,5 +197,19 @@ mod tests {
             path.display()
         );
         assert_eq!(crate::ocean::OCEAN_SHADER, "korsou://shaders/ocean.wgsl");
+    }
+
+    #[test]
+    fn korsou_asset_source_contains_its_cloud_shader() {
+        let path = Path::new(KORSOU_ASSET_ROOT).join("shaders/cloud_composite.wgsl");
+        assert!(
+            path.is_file(),
+            "Kòrsou cloud shader is missing: {}",
+            path.display()
+        );
+        assert_eq!(
+            crate::clouds::CLOUD_SHADER,
+            "korsou://shaders/cloud_composite.wgsl"
+        );
     }
 }

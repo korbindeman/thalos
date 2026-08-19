@@ -64,7 +64,7 @@ document.getElementById("cards").innerHTML =
   card("gpu mean", fmt(SUM.gpu_ms_mean, 2) + " ms") +
   (BENCH ? card("offscreen benchmark", `${fmt(BENCH.cpu_ms_mean, 2)} ms · ${fmt(BENCH.fps, 1)} fps`) : "") +
   (CFG.foliage_enabled == null ? "" :
-    card("render config", `foliage ${CFG.foliage_enabled ? "on" : "off"} · shadows ${CFG.shadow_cascade_budget ?? "—"}`)) +
+    card("render config", `foliage ${CFG.foliage_enabled ? "on" : "off"} · shadows ${CFG.shadow_quality ?? "—"} (${CFG.shadow_cascade_budget ?? "—"} cascades, ${CFG.shadow_map_size_px ?? "—"}²)`)) +
   (CFG.window_width_px == null ? "" :
     card("window", `${CFG.window_width_px}×${CFG.window_height_px} · ${CFG.vsync_enabled ? "vsync" : "uncapped"}`)) +
   card("spikes", S.length) +

@@ -17,6 +17,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dependencies]
 thalos_body_shading = { path = "../shading" }
+thalos_clouds = { path = "../clouds" }
 thalos_ocean = { path = "../ocean" }
 thalos_vegetation = { path = "../vegetation" }
 thalos_terrain = { path = "../../domain/terrain" }

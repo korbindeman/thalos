@@ -1,7 +1,9 @@
 //! NTR-X1 — the probe-extracted tile terrain renderer (keystone:
 //! ADR-20260723T142945Z, plan `ntr §6`): terrain as ordinary `Mesh` +
 //! `StandardMaterial` entities streamed by a camera-driven, 2:1-balanced
-//! cube-sphere quadtree, entirely on Bevy's standard render path.
+//! cube-sphere quadtree, entirely on Bevy's standard render path. Resident
+//! entities share three patch meshes; exact f64-built positions and surface
+//! channels live in a GPU array atlas selected through `MeshTag`.
 //!
 //! Ported from the standalone probe (`thalos-terrain-probe`, M0–M4) with the
 //! Thalos adaptations: per-body radius, tiles placed on the big_space **root**
@@ -34,7 +36,9 @@
 //! **Residency is budgeted in bytes** ([`TILE_MESH_BYTES`],
 //! `THALOS_TILE_BUDGET_MB`). The budget brakes by *coarsening selection*, never
 //! by evicting resident tiles — the despawn rule is hole-free, so eviction would
-//! punch holes in the ground. Any new per-tile GPU resource must join
+//! punch holes in the ground. The finite atlas adds a second hard ceiling and
+//! reserves replacement layers so bridge-before-retire cannot deadlock. Any
+//! new per-tile GPU resource must join
 //! `TILE_MESH_BYTES` or the budget silently under-counts VRAM
 //! (INC-20260725T012104Z-tile-residency-had-no-budget).
 //!
@@ -45,12 +49,16 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
+#[cfg(test)]
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::NoAutoAabb;
 use bevy::camera::visibility::RenderLayers;
 use bevy::math::{DQuat, DVec3};
+use bevy::mesh::MeshTag;
+#[cfg(test)]
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 use bevy::tasks::{Task, block_on, poll_once};
@@ -58,11 +66,13 @@ use big_space::prelude::*;
 use thalos_terrain::{SurfacePatch, SurfaceQuery};
 
 pub mod cache;
+pub mod gpu;
 pub mod height_mirror;
 pub mod material;
 pub mod vram_share;
 
 pub use cache::{CachedTileProvider, SurfaceTileCache, TileNamespaceFn};
+pub use gpu::TileGpuStore;
 pub use height_mirror::{TileHeightMirror, TileHeightMirrorHandle};
 
 /// Vertices per tile side (core grid, excluding halo).
@@ -153,91 +163,86 @@ fn package_screen_error_enabled() -> bool {
 /// exactly as they outrank the distance rule.
 const MOTION_CROSS_MIN_S: f64 = 1.0;
 const MAX_IN_FLIGHT: usize = 24;
+/// Split-distance scale for the initial resident cover, relative to the final
+/// selection. One quarter moves the distance-driven refinement boundary about
+/// two quadtree levels inward while the ground directly under the camera (and
+/// authored sites) retains its required level. The result is a smaller valid,
+/// non-overlapping selection that remains locally usable; the ordinary bridge
+/// path then refines the surroundings to the unchanged desired set.
+const BOOTSTRAP_SPLIT_SCALE: f64 = 0.25;
 
 // --- residency budget --------------------------------------------------------
 //
 // INC-20260725T012104Z-tile-residency-had-no-budget: this renderer could
 // allocate VRAM without limit until a `DeviceLost` stopped it.
 
-/// Skirt ring vertices appended by [`build_tile_mesh`] (one loop around the
+/// Skirt ring vertices appended by each shared patch (one loop around the
 /// core grid: `4·(res−1)`, i.e. each side minus its shared corner).
 const TILE_SKIRT_VERTS: usize = 4 * TILE_RES - 4;
 /// Vertices in one tile mesh — core grid plus the skirt ring.
 const TILE_VERTS: usize = TILE_RES * TILE_RES + TILE_SKIRT_VERTS;
-/// Bytes per vertex across the attribute set [`build_tile_mesh`] writes:
-/// POSITION 12 + NORMAL 12 + COLOR 16 + UV_0 8 + UV_1 8. Kept adjacent to the
-/// mesher so adding an attribute updates the budget's denominator in the same
-/// edit instead of silently under-counting VRAM.
-///
-/// COLOR and UV_1 carry the NTR-X4 spare-channel contract `tile_terrain.wgsl`
-/// reads. They are also why this mesh can never enter the raytracing scene —
-/// see [`RT_TILE_MESH_BYTES`] and [`crate::rt`].
+/// Vertex width of the retired per-tile mesh, retained only by the test oracle
+/// that proves the GPU payload reconstructs the same surface.
+#[cfg(test)]
 const TILE_VERTEX_BYTES: usize = 12 + 12 + 16 + 8 + 8;
 /// Triangles in one tile mesh: two per core quad plus two per skirt quad.
 const TILE_TRIANGLES: usize = (TILE_RES - 1) * (TILE_RES - 1) * 2 + TILE_SKIRT_VERTS * 2;
 /// Restart-delimited `U16` indices in the visible mesh. Each grid row is one
 /// strip, and each skirt quad is its own four-index strip so it preserves the
 /// exact diagonal and winding of the original triangle list.
+#[cfg(test)]
 const TILE_STRIPS: usize = (TILE_RES - 1) + TILE_SKIRT_VERTS;
+#[cfg(test)]
 const TILE_STRIP_INDICES: usize =
     2 * TILE_RES * (TILE_RES - 1) + 4 * TILE_SKIRT_VERTS + (TILE_STRIPS - 1);
 const _: () = assert!(TILE_VERTS < u16::MAX as usize);
-/// GPU bytes one resident tile costs — **1,008 KiB** at `TILE_RES = 129`.
-///
-/// This is the number the residency budget is denominated in, and the reason it
-/// has to be: a *count* cap looks harmless and silently means gigabytes (the
-/// same lesson `rendering::tile_cache`'s payload budget already records).
-pub const TILE_MESH_BYTES: usize = TILE_VERTS * TILE_VERTEX_BYTES + TILE_STRIP_INDICES * 2;
+/// GPU payload bytes one resident tile occupies in the displacement atlas.
+/// Kept under the established name because diagnostics and RT accounting use
+/// it as the residency denominator; it no longer describes a unique `Mesh`.
+pub const TILE_MESH_BYTES: usize = gpu::TILE_GPU_SLOT_BYTES;
 
-/// Grid resolution of the terrain twin used only by broad shadow cascades.
-/// 33² samples retain every fourth vertex of the visible 129² tile, reducing
-/// surface triangles 16× while preserving tile boundaries and the skirt.
+/// Grid resolution of the shared patch used by broad shadow cascades.
+/// 33² samples retain every fourth atlas sample, reducing surface triangles
+/// 16× while preserving tile boundaries and the skirt.
 const FAR_CASTER_RES: usize = 33;
+#[cfg(test)]
 const FAR_CASTER_STEP: usize = (TILE_RES - 1) / (FAR_CASTER_RES - 1);
 const FAR_CASTER_SKIRT_VERTS: usize = 4 * FAR_CASTER_RES - 4;
 const FAR_CASTER_VERTS: usize = FAR_CASTER_RES * FAR_CASTER_RES + FAR_CASTER_SKIRT_VERTS;
+#[cfg(test)]
 const FAR_CASTER_STRIPS: usize = (FAR_CASTER_RES - 1) + FAR_CASTER_SKIRT_VERTS;
+#[cfg(test)]
 const FAR_CASTER_STRIP_INDICES: usize = 2 * FAR_CASTER_RES * (FAR_CASTER_RES - 1)
     + 4 * FAR_CASTER_SKIRT_VERTS
     + (FAR_CASTER_STRIPS - 1);
-const FAR_CASTER_VERTEX_BYTES: usize = 12 + 12;
-/// Extra GPU residency per tile when broad terrain shadows are enabled.
-pub const FAR_CASTER_MESH_BYTES: usize =
-    FAR_CASTER_VERTS * FAR_CASTER_VERTEX_BYTES + FAR_CASTER_STRIP_INDICES * 2;
+/// Broad shadows reuse the one shared 33² patch mesh, so their per-tile
+/// geometry residency is zero. Their atlas payload is already counted above.
+pub const FAR_CASTER_MESH_BYTES: usize = 0;
 const _: () = assert!((TILE_RES - 1).is_multiple_of(FAR_CASTER_RES - 1));
 const _: () = assert!(FAR_CASTER_VERTS < u16::MAX as usize);
 
+const TILE_INDEX_PROBE_ENV: &str = "THALOS_TILE_INDEX_PROBE";
+const TILE_CULL_PROBE_ENV: &str = "THALOS_TILE_CULL_PROBE";
+
 /// Extra GPU bytes a tile costs **on top of** [`TILE_MESH_BYTES`] when it also
-/// carries an RT twin — **1,200 KiB**, i.e. an RT-covered tile costs **2.19×** a
-/// plain one.
+/// carries an RT twin — **1,200 KiB**, i.e. an RT-covered tile costs about
+/// **4.50×** a plain atlas slot.
 ///
-/// Solari's attribute gate is an equality, so the RT mesh is a second copy of
-/// the geometry rather than a re-use of the visible one ([`crate::rt`] explains
-/// why in full). That makes RT terrain coverage a VRAM decision before it is a
-/// tracing-cost decision: covering the whole 4 GiB resident set would want
-/// **another ~4.8 GiB**, on a budget that is already machine-wide and shared
-/// between concurrent instances (INC-20260725T012104Z). That is the number
-/// behind NTR-RT3 scoping RT proxies to a radius around `ViewAnchor` rather
-/// than to residency — near-only coverage is a necessity here, not a tuning
-/// choice.
+/// Solari cannot execute the raster material's vertex displacement or resolve
+/// its per-instance atlas slot, so RT geometry remains a second copy
+/// ([`crate::rt`] explains why in full). Near-radius-only coverage remains a
+/// necessity rather than a tuning choice.
 pub const RT_TILE_MESH_BYTES: usize =
     TILE_VERTS * crate::rt::RT_VERTEX_BYTES + TILE_TRIANGLES * 3 * 4;
 
-/// Soft VRAM target for tile meshes **across every Thalos renderer on this
-/// machine**, overridable with `THALOS_TILE_BUDGET_MB` (0 disables the budget
-/// entirely). One process's share is this divided by the live instance count —
-/// see [`residency_budget_bytes`] and [`vram_share`].
+/// Soft VRAM target for occupied tile payloads **across every Thalos renderer
+/// on this machine**, overridable with `THALOS_TILE_BUDGET_MB`. One process's
+/// share is this divided by the live instance count; the atlas's finite usable
+/// capacity still applies when the environment budget is disabled.
 ///
-/// 4 GiB ≈ 4,162 tiles. The 129²/L−1 mapping turns every four former 65²/L
-/// leaves into one while retaining their aggregate vertex density. Applied to
-/// the largest measured 65² working set (10,900 tiles), that projects to ~2,725
-/// tiles / 2.62 GiB, leaving the brake generous while runtime evidence is
-/// collected for the new topology.
-///
-/// It is therefore a **runaway brake, not a quality cap**, and deliberately
-/// generous: the residency gauge is what tells us where it can be tightened, and
-/// a smaller card wants `THALOS_TILE_BUDGET_MB` set down rather than this
-/// guessed lower.
+/// The 2,048-layer atlas is ~687 MiB allocated; 1,792 layers are admissible and
+/// the remainder are replacement headroom. On current hardware that capacity,
+/// rather than this legacy 4 GiB default, is normally the effective brake.
 const DEFAULT_RESIDENCY_BUDGET_BYTES: usize = 4096 * 1024 * 1024;
 
 /// Pressure fraction below which the split scale is allowed to recover. The
@@ -631,8 +636,13 @@ pub fn skirt_drop_m(sample_spacing_m: f64, radius_m: f64) -> f32 {
     (sag * 4.0 + sample_spacing_m * 0.06).clamp(0.5, 150.0) as f32
 }
 
+#[cfg(test)]
 struct BuiltTile {
     mesh: Mesh,
+    /// Opt-in compact visible twin for the warmed geometry-density probe.
+    index_probe_mesh: Option<Mesh>,
+    /// Opt-in full/skirt and tight/surface bounds for the warmed culling probe.
+    culling_probe_bounds: Option<TileCullingProbeBounds>,
     /// Coarse position+normal twin for the broad shadow cascades. Absent for a
     /// root that does not request terrain casting.
     far_caster_mesh: Option<Mesh>,
@@ -699,6 +709,116 @@ fn build_tile_strip_indices(res: usize, border: &[u16], skirt_base: u16) -> Vec<
     indices
 }
 
+/// Number of indices in the headless tile-density probe for one sampling step.
+///
+/// This is deliberately a diagnostics-only seam. Production tiles always use
+/// step 1; the warmed probe swaps in a compact mesh built from every fourth
+/// source sample to distinguish geometry traversal from pixel fill without
+/// changing tile entities, material work, or boundary coverage.
+#[doc(hidden)]
+pub fn tile_index_count_for_benchmark(step: usize) -> Option<usize> {
+    if step == 0 || !(TILE_RES - 1).is_multiple_of(step) {
+        return None;
+    }
+    let res = (TILE_RES - 1) / step + 1;
+    let border = TILE_SKIRT_VERTS / step;
+    let strips = (res - 1) + border;
+    Some(2 * res * (res - 1) + 4 * border + strips - 1)
+}
+
+fn tile_index_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(TILE_INDEX_PROBE_ENV)
+            .ok()
+            .is_some_and(|raw| matches!(raw.trim(), "1" | "true" | "on" | "yes"))
+    })
+}
+
+fn tile_cull_probe_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var(TILE_CULL_PROBE_ENV)
+            .ok()
+            .is_some_and(|raw| matches!(raw.trim(), "1" | "true" | "on" | "yes"))
+    })
+}
+
+#[cfg(test)]
+fn build_tile_index_probe_mesh(
+    source_positions: &[[f32; 3]],
+    source_normals: &[[f32; 3]],
+    source_colors: &[[f32; 4]],
+    source_uv0: &[[f32; 2]],
+    source_uv1: &[[f32; 2]],
+) -> Mesh {
+    let mut sources = Vec::with_capacity(FAR_CASTER_VERTS);
+    for j in 0..FAR_CASTER_RES {
+        for i in 0..FAR_CASTER_RES {
+            sources.push((j * FAR_CASTER_STEP) * TILE_RES + i * FAR_CASTER_STEP);
+        }
+    }
+    sources.extend(
+        (0..TILE_SKIRT_VERTS)
+            .step_by(FAR_CASTER_STEP)
+            .map(|offset| TILE_RES * TILE_RES + offset),
+    );
+    debug_assert_eq!(sources.len(), FAR_CASTER_VERTS);
+
+    let positions = sources
+        .iter()
+        .map(|&source| source_positions[source])
+        .collect::<Vec<_>>();
+    let normals = sources
+        .iter()
+        .map(|&source| source_normals[source])
+        .collect::<Vec<_>>();
+    let colors = sources
+        .iter()
+        .map(|&source| source_colors[source])
+        .collect::<Vec<_>>();
+    let uv0 = sources
+        .iter()
+        .map(|&source| source_uv0[source])
+        .collect::<Vec<_>>();
+    let uv1 = sources
+        .iter()
+        .map(|&source| source_uv1[source])
+        .collect::<Vec<_>>();
+
+    let mut border = Vec::with_capacity(FAR_CASTER_SKIRT_VERTS);
+    for i in 0..FAR_CASTER_RES {
+        border.push(i as u16);
+    }
+    for j in 1..FAR_CASTER_RES {
+        border.push((j * FAR_CASTER_RES + FAR_CASTER_RES - 1) as u16);
+    }
+    for i in (0..FAR_CASTER_RES - 1).rev() {
+        border.push(((FAR_CASTER_RES - 1) * FAR_CASTER_RES + i) as u16);
+    }
+    for j in (1..FAR_CASTER_RES - 1).rev() {
+        border.push((j * FAR_CASTER_RES) as u16);
+    }
+    let indices = build_tile_strip_indices(
+        FAR_CASTER_RES,
+        &border,
+        (FAR_CASTER_RES * FAR_CASTER_RES) as u16,
+    );
+
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleStrip,
+        RenderAssetUsages::RENDER_WORLD,
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uv0);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_UV_1, uv1);
+    mesh.insert_indices(Indices::U16(indices));
+    mesh
+}
+
+#[cfg(test)]
 fn build_far_caster_mesh(
     surface_positions: &[[f32; 3]],
     surface_normals: &[[f32; 3]],
@@ -756,6 +876,7 @@ fn build_far_caster_mesh(
     mesh
 }
 
+#[cfg(test)]
 fn build_tile_mesh(
     tile: &SurfaceTile,
     radius_m: f64,
@@ -876,12 +997,12 @@ fn build_tile_mesh(
     // `relief_m` below the datum, ~10 km on Thalos. So the automatic box for a
     // 300 m tile is ~10 km TALL: a 35:1 slab that intersects almost any frustum
     // pointed anywhere near the body, which makes frustum culling nearly
-    // inoperative for tiles. That is invisible in the main view (one camera,
-    // and the tiles were going to be drawn anyway) and expensive in the shadow
-    // rig, where it put 122 terrain tiles inside a cascade covering 64 m of
-    // ground. Handing the caster twin this tight box instead restores real
-    // culling; the curtain still rasterizes whenever the surface is in frame,
-    // which is the only time it is anything but buried (BL-20260731T202656Z).
+    // inoperative for tiles. In `forest-stand`, the same dense mesh with a
+    // surface-only box reduced view-visible tiles from 388 to 274; the shadow
+    // rig previously saw the same failure as 122 terrain tiles inside a
+    // cascade covering 64 m of ground. The curtain still rasterizes whenever
+    // the surface is in frame, which is the only time it is anything but
+    // buried (BL-20260731T202656Z).
     let surface_aabb = positions[..base as usize].iter().fold(
         ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
         |(mut lo, mut hi), p| {
@@ -940,6 +1061,28 @@ fn build_tile_mesh(
         );
     }
 
+    let surface_aabb = Aabb::from_min_max(
+        Vec3::from_array(surface_aabb.0),
+        Vec3::from_array(surface_aabb.1),
+    );
+    let culling_probe_bounds = tile_cull_probe_enabled().then(|| {
+        let (lo, hi) = positions.iter().fold(
+            ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
+            |(mut lo, mut hi), position| {
+                for axis in 0..3 {
+                    lo[axis] = lo[axis].min(position[axis]);
+                    hi[axis] = hi[axis].max(position[axis]);
+                }
+                (lo, hi)
+            },
+        );
+        TileCullingProbeBounds {
+            full: Aabb::from_min_max(Vec3::from_array(lo), Vec3::from_array(hi)),
+            surface: surface_aabb,
+        }
+    });
+    let index_probe_mesh = tile_index_probe_enabled()
+        .then(|| build_tile_index_probe_mesh(&positions, &normals, &colors, &uv0, &uv1));
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleStrip,
         RenderAssetUsages::RENDER_WORLD,
@@ -952,13 +1095,12 @@ fn build_tile_mesh(
     mesh.insert_indices(Indices::U16(indices));
     BuiltTile {
         mesh,
+        index_probe_mesh,
+        culling_probe_bounds,
         far_caster_mesh,
         origin,
         mesh_h,
-        surface_aabb: Aabb::from_min_max(
-            Vec3::from_array(surface_aabb.0),
-            Vec3::from_array(surface_aabb.1),
-        ),
+        surface_aabb,
     }
 }
 
@@ -1016,6 +1158,218 @@ pub struct TileEyeTarget {
 #[derive(Component, Debug, Clone, Copy)]
 pub struct TileBodyOrigin(pub DVec3);
 
+/// Screen-space topology choice for a visible tile or its near shadow twin.
+/// The atlas payload remains full resolution; changing this component only
+/// changes which exact subset of its samples the shared patch visits.
+#[derive(Component, Clone, Copy)]
+struct TilePatchLod {
+    key: TileKey,
+    gpu_slot: u32,
+    resolution: gpu::PatchResolution,
+    /// 0 = this topology collapsed onto the next-coarser lattice, 1 = exact
+    /// samples at this topology. Packed into `MeshTag` for the vertex shader.
+    morph: f32,
+}
+
+#[derive(Resource, Default)]
+struct TilePatchLodGauge {
+    r33: usize,
+    r65: usize,
+    r129: usize,
+}
+
+const PATCH_R33_MAX_PX: f64 = 128.0;
+const PATCH_R65_MAX_PX: f64 = 256.0;
+const PATCH_HYSTERESIS: f64 = 0.125;
+const PATCH_MORPH_PER_S: f32 = 5.0;
+const TILE_GPU_SLOT_BITS: u32 = gpu::TILE_GPU_ATLAS_SLOTS.trailing_zeros();
+const TILE_GPU_SLOT_MASK: u32 = gpu::TILE_GPU_ATLAS_SLOTS - 1;
+const _: () = assert!(gpu::TILE_GPU_ATLAS_SLOTS.is_power_of_two());
+
+fn tile_mesh_tag(slot: u32, morph: f32, previous_morph: f32) -> MeshTag {
+    let morph_u8 = (morph.clamp(0.0, 1.0) * 255.0).round() as u32;
+    let previous_u8 = (previous_morph.clamp(0.0, 1.0) * 255.0).round() as u32;
+    MeshTag(
+        (slot & TILE_GPU_SLOT_MASK)
+            | (morph_u8 << TILE_GPU_SLOT_BITS)
+            | (previous_u8 << (TILE_GPU_SLOT_BITS + 8)),
+    )
+}
+
+fn patch_rank(resolution: gpu::PatchResolution) -> u8 {
+    match resolution {
+        gpu::PatchResolution::R33 => 0,
+        gpu::PatchResolution::R65 => 1,
+        gpu::PatchResolution::R129 => 2,
+    }
+}
+
+fn adjacent_patch(
+    current: gpu::PatchResolution,
+    toward: gpu::PatchResolution,
+) -> gpu::PatchResolution {
+    match (current, patch_rank(toward).cmp(&patch_rank(current))) {
+        (gpu::PatchResolution::R33, std::cmp::Ordering::Greater) => gpu::PatchResolution::R65,
+        (gpu::PatchResolution::R65, std::cmp::Ordering::Greater) => gpu::PatchResolution::R129,
+        (gpu::PatchResolution::R129, std::cmp::Ordering::Less) => gpu::PatchResolution::R65,
+        (gpu::PatchResolution::R65, std::cmp::Ordering::Less) => gpu::PatchResolution::R33,
+        _ => current,
+    }
+}
+
+fn projected_tile_span_px(
+    key: TileKey,
+    radius_m: f64,
+    cam_body: DVec3,
+    focal_length_px: f64,
+) -> f64 {
+    let center = key.center_dir() * radius_m;
+    focal_length_px * tile_arc_m(key.level, radius_m) / (cam_body - center).length().max(1.0)
+}
+
+fn initial_patch_resolution(span_px: f64) -> gpu::PatchResolution {
+    if span_px <= PATCH_R33_MAX_PX {
+        gpu::PatchResolution::R33
+    } else if span_px <= PATCH_R65_MAX_PX {
+        gpu::PatchResolution::R65
+    } else {
+        gpu::PatchResolution::R129
+    }
+}
+
+fn patch_resolution_for_tile(
+    key: TileKey,
+    radius_m: f64,
+    cam_body: DVec3,
+    focal_length_px: Option<f64>,
+    current: gpu::PatchResolution,
+) -> gpu::PatchResolution {
+    let Some(focal_length_px) = focal_length_px.filter(|value| value.is_finite() && *value > 0.0)
+    else {
+        return current;
+    };
+    let span = projected_tile_span_px(key, radius_m, cam_body, focal_length_px);
+    match current {
+        gpu::PatchResolution::R33 => {
+            if span > PATCH_R65_MAX_PX * (1.0 + PATCH_HYSTERESIS) {
+                gpu::PatchResolution::R129
+            } else if span > PATCH_R33_MAX_PX * (1.0 + PATCH_HYSTERESIS) {
+                gpu::PatchResolution::R65
+            } else {
+                current
+            }
+        }
+        gpu::PatchResolution::R65 => {
+            if span > PATCH_R65_MAX_PX * (1.0 + PATCH_HYSTERESIS) {
+                gpu::PatchResolution::R129
+            } else if span < PATCH_R33_MAX_PX * (1.0 - PATCH_HYSTERESIS) {
+                gpu::PatchResolution::R33
+            } else {
+                current
+            }
+        }
+        gpu::PatchResolution::R129 => {
+            if span < PATCH_R33_MAX_PX * (1.0 - PATCH_HYSTERESIS) {
+                gpu::PatchResolution::R33
+            } else if span < PATCH_R65_MAX_PX * (1.0 - PATCH_HYSTERESIS) {
+                gpu::PatchResolution::R65
+            } else {
+                current
+            }
+        }
+    }
+}
+
+fn update_patch_lod(
+    eye: Res<TileEye>,
+    time: Res<Time>,
+    roots: Query<&TileTerrainRoot>,
+    patch_meshes: Res<gpu::TilePatchMeshes>,
+    mut gauge: ResMut<TilePatchLodGauge>,
+    mut patches: Query<(
+        &mut Mesh3d,
+        &mut MeshTag,
+        &mut TilePatchLod,
+        Option<&TileBodyOrigin>,
+    )>,
+) {
+    // The warmed density matrix owns mesh selection while its probe is active.
+    if tile_index_probe_enabled() {
+        return;
+    }
+    let Some(target) = &eye.target else {
+        return;
+    };
+    let Ok(root) = roots.get(target.root) else {
+        return;
+    };
+    *gauge = default();
+    let morph_step = PATCH_MORPH_PER_S * time.delta_secs();
+    for (mut mesh, mut tag, mut patch, visible_tile) in &mut patches {
+        let mut previous_morph = patch.morph;
+        let desired = patch_resolution_for_tile(
+            patch.key,
+            root.radius_m,
+            target.cam_body,
+            target.vertical_focal_length_px,
+            patch.resolution,
+        );
+        match patch_rank(desired).cmp(&patch_rank(patch.resolution)) {
+            std::cmp::Ordering::Greater => {
+                // A finer mesh at morph 0 is exactly the current coarse mesh,
+                // so the handle swap itself cannot pop. It then reveals the
+                // additional samples over subsequent frames.
+                let finer = adjacent_patch(patch.resolution, desired);
+                mesh.0 = patch_meshes.handle(finer);
+                patch.resolution = finer;
+                patch.morph = 0.0;
+                previous_morph = 0.0;
+            }
+            std::cmp::Ordering::Less => {
+                patch.morph = (patch.morph - morph_step).max(0.0);
+                if patch.morph == 0.0 {
+                    let coarser = adjacent_patch(patch.resolution, desired);
+                    mesh.0 = patch_meshes.handle(coarser);
+                    patch.resolution = coarser;
+                    // The coarser mesh's exact surface is the finer mesh's
+                    // fully-collapsed surface.
+                    patch.morph = 1.0;
+                    previous_morph = 1.0;
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                patch.morph = (patch.morph + morph_step).min(1.0);
+            }
+        }
+        tag.set_if_neq(tile_mesh_tag(patch.gpu_slot, patch.morph, previous_morph));
+        if visible_tile.is_some() {
+            match patch.resolution {
+                gpu::PatchResolution::R33 => gauge.r33 += 1,
+                gpu::PatchResolution::R65 => gauge.r65 += 1,
+                gpu::PatchResolution::R129 => gauge.r129 += 1,
+            }
+        }
+    }
+}
+
+/// Dense and compact handles for the opt-in warmed geometry-density probe.
+/// Production processes never build or attach this component.
+#[derive(Component)]
+#[doc(hidden)]
+pub struct TileIndexProbeMeshes {
+    pub dense: Handle<Mesh>,
+    pub coarse: Handle<Mesh>,
+}
+
+/// Full skirt-inflated and tight surface-only bounds for the opt-in warmed
+/// culling probe. Production processes never build or attach this component.
+#[derive(Component, Clone, Copy)]
+#[doc(hidden)]
+pub struct TileCullingProbeBounds {
+    pub full: Aabb,
+    pub surface: Aabb,
+}
+
 /// Set containing [`stream_tile_terrain`]. The driver that writes [`TileEye`]
 /// must run **before** this: the streamer places tiles from the target's f64
 /// body pose, and a frame-stale pose would slide the ground metres against
@@ -1030,7 +1384,8 @@ fn place_body_point(origin_body: DVec3, target: &TileEyeTarget, grid: &Grid) -> 
 
 struct StreamedTile {
     key: TileKey,
-    built: BuiltTile,
+    built: gpu::TileGpuPayload,
+    gpu_slot: u32,
     gen_micros: u64,
     /// Sampled height range (m) — diagnostic for flat-terrain regressions.
     h_range: (f32, f32),
@@ -1038,6 +1393,11 @@ struct StreamedTile {
     /// scatter / colliders read the heights this mesh was built from (see
     /// [`height_mirror`]).
     heights_m: Arc<Vec<f32>>,
+}
+
+struct PendingTile {
+    task: Task<StreamedTile>,
+    gpu_slot: u32,
 }
 
 /// Reusable storage for the streaming driver's per-frame work.
@@ -1097,7 +1457,7 @@ pub struct TileShadowCaster;
 /// that LOD choice per-view without affecting non-terrain casters.
 #[derive(Clone)]
 pub struct TileShadowCasterConfig {
-    pub material: Handle<StandardMaterial>,
+    pub material: Handle<material::TileCasterMaterial>,
     pub near_layers: RenderLayers,
     pub far_layers: RenderLayers,
 }
@@ -1128,14 +1488,27 @@ pub struct TileTerrainRoot {
     /// `SHIP_LAYER`-only).
     pub render_layers: RenderLayers,
     /// When set, every streamed tile also spawns two shadow-only children: the
-    /// visible mesh on the near-cascade layer and a 33² coarse twin on the
-    /// broad-cascade layer. This lets ridges shadow valleys without paying the
-    /// full 129² surface through every 4096² view. `None` (default) keeps
-    /// terrain a pure receiver.
+    /// visible patch LOD on the near-cascade layer and the shared 33² patch on
+    /// the broad-cascade layer. Both displace from the tile's atlas slot. This
+    /// lets ridges shadow valleys without paying the full 129² surface through
+    /// every 4096² view. `None` (default) keeps terrain a pure receiver.
     pub caster: Option<TileShadowCasterConfig>,
     desired: HashSet<TileKey>,
+    /// Frozen cold-start selection. Keeping this on the root, rather than in
+    /// per-frame scratch storage, prevents camera motion or newly measured
+    /// ruggedness from moving the handoff target while it is loading.
+    bootstrap: HashSet<TileKey>,
+    /// Body-fixed eye used to compute [`Self::bootstrap`]. A teleport that
+    /// dwarfs ordinary per-frame motion (parking-orbit → pad) invalidates the
+    /// frozen set so loading does not finish a whole-planet cover for a view
+    /// the player will never see.
+    bootstrap_cam: Option<DVec3>,
     resident: HashMap<TileKey, Entity>,
-    pending: HashMap<TileKey, Task<StreamedTile>>,
+    pending: HashMap<TileKey, PendingTile>,
+    /// Atlas layer paired with every resident entity. Kept separate from the
+    /// coverage map so the pure selection/despawn helpers remain concerned
+    /// only with topology.
+    resident_gpu_slots: HashMap<TileKey, u32>,
     /// Tiles whose despawn condition holds, counting down the lax grace
     /// gates (seconds, frames remaining). If coverage regresses meanwhile,
     /// the entry is dropped and the tile stays.
@@ -1165,9 +1538,10 @@ pub struct TileTerrainRoot {
     /// because it is a per-body constant.
     relief_m: f64,
     gen_stats: GenStats,
-    /// Latched true the first time the desired set is fully resident. After
-    /// that, the hole-free despawn rule keeps coverage complete, so the
-    /// impostor↔terrain swap can trust it without flickering back.
+    /// Latched true the first time the startup selection is fully resident.
+    /// After that, the hole-free despawn rule keeps coverage complete while the
+    /// streamer refines to the final desired set, so the impostor↔terrain
+    /// swap can trust it without flickering back.
     covered_once: bool,
     /// Budget controller state: multiplier on the split factors, 1.0 = the
     /// unconstrained rule. Driven by [`Self::update_split_scale`].
@@ -1188,6 +1562,10 @@ pub struct TileTerrainRoot {
     scratch: StreamScratch,
     /// Seconds until the next residency gauge line.
     gauge_countdown: f32,
+    /// Wall-clock start of this root's first stream, used by the permanent
+    /// first-coverage diagnostic. Wall time is intentional: loading latency is
+    /// player time, including scheduling and mesh admission stalls.
+    installed_at: Instant,
 }
 
 /// Rolling per-tile generation-time telemetry; records every 200 landings so
@@ -1260,8 +1638,11 @@ impl TileTerrainRoot {
             caster: None,
             refinement_sites: Vec::new(),
             desired: HashSet::new(),
+            bootstrap: HashSet::new(),
+            bootstrap_cam: None,
             resident: HashMap::new(),
             pending: HashMap::new(),
+            resident_gpu_slots: HashMap::new(),
             retiring: HashMap::new(),
             coverage_check_countdown: 2.0,
             recent_despawns: VecDeque::new(),
@@ -1276,6 +1657,7 @@ impl TileTerrainRoot {
             placement_pose: None,
             scratch: StreamScratch::default(),
             gauge_countdown: 0.0,
+            installed_at: Instant::now(),
         }
     }
 
@@ -1291,13 +1673,20 @@ impl TileTerrainRoot {
     /// kept: it is a measurement of *this body's* terrain, and a `TileKey` is
     /// only unique within a body. Carrying it across a handoff would apply one
     /// body's mountains to another's coordinates.
-    pub fn release_all(&mut self) -> Vec<Entity> {
+    pub fn release_all(&mut self, gpu_store: &mut TileGpuStore) -> Vec<Entity> {
         let entities: Vec<Entity> = self.resident.values().copied().collect();
         self.resident.clear();
-        // Dropping a pending task aborts it (the streamer relies on the same
-        // behaviour when it cancels un-wanted tiles).
-        self.pending.clear();
+        for (_, slot) in self.resident_gpu_slots.drain() {
+            gpu_store.release(slot);
+        }
+        // Dropping a pending task aborts it. Its reserved atlas slot must be
+        // returned in the same operation or body handoff leaks capacity.
+        for (_, pending) in self.pending.drain() {
+            gpu_store.release(pending.gpu_slot);
+        }
         self.desired.clear();
+        self.bootstrap.clear();
+        self.bootstrap_cam = None;
         self.retiring.clear();
         self.recent_despawns.clear();
         self.ruggedness.clear();
@@ -1307,6 +1696,7 @@ impl TileTerrainRoot {
         self.selection_dirty = true;
         self.placement_pose = None;
         self.scratch.clear();
+        self.installed_at = Instant::now();
         if let Ok(mut mirror) = self.height_mirror.write() {
             mirror.clear();
         }
@@ -1437,9 +1827,9 @@ impl TileTerrainRoot {
         }
     }
 
-    /// True once the streamed terrain has (ever) fully covered the desired
-    /// selection — the impostor↔terrain handoff criterion (the analogue of
-    /// udlod's `pinned_tiles_ready`).
+    /// True once resident terrain has (ever) fully covered the desired
+    /// footprints. The first cover may be the bounded coarse bootstrap; normal
+    /// streaming continues to the exact desired leaves after handoff.
     pub fn coverage_ready(&self) -> bool {
         self.covered_once
     }
@@ -1466,6 +1856,18 @@ impl TileTerrainRoot {
 
 fn tile_arc_m(level: u8, radius_m: f64) -> f64 {
     radius_m * core::f64::consts::FRAC_PI_2 / (1u64 << level) as f64
+}
+
+/// True when the selection eye jumped far enough that a frozen cold-start
+/// bootstrap computed at `from` is the wrong planet-scale cover for `to`.
+///
+/// Deferred placement drops the camera from a ~200 km parking orbit onto the
+/// pad. Ordinary per-frame motion is metres to maybe a kilometre; this
+/// threshold sits between those. Floor is 20 km so a small body still trips
+/// a pad drop; 2 % of radius covers Thalos (~64 km) without chasing LEO
+/// drift during a short load.
+fn bootstrap_eye_teleported(from: DVec3, to: DVec3, radius_m: f64) -> bool {
+    (from - to).length() > (radius_m * 0.02).max(20_000.0)
 }
 
 /// How much of the [`SPLIT_FACTOR`] → [`SPLIT_FACTOR_RUGGED`] range a tile of
@@ -1734,7 +2136,10 @@ fn select_leaves_scaled_with_error_into(
     stack: &mut Vec<TileKey>,
     balance_splits: &mut HashSet<TileKey>,
 ) {
-    let split_scale = split_scale.clamp(MIN_SPLIT_SCALE, 1.0);
+    // Runtime residency policy never falls below MIN_SPLIT_SCALE, but startup
+    // deliberately asks this pure selector for a still-coarser, complete cover.
+    // Zero remains safe: the MIN_LEVEL shell is always emitted.
+    let split_scale = split_scale.clamp(0.0, 1.0);
     let horizon = horizon_context(cam_body, radius_m, relief_m);
     let want_split = |key: TileKey| -> bool {
         if key.level >= max_level {
@@ -1892,6 +2297,39 @@ fn covered_by_resident(key: TileKey, resident: &HashMap<TileKey, Entity>, max_le
         .all(|child| covered_by_resident(child, resident, max_level))
 }
 
+/// Whether `key` is represented by itself or one resident ancestor.
+///
+/// Kept separate from recursive descendant coverage because the cold bootstrap
+/// calls this while residency is sparse. Recursing an empty level-2 subtree to
+/// `max_level` would explore billions of absent keys instead of doing the
+/// bounded ancestor walk the startup path actually needs.
+fn resident_ancestor_or_self(key: TileKey, resident: &HashMap<TileKey, Entity>) -> bool {
+    if resident.contains_key(&key) {
+        return true;
+    }
+    let mut probe = key;
+    while let Some(parent) = probe.parent() {
+        if parent.level < MIN_LEVEL {
+            break;
+        }
+        probe = parent;
+        if resident.contains_key(&probe) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether `key`'s footprint has any complete resident representation: itself,
+/// one resident ancestor, or a recursively complete descendant mosaic.
+fn footprint_covered_by_resident(
+    key: TileKey,
+    resident: &HashMap<TileKey, Entity>,
+    max_level: u8,
+) -> bool {
+    resident_ancestor_or_self(key, resident) || covered_by_resident(key, resident, max_level)
+}
+
 /// Bridge requests: children of stale resident ancestors whose replacement
 /// gap spans more than one level. Only desired tiles are generated otherwise,
 /// so a fast approach (selection skipping levels) left a coarse parent
@@ -2035,24 +2473,7 @@ fn uncovered_desired(
 ) -> Vec<TileKey> {
     desired
         .iter()
-        .filter(|k| {
-            if resident.contains_key(*k) {
-                return false;
-            }
-            let mut probe = **k;
-            loop {
-                match probe.parent() {
-                    Some(p) if p.level >= MIN_LEVEL => {
-                        probe = p;
-                        if resident.contains_key(&probe) {
-                            return false;
-                        }
-                    }
-                    _ => break,
-                }
-            }
-            !covered_by_resident(**k, resident, max_level)
-        })
+        .filter(|k| !footprint_covered_by_resident(**k, resident, max_level))
         .copied()
         .collect()
 }
@@ -2064,7 +2485,9 @@ fn stream_tile_terrain(
     mut roots: Query<&mut TileTerrainRoot>,
     big_space: Query<(Entity, &Grid), With<BigSpace>>,
     mut placed: Query<(&TileBodyOrigin, &mut CellCoord, &mut Transform)>,
-    mut meshes: ResMut<Assets<Mesh>>,
+    patch_meshes: Res<gpu::TilePatchMeshes>,
+    mut gpu_store: ResMut<TileGpuStore>,
+    patch_lod_gauge: Res<TilePatchLodGauge>,
     mut commands: Commands,
 ) {
     let Some(target) = &eye.target else {
@@ -2088,7 +2511,11 @@ fn stream_tile_terrain(
     // Residency budget: steer the split scale from the VRAM already committed
     // *before* selecting, so a frame that is over budget selects a coarser set
     // rather than committing more first (INC-20260725T012104Z-tile-residency-had-no-budget).
-    let budget_bytes = residency_budget_bytes();
+    // The array allocation is finite even when the environment disables the
+    // machine-wide byte budget. Its usable occupancy is therefore an
+    // unconditional second ceiling, with the final layers reserved for the
+    // bridge-before-retire replacement rule.
+    let budget_bytes = residency_budget_bytes().min(gpu_store.usable_budget_bytes());
     root_ref.update_split_scale(budget_bytes);
 
     // Selection reads the measured-ruggedness memo, so mountains hold their
@@ -2131,42 +2558,127 @@ fn stream_tile_terrain(
         root_ref.selection_dirty = false;
     }
 
-    // Bridge tiles keep multi-level replacement progressive (see
-    // `bridge_requests`).
+    // Before first handoff, admit only a complete reduced-distance cover. The
+    // previous cold path admitted hundreds of final leaves and held the loading
+    // screen until every one landed even though a usable ground mosaic needs a
+    // fraction of that work. After handoff, bridge tiles keep replacement
+    // progressive all the way to the unchanged final selection.
     let desired_fully_resident = root_ref.pending.is_empty()
         && root_ref
             .desired
             .iter()
             .all(|key| root_ref.resident.contains_key(key));
-    if desired_fully_resident {
+    if !root_ref.covered_once {
+        if root_ref
+            .bootstrap_cam
+            .is_some_and(|from| bootstrap_eye_teleported(from, cam, radius))
+        {
+            // The frozen cover was for a view the player will never see
+            // (parking-orbit placeholder → pad). Drop it and start again at
+            // the real eye; leftover meshes would only spend VRAM.
+            for (_, pending) in root_ref.pending.drain() {
+                gpu_store.release(pending.gpu_slot);
+            }
+            for entity in root_ref.resident.values().copied() {
+                commands.entity(entity).despawn();
+            }
+            root_ref.resident.clear();
+            for (_, slot) in root_ref.resident_gpu_slots.drain() {
+                gpu_store.release(slot);
+            }
+            if let Ok(mut mirror) = root_ref.height_mirror.write() {
+                mirror.clear();
+            }
+            root_ref.bootstrap.clear();
+            root_ref.bootstrap_cam = None;
+            root_ref.retiring.clear();
+            info!("tile terrain: cold-start bootstrap discarded after an eye teleport");
+        }
+        if root_ref.bootstrap.is_empty() {
+            let mut bootstrap = std::mem::take(&mut root_ref.bootstrap);
+            let known: &TileTerrainRoot = root_ref;
+            select_leaves_scaled_with_error_into(
+                cam,
+                radius,
+                max_level,
+                known.relief_m,
+                &|key| known.ruggedness_at(key),
+                &|key| known.provider.refinement_error_m(key, radius),
+                selection_input.vertical_focal_length_px,
+                known.effective_split_scale() * BOOTSTRAP_SPLIT_SCALE,
+                motion_arc_m,
+                &known.refinement_sites,
+                &mut bootstrap,
+                &mut scratch.selection_stack,
+                &mut scratch.balance_splits,
+            );
+            root_ref.bootstrap = bootstrap;
+            root_ref.bootstrap_cam = Some(cam);
+        }
+        scratch.bridges.clear();
+    } else if desired_fully_resident {
+        root_ref.bootstrap.clear();
         scratch.bridges.clear();
     } else {
+        root_ref.bootstrap.clear();
         bridge_requests_into(&root_ref.desired, &root_ref.resident, &mut scratch.bridges);
     }
 
     // Cancel pending tiles nobody wants (task drop aborts).
     let desired = &root_ref.desired;
-    root_ref
-        .pending
-        .retain(|key, _| desired.contains(key) || scratch.bridges.contains(key));
+    if root_ref.covered_once {
+        root_ref.pending.retain(|key, pending| {
+            let keep = desired.contains(key) || scratch.bridges.contains(key);
+            if !keep {
+                gpu_store.release(pending.gpu_slot);
+            }
+            keep
+        });
+    } else {
+        root_ref.pending.retain(|key, pending| {
+            let keep = root_ref.bootstrap.contains(key);
+            if !keep {
+                gpu_store.release(pending.gpu_slot);
+            }
+            keep
+        });
+    }
 
     // Admit missing (desired + bridges), screen-size-priority (distance /
     // tile size — absolute nearest-first starves coarse merge-targets; probe
     // M3 finding).
     scratch.missing.clear();
-    if !desired_fully_resident {
-        scratch.missing.extend(
-            root_ref
-                .desired
-                .iter()
-                .chain(scratch.bridges.iter())
-                .filter(|k| !root_ref.resident.contains_key(k) && !root_ref.pending.contains_key(k))
-                .map(|&key| {
-                    let priority =
-                        (cam - key.center_dir() * radius).length() / tile_arc_m(key.level, radius);
-                    (key, priority)
-                }),
-        );
+    if !desired_fully_resident || !root_ref.covered_once {
+        if root_ref.covered_once {
+            scratch.missing.extend(
+                root_ref
+                    .desired
+                    .iter()
+                    .chain(scratch.bridges.iter())
+                    .filter(|k| {
+                        !root_ref.resident.contains_key(k) && !root_ref.pending.contains_key(k)
+                    })
+                    .map(|&key| {
+                        let priority = (cam - key.center_dir() * radius).length()
+                            / tile_arc_m(key.level, radius);
+                        (key, priority)
+                    }),
+            );
+        } else {
+            scratch.missing.extend(
+                root_ref
+                    .bootstrap
+                    .iter()
+                    .filter(|k| {
+                        !root_ref.resident.contains_key(k) && !root_ref.pending.contains_key(k)
+                    })
+                    .map(|&key| {
+                        let priority = (cam - key.center_dir() * radius).length()
+                            / tile_arc_m(key.level, radius);
+                        (key, priority)
+                    }),
+            );
+        }
         scratch.missing.sort_by(|a, b| a.1.total_cmp(&b.1));
     }
     let budget = MAX_IN_FLIGHT.saturating_sub(root_ref.pending.len());
@@ -2174,9 +2686,13 @@ fn stream_tile_terrain(
     // Avian's collider-tree optimisation and hitches the main thread (the
     // documented reason `ground::tile_synthesis_pool` exists).
     let pool = crate::ground::tile_synthesis_pool::tile_synthesis_pool();
-    let admit = budget.min(scratch.missing.len());
-    let build_far_caster = root_ref.caster.is_some();
+    let admit = budget
+        .min(scratch.missing.len())
+        .min(gpu_store.free_slot_count());
     for (key, _) in scratch.missing.drain(..admit) {
+        let gpu_slot = gpu_store
+            .allocate()
+            .expect("admission count was capped to available terrain atlas slots");
         let provider = root_ref.provider.clone();
         // The skirt curtain's floor — per-body constant, cached at root
         // construction from the provider's height envelope.
@@ -2190,23 +2706,25 @@ fn stream_tile_terrain(
                 .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &h| {
                     (lo.min(h), hi.max(h))
                 });
-            let built = build_tile_mesh(&tile, radius, relief_m, build_far_caster);
+            let built = gpu::build_tile_payload(&tile, radius, relief_m);
             StreamedTile {
                 key,
                 built,
+                gpu_slot,
                 gen_micros: started.elapsed().as_micros() as u64,
                 h_range,
                 heights_m: Arc::new(tile.heights_m),
             }
         });
-        root_ref.pending.insert(key, task);
+        root_ref.pending.insert(key, PendingTile { task, gpu_slot });
     }
     scratch.missing.clear();
 
     // Land finished tiles as co-rotating children of the body grid.
     scratch.landed.clear();
-    root_ref.pending.retain(|_, task| {
-        if let Some(done) = block_on(poll_once(task)) {
+    root_ref.pending.retain(|_, pending| {
+        if let Some(done) = block_on(poll_once(&mut pending.task)) {
+            debug_assert_eq!(done.gpu_slot, pending.gpu_slot);
             scratch.landed.push(done);
             false
         } else {
@@ -2228,35 +2746,83 @@ fn stream_tile_terrain(
                 root_ref.selection_dirty = true;
             }
         }
-        let (cell, local) = place_body_point(done.built.origin, target, grid);
-        let mesh_handle = meshes.add(done.built.mesh);
+        let origin = done.built.origin;
+        let surface_aabb = done.built.surface_aabb;
+        let full_aabb = done.built.full_aabb;
+        let (cell, local) = place_body_point(origin, target, grid);
+        let initial_resolution = if tile_index_probe_enabled() {
+            gpu::PatchResolution::R129
+        } else {
+            target
+                .vertical_focal_length_px
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|focal| {
+                    initial_patch_resolution(projected_tile_span_px(done.key, radius, cam, focal))
+                })
+                .unwrap_or(gpu::PatchResolution::R129)
+        };
+        let mesh_handle = patch_meshes.handle(initial_resolution);
         let mut tile = commands.spawn((
             Mesh3d(mesh_handle.clone()),
             MeshMaterial3d(root_ref.material.clone()),
+            tile_mesh_tag(done.gpu_slot, 1.0, 1.0),
             // Rotation carries the body's spin, so it acts only on the
             // in-tile vertex offsets; the multi-Mm part of the placement is
             // already resolved in f64 above.
             Transform::from_translation(local).with_rotation(body_rotation),
             cell,
-            TileBodyOrigin(done.built.origin),
+            TileBodyOrigin(origin),
+            TilePatchLod {
+                key: done.key,
+                gpu_slot: done.gpu_slot,
+                resolution: initial_resolution,
+                morph: 1.0,
+            },
             root_ref.render_layers.clone(),
             ChildOf(root_entity),
+            // The skirt is a crack curtain below this exact surface band; it
+            // is visible only when the surface itself is in frame. Letting
+            // Bevy derive bounds from the kilometre-deep curtain submitted
+            // 114 extra dense tiles in `forest-stand` to both prepass and
+            // main. Shadow twins already use this same tight box.
+            surface_aabb,
+            NoAutoAabb,
         ));
+        if tile_index_probe_enabled() {
+            tile.insert(TileIndexProbeMeshes {
+                dense: patch_meshes.handle(gpu::PatchResolution::R129),
+                coarse: patch_meshes.handle(gpu::PatchResolution::R33),
+            });
+        }
+        if tile_cull_probe_enabled() {
+            let bounds = TileCullingProbeBounds {
+                full: full_aabb,
+                surface: surface_aabb,
+            };
+            tile.insert((bounds, bounds.full));
+        }
         // Shadow-caster children (see `TileTerrainRoot::caster`). The near
-        // cascades retain the exact visible mesh; the broad cascades use the
-        // independently layered 33² twin. Both inherit tile placement and
-        // recursive despawn.
+        // cascades track the visible shared-patch LOD; broad cascades use the
+        // fixed shared 33² patch. Both read the same atlas slot, inherit tile
+        // placement, and despawn recursively.
         if let Some(caster) = &root_ref.caster {
             tile.with_child((
                 Mesh3d(mesh_handle),
                 MeshMaterial3d(caster.material.clone()),
+                tile_mesh_tag(done.gpu_slot, 1.0, 1.0),
                 Transform::IDENTITY,
                 caster.near_layers.clone(),
                 TileShadowCaster,
+                TilePatchLod {
+                    key: done.key,
+                    gpu_slot: done.gpu_slot,
+                    resolution: initial_resolution,
+                    morph: 1.0,
+                },
                 // Explicit tight box, overriding the ~10 km-tall one Bevy would
                 // compute from the skirt curtain (see `surface_aabb`). This is
                 // the whole of "terrain stops flooding the near cascades".
-                done.built.surface_aabb,
+                surface_aabb,
                 // REQUIRED, and the reason the first attempt at this changed
                 // nothing: `calculate_bounds` does not merely fill in a missing
                 // `Aabb`, it also has an `update_aabb` query that OVERWRITES an
@@ -2268,22 +2834,21 @@ fn stream_tile_terrain(
                 // excludes the entity from both queries.
                 NoAutoAabb,
             ));
-            let far_mesh = done
-                .built
-                .far_caster_mesh
-                .expect("caster-enabled tile build must produce a broad-cascade twin");
             tile.with_child((
-                Mesh3d(meshes.add(far_mesh)),
+                Mesh3d(patch_meshes.handle(gpu::PatchResolution::R33)),
                 MeshMaterial3d(caster.material.clone()),
+                tile_mesh_tag(done.gpu_slot, 1.0, 1.0),
                 Transform::IDENTITY,
                 caster.far_layers.clone(),
                 TileShadowCaster,
-                done.built.surface_aabb,
+                surface_aabb,
                 NoAutoAabb,
             ));
         }
         let entity = tile.id();
         root_ref.resident.insert(done.key, entity);
+        root_ref.resident_gpu_slots.insert(done.key, done.gpu_slot);
+        gpu_store.upload(done.gpu_slot, done.built);
         // Publish the heights this tile was meshed from, so every ground
         // consumer seats on the geometry that is actually drawn.
         if let Ok(mut mirror) = root_ref.height_mirror.write() {
@@ -2312,15 +2877,29 @@ fn stream_tile_terrain(
     }
 
     if !root_ref.covered_once
-        && !root_ref.desired.is_empty()
+        && !root_ref.bootstrap.is_empty()
+        && root_ref.pending.is_empty()
         && root_ref
-            .desired
+            .bootstrap
             .iter()
-            .all(|k| root_ref.resident.contains_key(k))
+            .all(|key| root_ref.resident.contains_key(key))
     {
         root_ref.covered_once = true;
+        let elapsed_ms = root_ref.installed_at.elapsed().as_secs_f64() * 1_000.0;
         info!(
-            "tile terrain: first full coverage ({} tiles) — impostor handoff ready",
+            target: "thalos::diagnostic::tile_terrain",
+            event = "first_coverage",
+            elapsed_ms,
+            desired = root_ref.desired.len(),
+            resident = root_ref.resident.len(),
+            pending = root_ref.pending.len(),
+            bootstrap = root_ref.bootstrap.len(),
+            bootstrap_split_scale = BOOTSTRAP_SPLIT_SCALE,
+            "initial tile coverage ready"
+        );
+        info!(
+            "tile terrain: initial coverage ready in {:.2} s ({} tiles); refining in place",
+            elapsed_ms / 1_000.0,
             root_ref.resident.len()
         );
     }
@@ -2356,6 +2935,11 @@ fn stream_tile_terrain(
     for key in scratch.expired.drain(..) {
         if let Some(entity) = root_ref.resident.remove(&key) {
             commands.entity(entity).despawn();
+            let slot = root_ref
+                .resident_gpu_slots
+                .remove(&key)
+                .expect("resident terrain tile must own an atlas slot");
+            gpu_store.release(slot);
             if let Ok(mut mirror) = root_ref.height_mirror.write() {
                 mirror.remove(key);
             }
@@ -2413,6 +2997,13 @@ fn stream_tile_terrain(
             event = "residency_gauge",
             resident = root_ref.resident.len(),
             resident_mib = mib(root_ref.resident_bytes()),
+            atlas_allocated_mib = mib(gpu::TILE_GPU_ALLOCATED_BYTES),
+            atlas_free_slots = gpu_store.free_slot_count(),
+            atlas_slots = gpu::TILE_GPU_ATLAS_SLOTS,
+            atlas_usable_slots = gpu::TILE_GPU_USABLE_SLOTS,
+            patch_lod_33 = patch_lod_gauge.r33,
+            patch_lod_65 = patch_lod_gauge.r65,
+            patch_lod_129 = patch_lod_gauge.r129,
             pending = root_ref.pending.len(),
             desired = root_ref.desired.len(),
             retiring = root_ref.retiring.len(),
@@ -2548,68 +3139,90 @@ mod budget_tests {
         }
     }
 
-    /// The budget's denominator must equal what the mesher actually uploads.
-    /// A new vertex attribute (NTR-RT1 wants TANGENT) silently under-counts
-    /// VRAM otherwise, and an under-counting budget is worse than none: it
-    /// reports headroom that does not exist.
+    /// GPU displacement must reproduce the retired CPU mesh exactly. This is
+    /// the precision contract: the atlas carries f64-built local positions;
+    /// the vertex shader does not reconstruct a multi-megametre sphere in f32.
     #[test]
-    fn tile_mesh_bytes_matches_the_built_mesh() {
-        let built = build_tile_mesh(
-            &flat_tile(TileKey {
-                face: 0,
-                level: 6,
-                x: 3,
-                y: 5,
-            }),
-            R,
-            RELIEF,
-            false,
-        );
-        let vertex_bytes = built.mesh.get_vertex_buffer_size();
-        let index_bytes = built
+    fn tile_gpu_payload_matches_the_reference_mesh() {
+        let source = flat_tile(TileKey {
+            face: 0,
+            level: 6,
+            x: 3,
+            y: 5,
+        });
+        let built = build_tile_mesh(&source, R, RELIEF, false);
+        let payload = gpu::build_tile_payload(&source, R, RELIEF);
+        assert_eq!(payload.position_bytes.len(), gpu::TILE_GPU_POSITION_BYTES);
+        assert_eq!(payload.surface_bytes.len(), gpu::TILE_GPU_SURFACE_BYTES);
+        assert_eq!(TILE_MESH_BYTES, gpu::TILE_GPU_SLOT_BYTES);
+
+        let atlas_positions: &[[f32; 4]] = bytemuck::cast_slice(&payload.position_bytes);
+        let mesh_positions = built
             .mesh
-            .get_index_buffer_bytes()
-            .expect("tile meshes are indexed")
-            .len();
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|values| values.as_float3())
+            .expect("reference mesh positions");
+        let side = SurfaceTile::grid_side();
+        for j in 0..TILE_RES {
+            for i in 0..TILE_RES {
+                let mesh = mesh_positions[j * TILE_RES + i];
+                let atlas = atlas_positions[(j + TILE_HALO) * side + i + TILE_HALO];
+                assert_eq!(mesh, atlas[..3]);
+            }
+        }
+        for skirt in 0..TILE_SKIRT_VERTS {
+            assert_eq!(
+                mesh_positions[TILE_RES * TILE_RES + skirt],
+                atlas_positions[side * side + skirt][..3],
+            );
+        }
+        assert_eq!(payload.origin, built.origin);
+        assert_eq!(payload.surface_aabb, built.surface_aabb);
+    }
+
+    #[test]
+    fn index_density_probe_builds_a_compact_full_attribute_twin() {
+        let positions = (0..TILE_VERTS)
+            .map(|index| [index as f32, 0.0, 0.0])
+            .collect::<Vec<_>>();
+        let normals = vec![[0.0, 1.0, 0.0]; TILE_VERTS];
+        let colors = vec![[0.5, 0.4, 0.3, 0.2]; TILE_VERTS];
+        let uv0 = vec![[0.1, 0.2]; TILE_VERTS];
+        let uv1 = vec![[0.3, 0.4]; TILE_VERTS];
+        let probe = build_tile_index_probe_mesh(&positions, &normals, &colors, &uv0, &uv1);
+
+        assert_eq!(probe.count_vertices(), FAR_CASTER_VERTS);
         assert_eq!(
-            vertex_bytes + index_bytes,
-            TILE_MESH_BYTES,
-            "TILE_MESH_BYTES ({TILE_MESH_BYTES}) disagrees with the mesh \
-             ({vertex_bytes} vertex + {index_bytes} index) — an attribute changed"
-        );
-        assert_eq!(
-            built.mesh.primitive_topology(),
-            PrimitiveTopology::TriangleStrip
+            probe.get_vertex_buffer_size(),
+            FAR_CASTER_VERTS * TILE_VERTEX_BYTES
         );
         assert!(
-            matches!(built.mesh.indices(), Some(Indices::U16(indices)) if indices.len() == TILE_STRIP_INDICES),
-            "visible tiles must keep the compact restart-delimited U16 strip"
+            matches!(probe.indices(), Some(Indices::U16(indices)) if indices.len() == FAR_CASTER_STRIP_INDICES)
         );
+        let compact_positions = probe
+            .attribute(Mesh::ATTRIBUTE_POSITION)
+            .and_then(|attribute| attribute.as_float3())
+            .expect("probe positions");
+        for j in 0..FAR_CASTER_RES {
+            for i in 0..FAR_CASTER_RES {
+                let compact = j * FAR_CASTER_RES + i;
+                let dense = (j * FAR_CASTER_STEP) * TILE_RES + i * FAR_CASTER_STEP;
+                assert_eq!(compact_positions[compact], positions[dense]);
+            }
+        }
+        assert_eq!(
+            compact_positions[FAR_CASTER_RES * FAR_CASTER_RES],
+            positions[TILE_RES * TILE_RES]
+        );
+        assert!(probe.attribute(Mesh::ATTRIBUTE_COLOR).is_some());
+        assert!(probe.attribute(Mesh::ATTRIBUTE_UV_0).is_some());
+        assert!(probe.attribute(Mesh::ATTRIBUTE_UV_1).is_some());
     }
 
     #[test]
     fn far_caster_mesh_is_budgeted_and_samples_visible_tile_boundaries() {
-        let built = build_tile_mesh(
-            &flat_tile(TileKey {
-                face: 0,
-                level: 6,
-                x: 3,
-                y: 5,
-            }),
-            R,
-            RELIEF,
-            true,
-        );
-        let caster = built
-            .far_caster_mesh
-            .as_ref()
-            .expect("caster-enabled build produces the broad-cascade twin");
-        let vertex_bytes = caster.get_vertex_buffer_size();
-        let index_bytes = caster
-            .get_index_buffer_bytes()
-            .expect("far caster is indexed")
-            .len();
-        assert_eq!(vertex_bytes + index_bytes, FAR_CASTER_MESH_BYTES);
+        let caster = gpu::build_patch_mesh(gpu::PatchResolution::R33);
+        assert_eq!(FAR_CASTER_MESH_BYTES, 0);
         assert_eq!(
             caster.primitive_topology(),
             PrimitiveTopology::TriangleStrip
@@ -2618,20 +3231,21 @@ mod budget_tests {
             matches!(caster.indices(), Some(Indices::U16(indices)) if indices.len() == FAR_CASTER_STRIP_INDICES)
         );
 
-        let visible = built
-            .mesh
-            .attribute(Mesh::ATTRIBUTE_POSITION)
-            .and_then(|attribute| attribute.as_float3())
-            .expect("visible tile has positions");
         let coarse = caster
             .attribute(Mesh::ATTRIBUTE_POSITION)
             .and_then(|attribute| attribute.as_float3())
-            .expect("far caster has positions");
+            .expect("far caster has atlas addresses");
         for j in 0..FAR_CASTER_RES {
             for i in 0..FAR_CASTER_RES {
                 let coarse_index = j * FAR_CASTER_RES + i;
-                let visible_index = (j * FAR_CASTER_STEP) * TILE_RES + i * FAR_CASTER_STEP;
-                assert_eq!(coarse[coarse_index], visible[visible_index]);
+                assert_eq!(
+                    coarse[coarse_index][0] as usize,
+                    TILE_HALO + i * FAR_CASTER_STEP
+                );
+                assert_eq!(
+                    coarse[coarse_index][1] as usize,
+                    TILE_HALO + j * FAR_CASTER_STEP
+                );
             }
         }
     }
@@ -2763,14 +3377,11 @@ mod budget_tests {
         // Pin the figures the RT_TILE_MESH_BYTES docs quote and NTR-RT1's
         // budget reasons from, so prose and code cannot drift apart.
         assert_eq!(RT_TILE_MESH_BYTES / 1024, 1_200, "documented as 1,200 KiB");
-        assert_eq!(
-            TILE_MESH_BYTES, 1_031_990,
-            "documented as 1,008 KiB rounded"
-        );
+        assert_eq!(TILE_MESH_BYTES, 351_604, "documented atlas slot payload");
         let ratio = (TILE_MESH_BYTES + RT_TILE_MESH_BYTES) as f64 / TILE_MESH_BYTES as f64;
         assert!(
-            (ratio - 2.19).abs() < 0.005,
-            "documented as 2.19x, computed {ratio:.3}"
+            (ratio - 4.50).abs() < 0.01,
+            "documented as about 4.50x, computed {ratio:.3}"
         );
     }
 
@@ -3662,7 +4273,7 @@ mod skirt_tests {
     /// tile is wide. The near cascades are packed with exactly these fine tiles,
     /// which is why the flood showed up there first.
     #[test]
-    fn caster_bounds_describe_the_surface_not_the_curtain() {
+    fn visible_and_caster_bounds_describe_the_surface_not_the_curtain() {
         const RELIEF: f64 = 2_500.0;
         let key = TileKey {
             face: 0,
@@ -3700,7 +4311,7 @@ mod skirt_tests {
         let whole_depth = whole.half_extents.max_element();
         assert!(
             surface_depth * 4.0 < whole_depth,
-            "the caster box is not meaningfully tighter than the full mesh box \
+            "the tile box is not meaningfully tighter than the full mesh box \
              (surface {surface_depth:.1} m vs whole {whole_depth:.1} m half-extent) — \
              either the skirt is inside `surface_aabb` or the curtain stopped hanging"
         );
@@ -3717,7 +4328,7 @@ mod skirt_tests {
             for axis in 0..3 {
                 assert!(
                     p[axis] >= lo[axis] - 1.0e-3 && p[axis] <= hi[axis] + 1.0e-3,
-                    "surface vertex {n} falls outside the caster box on axis {axis}"
+                    "surface vertex {n} falls outside the tile box on axis {axis}"
                 );
             }
         }
@@ -3727,6 +4338,87 @@ mod skirt_tests {
 #[cfg(test)]
 mod streaming_tests {
     use super::*;
+
+    #[test]
+    fn bootstrap_cuts_real_thalos_cold_admission_by_at_least_half() {
+        const RADIUS_M: f64 = 3_186_000.0;
+        const RELIEF_M: f64 = 9_797.6;
+        let cam = DVec3::new(0.31, 0.72, 0.62).normalize() * (RADIUS_M + 1_000.0);
+        // Laptop is the macOS startup default. A cold root has no ruggedness
+        // measurements yet, matching the first production selection exactly.
+        let desired = select_leaves_scaled(
+            cam,
+            RADIUS_M,
+            max_level_for(RADIUS_M),
+            RELIEF_M,
+            &|_| None,
+            0.5,
+            0.0,
+            &[],
+        );
+        let bootstrap = select_leaves_scaled(
+            cam,
+            RADIUS_M,
+            max_level_for(RADIUS_M),
+            RELIEF_M,
+            &|_| None,
+            0.5 * BOOTSTRAP_SPLIT_SCALE,
+            0.0,
+            &[],
+        );
+        let resident: HashMap<_, _> = bootstrap
+            .iter()
+            .copied()
+            .map(|key| (key, Entity::PLACEHOLDER))
+            .collect();
+        let cam_dir = cam.normalize();
+        let final_nadir = desired
+            .iter()
+            .find(|key| TileKey::containing_dir(cam_dir, key.level) == **key)
+            .expect("final selection covers the camera direction");
+        let bootstrap_nadir = bootstrap
+            .iter()
+            .find(|key| TileKey::containing_dir(cam_dir, key.level) == **key)
+            .expect("bootstrap selection covers the camera direction");
+
+        eprintln!(
+            "Thalos cold admission: {} L{} final leaves -> {} L{} bootstrap tiles",
+            desired.len(),
+            final_nadir.level,
+            bootstrap.len(),
+            bootstrap_nadir.level,
+        );
+        assert!(
+            bootstrap.len() * 2 <= desired.len(),
+            "bootstrap no longer removes at least half of initial mesh admissions"
+        );
+        assert_eq!(
+            bootstrap_nadir.level, final_nadir.level,
+            "bootstrap reduced the ground detail directly under the camera"
+        );
+        assert!(
+            desired
+                .iter()
+                .all(|&key| resident_ancestor_or_self(key, &resident)),
+            "bootstrap is not a complete ancestor cover of the final selection"
+        );
+    }
+
+    #[test]
+    fn parking_orbit_to_pad_invalidates_frozen_bootstrap() {
+        const RADIUS_M: f64 = 3_186_000.0;
+        let pad = DVec3::Y * (RADIUS_M + 5.0);
+        let parking = DVec3::Y * (RADIUS_M + 200_000.0);
+        assert!(
+            bootstrap_eye_teleported(parking, pad, RADIUS_M),
+            "a 200 km pad drop must discard the orbital bootstrap"
+        );
+        let drift = DVec3::Y * (RADIUS_M + 200_000.0) + DVec3::X * 1_000.0;
+        assert!(
+            !bootstrap_eye_teleported(parking, drift, RADIUS_M),
+            "a kilometre of ordinary motion must not restart the cold cover"
+        );
+    }
 
     /// Simulate the production streaming loop through a continuous descent —
     /// selection, cancellation, capped admission, landing latency, lax
@@ -3791,26 +4483,34 @@ mod streaming_tests {
         let mut retiring: HashMap<TileKey, (f32, u16)> = HashMap::new();
         // The production ruggedness memo: measured once per key, never pruned.
         let mut rugged_memo: HashMap<TileKey, f32> = HashMap::new();
-        let select = |cam: DVec3, memo: &HashMap<TileKey, f32>| -> HashSet<TileKey> {
-            if rugged_field.is_none() {
-                return select_leaves(cam, RADIUS_M, max_level);
-            }
-            select_leaves_with_relief(cam, RADIUS_M, max_level, RELIEF_M, &|key| {
-                let mut k = key;
-                loop {
-                    if let Some(&r) = memo.get(&k) {
-                        return Some(r);
+        let select = |cam: DVec3, memo: &HashMap<TileKey, f32>, scale: f64| -> HashSet<TileKey> {
+            select_leaves_scaled(
+                cam,
+                RADIUS_M,
+                max_level,
+                RELIEF_M,
+                &|key| {
+                    rugged_field?;
+                    let mut k = key;
+                    loop {
+                        if let Some(&r) = memo.get(&k) {
+                            return Some(r);
+                        }
+                        match k.parent() {
+                            Some(p) if p.level >= MIN_LEVEL => k = p,
+                            _ => return None,
+                        }
                     }
-                    match k.parent() {
-                        Some(p) if p.level >= MIN_LEVEL => k = p,
-                        _ => return None,
-                    }
-                }
-            })
+                },
+                scale,
+                0.0,
+                &[],
+            )
         };
         // (key, seconds-until-landed); at most MAX_IN_FLIGHT actively count
         // down, the rest queue — mirrors the bounded pool.
         let mut pending: Vec<(TileKey, f32)> = Vec::new();
+        let mut bootstrap: HashSet<TileKey> = HashSet::new();
         let mut covered_once = false;
         // Event log for post-mortem on failure: (t, what, key).
         let mut events: Vec<(f32, &'static str, TileKey)> = Vec::new();
@@ -3845,16 +4545,27 @@ mod streaming_tests {
             // identical set, and the stationary settle is most of the ticks.
             let memo_len = rugged_memo.len();
             if cam != last_cam || memo_len != last_memo_len {
-                desired = select(cam, &rugged_memo);
+                desired = select(cam, &rugged_memo, 1.0);
                 last_cam = cam;
                 last_memo_len = memo_len;
             }
-            let bridges = bridge_requests(&desired, &resident);
+            let bridges = if covered_once {
+                bridge_requests(&desired, &resident)
+            } else {
+                if bootstrap.is_empty() {
+                    bootstrap = select(cam, &rugged_memo, BOOTSTRAP_SPLIT_SCALE);
+                }
+                HashSet::new()
+            };
 
             // Cancel pendings nobody wants (production: Task drop).
-            let (keep, cancelled): (Vec<_>, Vec<_>) = pending
-                .into_iter()
-                .partition(|(key, _)| desired.contains(key) || bridges.contains(key));
+            let (keep, cancelled): (Vec<_>, Vec<_>) = pending.into_iter().partition(|(key, _)| {
+                if covered_once {
+                    desired.contains(key) || bridges.contains(key)
+                } else {
+                    bootstrap.contains(key)
+                }
+            });
             pending = keep;
             for (key, _) in cancelled {
                 events.push((t, "cancel", key));
@@ -3862,9 +4573,13 @@ mod streaming_tests {
 
             // Admit missing (desired + bridges) by screen-size priority up to
             // the in-flight cap.
-            let mut missing: Vec<TileKey> = desired
+            let requests: Vec<TileKey> = if covered_once {
+                desired.iter().chain(bridges.iter()).copied().collect()
+            } else {
+                bootstrap.iter().copied().collect()
+            };
+            let mut missing: Vec<TileKey> = requests
                 .iter()
-                .chain(bridges.iter())
                 .filter(|k| !resident.contains_key(k) && !pending.iter().any(|(p, _)| p == *k))
                 .copied()
                 .collect();
@@ -3900,8 +4615,9 @@ mod streaming_tests {
             }
 
             if !covered_once
-                && !desired.is_empty()
-                && desired.iter().all(|k| resident.contains_key(k))
+                && !bootstrap.is_empty()
+                && pending.is_empty()
+                && bootstrap.iter().all(|key| resident.contains_key(key))
             {
                 covered_once = true;
             }
@@ -3963,7 +4679,7 @@ mod streaming_tests {
         // the relief rule live this also catches a ratcheting oracle — a
         // ruggedness estimate that keeps deepening the selection would leave
         // the resident set permanently chasing it.
-        let desired = select(cam_at(sim_end_s), &rugged_memo);
+        let desired = select(cam_at(sim_end_s), &rugged_memo, 1.0);
         let stale: Vec<TileKey> = resident
             .keys()
             .filter(|k| !desired.contains(k))
@@ -4011,9 +4727,19 @@ impl Plugin for TileTerrainPlugin {
         if !app.is_plugin_added::<crate::shading::PlanetLightingPlugin>() {
             app.add_plugins(crate::shading::PlanetLightingPlugin);
         }
-        app.add_plugins(bevy::pbr::MaterialPlugin::<material::TileTerrainMaterial>::default());
+        app.add_plugins((
+            gpu::TileGpuPlugin,
+            bevy::pbr::MaterialPlugin::<material::TileTerrainMaterial>::default(),
+            bevy::pbr::MaterialPlugin::<material::TileCasterMaterial>::default(),
+        ));
         app.init_resource::<TileEye>()
-            .add_systems(Update, stream_tile_terrain.in_set(TileStreamSet))
+            .init_resource::<TilePatchLodGauge>()
+            .add_systems(
+                Update,
+                (stream_tile_terrain, update_patch_lod)
+                    .chain()
+                    .in_set(TileStreamSet),
+            )
             // `Last`, not `PostUpdate`: the game's cloud driver resolves the
             // cascade frame in `PostUpdate`, and the compute pass marches THAT
             // frame the same frame. Fanning the receiver block from an

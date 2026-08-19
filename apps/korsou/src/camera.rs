@@ -133,7 +133,12 @@ fn spawn_camera(
     });
 
     let mut entity = commands.spawn((
-        Camera3d::default(),
+        Camera3d {
+            depth_texture_usages: thalos_render_foundation::scene_depth_view_texture_usages()
+                .into(),
+            ..default()
+        },
+        thalos_render_foundation::SceneDepthView,
         Projection::Perspective(PerspectiveProjection {
             near: 0.5,
             far: 220_000.0,

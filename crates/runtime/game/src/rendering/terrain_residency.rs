@@ -552,6 +552,7 @@ fn initial_residency_loading_gate(
     residency: Res<BodyTerrainResidency>,
     sim: Res<SimulationState>,
     tile_roots: Query<&thalos_body_render::tiles::TileTerrainRoot>,
+    headless_capture: Option<Res<crate::screenshot::HeadlessCaptureOwnsTerrainReadiness>>,
 ) {
     // No-op once complete, and on runtime re-loads that don't register the
     // step (the start screen's runway pass — the world is already up).
@@ -564,6 +565,21 @@ fn initial_residency_loading_gate(
     // spawn terrain for installed bakes, and waiting keeps this gate from
     // passing trivially on frame 0 before the wanted set means anything.
     if !tracker.is_step_complete(crate::loading::step::BODIES) {
+        return;
+    }
+    // Headless capture owns readiness for the complete terrain set it will
+    // actually render, not merely for the body the tile root currently owns.
+    // The orbit prediction can nominate another `Near` body; with legacy udlod
+    // absent, retaining the per-body gate for that body can never complete.
+    // Once the standard tile path has a live root, reveal `Running` so the
+    // scripted camera can select the real body/view and settle it exactly.
+    if capture_owns_tile_readiness(
+        headless_capture.is_some(),
+        crate::rendering::tile_terrain::tile_renderer_enabled(),
+    ) {
+        if tile_roots.iter().next().is_some() {
+            tracker.complete(crate::loading::step::TERRAIN);
+        }
         return;
     }
     // Every *gameplay-relevant* (`Near`) body the residency planner wants must
@@ -580,11 +596,23 @@ fn initial_residency_loading_gate(
     // with `Surface terrain` incomplete, long after the ground was actually up
     // (observed 2026-07-26 01:23: full tile coverage at t+21 s, timeout at
     // t+120 s). For those bodies the equivalent condition is the tile path's own
-    // handoff criterion, `coverage_ready` — the desired selection has been fully
-    // resident at least once.
-    let tile_covered = |body_id: BodyId| {
-        crate::rendering::tile_terrain::tile_rendered(body_id)
-            && tile_roots.iter().any(|r| r.coverage_ready())
+    // handoff criterion, `coverage_ready` — the desired footprints have a
+    // complete resident cover (the bounded bootstrap on a cold start, then
+    // progressive refinement to the exact desired leaves).
+    //
+    // Surface boots that also register `step::SETTLE` wait for that cover *after*
+    // the craft sits down, at the pad, not here. Completing this step on first
+    // cover of the parking-orbit placeholder would synthesize tiles the real
+    // view immediately discards. A live root is enough for settle to take
+    // ownership; settle then requires exact-view cover.
+    let downstream_owns_cover = tracker.has_step(crate::loading::step::SETTLE);
+    let tile_ready = |body_id: BodyId| {
+        tile_loading_ready(
+            crate::rendering::tile_terrain::tile_rendered(body_id),
+            tile_roots.iter().next().is_some(),
+            tile_roots.iter().any(|root| root.coverage_ready()),
+            downstream_owns_cover,
+        )
     };
     for (body_id, tier) in &wanted.0 {
         if *tier != TerrainTier::Near {
@@ -596,11 +624,24 @@ fn initial_residency_loading_gate(
             .bodies
             .get(*body_id)
             .is_some_and(|b| !b.terrain.is_some());
-        if !resident && !no_terrain && !tile_covered(*body_id) {
+        if !resident && !no_terrain && !tile_ready(*body_id) {
             return;
         }
     }
     tracker.complete(crate::loading::step::TERRAIN);
+}
+
+fn capture_owns_tile_readiness(headless_capture: bool, tile_renderer_enabled: bool) -> bool {
+    headless_capture && tile_renderer_enabled
+}
+
+fn tile_loading_ready(
+    tile_rendered: bool,
+    root_exists: bool,
+    coverage_ready: bool,
+    downstream_owns_cover: bool,
+) -> bool {
+    tile_rendered && root_exists && (downstream_owns_cover || coverage_ready)
 }
 
 #[cfg(test)]
@@ -641,5 +682,59 @@ mod placement_gate_tests {
         tracker.begin(steps_for(SpawnSituation::ShipOrbit, true));
         assert!(!tracker.has_step(step::PLACEMENT));
         assert!(placement_settled(&tracker));
+    }
+
+    /// Launch/runway register settle, which waits for pad-view coverage after
+    /// placement. The terrain step must not also wait on parking-orbit cover
+    /// or every surface boot synthesizes a whole-planet bootstrap and discards
+    /// it (INC-20260817T003451Z).
+    #[test]
+    fn launch_settle_owns_the_tile_cover_wait() {
+        let mut tracker = LoadingTracker::default();
+        tracker.begin(steps_for(SpawnSituation::Launch, true));
+        assert!(tracker.has_step(step::TERRAIN));
+        assert!(
+            tracker.has_step(step::SETTLE),
+            "launch must keep settle so the terrain step can complete on a live root"
+        );
+
+        let mut orbit = LoadingTracker::default();
+        orbit.begin(steps_for(SpawnSituation::ShipOrbit, true));
+        assert!(orbit.has_step(step::TERRAIN));
+        assert!(
+            !orbit.has_step(step::SETTLE),
+            "orbit has no settle step; it still waits on coverage_ready"
+        );
+    }
+
+    #[test]
+    fn downstream_consumer_can_take_tile_cover_ownership_after_root_spawn() {
+        assert!(tile_loading_ready(true, true, false, true));
+        assert!(tile_loading_ready(true, true, true, false));
+        assert!(
+            !tile_loading_ready(true, true, false, false),
+            "interactive orbit boots still wait for their initial coverage"
+        );
+        assert!(
+            !tile_loading_ready(false, true, true, true),
+            "the consumer cannot take ownership before the tile renderer claims the body"
+        );
+        assert!(
+            !tile_loading_ready(true, false, true, true),
+            "the consumer needs a live root before it can settle the target view"
+        );
+    }
+
+    #[test]
+    fn headless_tile_capture_owns_the_complete_wanted_set() {
+        assert!(capture_owns_tile_readiness(true, true));
+        assert!(
+            !capture_owns_tile_readiness(false, true),
+            "interactive boots retain the per-body residency gate"
+        );
+        assert!(
+            !capture_owns_tile_readiness(true, false),
+            "legacy capture retains its legacy terrain gate"
+        );
     }
 }

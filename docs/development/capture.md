@@ -111,7 +111,7 @@ just capture spaceport-aerial dry-belt --graphics grass=off
 
 The profile is a partial patch over deterministic capture defaults, so omitted
 settings do not inherit either the player's preferences or the previous request
-served by a persistent host. The current fields are `clouds` and `grass`;
+served by a persistent host. The current fields are `clouds`, `grass`, and `foliage`;
 additional graphics preferences extend the same typed protocol object.
 
 One host means one world, one render device, and one active real camera.
@@ -373,7 +373,9 @@ Each PNG is paired with `<image>.capture.json`
 PID, Git revision and dirty state, full capture-input fingerprint, the host's
 launch/build fingerprint, the post-readback workspace fingerprint, and
 `source_floor_guaranteed`, `workspace_relation`, and the compatibility boolean
-`workspace_matches`. Console success prints the short floor fingerprint as an
+`workspace_matches`. Its effective graphics block includes the shadow cascade
+count and active-map size, so a plausible image cannot silently inherit a
+different shadow tier. Console success prints the short floor fingerprint as an
 immediate inclusion check. `workspace_matches: false` means the checkout
 advanced; it does not invalidate the capture or prove whether a particular
 later edit was consumed. Comparison manifests reference every variant receipt
@@ -454,6 +456,7 @@ Every `<name>.capture.json` carries a `terrain` block sampled **at readback**:
 "terrain": {
   "split_scale": 1.0, "worst_split_scale": 1.0,
   "resident_tiles": 5572, "desired_tiles": 7830,
+  "settled": false, "settle_wait_s": 180.0,
   "resident_mib": 1888.5, "budget_mib": 2048.0,
   "instances": 1, "brake_wait_s": 0.0
 }
@@ -466,14 +469,18 @@ stderr warning, the tool lane records `tile_split_scale` / `terrain_braked_count
 and `just diag` reports it as `capture_terrain_braked` naming the preset. Absent
 block = the legacy udlod path, where there is no such thing to report.
 
+`settled: false` is independently invalid: the authored selection was not fully
+covered at readback even if `split_scale` is 1.0. The host holds after ordinary
+warmup until coverage settles, bounded by the same 180 s stream ceiling used by
+massif captures; a timeout captures for diagnosis but prints a warning and
+records `terrain_unsettled` plus `settle_wait_s`.
+
 Read the other fields before blaming the framing:
 
 - `instances` above 1 means a peer renderer halved this host's share
   (INC-20260725T012104Z), so the framing is fine and the machine is busy.
-- `desired_tiles` far above `resident_tiles` with `split_scale` at 1.0 is a
-  framing living close to its allowance — `cloud-godray` reads 5,572 resident of
-  7,830 wanted at 92 % of a 2 GiB share, which is why it is the preset that
-  brakes first.
+- `desired_tiles` far above `resident_tiles` with `split_scale` at 1.0 and
+  `settled: false` means streaming, not the memory brake, failed to finish.
 - `brake_wait_s` above zero with `split_scale` back at 1.0 is the readback gate
   working: it waited, the brake let go, the image is good.
 

@@ -9,6 +9,7 @@
 mod graphics;
 mod menu;
 mod persistence;
+mod render_scale;
 mod window;
 
 pub use graphics::{
@@ -23,6 +24,7 @@ pub use menu::{
 pub use persistence::{
     AppPreferences, PreferencesPlugin, first_run_defaults_for, load, preferences_path, save,
 };
+pub use render_scale::{RenderScaleSet, RenderScaleState, scaled_physical_size};
 pub use thalos_ui::UiBackdropSource;
 pub use window::{
     RESOLUTION_PRESETS, UI_SCALE_MAX, UI_SCALE_MIN, WindowModeSetting, WindowSettings,

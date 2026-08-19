@@ -165,7 +165,7 @@ impl RenderPlan {
             terrain: TerrainAdapter::PlanarRtin,
             atmosphere: AtmosphereAdapter::BevyEarth,
             ocean: OceanAdapter::PlanarClipmap,
-            clouds: CloudAdapter::None,
+            clouds: CloudAdapter::PlanetaryVolume,
             lighting: LightingAdapter::BevyStandard,
             far_body: FarBodyAdapter::None,
         }
@@ -208,7 +208,10 @@ impl RenderPlan {
                         AtmosphereAdapter::None | AtmosphereAdapter::BevyEarth
                     )
                     && matches!(self.ocean, OceanAdapter::None | OceanAdapter::PlanarClipmap)
-                    && self.clouds == CloudAdapter::None
+                    && matches!(
+                        self.clouds,
+                        CloudAdapter::None | CloudAdapter::PlanetaryVolume
+                    )
                     && self.lighting == LightingAdapter::BevyStandard
                     && self.far_body == FarBodyAdapter::None
             }
@@ -234,7 +237,10 @@ impl RenderPlan {
                         AtmosphereAdapter::None | AtmosphereAdapter::BevyEarth
                     )
                     && matches!(self.ocean, OceanAdapter::None | OceanAdapter::PlanarClipmap)
-                    && self.clouds == CloudAdapter::None
+                    && matches!(
+                        self.clouds,
+                        CloudAdapter::None | CloudAdapter::PlanetaryVolume
+                    )
                     && self.lighting == LightingAdapter::BevyStandard
             }
         };

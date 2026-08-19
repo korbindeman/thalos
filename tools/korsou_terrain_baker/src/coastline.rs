@@ -24,8 +24,66 @@ pub struct Coastline {
 impl Coastline {
     pub fn read(path: &Path, local_origin_utm_m: [f64; 2]) -> Result<Self> {
         let bytes = fs::read(path).with_context(|| format!("read {}", path.display()))?;
-        let document: OverpassDocument =
+        let value: serde_json::Value =
             serde_json::from_slice(&bytes).with_context(|| format!("parse {}", path.display()))?;
+        if value.get("format").and_then(|value| value.as_str()) == Some("korsou.coastline-rings.v1")
+        {
+            Self::from_rings(path, &value, local_origin_utm_m)
+        } else {
+            Self::from_overpass(path, &bytes, local_origin_utm_m)
+        }
+    }
+
+    fn from_rings(
+        path: &Path,
+        value: &serde_json::Value,
+        local_origin_utm_m: [f64; 2],
+    ) -> Result<Self> {
+        let document: RingsDocument = serde_json::from_value(value.clone())
+            .with_context(|| format!("parse coastline rings {}", path.display()))?;
+        ensure!(
+            !document.rings.is_empty(),
+            "coastline rings source is empty"
+        );
+        let mut rings = Vec::with_capacity(document.rings.len());
+        for (index, source) in document.rings.iter().enumerate() {
+            if source.len() < 4 {
+                eprintln!(
+                    "skipping coastline ring {index}: {} vertices is not a closed polygon",
+                    source.len()
+                );
+                continue;
+            }
+            let mut ring = Vec::with_capacity(source.len());
+            for &[lon, lat] in source {
+                let (easting, northing) = utm_forward(lat, lon, UTM_ZONE);
+                ring.push(utm_to_local(easting, northing, local_origin_utm_m));
+            }
+            ensure!(
+                ring.first() == ring.last(),
+                "coastline ring {index} is open"
+            );
+            rings.push(ring);
+        }
+        ensure!(
+            !rings.is_empty(),
+            "coastline rings source has no closed polygons"
+        );
+        let node_count = rings.iter().map(|ring| ring.len().saturating_sub(1)).sum();
+        let segment_count = rings.iter().map(|ring| ring.len() - 1).sum();
+        Ok(Self {
+            source_path: path.to_owned(),
+            source_timestamp: document.osm_timestamp,
+            way_count: rings.len(),
+            node_count,
+            segment_count,
+            rings,
+        })
+    }
+
+    fn from_overpass(path: &Path, bytes: &[u8], local_origin_utm_m: [f64; 2]) -> Result<Self> {
+        let document: OverpassDocument =
+            serde_json::from_slice(bytes).with_context(|| format!("parse {}", path.display()))?;
 
         let mut nodes = HashMap::new();
         let mut ways = Vec::new();
@@ -80,6 +138,20 @@ impl Coastline {
             segment_count,
             rings,
         })
+    }
+
+    pub fn write_polylines(&self, path: &Path) -> Result<()> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"KSH1");
+        bytes.extend_from_slice(&(self.rings.len() as u32).to_le_bytes());
+        for ring in &self.rings {
+            bytes.extend_from_slice(&(ring.len() as u32).to_le_bytes());
+            for &[x, z] in ring {
+                bytes.extend_from_slice(&x.to_le_bytes());
+                bytes.extend_from_slice(&z.to_le_bytes());
+            }
+        }
+        fs::write(path, bytes).with_context(|| format!("write {}", path.display()))
     }
 
     pub fn rasterize_land(
@@ -205,6 +277,12 @@ fn point_segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 #[derive(Deserialize)]
+struct RingsDocument {
+    osm_timestamp: String,
+    rings: Vec<Vec<[f64; 2]>>,
+}
+
+#[derive(Deserialize)]
 struct OverpassDocument {
     osm3s: OverpassMetadata,
     elements: Vec<OverpassElement>,
@@ -239,6 +317,38 @@ mod tests {
     fn assembles_reversed_ways_into_a_closed_ring() {
         let rings = assemble_rings(vec![vec![1, 2], vec![3, 2], vec![3, 1]]).unwrap();
         assert_eq!(rings, vec![vec![1, 2, 3, 1]]);
+    }
+
+    #[test]
+    fn skips_degenerate_lonlat_rings() {
+        let json = serde_json::json!({
+            "format": "korsou.coastline-rings.v1",
+            "osm_timestamp": "2026-08-07T20:31:21Z",
+            "rings": [
+                [[-69.0, 12.1], [-68.99, 12.1], [-68.99, 12.11], [-69.0, 12.11], [-69.0, 12.1]],
+                [[-69.1, 12.2], [-69.1, 12.2]]
+            ]
+        });
+        let path = std::env::temp_dir().join("korsou-coast-rings-degenerate.json");
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let coastline = Coastline::read(&path, [500_000.0, 1_350_000.0]).unwrap();
+        assert_eq!(coastline.way_count, 1);
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn reads_closed_lonlat_rings() {
+        let json = serde_json::json!({
+            "format": "korsou.coastline-rings.v1",
+            "osm_timestamp": "2026-08-07T20:31:21Z",
+            "rings": [[[-69.0, 12.1], [-68.99, 12.1], [-68.99, 12.11], [-69.0, 12.11], [-69.0, 12.1]]]
+        });
+        let path = std::env::temp_dir().join("korsou-coast-rings-test.json");
+        fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let coastline = Coastline::read(&path, [500_000.0, 1_350_000.0]).unwrap();
+        assert_eq!(coastline.way_count, 1);
+        assert_eq!(coastline.rings[0].first(), coastline.rings[0].last());
+        fs::remove_file(path).unwrap();
     }
 
     #[test]

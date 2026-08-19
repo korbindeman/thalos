@@ -128,12 +128,6 @@ const TERRAIN_REGOLITH_FILTER_VARIANTS: &[Variant] = &[
     },
 ];
 
-/// Renderer-path axis (NTR-X): the same scene through udlod's custom spine and
-/// through the standard-path tile renderer. The keystone's whole question — "is
-/// the tile path there yet?" — is a matched pair at one framing, so it belongs
-/// in the harness rather than in two hand-run screenshots
-/// (ADR-20260721T192218Z). Structural: the gate is read once at boot and decides
-/// which ground streams, so this axis always runs cold.
 /// Cascade budget, full set first. Unlike every other axis here this one is a
 /// COST ladder rather than a look comparison: each step removes one ortho view
 /// with its own cull, queue, depth pass and depth copy, so the `frame_gauge`
@@ -146,7 +140,7 @@ const SHADOW_CASCADE_VARIANTS: &[Variant] = &[
         value: "4",
     },
     Variant {
-        label: "3-no-near",
+        label: "3-no-farthest",
         value: "3",
     },
     Variant {
@@ -163,6 +157,34 @@ const SHADOW_CASCADE_VARIANTS: &[Variant] = &[
     },
 ];
 
+/// Shipping-facing bundles over the measured cascade ladder. Active maps stay
+/// 4096²; each lower tier removes the farthest active views and releases their
+/// targets. The raw 0→4 ladder above remains available for diagnosis.
+const SHADOW_QUALITY_VARIANTS: &[Variant] = &[
+    Variant {
+        label: "high-4",
+        value: "high",
+    },
+    Variant {
+        label: "medium-3",
+        value: "medium",
+    },
+    Variant {
+        label: "low-2",
+        value: "low",
+    },
+    Variant {
+        label: "off-0",
+        value: "off",
+    },
+];
+
+/// Renderer-path axis (NTR-X): the same scene through udlod's custom spine and
+/// through the standard-path tile renderer. The keystone's whole question — "is
+/// the tile path there yet?" — is a matched pair at one framing, so it belongs
+/// in the harness rather than in two hand-run screenshots
+/// (ADR-20260721T192218Z). Structural: the gate is read once at boot and decides
+/// which ground streams, so this axis always runs cold.
 /// Default first: `tiles` is the production ground renderer, `udlod` the
 /// legacy baseline it replaced.
 const RENDERER_VARIANTS: &[Variant] = &[
@@ -318,6 +340,11 @@ const AXES: &[Axis] = &[
         variants: SHADOW_CASCADE_VARIANTS,
     },
     Axis {
+        name: "shadow-quality",
+        env_key: "THALOS_SHADOW_QUALITY",
+        variants: SHADOW_QUALITY_VARIANTS,
+    },
+    Axis {
         name: "renderer",
         env_key: "THALOS_TILE_RENDERER",
         variants: RENDERER_VARIANTS,
@@ -434,7 +461,7 @@ pub(crate) fn run_cli(args: impl Iterator<Item = String>) -> Result<(), String> 
     // means five identical numbers and a wrong conclusion.
     let structural = matches!(
         args.axis.name,
-        "terrain-culling" | "renderer" | "shadow-cascades"
+        "terrain-culling" | "renderer" | "shadow-cascades" | "shadow-quality"
     );
     let cold = args.cold || structural;
     if structural && !args.cold {

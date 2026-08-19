@@ -45,7 +45,8 @@ direct, low-friction exploration of one real place.
 - Projected terrain: WGS 84 / UTM zone 19N, EPSG:32619.
 - Ellipsoid: WGS 84 geographic 3D, EPSG:4979 / EPSG:7030.
 - Vertical datum: EGM2008 height, EPSG:3855; `h = H + N` is explicit.
-- Coastline: attributed OpenStreetMap geometry projected into the same CRS.
+- Coastline: OSM land/sea rings densified with Sentinel-2 NDWI, projected into
+  the same CRS, and kept as polylines.
 - Runtime axes: `+X` east, `+Y` up, `-Z` north; one unit is one metre.
 - CPU terrain queries return DEM truth. Synthetic relief plus mipmapped
   albedo/normal detail change only the rendered surface and are explicitly
@@ -58,8 +59,8 @@ direct, low-friction exploration of one real place.
 ## Module map
 
 - `tools/korsou_terrain_baker`: reads georeferenced GeoTIFFs, reprojects them,
-  and bakes terrain, LOD error, coastline distance, and explicit CRS/datum
-  metadata.
+  and bakes terrain, LOD error, coastline polylines plus distance, and explicit
+  CRS/datum metadata.
 - `thalos_geodetic` + `spatial`: typed UTM/geodetic/ECEF/ENU/EGM2008 conversion
   and the two concrete runtime placement adapters.
 - `places`: owns the attributed WGS84 place catalog, its one-time projection

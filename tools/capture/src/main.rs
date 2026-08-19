@@ -69,6 +69,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_CLOUD_TIER",
     "THALOS_SCREENSHOT_CLOUD_FAR_FILTER",
     "THALOS_SCREENSHOT_CLOUD_FAR_AGGREGATION",
+    "THALOS_SCREENSHOT_RENDER_SCALE",
     "THALOS_SCREENSHOT_OCEAN_TIME",
     "THALOS_PLUME_PRESSURE",
     "THALOS_CONTACT_SHADOW",
@@ -81,6 +82,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
     "THALOS_TILE_BUDGET_MB",
+    "THALOS_SHADOW_QUALITY",
     "THALOS_SHADOW_CASCADES",
     "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
@@ -97,12 +99,17 @@ const STARTUP_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
     "THALOS_TILE_BUDGET_MB",
-    // Cascade budget: a boot `OnceLock`, so a warm host would serve any value
-    // at whatever count it booted with — silently, and with a plausible PNG.
+    // Shadow tier/cascade override: boot `OnceLock` inputs, so a warm host
+    // would serve any value at whatever count it booted with — silently, and
+    // with a plausible PNG.
+    "THALOS_SHADOW_QUALITY",
     "THALOS_SHADOW_CASCADES",
     "THALOS_CAPTURE_RSS_LIMIT_MB",
     "THALOS_RUNWAY_SITE",
     "THALOS_WGPU_BACKEND",
+    // 3D main-target scale is read at app boot (`lib.rs` headless init). A
+    // warm Showcase host would keep serving 1.00× if this stayed a live key.
+    "THALOS_SCREENSHOT_RENDER_SCALE",
     // Wall vs. driven simulation clock (`sim_clock::SimClockDrive`). A boot
     // property: it changes how Avian steps and how every warmup frame advances
     // the world, so switching it must restart the host rather than reuse one
@@ -917,6 +924,18 @@ fn capture_once(
                 // waited for the brake and then rendered clean is the gate
                 // working, and that is worth seeing in the lane too.
                 runlog::field("tile_split_scale", terrain.split_scale);
+                if terrain.settle_wait_s > 0.0 {
+                    runlog::field("terrain_settle_wait_s", terrain.settle_wait_s);
+                }
+                if !terrain.settled {
+                    runlog::count("terrain_unsettled");
+                    eprintln!(
+                        "WARNING: terrain coverage was NOT SETTLED at readback ({} tiles resident \
+                         of {} desired after waiting {:.0} s). Do not treat this image as terrain \
+                         evidence.",
+                        terrain.resident_tiles, terrain.desired_tiles, terrain.settle_wait_s,
+                    );
+                }
                 if terrain.brake_wait_s > 0.0 {
                     runlog::field("brake_wait_s", terrain.brake_wait_s);
                 }

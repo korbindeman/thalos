@@ -274,7 +274,12 @@ prepass-depth texture is terrain-blind. The shared workaround lives in
   transparent passes and issues `copy_texture_to_texture` from the main pass's
   `ViewDepthTexture` (which has terrain depth written by then) into
   the Image. Under MSAA it instead runs a depth-only fullscreen resolve that
-  copies sample 0 into the same single-sample image.
+  copies sample 0 into the same single-sample image. Source and destination
+  must match in size; a skipped copy leaves empty depth and the sky paints
+  opaque air over every pixel above the geometric horizon
+  (INC-20260817T014132Z). Laptop 0.50× 3D is the usual hang — the scale must
+  land on `ExtractedCamera` in `PrepareViews`, after extract, not in
+  `ExtractSchedule`.
 - `BodySkyMaterial` binds the Image as `texture_depth_2d` at
   `@group(3) @binding(2)`; `body_sky.wgsl` reads it via
   `textureLoad` and reconstructs view-space distance with

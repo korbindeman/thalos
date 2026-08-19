@@ -55,7 +55,7 @@ Steps are built by `loading::steps_for(situation, boot)`:
 |---|---|---|---|
 | `session` | Projecting session | live-world non-spaceport session replacement | `session_loading::complete_live_session_projection`, after relaunch becomes idle |
 | `bodies` | Celestial bodies | boot only | total seeded by `rendering::spawn::spawn_bodies`; advanced (+ body-name detail) by `rendering::generation::poll_planet_install_tasks` |
-| `terrain` | Surface terrain | boot only | `rendering::terrain_residency::initial_residency_loading_gate`, gated on `bodies` completing first |
+| `terrain` | Surface terrain | boot only | `rendering::terrain_residency::initial_residency_loading_gate`, gated on `bodies` completing first. On runway/launch, this completes once the tile root exists; `settle` waits for the pad-view cover so the step does not stream the parking-orbit placeholder. |
 | `placement` | Placing craft | scenarios with a deferred placement | `spawn::refine_descent_spawn` or `runway::finish_runway_spawn` |
 | `settle` | Settling terrain | parked `Runway` only | `surface_settle::update_surface_settle` (publishes a live m/texel detail + progress estimate) |
 

@@ -1,3 +1,4 @@
+mod coast;
 mod data;
 mod mesh;
 mod quadtree;
@@ -126,6 +127,7 @@ fn stream_terrain(
     spatial: Res<TerrainSpatialFrame>,
     material: Option<Res<TerrainMaterial>>,
     camera: Single<(&TerrainCamera, &Projection, &Camera)>,
+    render_scale: Res<thalos_runtime::preferences::RenderScaleState>,
     mut state: ResMut<TerrainStreamState>,
     mut stats: ResMut<TerrainStats>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -134,7 +136,7 @@ fn stream_terrain(
     if !ready {
         return;
     }
-    let Some(viewport_height) = camera.2.physical_viewport_size().map(|size| size.y) else {
+    let Some(viewport_height) = render_scale.physical_viewport(camera.2).map(|size| size.y) else {
         return;
     };
     state.first_tick = false;

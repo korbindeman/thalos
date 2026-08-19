@@ -138,10 +138,22 @@ pub struct CaptureGraphicsSettings {
     pub grass: bool,
     #[serde(default = "capture_graphics_default_on")]
     pub foliage: bool,
+    #[serde(default = "capture_graphics_default_shadow_cascades")]
+    pub shadow_cascades: u8,
+    #[serde(default = "capture_graphics_default_shadow_map_size")]
+    pub shadow_map_size_px: u32,
 }
 
 fn capture_graphics_default_on() -> bool {
     true
+}
+
+fn capture_graphics_default_shadow_cascades() -> u8 {
+    4
+}
+
+fn capture_graphics_default_shadow_map_size() -> u32 {
+    4096
 }
 
 /// Tile-terrain residency at the moment the image was read back.
@@ -169,6 +181,15 @@ pub struct CaptureTerrainResidency {
     /// Landed tiles at readback, and what the selector wanted before the brake.
     pub resident_tiles: usize,
     pub desired_tiles: usize,
+    /// True only when the desired leaf set is fully covered and no tile work
+    /// remains in flight at readback. A plausible PNG with this false is not
+    /// settled terrain evidence even when `split_scale == 1`.
+    #[serde(default)]
+    pub settled: bool,
+    /// Wall-clock seconds the capture held after its ordinary frame warmup for
+    /// desired coverage to settle.
+    #[serde(default)]
+    pub settle_wait_s: f64,
     pub resident_mib: f64,
     /// This process's share of the machine-wide tile budget, MiB. `None` when
     /// the budget is disabled (`THALOS_TILE_BUDGET_MB=0`).
@@ -379,10 +400,12 @@ mod tests {
     }
 
     #[test]
-    fn legacy_capture_graphics_default_foliage_on() {
+    fn legacy_capture_graphics_defaults_new_quality_fields() {
         let parsed: CaptureGraphicsSettings =
             serde_json::from_str(r#"{"clouds":true,"grass":false}"#).unwrap();
         assert!(parsed.foliage);
+        assert_eq!(parsed.shadow_cascades, 4);
+        assert_eq!(parsed.shadow_map_size_px, 4096);
     }
 
     /// A receipt written before the driven clock existed must still read as

@@ -26,12 +26,8 @@ const DETAIL_NORMAL_STRENGTH: f32 = 0.015;
 const MAX_SYNTHETIC_DETAIL_M: f32 = 7.0;
 const FINE_TILE_CELLS: usize = TILE_CELLS * 2;
 const COAST_EDGE_MAX_LENGTH_M: f64 = 3.0;
-const COAST_HEIGHT_SAMPLE_INLAND_M: f64 = 4.0;
-const COAST_SKIRT_DEPTH_M: f32 = 10.0;
-const COAST_CLIFF_GRADE_START: f32 = 0.06;
-const COAST_CLIFF_GRADE_END: f32 = 0.18;
-const COAST_CLIFF_HEIGHT_START_M: f32 = 1.5;
-const COAST_CLIFF_HEIGHT_END_M: f32 = 8.0;
+const COAST_REFINE_BAND_M: f32 = 30.0;
+const COAST_SNAP_M: f64 = 0.15;
 const DEM_GRADIENT_SAMPLE_M: f64 = 30.0;
 const NORMAL_FILTER_SOURCE_RADII: f64 = 2.0;
 const RESOLVED_GRADE_START: f32 = 0.03;
@@ -146,20 +142,20 @@ fn refine_coast_triangle(
         shore_distances,
         coast_samples,
     );
-    let segments = ((end_position - start_position).length() / COAST_EDGE_MAX_LENGTH_M)
-        .ceil()
-        .max(1.0) as usize;
-    if segments == 1 {
+    let path = dataset.coast_path(
+        start_position.to_array(),
+        end_position.to_array(),
+        COAST_EDGE_MAX_LENGTH_M,
+    );
+    if path.len() <= 2 {
         return vec![[pivot, start, end]];
     }
 
-    let mut edge = Vec::with_capacity(segments + 1);
+    let mut edge = Vec::with_capacity(path.len());
     edge.push(start);
-    for step in 1..segments {
-        let t = step as f64 / segments as f64;
-        let position = project_to_shoreline(dataset, start_position.lerp(end_position, t));
+    for position in path.iter().skip(1).take(path.len().saturating_sub(2)) {
         let sample = coast_samples.len() as u32;
-        coast_samples.push(position.to_array());
+        coast_samples.push(*position);
         edge.push(ClipPoint {
             vertex: VertexRef::CoastSample(sample),
             distance_m: 0.0,
@@ -204,38 +200,12 @@ fn coast_position(
     }
 }
 
-fn project_to_shoreline(dataset: &TerrainDataset, mut position: DVec2) -> DVec2 {
-    let sample_step = dataset.metadata.coastline.distance_spacing_m * 0.5;
-    for _ in 0..4 {
-        let distance = f64::from(dataset.shore_distance_m(position.x, position.y));
-        if distance.abs() < 0.01 {
-            break;
-        }
-        let gradient = DVec2::new(
-            f64::from(
-                dataset.shore_distance_m(position.x + sample_step, position.y)
-                    - dataset.shore_distance_m(position.x - sample_step, position.y),
-            ),
-            f64::from(
-                dataset.shore_distance_m(position.x, position.y + sample_step)
-                    - dataset.shore_distance_m(position.x, position.y - sample_step),
-            ),
-        ) / (2.0 * sample_step);
-        let gradient_squared = gradient.length_squared();
-        if gradient_squared < 1.0e-8 {
-            break;
-        }
-        let correction = gradient * (distance / gradient_squared);
-        position -= correction.clamp_length_max(sample_step);
-    }
-    position
+fn project_to_shoreline(dataset: &TerrainDataset, position: DVec2) -> DVec2 {
+    DVec2::from_array(dataset.nearest_coast_point(position.x, position.y))
 }
 
-fn coast_boundary_segment(triangle: [ClipPoint; 3]) -> Option<[VertexRef; 2]> {
-    let pivot = triangle.iter().position(|point| !point.vertex.is_coast())?;
-    let start = triangle[(pivot + 1) % 3].vertex;
-    let end = triangle[(pivot + 2) % 3].vertex;
-    (start.is_coast() && end.is_coast()).then_some([start, end])
+fn coast_geometry_distance(dataset: &TerrainDataset, x: f64, z: f64) -> f32 {
+    dataset.shore_distance_m(x, z)
 }
 
 pub struct BuiltTerrainMesh {
@@ -261,7 +231,9 @@ pub fn collapse_positions(
         .map(|position| {
             let world_x = position[0];
             let world_z = position[1];
-            let height = if dataset.shore_distance_m(world_x, world_z).abs() <= 0.11 {
+            let height = if coast_geometry_distance(dataset, world_x, world_z).abs() <= 2.0
+                && dataset.distance_to_coast_line_m(world_x, world_z) <= COAST_SNAP_M
+            {
                 SEA_LEVEL_M
             } else {
                 grid_surface_height(dataset, world_x, world_z, target_level).max(SEA_LEVEL_M)
@@ -294,13 +266,13 @@ pub fn build_tile_mesh(
             let world_z = bounds[1] + z as f64 * spacing;
             let index = z * side + x;
             heights[index] = rendered_height(dataset, world_x, world_z, key.level).max(SEA_LEVEL_M);
-            shore_distances[index] = dataset.shore_distance_m(world_x, world_z);
+            shore_distances[index] = coast_geometry_distance(dataset, world_x, world_z);
         }
     }
     stitch_edges(dataset, key, bounds, spacing, cells, stitch, &mut heights);
 
     let mut constrained = vec![false; heights.len()];
-    let coast_refine_band_m = dataset.metadata.coastline.distance_spacing_m as f32 * 4.0;
+    let coast_refine_band_m = COAST_REFINE_BAND_M;
     for z in 0..side {
         for x in 0..side {
             let index = z * side + x;
@@ -317,7 +289,7 @@ pub fn build_tile_mesh(
                 } else {
                     let world_x = bounds[0] + nx as f64 * spacing;
                     let world_z = bounds[1] + nz as f64 * spacing;
-                    dataset.shore_distance_m(world_x, world_z) >= 0.0
+                    coast_geometry_distance(dataset, world_x, world_z) >= 0.0
                 };
                 constrained[index] |= neighbour != value;
             }
@@ -329,11 +301,10 @@ pub fn build_tile_mesh(
     let source_triangles = rtin.triangles(tolerance);
     let mut clipped_triangles = Vec::with_capacity(source_triangles.len());
     let mut coast_samples = Vec::new();
-    let mut coast_segments = Vec::new();
     for triangle in source_triangles {
         let points = triangle.map(|index| ClipPoint::grid(index, shore_distances[index as usize]));
         for clipped in clip_triangle_to_land(points) {
-            for refined in refine_coast_triangle(
+            clipped_triangles.extend(refine_coast_triangle(
                 clipped,
                 dataset,
                 bounds,
@@ -341,12 +312,7 @@ pub fn build_tile_mesh(
                 side,
                 &shore_distances,
                 &mut coast_samples,
-            ) {
-                if let Some(segment) = coast_boundary_segment(refined) {
-                    coast_segments.push(segment);
-                }
-                clipped_triangles.push(refined);
-            }
+            ));
         }
     }
 
@@ -396,27 +362,6 @@ pub fn build_tile_mesh(
             indices.push(compact);
         }
     }
-
-    emit_coast_skirts(
-        &coast_segments,
-        dataset,
-        spatial,
-        key,
-        bounds,
-        origin_render_m,
-        spacing,
-        side,
-        &shore_distances,
-        &coast_samples,
-        &mut high_positions,
-        &mut parent_positions,
-        &mut source_positions_m,
-        &mut compact_normals,
-        &mut compact_tangents,
-        &mut colors,
-        &mut uvs,
-        &mut indices,
-    );
 
     let mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -512,7 +457,7 @@ fn emit_vertex(
             );
             let high = [
                 (position.x - bounds[0]) as f32,
-                coast_top_height(dataset, position),
+                SEA_LEVEL_M,
                 (position.y - bounds[1]) as f32,
             ];
             (
@@ -572,27 +517,14 @@ fn emit_vertex(
     index
 }
 
-fn coast_top_height(dataset: &TerrainDataset, position: DVec2) -> f32 {
-    let sample = coast_land_sample(dataset, position);
-    let height = dataset.dem_height(sample.x, sample.y).max(SEA_LEVEL_M);
-    let grade = dem_grade(dataset, sample.x, sample.y);
-    let cliff_weight = smoothstep(COAST_CLIFF_GRADE_START, COAST_CLIFF_GRADE_END, grade)
-        * smoothstep(COAST_CLIFF_HEIGHT_START_M, COAST_CLIFF_HEIGHT_END_M, height);
-    SEA_LEVEL_M + (height - SEA_LEVEL_M) * cliff_weight
-}
-
-fn coast_land_sample(dataset: &TerrainDataset, position: DVec2) -> DVec2 {
-    let landward = shore_gradient(dataset, position).normalize_or(DVec2::X);
-    position + landward * COAST_HEIGHT_SAMPLE_INLAND_M
-}
-
 fn rendered_surface_normal(
     dataset: &TerrainDataset,
     position: DVec2,
     level: u8,
     grid_spacing_m: f64,
 ) -> Vec3 {
-    let center = coast_land_sample(dataset, position);
+    let landward = shore_gradient(dataset, position).normalize_or(DVec2::X);
+    let center = position + landward * 4.0;
     let step = grid_spacing_m * 0.5;
     let west = rendered_height(dataset, center.x - step, center.y, level).max(SEA_LEVEL_M);
     let east = rendered_height(dataset, center.x + step, center.y, level).max(SEA_LEVEL_M);
@@ -610,216 +542,14 @@ fn shore_gradient(dataset: &TerrainDataset, position: DVec2) -> DVec2 {
     let step = dataset.metadata.coastline.distance_spacing_m * 0.5;
     DVec2::new(
         f64::from(
-            dataset.shore_distance_m(position.x + step, position.y)
-                - dataset.shore_distance_m(position.x - step, position.y),
+            coast_geometry_distance(dataset, position.x + step, position.y)
+                - coast_geometry_distance(dataset, position.x - step, position.y),
         ),
         f64::from(
-            dataset.shore_distance_m(position.x, position.y + step)
-                - dataset.shore_distance_m(position.x, position.y - step),
+            coast_geometry_distance(dataset, position.x, position.y + step)
+                - coast_geometry_distance(dataset, position.x, position.y - step),
         ),
     ) / (2.0 * step)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_coast_skirts(
-    coast_segments: &[[VertexRef; 2]],
-    dataset: &TerrainDataset,
-    spatial: &TerrainSpatialFrame,
-    key: TileKey,
-    bounds: [f64; 4],
-    origin_render_m: DVec3,
-    spacing: f64,
-    side: usize,
-    shore_distances: &[f32],
-    coast_samples: &[[f64; 2]],
-    high_positions: &mut Vec<[f32; 3]>,
-    parent_positions: &mut Vec<[f32; 3]>,
-    source_positions_m: &mut Vec<[f64; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    tangents: &mut Vec<[f32; 4]>,
-    colors: &mut Vec<[f32; 4]>,
-    uvs: &mut Vec<[f32; 2]>,
-    indices: &mut Vec<u32>,
-) {
-    let mut vertices = HashMap::new();
-    for &[start, end] in coast_segments {
-        let top_start = emit_coast_skirt_vertex(
-            start,
-            true,
-            &mut vertices,
-            dataset,
-            spatial,
-            key,
-            bounds,
-            origin_render_m,
-            spacing,
-            side,
-            shore_distances,
-            coast_samples,
-            high_positions,
-            parent_positions,
-            source_positions_m,
-            normals,
-            tangents,
-            colors,
-            uvs,
-        );
-        let bottom_start = emit_coast_skirt_vertex(
-            start,
-            false,
-            &mut vertices,
-            dataset,
-            spatial,
-            key,
-            bounds,
-            origin_render_m,
-            spacing,
-            side,
-            shore_distances,
-            coast_samples,
-            high_positions,
-            parent_positions,
-            source_positions_m,
-            normals,
-            tangents,
-            colors,
-            uvs,
-        );
-        let top_end = emit_coast_skirt_vertex(
-            end,
-            true,
-            &mut vertices,
-            dataset,
-            spatial,
-            key,
-            bounds,
-            origin_render_m,
-            spacing,
-            side,
-            shore_distances,
-            coast_samples,
-            high_positions,
-            parent_positions,
-            source_positions_m,
-            normals,
-            tangents,
-            colors,
-            uvs,
-        );
-        let bottom_end = emit_coast_skirt_vertex(
-            end,
-            false,
-            &mut vertices,
-            dataset,
-            spatial,
-            key,
-            bounds,
-            origin_render_m,
-            spacing,
-            side,
-            shore_distances,
-            coast_samples,
-            high_positions,
-            parent_positions,
-            source_positions_m,
-            normals,
-            tangents,
-            colors,
-            uvs,
-        );
-        indices.extend_from_slice(&[
-            top_start,
-            bottom_start,
-            bottom_end,
-            top_start,
-            bottom_end,
-            top_end,
-        ]);
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn emit_coast_skirt_vertex(
-    vertex: VertexRef,
-    top: bool,
-    remap: &mut HashMap<(VertexRef, bool), u32>,
-    dataset: &TerrainDataset,
-    spatial: &TerrainSpatialFrame,
-    key: TileKey,
-    bounds: [f64; 4],
-    origin_render_m: DVec3,
-    spacing: f64,
-    side: usize,
-    shore_distances: &[f32],
-    coast_samples: &[[f64; 2]],
-    high_positions: &mut Vec<[f32; 3]>,
-    parent_positions: &mut Vec<[f32; 3]>,
-    source_positions_m: &mut Vec<[f64; 2]>,
-    normals: &mut Vec<[f32; 3]>,
-    tangents: &mut Vec<[f32; 4]>,
-    colors: &mut Vec<[f32; 4]>,
-    uvs: &mut Vec<[f32; 2]>,
-) -> u32 {
-    if let Some(index) = remap.get(&(vertex, top)) {
-        return *index;
-    }
-
-    let position = coast_position(
-        dataset,
-        vertex,
-        bounds,
-        spacing,
-        side,
-        shore_distances,
-        coast_samples,
-    );
-    let top_height = coast_top_height(dataset, position);
-    let height = if top {
-        top_height
-    } else {
-        SEA_LEVEL_M - COAST_SKIRT_DEPTH_M
-    };
-    let world = DVec3::new(position.x, f64::from(height), position.y);
-    let render_position = (spatial.project(world) - origin_render_m).as_vec3();
-    let landward = shore_gradient(dataset, position).normalize_or(DVec2::X);
-    let outward = DVec3::new(-landward.x, 0.0, -landward.y);
-    let render_normal = spatial
-        .project_direction(world, outward)
-        .as_vec3()
-        .normalize_or(Vec3::X);
-    let render_up = spatial.project_direction(world, DVec3::Y).as_vec3();
-    let tangent = (render_up - render_normal * render_up.dot(render_normal)).normalize_or(Vec3::Y);
-    let alongshore = spatial
-        .project_direction(world, DVec3::new(-outward.z, 0.0, outward.x))
-        .as_vec3();
-    let handedness = if render_normal.cross(tangent).dot(alongshore) >= 0.0 {
-        1.0
-    } else {
-        -1.0
-    };
-    let land_sample = coast_land_sample(dataset, position);
-    let color = terrain_color(
-        position.x,
-        position.y,
-        top_height,
-        0.0,
-        dem_grade(dataset, land_sample.x, land_sample.y),
-        key.level,
-    );
-
-    let index = high_positions.len() as u32;
-    high_positions.push(render_position.to_array());
-    parent_positions.push(render_position.to_array());
-    source_positions_m.push(position.to_array());
-    normals.push(render_normal.to_array());
-    tangents.push([tangent.x, tangent.y, tangent.z, handedness]);
-    colors.push(color);
-    uvs.push([
-        height / DETAIL_REPEAT_M,
-        ((position.x + position.y) * 0.5) as f32 / DETAIL_REPEAT_M,
-    ]);
-    remap.insert((vertex, top), index);
-    index
 }
 
 impl BuiltTerrainMesh {
@@ -922,17 +652,11 @@ fn grid_normals(heights: &[f32], side: usize, spacing: f64, filter_radius_m: f64
 
 pub(crate) fn rendered_height(dataset: &TerrainDataset, x: f64, z: f64, level: u8) -> f32 {
     let base = dataset.dem_height(x, z);
-    if !dataset.is_land(x, z) {
+    let shore_distance = coast_geometry_distance(dataset, x, z);
+    if shore_distance < 0.0 {
         return base;
     }
-    base + synthetic_detail(
-        x,
-        z,
-        base,
-        dataset.shore_distance_m(x, z),
-        dem_grade(dataset, x, z),
-        level,
-    )
+    base + synthetic_detail(x, z, base, shore_distance, dem_grade(dataset, x, z), level)
 }
 
 fn dem_grade(dataset: &TerrainDataset, x: f64, z: f64) -> f32 {
@@ -1226,6 +950,14 @@ mod tests {
 
     use super::*;
 
+    fn nearest_shore(dataset: &TerrainDataset, seed: DVec2) -> DVec2 {
+        DVec2::from_array(dataset.nearest_coast_point(seed.x, seed.y))
+    }
+
+    fn on_mapped_waterline(dataset: &TerrainDataset, x: f64, z: f64) -> bool {
+        dataset.distance_to_coast_line_m(x, z) < 0.05
+    }
+
     #[test]
     fn synthetic_detail_is_deterministic_and_coast_safe() {
         assert_eq!(
@@ -1258,7 +990,7 @@ mod tests {
     }
 
     #[test]
-    fn caracasbaai_cliff_mesh_has_finer_geometry_than_the_shoreline_grid() {
+    fn caracasbaai_rough_coast_mesh_has_finer_geometry_than_the_shoreline_grid() {
         let asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/terrain/curacao");
         let dataset = TerrainDataset::load(&asset_dir).unwrap();
         let level = dataset.metadata.quadtree.visual_max_level;
@@ -1285,12 +1017,12 @@ mod tests {
 
         assert!(
             has_interior_half_step,
-            "the closest Caracasbaai cliff mesh must resolve geometry below the 15 m shoreline grid"
+            "the reported Caracasbaai rough coast must resolve geometry below the 15 m shoreline grid"
         );
     }
 
     #[test]
-    fn caracasbaai_cliff_coast_uses_a_vertical_face_instead_of_a_triangular_ramp() {
+    fn inland_hills_do_not_create_a_vertical_coast_face() {
         let asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/terrain/curacao");
         let dataset = TerrainDataset::load(&asset_dir).unwrap();
         let level = dataset.metadata.quadtree.visual_max_level;
@@ -1305,15 +1037,19 @@ mod tests {
         let spatial = TerrainSpatialFrame::new(&dataset, crate::cli::SpatialMode::Planar).unwrap();
         let built = build_tile_mesh(&dataset, &spatial, key, EdgeStitch::default());
         let indices: Vec<usize> = built.mesh.indices().unwrap().iter().collect();
+        let reported_shore = nearest_shore(&dataset, DVec2::from_array(cliff));
 
         let has_vertical_coast_face = indices.chunks_exact(3).any(|triangle| {
             let all_on_coast = triangle.iter().all(|index| {
                 let position = built.source_positions_m[*index];
-                dataset.shore_distance_m(position[0], position[1]).abs() < 1.0
+                on_mapped_waterline(&dataset, position[0], position[1])
             });
             let a = built.source_positions_m[triangle[0]];
             let b = built.source_positions_m[triangle[1]];
             let c = built.source_positions_m[triangle[2]];
+            let near_reported_shore = [a, b, c]
+                .into_iter()
+                .all(|position| DVec2::from_array(position).distance(reported_shore) < 60.0);
             let projected_twice_area =
                 (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
             let min_height = triangle
@@ -1324,81 +1060,100 @@ mod tests {
                 .iter()
                 .map(|index| built.high_positions[*index][1])
                 .fold(f32::NEG_INFINITY, f32::max);
-            all_on_coast && projected_twice_area.abs() < 0.01 && max_height - min_height > 3.0
+            near_reported_shore
+                && all_on_coast
+                && projected_twice_area.abs() < 0.01
+                && max_height - min_height > 3.0
         });
 
         assert!(
-            has_vertical_coast_face,
-            "the Caracasbaai cliff must end in a coast face; dropping the land surface to sea level creates the visible triangular fan"
-        );
-    }
-
-    #[test]
-    fn caracasbaai_height_profile_separates_smooth_beach_from_broken_cliff() {
-        fn mean_profile_curvature(dataset: &TerrainDataset, center: [f64; 2], level: u8) -> f32 {
-            let step = 7.5;
-            let mut curvature = 0.0;
-            let mut samples = 0;
-            for offset in -4..=4 {
-                let offset = f64::from(offset) * step;
-                for axis in 0..2 {
-                    let mut positions = [center, center, center];
-                    positions[0][axis] += offset - step;
-                    positions[1][axis] += offset;
-                    positions[2][axis] += offset + step;
-                    let heights = positions
-                        .map(|position| rendered_height(dataset, position[0], position[1], level));
-                    curvature += (heights[0] - 2.0 * heights[1] + heights[2]).abs();
-                    samples += 1;
-                }
-            }
-            curvature / samples as f32
-        }
-
-        let asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/terrain/curacao");
-        let dataset = TerrainDataset::load(&asset_dir).unwrap();
-        let level = dataset.metadata.quadtree.visual_max_level;
-        let beach_curvature = mean_profile_curvature(&dataset, [8_800.0, 14_550.0], level);
-        let cliff_curvature = mean_profile_curvature(&dataset, [8_345.1, 14_734.4], level);
-
-        assert!(
-            beach_curvature < 0.10,
-            "the Caracasbaai foreground beach must remain smooth"
-        );
-        assert!(
-            cliff_curvature > 0.65,
-            "the Caracasbaai cliff needs metre-scale breaks instead of one rounded sheet"
+            !has_vertical_coast_face,
+            "a hill beyond the nearest DEM cell must not create a cliff at the waterline"
         );
     }
 
     #[test]
     fn caracasbaai_beach_meets_water_without_a_retaining_wall() {
-        fn nearest_shore(dataset: &TerrainDataset, seed: DVec2) -> DVec2 {
-            let spacing = dataset.metadata.coastline.distance_spacing_m;
-            let radius_steps = (500.0 / spacing) as i32;
-            let mut nearest = seed;
-            let mut nearest_distance = f32::INFINITY;
-            for z in -radius_steps..=radius_steps {
-                for x in -radius_steps..=radius_steps {
-                    let candidate = seed + DVec2::new(f64::from(x), f64::from(z)) * spacing;
-                    let distance = dataset.shore_distance_m(candidate.x, candidate.y).abs();
-                    if distance < nearest_distance {
-                        nearest = candidate;
-                        nearest_distance = distance;
-                    }
-                }
-            }
-            project_to_shoreline(dataset, nearest)
-        }
-
         let asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/terrain/curacao");
         let dataset = TerrainDataset::load(&asset_dir).unwrap();
+        let level = dataset.metadata.quadtree.visual_max_level;
+        let root = dataset.metadata.quadtree.domain_bounds_local_m;
+        let tile_size = (root[2] - root[0]) / f64::from(1u32 << level);
         let beach = nearest_shore(&dataset, DVec2::new(8_800.0, 14_550.0));
+        let key = TileKey {
+            level,
+            x: ((beach.x - root[0]) / tile_size).floor() as u32,
+            z: ((beach.y - root[1]) / tile_size).floor() as u32,
+        };
+        let spatial = TerrainSpatialFrame::new(&dataset, crate::cli::SpatialMode::Planar).unwrap();
+        let built = build_tile_mesh(&dataset, &spatial, key, EdgeStitch::default());
 
-        assert!(dataset.shore_distance_m(beach.x, beach.y).abs() < 0.02);
+        assert!(on_mapped_waterline(&dataset, beach.x, beach.y));
+        let waterline_heights: Vec<f32> = built
+            .source_positions_m
+            .iter()
+            .enumerate()
+            .filter(|(_, position)| {
+                on_mapped_waterline(&dataset, position[0], position[1])
+                    && DVec2::from_array(**position).distance(beach) < 40.0
+            })
+            .map(|(index, _)| built.high_positions[index][1])
+            .collect();
+        assert!(!waterline_heights.is_empty());
         assert!(
-            coast_top_height(&dataset, beach) < 0.5,
-            "the gentle Caracasbaai beach must meet the water instead of forming a retaining wall"
+            waterline_heights
+                .iter()
+                .all(|height| (*height - SEA_LEVEL_M).abs() < 0.02),
+            "the mapped Caracasbaai waterline must sit at sea level, not on an invented lip"
+        );
+    }
+
+    #[test]
+    fn caracasbaai_beach_mesh_has_no_vertical_shore_wall() {
+        let asset_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/terrain/curacao");
+        let dataset = TerrainDataset::load(&asset_dir).unwrap();
+        let level = dataset.metadata.quadtree.visual_max_level;
+        let root = dataset.metadata.quadtree.domain_bounds_local_m;
+        let tile_size = (root[2] - root[0]) / f64::from(1u32 << level);
+        let beach = DVec2::new(8_800.0, 14_550.0);
+        let key = TileKey {
+            level,
+            x: ((beach.x - root[0]) / tile_size).floor() as u32,
+            z: ((beach.y - root[1]) / tile_size).floor() as u32,
+        };
+        let spatial = TerrainSpatialFrame::new(&dataset, crate::cli::SpatialMode::Planar).unwrap();
+        let built = build_tile_mesh(&dataset, &spatial, key, EdgeStitch::default());
+        let indices: Vec<usize> = built.mesh.indices().unwrap().iter().collect();
+
+        let has_beach_wall = indices.chunks_exact(3).any(|triangle| {
+            let sources = [
+                DVec2::from_array(built.source_positions_m[triangle[0]]),
+                DVec2::from_array(built.source_positions_m[triangle[1]]),
+                DVec2::from_array(built.source_positions_m[triangle[2]]),
+            ];
+            let all_on_gentle_coast = sources.iter().all(|position| {
+                on_mapped_waterline(&dataset, position.x, position.y)
+                    && position.distance(beach) < 80.0
+            });
+            let projected_twice_area = (sources[1].x - sources[0].x)
+                * (sources[2].y - sources[0].y)
+                - (sources[1].y - sources[0].y) * (sources[2].x - sources[0].x);
+            let min_height = triangle
+                .iter()
+                .map(|index| built.high_positions[*index][1])
+                .fold(f32::INFINITY, f32::min);
+            let max_height = triangle
+                .iter()
+                .map(|index| built.high_positions[*index][1])
+                .fold(f32::NEG_INFINITY, f32::max);
+            all_on_gentle_coast
+                && projected_twice_area.abs() < 0.01
+                && max_height - min_height > 1.0
+        });
+
+        assert!(
+            !has_beach_wall,
+            "a terrain-classified beach must enter the water as a smooth foreshore, not a vertical skirt"
         );
     }
 
@@ -1523,12 +1278,15 @@ mod tests {
             .filter_map(|((a, b), _)| {
                 let position_a = positions[a];
                 let position_b = positions[b];
-                (!on_same_tile_edge(position_a, position_b)).then_some((
+                let source_a = built.source_positions_m[a];
+                let source_b = built.source_positions_m[b];
+                (!on_same_tile_edge(position_a, position_b)
+                    && on_mapped_waterline(&dataset, source_a[0], source_a[1])
+                    && on_mapped_waterline(&dataset, source_b[0], source_b[1]))
+                .then_some((
                     a,
                     b,
-                    (position_a[0] - position_b[0])
-                        .hypot(position_a[1] - position_b[1])
-                        .hypot(position_a[2] - position_b[2]),
+                    (position_a[0] - position_b[0]).hypot(position_a[2] - position_b[2]),
                 ))
             })
             .collect();
@@ -1537,13 +1295,16 @@ mod tests {
             .iter()
             .map(|(_, _, length)| *length)
             .fold(0.0, f32::max);
-        assert!(max_coast_length <= COAST_EDGE_MAX_LENGTH_M as f32 + 0.01);
+        assert!(
+            max_coast_length <= COAST_EDGE_MAX_LENGTH_M as f32 + 0.01,
+            "the longest alongshore boundary edge is {max_coast_length:.3} m"
+        );
         for (a, b, _) in coast_edges {
             for index in [a, b] {
                 let source = built.source_positions_m[index];
                 assert!(
-                    dataset.shore_distance_m(source[0], source[1]).abs() < 0.02,
-                    "every subdivided boundary vertex must stay on the authored zero contour"
+                    on_mapped_waterline(&dataset, source[0], source[1]),
+                    "every subdivided boundary vertex must stay on the mapped coastline polyline"
                 );
             }
         }

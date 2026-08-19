@@ -6038,12 +6038,16 @@ dependencies = [
  "serde",
  "serde_json",
  "thalos_atmosphere",
+ "thalos_body_shading",
+ "thalos_clouds",
  "thalos_diagnostics",
  "thalos_geodetic",
  "thalos_ocean",
+ "thalos_render_foundation",
  "thalos_render_kit",
  "thalos_runtime",
  "thalos_vegetation",
+ "thalos_weather",
  "thalos_world",
 ]
 
@@ -9211,6 +9215,7 @@ dependencies = [
  "image",
  "rayon",
  "thalos_body_shading",
+ "thalos_clouds",
  "thalos_ocean",
  "thalos_shipyard",
  "thalos_terrain",
@@ -9282,6 +9287,15 @@ dependencies = [
  "rand_distr 0.6.0",
  "rayon",
  "serde",
+]
+
+[[package]]
+name = "thalos_clouds"
+version = "0.1.1"
+dependencies = [
+ "bevy",
+ "rayon",
+ "thalos_terrain",
 ]
 
 [[package]]
@@ -9504,6 +9518,7 @@ dependencies = [
  "bevy",
  "ron",
  "serde",
+ "thalos_render_foundation",
  "thalos_ui",
 ]
 

@@ -37,6 +37,7 @@ struct Session {
     blocks: Vec<(u128, Value)>,
     slab_gauges: Vec<(u128, Value)>,
     headless_benchmarks: Vec<(u128, Value)>,
+    headless_render_passes: Vec<(u128, Value)>,
     total_events: u64,
 }
 
@@ -76,6 +77,22 @@ fn main() {
     }
     if arg == "--headless-shadow-cascades" {
         write_headless_shadow_cascades(&sessions);
+        return;
+    }
+    if arg == "--headless-terrain-material" {
+        write_headless_terrain_material(&sessions);
+        return;
+    }
+    if arg == "--headless-terrain-prepass" {
+        write_headless_terrain_prepass(&sessions);
+        return;
+    }
+    if arg == "--headless-terrain-index" {
+        write_headless_terrain_index(&sessions);
+        return;
+    }
+    if arg == "--headless-terrain-culling" {
+        write_headless_terrain_culling(&sessions);
         return;
     }
 
@@ -180,6 +197,9 @@ fn ingest(path: &Path, sessions: &mut BTreeMap<String, Session>) {
             ("thalos::diagnostic::perf", "headless_benchmark_end") => {
                 s.headless_benchmarks.push((ts, v["fields"].clone()));
             }
+            ("thalos::diagnostic::perf", "headless_render_pass") => {
+                s.headless_render_passes.push((ts, v["fields"].clone()));
+            }
             ("thalos::diagnostic::gpu_mem", "mesh_slab_gauge") => {
                 s.slab_gauges.push((ts, v["fields"].clone()));
             }
@@ -282,6 +302,8 @@ fn build_summary(id: &str, s: &Session) -> Value {
             "gpu_grass_enabled": last.and_then(|g| g["gpu_grass_enabled"].as_bool()),
             "msaa_samples": last.and_then(|g| g["msaa_samples"].as_u64()),
             "shadow_cascade_budget": last.and_then(|g| g["shadow_cascade_budget"].as_u64()),
+            "shadow_quality": last.and_then(|g| g["shadow_quality"].as_str()),
+            "shadow_map_size_px": last.and_then(|g| g["shadow_map_size_px"].as_u64()),
             "vsync_enabled": last.and_then(|g| g["vsync_enabled"].as_bool()),
             "has_primary_window": last.and_then(|g| g["has_primary_window"].as_bool()),
             "window_width_px": last.and_then(|g| g["window_width_px"].as_u64()),
@@ -331,6 +353,7 @@ fn write_headless_matrix(sessions: &BTreeMap<String, Session>) {
                         "session": session_id,
                         "end_unix_ms": *ts as u64,
                         "result": result,
+                        "render_passes": headless_render_passes(session, variant),
                     }),
                 );
             }
@@ -413,6 +436,7 @@ fn write_headless_shadow_cascades(sessions: &BTreeMap<String, Session>) {
                         "session": session_id,
                         "end_unix_ms": *ts as u64,
                         "result": result,
+                        "render_passes": headless_render_passes(session, variant),
                     }),
                 );
             }
@@ -457,10 +481,19 @@ fn write_headless_shadow_cascades(sessions: &BTreeMap<String, Session>) {
         "effects": {
             "all_cascades_ms": metric(4, "cpu_ms_mean") - metric(0, "cpu_ms_mean"),
             "all_cascades_p50_ms": metric(4, "cpu_ms_p50") - metric(0, "cpu_ms_p50"),
+            "medium_savings_vs_high_ms": metric(4, "cpu_ms_mean") - metric(3, "cpu_ms_mean"),
+            "low_savings_vs_high_ms": metric(4, "cpu_ms_mean") - metric(2, "cpu_ms_mean"),
+            "off_savings_vs_high_ms": metric(4, "cpu_ms_mean") - metric(0, "cpu_ms_mean"),
             "residual_frame_ms": metric(0, "cpu_ms_mean"),
             "residual_frame_p50_ms": metric(0, "cpu_ms_p50"),
             "marginal_ms": marginal_ms,
             "marginal_p50_ms": marginal_p50_ms,
+        },
+        "quality_tiers": {
+            "off": { "shadow_cascade_budget": 0, "cell": "cascades-0" },
+            "low": { "shadow_cascade_budget": 2, "cell": "cascades-2" },
+            "medium": { "shadow_cascade_budget": 3, "cell": "cascades-3" },
+            "high": { "shadow_cascade_budget": 4, "cell": "cascades-4" },
         },
     });
     let path = Path::new(DIAGNOSTICS_DIR)
@@ -472,6 +505,508 @@ fn write_headless_shadow_cascades(sessions: &BTreeMap<String, Session>) {
         .expect("write headless shadow-cascade ladder");
     println!("{}", path.display());
     println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn write_headless_terrain_material(sessions: &BTreeMap<String, Session>) {
+    let labels = [
+        "terrain-lit-before",
+        "terrain-fullbright",
+        "terrain-base-color",
+        "terrain-hidden",
+        "terrain-lit-after",
+    ];
+    let Some((session_id, session)) = sessions
+        .iter()
+        .filter(|(_, session)| {
+            labels.iter().all(|label| {
+                session
+                    .headless_benchmarks
+                    .iter()
+                    .any(|(_, result)| result["variant"].as_str() == Some(label))
+            })
+        })
+        .max_by_key(|(_, session)| session.last_ms)
+    else {
+        eprintln!("headless terrain-material benchmark is incomplete");
+        std::process::exit(2);
+    };
+
+    let mut cells = serde_json::Map::new();
+    for label in labels {
+        let (ts, result) = session
+            .headless_benchmarks
+            .iter()
+            .rev()
+            .find(|(_, result)| result["variant"].as_str() == Some(label))
+            .expect("complete session checked above");
+        cells.insert(
+            label.to_string(),
+            json!({
+                "session": session_id,
+                "end_unix_ms": *ts as u64,
+                "result": result,
+                "render_passes": headless_render_passes(session, label),
+            }),
+        );
+    }
+
+    let metric = |label: &str, key: &str| {
+        cells[label]["result"][key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("validated terrain-material cell has {key}"))
+    };
+    let effects_for = |key: &str| {
+        let lit_before = metric("terrain-lit-before", key);
+        let fullbright = metric("terrain-fullbright", key);
+        let base_color = metric("terrain-base-color", key);
+        let terrain_hidden = metric("terrain-hidden", key);
+        let lit_after = metric("terrain-lit-after", key);
+        let lit_midpoint = (lit_before + lit_after) * 0.5;
+        json!({
+            "lit_before_ms": lit_before,
+            "lit_after_ms": lit_after,
+            "lit_drift_ms": lit_after - lit_before,
+            "fullbright_ms": fullbright,
+            "base_color_ms": base_color,
+            "terrain_hidden_ms": terrain_hidden,
+            "terrain_base_render_ms": base_color - terrain_hidden,
+            "procedural_layers_ms": fullbright - base_color,
+            "pbr_and_post_ms": lit_midpoint - fullbright,
+            "layers_plus_lighting_ms": lit_midpoint - base_color,
+        })
+    };
+    let report = json!({
+        "schema": "thalos.headless_terrain_material.v1",
+        "session": session_id,
+        "cells": cells,
+        "effects": {
+            "mean": effects_for("cpu_ms_mean"),
+            "p50": effects_for("cpu_ms_p50"),
+        },
+    });
+    let path = Path::new(DIAGNOSTICS_DIR)
+        .join("reports")
+        .join("headless-terrain-material.json");
+    fs::create_dir_all(path.parent().expect("terrain report parent"))
+        .expect("create terrain report directory");
+    fs::write(&path, serde_json::to_string_pretty(&report).unwrap())
+        .expect("write headless terrain-material report");
+    println!("{}", path.display());
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn write_headless_terrain_prepass(sessions: &BTreeMap<String, Session>) {
+    let labels = [
+        "terrain-base-prepass-before",
+        "terrain-hidden-prepass",
+        "terrain-base-no-prepass",
+        "terrain-hidden-no-prepass",
+        "terrain-base-prepass-after",
+    ];
+    let Some((session_id, session)) = sessions
+        .iter()
+        .filter(|(_, session)| {
+            labels.iter().all(|label| {
+                session
+                    .headless_benchmarks
+                    .iter()
+                    .any(|(_, result)| result["variant"].as_str() == Some(label))
+            })
+        })
+        .max_by_key(|(_, session)| session.last_ms)
+    else {
+        eprintln!("headless terrain-prepass benchmark is incomplete");
+        std::process::exit(2);
+    };
+
+    let mut cells = serde_json::Map::new();
+    for label in labels {
+        let (ts, result) = session
+            .headless_benchmarks
+            .iter()
+            .rev()
+            .find(|(_, result)| result["variant"].as_str() == Some(label))
+            .expect("complete session checked above");
+        cells.insert(
+            label.to_string(),
+            json!({
+                "session": session_id,
+                "end_unix_ms": *ts as u64,
+                "result": result,
+                "render_passes": headless_render_passes(session, label),
+            }),
+        );
+    }
+
+    let identity_keys = [
+        "entities",
+        "main_meshes",
+        "tile_resident",
+        "offscreen_width_px",
+        "offscreen_height_px",
+        "foliage_enabled",
+        "shadow_cascade_budget",
+    ];
+    let reference = &cells[labels[0]]["result"];
+    for label in labels.iter().skip(1) {
+        for key in identity_keys {
+            if cells[*label]["result"][key] != reference[key] {
+                eprintln!(
+                    "headless terrain-prepass identity drift: {label}.{key}={:?}, expected {:?}",
+                    cells[*label]["result"][key], reference[key]
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+
+    let effects_for = |key: &str| terrain_prepass_effects(&cells, key);
+    let report = json!({
+        "schema": "thalos.headless_terrain_prepass.v1",
+        "session": session_id,
+        "identity": identity_keys
+            .into_iter()
+            .map(|key| (key.to_string(), reference[key].clone()))
+            .collect::<serde_json::Map<String, Value>>(),
+        "cells": cells,
+        "effects": {
+            "mean": effects_for("cpu_ms_mean"),
+            "p50": effects_for("cpu_ms_p50"),
+        },
+    });
+    let path = Path::new(DIAGNOSTICS_DIR)
+        .join("reports")
+        .join("headless-terrain-prepass.json");
+    fs::create_dir_all(path.parent().expect("terrain-prepass report parent"))
+        .expect("create terrain-prepass report directory");
+    fs::write(&path, serde_json::to_string_pretty(&report).unwrap())
+        .expect("write headless terrain-prepass report");
+    println!("{}", path.display());
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn terrain_prepass_effects(cells: &serde_json::Map<String, Value>, key: &str) -> Value {
+    let metric = |label: &str| {
+        cells[label]["result"][key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("validated terrain-prepass cell has {key}"))
+    };
+    let base_before = metric("terrain-base-prepass-before");
+    let hidden_prepass = metric("terrain-hidden-prepass");
+    let base_no_prepass = metric("terrain-base-no-prepass");
+    let hidden_no_prepass = metric("terrain-hidden-no-prepass");
+    let base_after = metric("terrain-base-prepass-after");
+    let base_prepass = (base_before + base_after) * 0.5;
+    let terrain_with_prepass = base_prepass - hidden_prepass;
+    let terrain_without_prepass = base_no_prepass - hidden_no_prepass;
+    json!({
+        "base_prepass_before_ms": base_before,
+        "base_prepass_after_ms": base_after,
+        "base_prepass_drift_ms": base_after - base_before,
+        "hidden_prepass_ms": hidden_prepass,
+        "base_no_prepass_ms": base_no_prepass,
+        "hidden_no_prepass_ms": hidden_no_prepass,
+        "terrain_with_prepass_ms": terrain_with_prepass,
+        "terrain_without_prepass_ms": terrain_without_prepass,
+        "terrain_prepass_net_ms": terrain_with_prepass - terrain_without_prepass,
+        "whole_scene_prepass_net_ms": base_prepass - base_no_prepass,
+        "nonterrain_prepass_net_ms": hidden_prepass - hidden_no_prepass,
+    })
+}
+
+fn write_headless_terrain_index(sessions: &BTreeMap<String, Session>) {
+    let labels = [
+        "terrain-base-dense-before",
+        "terrain-hidden-dense",
+        "terrain-base-coarse",
+        "terrain-hidden-coarse",
+        "terrain-base-dense-after",
+    ];
+    let Some((session_id, session)) = sessions
+        .iter()
+        .filter(|(_, session)| {
+            labels.iter().all(|label| {
+                session
+                    .headless_benchmarks
+                    .iter()
+                    .any(|(_, result)| result["variant"].as_str() == Some(label))
+            })
+        })
+        .max_by_key(|(_, session)| session.last_ms)
+    else {
+        eprintln!("headless terrain-index benchmark is incomplete");
+        std::process::exit(2);
+    };
+
+    let mut cells = serde_json::Map::new();
+    for label in labels {
+        let (ts, result) = session
+            .headless_benchmarks
+            .iter()
+            .rev()
+            .find(|(_, result)| result["variant"].as_str() == Some(label))
+            .expect("complete session checked above");
+        cells.insert(
+            label.to_string(),
+            json!({
+                "session": session_id,
+                "end_unix_ms": *ts as u64,
+                "result": result,
+                "render_passes": headless_render_passes(session, label),
+            }),
+        );
+    }
+
+    let identity_keys = [
+        "entities",
+        "main_meshes",
+        "tile_resident",
+        "offscreen_width_px",
+        "offscreen_height_px",
+        "foliage_enabled",
+        "shadow_cascade_budget",
+        "depth_prepass_enabled",
+    ];
+    let reference = &cells[labels[0]]["result"];
+    for label in labels.iter().skip(1) {
+        for key in identity_keys {
+            if cells[*label]["result"][key] != reference[key] {
+                eprintln!(
+                    "headless terrain-index identity drift: {label}.{key}={:?}, expected {:?}",
+                    cells[*label]["result"][key], reference[key]
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    for (label, expected_step) in [
+        ("terrain-base-dense-before", 1),
+        ("terrain-hidden-dense", 1),
+        ("terrain-base-coarse", 4),
+        ("terrain-hidden-coarse", 4),
+        ("terrain-base-dense-after", 1),
+    ] {
+        if cells[label]["result"]["terrain_index_step"] != expected_step {
+            eprintln!("headless terrain-index cell {label} has the wrong index step");
+            std::process::exit(2);
+        }
+    }
+
+    let effects_for = |key: &str| terrain_index_effects(&cells, key);
+    let report = json!({
+        "schema": "thalos.headless_terrain_index.v1",
+        "session": session_id,
+        "identity": identity_keys
+            .into_iter()
+            .map(|key| (key.to_string(), reference[key].clone()))
+            .collect::<serde_json::Map<String, Value>>(),
+        "cells": cells,
+        "effects": {
+            "mean": effects_for("cpu_ms_mean"),
+            "p50": effects_for("cpu_ms_p50"),
+        },
+    });
+    let path = Path::new(DIAGNOSTICS_DIR)
+        .join("reports")
+        .join("headless-terrain-index.json");
+    fs::create_dir_all(path.parent().expect("terrain-index report parent"))
+        .expect("create terrain-index report directory");
+    fs::write(&path, serde_json::to_string_pretty(&report).unwrap())
+        .expect("write headless terrain-index report");
+    println!("{}", path.display());
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn terrain_index_effects(cells: &serde_json::Map<String, Value>, key: &str) -> Value {
+    let metric = |label: &str| {
+        cells[label]["result"][key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("validated terrain-index cell has {key}"))
+    };
+    let dense_before = metric("terrain-base-dense-before");
+    let hidden_dense = metric("terrain-hidden-dense");
+    let coarse = metric("terrain-base-coarse");
+    let hidden_coarse = metric("terrain-hidden-coarse");
+    let dense_after = metric("terrain-base-dense-after");
+    let dense = (dense_before + dense_after) * 0.5;
+    let dense_terrain = dense - hidden_dense;
+    let coarse_terrain = coarse - hidden_coarse;
+    let net = dense_terrain - coarse_terrain;
+    json!({
+        "base_dense_before_ms": dense_before,
+        "base_dense_after_ms": dense_after,
+        "base_dense_drift_ms": dense_after - dense_before,
+        "hidden_dense_ms": hidden_dense,
+        "base_coarse_ms": coarse,
+        "hidden_coarse_ms": hidden_coarse,
+        "hidden_control_drift_ms": hidden_coarse - hidden_dense,
+        "dense_terrain_ms": dense_terrain,
+        "coarse_terrain_ms": coarse_terrain,
+        "terrain_index_density_net_ms": net,
+        "terrain_index_density_reduction_frac": net / dense_terrain.max(f64::EPSILON),
+        "whole_scene_index_density_net_ms": dense - coarse,
+    })
+}
+
+fn write_headless_terrain_culling(sessions: &BTreeMap<String, Session>) {
+    let labels = [
+        "terrain-base-full-bounds-before",
+        "terrain-hidden-full-bounds",
+        "terrain-base-tight-bounds",
+        "terrain-hidden-tight-bounds",
+        "terrain-base-full-bounds-after",
+    ];
+    let Some((session_id, session)) = sessions
+        .iter()
+        .filter(|(_, session)| {
+            labels.iter().all(|label| {
+                session
+                    .headless_benchmarks
+                    .iter()
+                    .any(|(_, result)| result["variant"].as_str() == Some(label))
+            })
+        })
+        .max_by_key(|(_, session)| session.last_ms)
+    else {
+        eprintln!("headless terrain-culling benchmark is incomplete");
+        std::process::exit(2);
+    };
+
+    let mut cells = serde_json::Map::new();
+    for label in labels {
+        let (ts, result) = session
+            .headless_benchmarks
+            .iter()
+            .rev()
+            .find(|(_, result)| result["variant"].as_str() == Some(label))
+            .expect("complete session checked above");
+        cells.insert(
+            label.to_string(),
+            json!({
+                "session": session_id,
+                "end_unix_ms": *ts as u64,
+                "result": result,
+                "render_passes": headless_render_passes(session, label),
+            }),
+        );
+    }
+
+    let identity_keys = [
+        "entities",
+        "main_meshes",
+        "tile_resident",
+        "offscreen_width_px",
+        "offscreen_height_px",
+        "foliage_enabled",
+        "shadow_cascade_budget",
+        "depth_prepass_enabled",
+        "terrain_index_step",
+    ];
+    let reference = &cells[labels[0]]["result"];
+    for label in labels.iter().skip(1) {
+        for key in identity_keys {
+            if cells[*label]["result"][key] != reference[key] {
+                eprintln!(
+                    "headless terrain-culling identity drift: {label}.{key}={:?}, expected {:?}",
+                    cells[*label]["result"][key], reference[key]
+                );
+                std::process::exit(2);
+            }
+        }
+    }
+    for (label, expected_tight) in [
+        ("terrain-base-full-bounds-before", false),
+        ("terrain-hidden-full-bounds", false),
+        ("terrain-base-tight-bounds", true),
+        ("terrain-hidden-tight-bounds", true),
+        ("terrain-base-full-bounds-after", false),
+    ] {
+        if cells[label]["result"]["tight_tile_bounds"] != expected_tight {
+            eprintln!("headless terrain-culling cell {label} has the wrong bounds state");
+            std::process::exit(2);
+        }
+    }
+
+    let effects_for = |key: &str| terrain_culling_effects(&cells, key);
+    let report = json!({
+        "schema": "thalos.headless_terrain_culling.v1",
+        "session": session_id,
+        "identity": identity_keys
+            .into_iter()
+            .map(|key| (key.to_string(), reference[key].clone()))
+            .collect::<serde_json::Map<String, Value>>(),
+        "cells": cells,
+        "effects": {
+            "mean": effects_for("cpu_ms_mean"),
+            "p50": effects_for("cpu_ms_p50"),
+        },
+    });
+    let path = Path::new(DIAGNOSTICS_DIR)
+        .join("reports")
+        .join("headless-terrain-culling.json");
+    fs::create_dir_all(path.parent().expect("terrain-culling report parent"))
+        .expect("create terrain-culling report directory");
+    fs::write(&path, serde_json::to_string_pretty(&report).unwrap())
+        .expect("write headless terrain-culling report");
+    println!("{}", path.display());
+    println!("{}", serde_json::to_string_pretty(&report).unwrap());
+}
+
+fn terrain_culling_effects(cells: &serde_json::Map<String, Value>, key: &str) -> Value {
+    let metric = |label: &str| {
+        cells[label]["result"][key]
+            .as_f64()
+            .unwrap_or_else(|| panic!("validated terrain-culling cell has {key}"))
+    };
+    let full_before = metric("terrain-base-full-bounds-before");
+    let hidden_full = metric("terrain-hidden-full-bounds");
+    let tight = metric("terrain-base-tight-bounds");
+    let hidden_tight = metric("terrain-hidden-tight-bounds");
+    let full_after = metric("terrain-base-full-bounds-after");
+    let full = (full_before + full_after) * 0.5;
+    let full_terrain = full - hidden_full;
+    let tight_terrain = tight - hidden_tight;
+    let net = full_terrain - tight_terrain;
+    json!({
+        "base_full_before_ms": full_before,
+        "base_full_after_ms": full_after,
+        "base_full_drift_ms": full_after - full_before,
+        "hidden_full_ms": hidden_full,
+        "base_tight_ms": tight,
+        "hidden_tight_ms": hidden_tight,
+        "hidden_control_drift_ms": hidden_tight - hidden_full,
+        "full_bounds_terrain_ms": full_terrain,
+        "tight_bounds_terrain_ms": tight_terrain,
+        "terrain_tight_bounds_net_ms": net,
+        "terrain_tight_bounds_reduction_frac": net / full_terrain.max(f64::EPSILON),
+        "whole_scene_tight_bounds_net_ms": full - tight,
+    })
+}
+
+fn headless_render_passes(session: &Session, variant: &str) -> Value {
+    let mut passes = serde_json::Map::new();
+    for (_, fields) in &session.headless_render_passes {
+        if fields["variant"].as_str() != Some(variant) {
+            continue;
+        }
+        let Some(pass) = fields["pass"].as_str() else {
+            continue;
+        };
+        let gpu_timing_available = fields["gpu_timing_available"].as_bool().unwrap_or(false);
+        passes.insert(
+            pass.to_string(),
+            json!({
+                "cpu_ms": fields["cpu_ms"].as_f64(),
+                "gpu_ms": if gpu_timing_available {
+                    fields["gpu_ms"].as_f64().map(Value::from).unwrap_or(Value::Null)
+                } else {
+                    Value::Null
+                },
+                "gpu_timing_available": gpu_timing_available,
+            }),
+        );
+    }
+    Value::Object(passes)
 }
 
 fn render_html(id: &str, s: &Session, summary: &Value) -> String {
@@ -549,6 +1084,8 @@ mod tests {
                 "gpu_grass_enabled": true,
                 "msaa_samples": 1,
                 "shadow_cascade_budget": 4,
+                "shadow_quality": "High",
+                "shadow_map_size_px": 4096,
                 "vsync_enabled": false,
                 "has_primary_window": true,
                 "window_width_px": 1600,
@@ -561,6 +1098,8 @@ mod tests {
         assert_eq!(summary["gpu_timing_available"], false);
         assert_eq!(summary["configuration"]["foliage_enabled"], false);
         assert_eq!(summary["configuration"]["shadow_cascade_budget"], 4);
+        assert_eq!(summary["configuration"]["shadow_quality"], "High");
+        assert_eq!(summary["configuration"]["shadow_map_size_px"], 4096);
         assert_eq!(summary["configuration"]["window_width_px"], 1600);
     }
 
@@ -602,5 +1141,68 @@ mod tests {
             .max_by_key(|(ts, _)| *ts)
             .unwrap();
         assert_eq!(newest.1["cpu_ms_mean"], 10.0);
+    }
+
+    #[test]
+    fn terrain_prepass_effects_subtract_the_hidden_control() {
+        let mut cells = serde_json::Map::new();
+        for (label, value) in [
+            ("terrain-base-prepass-before", 40.0),
+            ("terrain-hidden-prepass", 18.0),
+            ("terrain-base-no-prepass", 31.0),
+            ("terrain-hidden-no-prepass", 15.0),
+            ("terrain-base-prepass-after", 42.0),
+        ] {
+            cells.insert(label.to_string(), json!({"result": {"cpu_ms_p50": value}}));
+        }
+
+        let effects = terrain_prepass_effects(&cells, "cpu_ms_p50");
+        assert_eq!(effects["base_prepass_drift_ms"], 2.0);
+        assert_eq!(effects["terrain_with_prepass_ms"], 23.0);
+        assert_eq!(effects["terrain_without_prepass_ms"], 16.0);
+        assert_eq!(effects["terrain_prepass_net_ms"], 7.0);
+        assert_eq!(effects["nonterrain_prepass_net_ms"], 3.0);
+    }
+
+    #[test]
+    fn terrain_index_effects_subtract_the_hidden_control() {
+        let mut cells = serde_json::Map::new();
+        for (label, value) in [
+            ("terrain-base-dense-before", 34.0),
+            ("terrain-hidden-dense", 15.0),
+            ("terrain-base-coarse", 22.0),
+            ("terrain-hidden-coarse", 16.0),
+            ("terrain-base-dense-after", 36.0),
+        ] {
+            cells.insert(label.to_string(), json!({"result": {"cpu_ms_p50": value}}));
+        }
+
+        let effects = terrain_index_effects(&cells, "cpu_ms_p50");
+        assert_eq!(effects["base_dense_drift_ms"], 2.0);
+        assert_eq!(effects["dense_terrain_ms"], 20.0);
+        assert_eq!(effects["coarse_terrain_ms"], 6.0);
+        assert_eq!(effects["terrain_index_density_net_ms"], 14.0);
+        assert_eq!(effects["terrain_index_density_reduction_frac"], 0.7);
+    }
+
+    #[test]
+    fn terrain_culling_effects_subtract_the_hidden_control() {
+        let mut cells = serde_json::Map::new();
+        for (label, value) in [
+            ("terrain-base-full-bounds-before", 42.0),
+            ("terrain-hidden-full-bounds", 17.0),
+            ("terrain-base-tight-bounds", 31.0),
+            ("terrain-hidden-tight-bounds", 16.0),
+            ("terrain-base-full-bounds-after", 40.0),
+        ] {
+            cells.insert(label.to_string(), json!({"result": {"cpu_ms_p50": value}}));
+        }
+
+        let effects = terrain_culling_effects(&cells, "cpu_ms_p50");
+        assert_eq!(effects["base_full_drift_ms"], -2.0);
+        assert_eq!(effects["full_bounds_terrain_ms"], 24.0);
+        assert_eq!(effects["tight_bounds_terrain_ms"], 15.0);
+        assert_eq!(effects["terrain_tight_bounds_net_ms"], 9.0);
+        assert_eq!(effects["terrain_tight_bounds_reduction_frac"], 0.375);
     }
 }

@@ -165,13 +165,16 @@ typed controls they implement. Unsupported controls are absent, not disabled
 noise.
 
 The first common graphics tracer was MSAA because both applications use Bevy
-cameras and the setting has one concrete meaning. Foliage is now the second:
+cameras and the setting has one concrete meaning. Foliage is the second:
 `GraphicsPreferences::foliage` parks and clears either application's woody
 foliage streamer while leaving terrain colour and the game's separate grass
-layer unchanged. The control is registered only when the application supplies
-a foliage adapter, so Kòrsou's ellipsoid mode does not show an inert setting.
-Planetary-only clouds, grass, terrain LOD, and shadow-cascade count remain
-game settings until a second real consumer exists.
+layer unchanged. Clouds are the third: `GraphicsPreferences::clouds` parks
+the shared volumetric marcher in Kòrsou; the game still parks through its
+own `GraphicsSettings::clouds` until that field is folded in. Each control
+is registered only when the application supplies that adapter, so Kòrsou's
+ellipsoid mode does not show an inert foliage setting. Grass, terrain LOD,
+and shadow quality remain game settings until a second real consumer
+exists.
 
 Named quality presets (Showcase / Laptop / Custom) live in the shared
 graphics schema and stamp both shared and game knobs. Laptop is a developer

@@ -27,10 +27,13 @@ const QUADTREE_TILE_CELLS: usize = 64;
 const MIP_COUNT: usize = 4;
 const UTM_ZONE: u8 = 19;
 const COAST_DISTANCE_FILE: &str = "coast_distance_l6.i16";
+const COAST_POLYLINE_FILE: &str = "coast_polylines.bin";
 
 const ATTRIBUTION: &str = "produced using Copernicus WorldDEM-30 © DLR e.V. 2010-2014 and © Airbus Defence and Space GmbH 2014-2018 provided under COPERNICUS by the European Union and ESA; all rights reserved";
 const OSM_ATTRIBUTION: &str =
     "© OpenStreetMap contributors, data available under the Open Database License (ODbL)";
+const SENTINEL_ATTRIBUTION: &str = "Contains modified Copernicus Sentinel-2 data (ESA), processed to L2A COGs by Element 84 / AWS Earth Search";
+const COAST_ATTRIBUTION: &str = "© OpenStreetMap contributors, data available under the Open Database License (ODbL); Contains modified Copernicus Sentinel-2 data (ESA), processed to L2A COGs by Element 84 / AWS Earth Search";
 
 fn main() -> Result<()> {
     let mut args = env::args_os().skip(1);
@@ -44,7 +47,7 @@ fn main() -> Result<()> {
             coastline_path = Some(
                 args.next()
                     .map(PathBuf::from)
-                    .context("--coastline requires an Overpass JSON path")?,
+                    .context("--coastline requires a coastline-rings or Overpass JSON path")?,
             );
         } else {
             input_paths.push(PathBuf::from(argument));
@@ -216,10 +219,11 @@ fn main() -> Result<()> {
         coast_spacing_m,
     );
     write_i16(&output_dir.join(COAST_DISTANCE_FILE), &coast_distance)?;
+    coastline.write_polylines(&output_dir.join(COAST_POLYLINE_FILE))?;
 
     let source_rasters = sources.iter().map(SourceRaster::metadata).collect();
     let metadata = Metadata {
-        format_version: 5,
+        format_version: 6,
         name: "Curaçao Copernicus GLO-30 terrain explorer",
         source_product: "Copernicus DEM GLO-30, 2021 release",
         source_doi: "https://doi.org/10.5270/ESA-c5d3d65",
@@ -238,9 +242,9 @@ fn main() -> Result<()> {
         chunk_size_m,
         quadtree,
         coastline: CoastlineMetadata {
-            representation: "OpenStreetMap vector coastline rasterized as a signed-distance field",
-            method: "natural=coastline ways assembled into closed rings, projected to EPSG:32619, mapped to Bevy +X east/-Z north, sampled at the fixed visual terrain spacing, and used to clip mixed triangles",
-            limitation: "piecewise-linear zero contour is limited by the 15 m shoreline field; tides, beach profiles, cliffs, and inland water need separate data",
+            representation: "OSM land/sea rings densified with Sentinel-2 NDWI waterline crossings, kept as polylines and rasterized as a signed-distance field",
+            method: "OSM natural=coastline rings stay the land/sea topology; Sentinel-2 B03/B08 NDWI zero-crossings densify long chords; runtime clips mixed triangles to those polylines",
+            limitation: "Sentinel-2 waterline is a photographed instant inside a 40 m OSM corridor; tides, beach/cliff profiles, and inland water still need dedicated data. GLO-30 remains 30 m inland of the waterline",
             source_file: coastline
                 .source_path
                 .file_name()
@@ -249,8 +253,10 @@ fn main() -> Result<()> {
                 .into_owned(),
             source_timestamp: coastline.source_timestamp,
             source_url: "https://www.openstreetmap.org",
-            attribution: OSM_ATTRIBUTION,
-            license: "Open Data Commons Open Database License (ODbL) 1.0",
+            attribution: COAST_ATTRIBUTION,
+            license: "Open Data Commons Open Database License (ODbL) 1.0; Copernicus Sentinel data (ESA)",
+            polyline_file: COAST_POLYLINE_FILE,
+            polyline_vertex_count: coastline.node_count,
             distance_file: COAST_DISTANCE_FILE,
             distance_width: coast_width,
             distance_height: coast_height,
@@ -272,7 +278,7 @@ fn main() -> Result<()> {
         "wrote {} ({:.1}% land posts)\n{}",
         output_dir.display(),
         land_posts as f64 * 100.0 / (width * height) as f64,
-        format!("{ATTRIBUTION}\n{OSM_ATTRIBUTION}")
+        format!("{ATTRIBUTION}\n{OSM_ATTRIBUTION}\n{SENTINEL_ATTRIBUTION}")
     );
     Ok(())
 }
@@ -736,6 +742,8 @@ struct CoastlineMetadata<'a> {
     source_url: &'a str,
     attribution: &'a str,
     license: &'a str,
+    polyline_file: &'a str,
+    polyline_vertex_count: usize,
     distance_file: &'a str,
     distance_width: usize,
     distance_height: usize,

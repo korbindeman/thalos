@@ -17,7 +17,7 @@ use thalos_ui::{
     spawn_checkbox_row, spawn_cycle_row, spawn_slider_row, spawn_text_field, tokens,
 };
 
-use crate::graphics_settings::GraphicsSettings;
+use crate::graphics_settings::{GraphicsSettings, ShadowQuality};
 use crate::units_settings::{AviationUnits, UnitSystem, UnitsSettings};
 
 const HOTAS_AXES: [&str; 4] = ["pitch", "yaw", "roll", "throttle"];
@@ -31,7 +31,7 @@ struct GpuGrassControl;
 #[derive(Component)]
 struct TerrainLodControl;
 #[derive(Component)]
-struct ShadowCascadesControl;
+struct ShadowQualityControl;
 #[derive(Component)]
 struct ResetGraphicsControl;
 
@@ -213,28 +213,26 @@ fn build_graphics_tab(
     );
 
     spacer(b);
-    let shadow_index = settings.shadow_cascades as usize;
-    let shadow_options = (0..=GraphicsSettings::SHADOW_CASCADES_MAX)
-        .map(|count| {
-            if count == 0 {
-                "Off".to_string()
-            } else {
-                format!("{count}")
-            }
-        })
+    let shadow_index = ShadowQuality::ALL
+        .iter()
+        .position(|quality| *quality == settings.shadow_quality)
+        .unwrap_or(ShadowQuality::ALL.len() - 1);
+    let shadow_options = ShadowQuality::ALL
+        .iter()
+        .map(|quality| quality.label().to_string())
         .collect();
     spawn_cycle_row(
         b,
         theme,
-        "Shadow cascades",
+        "Shadow quality",
         shadow_options,
         shadow_index,
-        ShadowCascadesControl,
+        ShadowQualityControl,
     );
     note(
         b,
         theme,
-        "Each cascade is a 4096² depth pass. Laptop uses 2. THALOS_SHADOW_CASCADES still pins a session.",
+        "Low / Medium / High keep 2 / 3 / 4 cascades at 4096². Lower tiers shorten shadow range and release inactive targets.",
     );
 
     spacer(b);
@@ -659,7 +657,7 @@ fn apply_graphics_controls(
     grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GrassControl>)>,
     gpu_grass_q: Query<&UiCheckbox, (Changed<UiCheckbox>, With<GpuGrassControl>)>,
     terrain_q: Query<&UiSlider, (Changed<UiSlider>, With<TerrainLodControl>)>,
-    shadows_q: Query<&UiCycle, (Changed<UiCycle>, With<ShadowCascadesControl>)>,
+    shadows_q: Query<&UiCycle, (Changed<UiCycle>, With<ShadowQualityControl>)>,
     reset_q: Query<&Interaction, (Changed<Interaction>, With<ResetGraphicsControl>)>,
 ) {
     for checkbox in &clouds_q {
@@ -683,9 +681,10 @@ fn apply_graphics_controls(
         }
     }
     for cycle in &shadows_q {
-        let value = cycle.index as u8;
-        if value <= GraphicsSettings::SHADOW_CASCADES_MAX && settings.shadow_cascades != value {
-            settings.shadow_cascades = value;
+        if let Some(&quality) = ShadowQuality::ALL.get(cycle.index)
+            && settings.shadow_quality != quality
+        {
+            settings.shadow_quality = quality;
         }
     }
     for interaction in &reset_q {

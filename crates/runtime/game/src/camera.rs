@@ -205,6 +205,7 @@ pub(crate) fn spawn_camera(mut commands: Commands, view: Res<ViewMode>) {
         space_camera_post_stack(),
         OrbitCamera,
         MapCamera,
+        thalos_preferences::PreferencesCamera::smaa(),
         bevy::picking::mesh_picking::MeshPickingCamera,
         // Layer 0 (default) covers entities visible in both views (bodies,
         // sky); MAP_LAYER covers map-only overlays.

@@ -234,6 +234,37 @@ perf-shadow-bisect preset="forest-stand":
     RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=shadow-cascades THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=4 {{capture_command}}
     cargo run --release -p thalos_perfreport -- --headless-shadow-cascades
 
+# Terrain main-pass discriminator: bracket ordinary lit rendering around the
+# existing fullbright path and a baked-base-colour path in one warmed scene.
+perf-terrain-bisect preset="forest-stand":
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=terrain-material THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=0 {{capture_command}}
+    cargo run --release -p thalos_perfreport -- --headless-terrain-material
+
+# Difference-of-differences discriminator for terrain's depth-prepass cost.
+# Visible and hidden controls run with the ship-camera prepass on and off while
+# geometry, residency, foliage, resolution, and custom shadows remain fixed.
+perf-terrain-prepass-bisect preset="forest-stand":
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=terrain-prepass THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=0 {{capture_command}}
+    cargo run --release -p thalos_perfreport -- --headless-terrain-prepass
+
+# Main-pass triangle/vertex discriminator. The explicit probe gate builds a
+# compact full-attribute twin per tile; warmed cells swap handles, then restore
+# the exact dense handle before exit.
+perf-terrain-index-bisect preset="forest-stand":
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=terrain-index THALOS_TILE_INDEX_PROBE=1 THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=0 {{capture_command}}
+    cargo run --release -p thalos_perfreport -- --headless-terrain-index
+
+# Fidelity-free culling candidate: full skirt-inflated bounds versus the tight
+# surface bounds already used by terrain shadow twins, with dense geometry and
+# the production depth prepass held fixed.
+perf-terrain-culling-bisect preset="forest-stand":
+    cargo run -p thalos_capture --bin thalos_capture -- stop
+    RUST_LOG=warn,thalos::diagnostic=info THALOS_SCREENSHOT={{preset}} THALOS_SCREENSHOT_WARMUP=1000000 THALOS_SCREENSHOT_SIZE=1600x900 THALOS_SCREENSHOT_GRAPHICS=clouds=off,grass=off,foliage=on THALOS_CAPTURE_CLOCK=driven:60 THALOS_HEADLESS_PERF=terrain-culling THALOS_TILE_CULL_PROBE=1 THALOS_PERF_FOLIAGE=on THALOS_SHADOW_CASCADES=0 {{capture_command}}
+    cargo run --release -p thalos_perfreport -- --headless-terrain-culling
+
 # CLOUD-0's repeatable five-view baseline. Each preset writes a PNG under
 # artifacts/visual/latest/ and a same-named JSONL report under artifacts/diagnostics/.
 # Use the single-preset `screenshot` recipe with overrides for 1440p,

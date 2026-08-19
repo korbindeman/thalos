@@ -22,14 +22,16 @@
 //! - [`step::TERRAIN`] — ground-LOD terrain for the initially-wanted
 //!   bodies. Completed by
 //!   `rendering::terrain_residency::initial_residency_loading_gate`.
+//!   On surface boots that also register [`step::SETTLE`], this completes
+//!   once the tile root exists; settle waits for the pad-view cover so the
+//!   step does not stall on the parking-orbit placeholder.
 //! - [`step::PLACEMENT`] — deferred terrain-aware craft placement
 //!   (descents via `spawn::refine_descent_spawn`, runway scenarios via
 //!   `runway::finish_runway_spawn`). Registered only for scenarios with a
 //!   deferred placement; the reveal now waits for it, so the first visible
 //!   frame has the craft in its real scenario state.
 //! - [`step::SETTLE`] — tile streaming settled under the view
-//!   (`crate::surface_settle`). Registered only for the parked runway
-//!   start.
+//!   (`crate::surface_settle`). Registered only for parked runway / launch.
 //!
 //! Updates to an unregistered step are no-ops, so producers don't need to
 //! know which scenario is loading. A load can be re-armed at runtime
@@ -60,7 +62,7 @@ pub mod step {
     pub const TERRAIN: &str = "terrain";
     /// Deferred terrain-aware craft placement (descents, runway).
     pub const PLACEMENT: &str = "placement";
-    /// Tile streaming settled under the view (parked runway).
+    /// Tile streaming settled under the view (parked runway / launch).
     pub const SETTLE: &str = "settle";
 }
 

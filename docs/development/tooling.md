@@ -105,6 +105,13 @@ invocation, amortizing the world/GPU boot wherever the boot context matches.
 executable. The controller validates scene names and decoded outputs, rejects
 fatal shader/pipeline/device logs, and retries one dead or wedged host once.
 
+On a headless boot, the loading tracker hands terrain readiness to the capture
+driver as soon as a live tile root exists. Loading must not wait for coverage
+of the placeholder orbit because the scripted camera can pose only in
+`Running`. After posing, the driver remains fail-closed on the actual evidence
+view: `coverage_ready() && settled()` is required before readback, and the
+receipt records the verdict (INC-20260818T200855Z).
+
 ### Game window / renderer launch toggles
 
 `just game` normally starts borderless fullscreen. The renderer backend
@@ -132,7 +139,9 @@ does not write `preferences.ron` / `settings.ron`. On macOS, `just game` and
 mode is unchanged) so an existing checkout does not stay on Showcase
 layers.
 `quality=showcase` forces the canonical look. Capture ignores the pin. Full
-contract: `docs/development/quality_profiles.md`.
+contract: `docs/development/quality_profiles.md`. To force 3D render scale on
+one headless shot (Laptop 0.50× sky/depth regressions), set
+`THALOS_SCREENSHOT_RENDER_SCALE=0.5`.
 
 ```bash
 just game orbit
@@ -189,10 +198,11 @@ tab, which *does* persist.)
 
 `just perf-bisect [preset]` is the agent-runnable render-cost discriminator. It
 boots the real screenshot world and offscreen render graph once, removes the
-capture host's 60 Hz pacing and PNG readback, waits for terrain coverage plus
-stable mesh/tile counts, then measures the four cells of foliage × custom
-shadows in that same warmed process. Each cell gets a frame-history flush and
-240-frame measurement window. Results and the computed main/interaction
+capture host's 60 Hz pacing and PNG readback, poses the scripted camera, then
+waits once for exact terrain settlement plus 120 frames of stable mesh/tile
+counts before configuring the first cell. Each cell gets a 30-frame transition
+flush and an unchanged 240-frame measurement window; later cells never repeat
+the scene-settle window. Results and the computed main/interaction
 effects go to `artifacts/diagnostics/reports/headless-matrix.json`.
 The recipe explicitly enables the diagnostic target even when the calling
 shell has a restrictive `RUST_LOG`; the report command fails if any cell is
@@ -203,7 +213,56 @@ holds foliage resident while stepping the live shadow-camera budget 4→0. Its
 `headless-shadow-cascades.json` report gives the marginal frame cost of every
 cascade. Use that ladder before changing cascade coverage or resolution: it
 separates a costly individual view from fixed rig overhead, and it fails closed
-when any rung is missing.
+when any rung is missing. The report also maps the player tiers onto their
+measured cells (Off/Low/Medium/High = 0/2/3/4) and reports the Low and Medium
+savings against High. Active targets remain 4096²; inactive targets shrink to
+1×1. Ordinary `frame_gauge` records the effective tier, cascade count, and map
+size so performance evidence cannot silently inherit the wrong bundle.
+
+`just perf-terrain-bisect [preset]` holds geometry, foliage, resolution, and a
+zero custom-shadow budget constant while measuring five material cells in one
+warmed process: lit, fullbright after the procedural layers, baked base colour
+before those layers, terrain hidden, then lit again. The bracketing lit cells expose drift. Its
+`headless-terrain-material.json` report attributes the procedural layer stack
+separately from PBR/post-lighting, then hides terrain to price its irreducible
+base draw/raster work, even on Metal where Bevy does not provide GPU pass
+timestamps.
+
+`just perf-terrain-prepass-bisect [preset]` keeps the same fixed scene but
+uses baked-base-colour terrain to isolate geometry/raster work. Visible and
+hidden controls run with the ship-camera depth prepass both enabled and
+disabled, bracketed by the ordinary prepass-on path. The
+`headless-terrain-prepass.json` report subtracts the hidden control from both
+states, so terrain is not charged for prepass work from craft, structures, or
+foliage. This is a diagnostic ablation: the production contact-shadow pass
+requires current-frame prepass depth, so a faster no-prepass cell does not by
+itself justify disabling it.
+
+`just perf-terrain-index-bisect [preset]` narrows the remaining no-prepass main
+path. In this opt-in process only, each visible tile builds a compact
+full-attribute 33² twin from every fourth sample of its 129² source; warmed
+cells swap mesh handles without rebuilding the scene. Dense cells bracket the
+probe and both densities have terrain-hidden controls. The
+`headless-terrain-index.json` reader fails if scene identity drifts and reports
+the residual-normalized geometry-density delta. The coarse cell is evidence,
+not a production LOD setting: it deliberately removes interior geometric
+samples while retaining tile count, draws, material, footprint, and boundaries.
+
+`just perf-terrain-culling-bisect [preset]` tests the fidelity-free local
+candidate after geometry density is implicated. It keeps dense geometry and
+the production depth prepass, then swaps only each tile's local AABB between
+the skirt-inflated mesh extent and its tight surface band. The same process
+brackets full bounds and records `terrain_view_visible` for every cell. Its
+`headless-terrain-culling.json` report uses hidden controls and fails closed on
+scene-identity drift. This probe exists because the skirt can extend kilometres
+below a coarse tile even though it is visible only with that tile's surface.
+
+Every headless cell also snapshots Bevy's top-level render diagnostics as
+`headless_render_pass` events and embeds them under `render_passes` in the JSON
+report. `cpu_ms` is command encoding/submission work, not GPU execution. The
+reader writes `gpu_ms: null` with `gpu_timing_available: false` when the backend
+does not expose timestamps (notably Metal); zero is never reported as a free
+pass. The custom contact-shadow node participates in the same diagnostic set.
 
 The default preset is `forest-stand`; output is fixed at 1600×900 with clouds,
 grass, and MSAA off so the matrix changes only woody vegetation and the custom
@@ -218,10 +277,11 @@ player-visible validation if the offscreen result identifies a lever.
 Every `frame_gauge` records the effective foliage/cloud/grass/MSAA state,
 shadow-cascade budget, VSync state, and physical window size. `just perf-report`
 copies that identity into `summary.json`; a comparison is invalid when those
-fields differ outside the intended axis. Each offscreen cell additionally emits
-`headless_benchmark_{config,ready,start,end}` records with frame percentiles,
-wall duration, scene counts, stage samples, resolution, and an explicit GPU
-timing-availability bit.
+fields differ outside the intended axis. Each offscreen cell emits
+`headless_benchmark_{config,start,end}` records with frame percentiles, wall
+duration, scene counts, stage samples, resolution, and an explicit GPU
+timing-availability bit. One `headless_benchmark_ready` record marks the shared
+scene-settle boundary before cell 1.
 
 For A/B attribution, have the user change one variable at a time and report
 the frame time from the F3 debug view or capture a chrome trace
@@ -264,6 +324,13 @@ warnings and errors remain visible. Set
 `THALOS_RUNTIME_DIAGNOSTICS` to a bare filename (resolved under
 `artifacts/diagnostics/`) or an explicit path to override the sink. `RUST_LOG`
 still controls which events exist.
+
+Tile startup emits one `tile_terrain / first_coverage` event per installed
+terrain root. `elapsed_ms` measures player-visible wall time through scheduling,
+synthesis, mesh admission, and the first complete resident cover; `resident`
+and `desired` distinguish a compact bootstrap from a regression that waits for
+final-detail residency. `just diag` reports covers above 5 s and escalates those
+above 10 s.
 
 ### Performance telemetry (perf lane)
 
@@ -339,6 +406,13 @@ second. `origin_frame_error_m` compares the cascade rig's render origin with the
 current camera cell origin; `footprint_scale`, `cascade0_texel_m`, and
 `active_cascades` provide the scale denominator. Any origin error above 1 cm is
 a frame-coherence failure, reported by `just diag` as `shadow_frame_desync`.
+
+The scene-depth copy emits `thalos::diagnostic::scene_depth` /
+`depth_copy_skipped` when the main-pass depth and `SceneDepthImage` differ in
+size (once per unique pair, then every 60 skipped frames). A hang of three or
+more records in a session is `scene_depth_copy_skipped`: the sky composite
+falls back to the geometric horizon and paints over the ship and mountains
+(INC-20260817T014132Z).
 
 The ground-contact pair on `thalos::diagnostic::local_physics` (both 1 Hz
 sim-time throttled, added with INC-20260729T073116Z): **`gear_contact`**

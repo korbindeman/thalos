@@ -53,6 +53,11 @@ change.
 
 Output resolution is separate. A 1920×1080 and 3840×2160 capture sample the same
 16:9 sensor window at different fidelity and must have identical projection.
+Interactive **render scale** is the same idea: the 3D main target is
+`window_physical × scale`, then upscaled to the swapchain. The HUD camera
+clears to transparent and alpha-blends over that blit so undrawn pixels do
+not cover the scene. Projection and window-logical picking stay on the
+native window. Capture stays at 1.0.
 An output aspect that differs from the active sensor window must not silently
 change the camera: the caller supplies an explicit sensor crop/fit policy, or
 capture rejects the mismatch.

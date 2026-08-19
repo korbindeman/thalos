@@ -29,7 +29,7 @@ Use the smallest workflow that answers the question:
 | Isolate cloud internals | `just compare <scene> cloud-tier` or `cloud-reconstruction` | registered N-way variants |
 | Check whether your edits are present | read `<image>.capture.json` | `source_floor_guaranteed: true` proves the invocation floor is included; `workspace_matches` says whether the checkout stayed exact |
 | Hand framing to/from a human | human presses F9; agent runs `just screenshot <id>` | exact body-fixed camera, lens, scene, and saved time |
-| Hand the result back to a human | write `<page>.html.in` with image tokens, run `just publish-report <page>.html.in`, open only `<page>.html` | *Presenting results* below |
+| Hand the result back to a human | show or link the PNG files in the normal chat response | Build an optional HTML report only when the user requests one |
 
 ### Framing versus fidelity
 
@@ -277,6 +277,8 @@ readback-flush tail. A fixed frame delay is not a readback-completion contract
 | `renderer` | `tiles`, `udlod` | The same scene through the **default** standard-path tile renderer and the **legacy** UDLOD baseline. Structural, so it always runs cold; the capture client automatically adds the default-off `legacy-udlod` feature only for the UDLOD variant. Ordinary game/capture builds never compile it |
 | `terrain-culling` | `backface`, `two-sided` | Test whether grazing holes are missing back-facing raster coverage |
 | `terrain-regolith-filter` | `legacy-unfiltered`, `footprint-filtered` | Matched before/after for airless procedural-detail Nyquist filtering |
+| `shadow-quality` | `high-4`, `medium-3`, `low-2`, `off-0` | Player-facing shadow range tiers at fixed 4096² active-map detail; structural, so every variant runs cold |
+| `shadow-cascades` | `4-full`, `3-no-farthest`, `2`, `1`, `0-off` | Raw diagnostic cost/coverage ladder underlying the named tiers |
 
 Axes are intentionally typed in `tools/capture/src/compare.rs`, inside the
 single `thalos_capture` binary. Add a new one only when every variant can be
@@ -290,9 +292,10 @@ the game silently renders the default each time. Any secondary diagnostic held
 fixed during an A/B belongs in `INVARIANT_ENV_KEYS` so the manifest proves it did
 not drift (INC-20260722T182934Z).
 
-`terrain-culling` and `renderer` are structural — one specializes a pipeline at
-first use, the other decides at boot which ground streams — so the normal
-comparison command automatically sends them through the cold lane. New axes
+`terrain-culling`, `renderer`, `shadow-quality`, and `shadow-cascades` are
+structural — they specialize a pipeline or select a renderer/camera budget at
+boot — so the normal comparison command automatically sends them through the
+cold lane. New axes
 should be runtime resources/material inputs when possible; otherwise mark them
 cold rather than pretending an existing pipeline changed.
 
@@ -337,14 +340,12 @@ to a failed request, validates that the output exists and decodes, and refuses
 to assemble comparisons from invalid variants. Cold variants receive the same
 log validation.
 
-## Presenting results
+## Optional report artifacts
 
-Captures exist to be looked at. When a change lands whose result is visual — or
-whose shape is spatial or structural enough that a diagram beats prose — the
-hand-back is a presentation page, not a paragraph describing the images
-(CLAUDE.md · *Presenting your work*). Skip it for one-line fixes, doc edits, and
-anything with no visible surface; a padded presentation costs more than it
-returns.
+Do not build an HTML report after each change. Show or link captures in the
+normal chat response. Build a self-contained report only when the user
+explicitly requests one. The report template and publisher remain available for
+that future use.
 
 The page is a self-contained HTML file in `artifacts/reports/`
 (`<date>-<slug>.html`, gitignored like all evidence), handed back by showing it

@@ -5,7 +5,9 @@ ladder. The first named profile exists so Thalos can be run and developed on a
 Mac without the Showcase path melting the machine.
 
 Capture and screenshots always use Showcase defaults. A laptop session must not
-leak into `just screenshot` evidence.
+leak into `just screenshot` evidence. To reproduce a Laptop-only 3D-scale
+defect headlessly, pin `THALOS_SCREENSHOT_RENDER_SCALE=0.5` on that shot
+(INC-20260817T014132Z).
 
 ## Presets
 
@@ -15,19 +17,50 @@ Showcase.
 
 | Knob | Showcase | Laptop |
 |---|---|---|
+| Render scale | 1.00× | 0.50× |
 | Frame cap | Off | 30 Hz |
-| Foliage | On | Off |
+| Foliage | On | On |
 | MSAA | Off (post-process AA) | Off |
-| Clouds | On | Off |
+| Clouds | On | On |
 | Grass | On | Off |
 | Terrain detail | 1.00× | 0.50× |
-| Shadow cascades | 4 | 2 |
+| Shadow quality | High (4 cascades) | Low (2 cascades) |
 
-Laptop may look rough. That is the point.
+Laptop keeps clouds and woody foliage because both are part of the game's
+signature world fidelity. Its primary savings are the 0.50× 3D render scale
+and 30 Hz cap; grass, terrain detail, and shadow range remain secondary
+reductions.
+
+### Shadow quality
+
+Shadow quality is an independent player-facing tier, not a raw renderer count:
+
+| Tier | Active cascades | Effect |
+|---|---:|---|
+| Off | 0 | Disables the custom sun-shadow rig |
+| Low | 2 | Keeps near and mid shadows; parks the two broadest views |
+| Medium | 3 | Adds broad terrain/foliage grounding; parks only the farthest view |
+| High | 4 | Full Showcase shadow range |
+
+Every active cascade remains 4096². The broad-cascade benchmark showed that
+caster geometry, not map fill, dominated cost, so lowering resolution would
+weaken near detail without addressing the measured bottleneck
+(ADR-20260814T201228Z). An inactive cascade's depth and throwaway colour targets
+shrink to 1×1, returning a nominal 80 MiB per parked cascade as well as removing
+its cull, queue, depth pass, and depth copy. The measured forest-stand ladder
+saved about 11.9 ms/frame from High to Low on the machine that produced the
+current report; rerun `just perf-shadow-bisect forest-stand` for the current
+hardware and source.
+
+`THALOS_SHADOW_QUALITY=off|low|medium|high` pins a tier for one process.
+`THALOS_SHADOW_CASCADES=0..4` remains the lower-level diagnostic override; a
+one-cascade run is deliberately reported as Custom rather than exposed in the
+menu. `just compare <scene> shadow-quality` captures the four named tiers.
 
 Laptop does not change the window. Mode and size stay on the Window page
-(default is borderless fullscreen). UI stays at the OS HiDPI scale. Do not
-write `scale_factor_override` for this profile: that made the HUD 1×.
+(default is borderless fullscreen). Render scale shrinks the 3D main target
+and Bevy upscales it to the swapchain; UI stays on a full-resolution camera
+at OS HiDPI. Picking and `world_to_viewport` keep window-logical coordinates.
 `THALOS_SCALE` still pins one session.
 
 ## First run
@@ -61,9 +94,10 @@ patches only the typed capture overrides.
 
 ## Where the knobs live
 
-Shared knobs (preset, render scale, frame cap, MSAA, foliage) live in
-`thalos_preferences` and appear on the common Graphics page. Game-only knobs
-(clouds, grass, terrain detail, shadow cascades) live in `GraphicsSettings` and
+Shared knobs (preset, render scale, frame cap, MSAA, foliage, clouds) live in
+`thalos_preferences` and appear on the common Graphics page when the
+application supplies that adapter. Game-only knobs (clouds until folded in,
+grass, terrain detail, shadow quality) live in `GraphicsSettings` and
 appear on the game Graphics page. Picking a named preset stamps both files.
 
 ## Later work

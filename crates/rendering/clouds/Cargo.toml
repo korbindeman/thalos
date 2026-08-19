@@ -1,0 +1,16 @@
+[package]
+name = "thalos_clouds"
+publish = false
+version.workspace = true
+edition.workspace = true
+
+# Volumetric-cloud compute mechanism: noise generation, spherical-shell
+# raymarch, weather/strata cubes, and the sun-transmittance cascade.
+# Applications write CameraMatrices and CloudsConfig each frame and composite
+# CloudRenderTexture themselves. The planetary BodySky composite stays in
+# thalos_body_render.
+
+[dependencies]
+bevy = { version = "0.19", features = ["wayland", "jpeg"] }
+rayon = "1.12"
+thalos_terrain = { path = "../../domain/terrain" }

@@ -70,6 +70,7 @@ use thalos_body_render::{
 use thalos_world::BodyId;
 
 use crate::camera::ShipCamera;
+use crate::graphics_settings::{GraphicsSettings, ShadowQuality};
 use crate::solar_system_state::{SimulationState, SolarSystemState};
 
 static CASCADE_BUDGET: std::sync::OnceLock<std::sync::atomic::AtomicUsize> =
@@ -88,22 +89,23 @@ pub const SHADOW_FOLIAGE_LAYER: usize = 11;
 
 /// Per-cascade square resolution. 4096² at the extents below is ~0.03 m/texel
 /// for the near cascade and ~2.0 m for the far one.
-const SHADOW_MAP_SIZE: u32 = 4096;
+pub(crate) const SHADOW_MAP_SIZE: u32 = 4096;
+const INACTIVE_SHADOW_MAP_SIZE: u32 = 1;
 
-/// Ceiling on the number of live cascades, from `THALOS_SHADOW_CASCADES`
-/// (0 = shadows off). Unset means no ceiling.
+/// Ceiling on the number of live cascades. The named player setting maps to
+/// 0/2/3/4; `THALOS_SHADOW_QUALITY` pins one of those tiers and
+/// `THALOS_SHADOW_CASCADES=0..4` pins the raw diagnostic value.
 ///
-/// A **measurement** knob, not a quality setting, and the reason it exists is
+/// The raw override remains a **measurement** knob, and the reason it exists is
 /// that "how much does the shadow rig cost" was previously unanswerable without
 /// a recompile. Each cascade is a separate ortho view with its own cull, queue,
 /// depth pass and depth copy, so stepping this 0→4 over one preset gives the
 /// MARGINAL cost of each cascade directly, in the real scene, read off the perf
 /// lane's `frame_gauge` — which is what ranks the levers in
-/// BL-20260731T202656Z. Drives the `shadows` compare axis.
+/// BL-20260731T202656Z. Drives the `shadow-cascades` compare axis.
 ///
-/// Read once for ordinary sessions, so an environment change needs a cold run /
-/// capture-host restart, same as `THALOS_TILE_RENDERER`. The controlled
-/// headless cost matrix is the sole live writer.
+/// Environment pins are read once and need a cold run / capture-host restart.
+/// The settings menu and controlled headless cost matrix are the live writers.
 pub(crate) fn cascade_budget() -> usize {
     CASCADE_BUDGET
         .get_or_init(|| std::sync::atomic::AtomicUsize::new(configured_cascade_budget()))
@@ -111,18 +113,56 @@ pub(crate) fn cascade_budget() -> usize {
 }
 
 fn configured_cascade_budget() -> usize {
-    let Ok(raw) = std::env::var("THALOS_SHADOW_CASCADES") else {
-        return CASCADE_COUNT;
-    };
-    match raw.trim().parse::<usize>() {
-        Ok(n) if n <= CASCADE_COUNT => {
-            warn!("THALOS_SHADOW_CASCADES={n} — shadow cascades capped (measurement mode)");
-            n
-        }
-        _ => {
-            warn!("THALOS_SHADOW_CASCADES={raw:?} is not 0..={CASCADE_COUNT}; ignoring");
-            CASCADE_COUNT
-        }
+    if let Ok(raw) = std::env::var("THALOS_SHADOW_CASCADES") {
+        return match raw.trim().parse::<usize>() {
+            Ok(n) if n <= CASCADE_COUNT => {
+                warn!("THALOS_SHADOW_CASCADES={n} — shadow cascades capped (measurement mode)");
+                n
+            }
+            _ => {
+                warn!("THALOS_SHADOW_CASCADES={raw:?} is not 0..={CASCADE_COUNT}; ignoring");
+                CASCADE_COUNT
+            }
+        };
+    }
+    if let Ok(raw) = std::env::var("THALOS_SHADOW_QUALITY") {
+        return match ShadowQuality::parse(&raw) {
+            Some(quality) => {
+                info!(
+                    "THALOS_SHADOW_QUALITY={} — {} active shadow cascades",
+                    quality.label(),
+                    quality.cascade_count()
+                );
+                quality.cascade_count() as usize
+            }
+            None => {
+                warn!("THALOS_SHADOW_QUALITY={raw:?} is not off|low|medium|high; ignoring");
+                CASCADE_COUNT
+            }
+        };
+    }
+    CASCADE_COUNT
+}
+
+pub(crate) const fn quality_label_for_budget(budget: usize) -> &'static str {
+    match budget {
+        0 => "Off",
+        2 => "Low",
+        3 => "Medium",
+        4 => "High",
+        _ => "Custom",
+    }
+}
+
+pub(crate) fn quality_label() -> &'static str {
+    quality_label_for_budget(cascade_budget())
+}
+
+const fn shadow_target_size(index: usize, budget: usize) -> u32 {
+    if index < budget {
+        SHADOW_MAP_SIZE
+    } else {
+        INACTIVE_SHADOW_MAP_SIZE
     }
 }
 
@@ -331,6 +371,7 @@ const SHADOW_STRENGTH: f32 = 0.88;
 #[derive(Resource, Clone, ExtractResource)]
 pub struct SunShadowImage {
     pub handles: [Handle<Image>; CASCADE_COUNT],
+    color_handles: [Handle<Image>; CASCADE_COUNT],
 }
 
 /// Main-world shadow state read by the terrain + tree material drivers.
@@ -489,6 +530,18 @@ pub struct SunShadowPlugin;
 
 impl Plugin for SunShadowPlugin {
     fn build(&self, app: &mut App) {
+        if std::env::var("THALOS_SHADOW_CASCADES").is_err()
+            && std::env::var("THALOS_SHADOW_QUALITY").is_err()
+        {
+            let initial_budget = app
+                .world()
+                .get_resource::<GraphicsSettings>()
+                .map(|settings| settings.shadow_quality.cascade_count() as usize);
+            if let Some(initial_budget) = initial_budget {
+                set_cascade_budget(initial_budget);
+            }
+        }
+
         app.add_plugins(ExtractResourcePlugin::<SunShadowImage>::default())
             .add_plugins(ExtractComponentPlugin::<SunShadowCascade>::default())
             .add_systems(Startup, setup_sun_shadow)
@@ -496,6 +549,7 @@ impl Plugin for SunShadowPlugin {
                 PostUpdate,
                 (
                     crate::rendering::real_space::update_real_space_origin,
+                    resize_sun_shadow_targets,
                     update_sun_shadow_camera,
                     sync_craft_shadow,
                 )
@@ -569,29 +623,85 @@ impl Plugin for SunShadowPlugin {
 
 /// Create a plain 2-D depth target (one per cascade) the camera depth is copied
 /// into — the known-good single-map image, replicated.
-fn make_depth_image(images: &mut Assets<Image>) -> Handle<Image> {
+fn make_depth_image(images: &mut Assets<Image>, size: u32) -> Handle<Image> {
     let mut depth = Image::new_uninit(
         Extent3d {
-            width: SHADOW_MAP_SIZE,
-            height: SHADOW_MAP_SIZE,
+            width: size,
+            height: size,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
         TextureFormat::Depth32Float,
-        RenderAssetUsages::RENDER_WORLD,
+        // Live menu changes resize this descriptor after the first extraction.
+        // `new_uninit` carries no CPU pixel payload, so retaining the asset in
+        // MAIN_WORLD costs metadata rather than a second 4096² allocation.
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
     );
     depth.texture_descriptor.usage = TextureUsages::COPY_DST | TextureUsages::TEXTURE_BINDING;
     images.add(depth)
 }
 
+fn make_color_image(images: &mut Assets<Image>, size: u32) -> Handle<Image> {
+    let mut color = Image::new_uninit(
+        Extent3d {
+            width: size,
+            height: size,
+            depth_or_array_layers: 1,
+        },
+        TextureDimension::D2,
+        TextureFormat::R8Unorm,
+        RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+    );
+    color.texture_descriptor.usage =
+        TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
+    images.add(color)
+}
+
+fn resize_image(images: &mut Assets<Image>, handle: &Handle<Image>, size: u32) {
+    let Some(mut image) = images.get_mut(handle) else {
+        return;
+    };
+    let target = Extent3d {
+        width: size,
+        height: size,
+        depth_or_array_layers: 1,
+    };
+    if image.texture_descriptor.size != target {
+        image.resize(target);
+    }
+}
+
+fn resize_sun_shadow_targets(
+    shadow: Res<SunShadowImage>,
+    mut images: ResMut<Assets<Image>>,
+    mut previous_budget: Local<Option<usize>>,
+) {
+    let budget = cascade_budget();
+    if *previous_budget == Some(budget) {
+        return;
+    }
+    *previous_budget = Some(budget);
+    for index in 0..CASCADE_COUNT {
+        let size = shadow_target_size(index, budget);
+        resize_image(&mut images, &shadow.handles[index], size);
+        resize_image(&mut images, &shadow.color_handles[index], size);
+    }
+}
+
 /// Create the per-cascade depth targets + colour targets and spawn the
 /// (inactive) orthographic cascade cameras.
 fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    let handles: [Handle<Image>; CASCADE_COUNT] =
-        core::array::from_fn(|_| make_depth_image(&mut images));
+    let budget = cascade_budget();
+    let handles: [Handle<Image>; CASCADE_COUNT] = core::array::from_fn(|index| {
+        make_depth_image(&mut images, shadow_target_size(index, budget))
+    });
+    let color_handles: [Handle<Image>; CASCADE_COUNT] = core::array::from_fn(|index| {
+        make_color_image(&mut images, shadow_target_size(index, budget))
+    });
 
     commands.insert_resource(SunShadowImage {
         handles: handles.clone(),
+        color_handles: color_handles.clone(),
     });
     commands.insert_resource(SunShadowState {
         images: handles,
@@ -604,20 +714,6 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         // 256 MiB across four 4096² cascades and wrote four channels for pixels
         // no consumer ever samples. R8 preserves the identical depth pass while
         // cutting the discarded colour allocation and bandwidth by 75%.
-        let mut color = Image::new_uninit(
-            Extent3d {
-                width: SHADOW_MAP_SIZE,
-                height: SHADOW_MAP_SIZE,
-                depth_or_array_layers: 1,
-            },
-            TextureDimension::D2,
-            TextureFormat::R8Unorm,
-            RenderAssetUsages::RENDER_WORLD,
-        );
-        color.texture_descriptor.usage =
-            TextureUsages::RENDER_ATTACHMENT | TextureUsages::TEXTURE_BINDING;
-        let color_handle = images.add(color);
-
         // Spawn-time baseline only — `update_sun_shadow_camera` overwrites this
         // every frame with the live square-on-ground extents (U ≠ V).
         let half = CASCADE_HALF_EXTENTS_M[index];
@@ -646,7 +742,7 @@ fn setup_sun_shadow(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
                 clear_color: ClearColorConfig::Custom(Color::NONE),
                 ..default()
             },
-            RenderTarget::Image(ImageRenderTarget::from(color_handle)),
+            RenderTarget::Image(ImageRenderTarget::from(color_handles[index].clone())),
             Projection::Orthographic(OrthographicProjection {
                 scaling_mode: ScalingMode::Fixed {
                     width: half * 2.0,
@@ -1351,4 +1447,34 @@ fn update_sun_shadow_camera(
         cam.is_active = false;
     }
     state.block.gate.x = 0.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn named_quality_budgets_preserve_active_resolution_and_release_the_rest() {
+        assert_eq!(
+            core::array::from_fn::<_, CASCADE_COUNT, _>(|index| shadow_target_size(index, 0)),
+            [1, 1, 1, 1]
+        );
+        assert_eq!(
+            core::array::from_fn::<_, CASCADE_COUNT, _>(|index| shadow_target_size(index, 2)),
+            [4096, 4096, 1, 1]
+        );
+        assert_eq!(
+            core::array::from_fn::<_, CASCADE_COUNT, _>(|index| shadow_target_size(index, 3)),
+            [4096, 4096, 4096, 1]
+        );
+        assert_eq!(
+            core::array::from_fn::<_, CASCADE_COUNT, _>(|index| shadow_target_size(index, 4)),
+            [4096, 4096, 4096, 4096]
+        );
+    }
+
+    #[test]
+    fn raw_one_cascade_override_is_reported_as_custom() {
+        assert_eq!(quality_label_for_budget(1), "Custom");
+    }
 }

@@ -36,6 +36,7 @@ use bevy::math::{Mat4, Vec3, Vec4};
 use bevy::prelude::*;
 use bevy::render::{
     RenderApp, RenderStartup,
+    diagnostic::RecordDiagnostics,
     extract_resource::{ExtractResource, ExtractResourcePlugin},
     render_asset::RenderAssets,
     render_resource::{binding_types::*, encase, *},
@@ -239,6 +240,7 @@ fn resize_contact_shadow_image(
     contact: Option<Res<ContactShadowImage>>,
     mut images: ResMut<Assets<Image>>,
     cameras: Query<&Camera, With<ShipCamera>>,
+    render_scale: Res<thalos_preferences::RenderScaleState>,
 ) {
     let Some(contact) = contact else {
         return;
@@ -246,7 +248,7 @@ fn resize_contact_shadow_image(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let Some(viewport) = camera.physical_viewport_size() else {
+    let Some(viewport) = render_scale.physical_viewport(camera) else {
         return;
     };
     if viewport.x == 0 || viewport.y == 0 {
@@ -435,6 +437,8 @@ fn compute_contact_shadow(
         &BindGroupEntries::sequential((&depth.texture.default_view, buffer.as_entire_binding())),
     );
 
+    let diagnostics = ctx.diagnostic_recorder();
+    let diagnostics = diagnostics.as_deref();
     let mut pass = ctx.begin_tracked_render_pass(RenderPassDescriptor {
         label: Some("contact_shadow_pass"),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -449,7 +453,9 @@ fn compute_contact_shadow(
         occlusion_query_set: None,
         multiview_mask: None,
     });
+    let pass_span = diagnostics.pass_span(&mut pass, "contact_shadow");
     pass.set_render_pipeline(render_pipeline);
     pass.set_bind_group(0, &bind_group, &[]);
     pass.draw(0..3, 0..1);
+    pass_span.end(&mut pass);
 }

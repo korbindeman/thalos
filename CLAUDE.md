@@ -215,6 +215,14 @@ just perf-bisect [p]    # one warmed offscreen foliage × custom-shadow matrix
                         #   (default preset forest-stand) → headless-matrix.json
 just perf-shadow-bisect [p] # warmed 4→0 custom-shadow cascade cost ladder
                             #   → headless-shadow-cascades.json
+just perf-terrain-bisect [p] # warmed terrain layers/PBR/base-colour ablation
+                             #   → headless-terrain-material.json
+just perf-terrain-prepass-bisect [p] # warmed depth-prepass on/off controls
+                                     #   → headless-terrain-prepass.json
+just perf-terrain-index-bisect [p] # warmed 129²↔33² index-density controls
+                                   #   → headless-terrain-index.json
+just perf-terrain-culling-bisect [p] # warmed full↔tight tile AABB controls
+                                     #   → headless-terrain-culling.json
 just trace              # profile-tracy build (needs Tracy GUI v0.11.x running)
 just release <kind>     # bump version, commit, tag, push
 ```
@@ -316,65 +324,13 @@ Enter overrides it) or **F8** to manage saved viewpoints in
 
 ## Presenting your work
 
-**When the result is something to look at, hand back a presentation, not a wall
-of prose.** The user judges terrain, lighting, scatter, UI, and layout by eye; a
-paragraph describing a screenshot is strictly worse than the screenshot. The
-same holds when the change's shape is spatial or structural — a reordered
-pipeline, a moved ownership boundary, a before/after of a data flow — where one
-diagram replaces three paragraphs nobody reads carefully.
+Use the normal chat response to hand work back. If images are evidence, show or
+link the PNG files directly and give a short summary. Do not create an HTML
+report artifact after each change.
 
-**Not every change earns one, and a padded presentation is worse than none.** A
-one-line fix, a doc edit, a refactor with no visible surface, an answer to a
-question: those get the normal short summary. Present when the images *are* the
-evidence (you ran `just screenshot` / `capture` / `compare` / `preview` /
-`map`), when the user will accept or reject the change on looks, when the change
-spans enough subsystems that a diagram beats a list, or when asked. Judge it
-yourself — this is not a step to perform on every run.
-
-**Build it as a local page in `artifacts/reports/`**. The editable input is
-`<date>-<slug>.html.in`; its non-HTML suffix is a safety boundary, not a naming
-preference. The self-contained result is the only browser page,
-`<date>-<slug>.html` (both are gitignored like all evidence). Open only that
-result in the user's own browser. If the input is opened accidentally, its
-non-rendering source wrapper shows only an **Unpublished report input** warning:
-
-- **Start from `scripts/present_template.html`** and keep its stylesheet. The
-  design language is fixed (defined in `docs/development/visual_testing.md` ·
-  *Presenting results*): a research-paper page — white in light theme, black in
-  dark, one serif column, numbered figure captions, hairlines as the only
-  decoration. Never uppercase styling, never em-dashes in page copy. Page text
-  stays at slide-deck volume — a few bullets and one-sentence captions; the
-  full write-up belongs in the chat reply, which the user reads regardless.
-- **Captures must be embedded.** `artifacts/visual/latest/` and the comparison
-  dirs are overwritten on every rerun, so a page that references them live
-  silently changes under the reader. Write the `.html.in` file with
-  `{{img:artifacts/visual/latest/<name>.png}}` tokens (optionally
-  `{{img:<path>|caption text}}`), then run `just publish-report <page>.html.in`.
-  The command refuses malformed/unresolved tokens and any non-embedded image,
-  then prints `OPEN ONLY:` followed by the canonical `<page>.html`. Present
-  exactly that file by navigating the agent browser pane to its `file://` path
-  (`force: true` if the pane shows a stale snapshot). Keep the `.html.in` input
-  and its unpublished-input wrapper only so the page can be regenerated after
-  a recapture; it must never be handed back or opened as a page.
-- **Always show a before/after when applicable.** If the result has a meaningful
-  prior state, present both states rather than only the finished result. For
-  visual changes, use the matched pair from the comparison run with the same
-  preset and framing, clearly labelled — never two differently-framed stills.
-- **Diagrams are mermaid**, rendered natively (```mermaid fence or
-  `<pre class="mermaid">`); no external library will load.
-- **Plain language, same as a visual report**: what you see, what changed, what
-  you deliberately left alone, and what is still unverified. Name the presets
-  and files so the user can rerun them.
-- The claude.ai Artifact tool is the secondary route, for a page that must
-  travel off this machine — publish the same canonical `.html` (its CSP blocks
-  external loads, which the embedding already satisfies). With no way to open
-  a page at all, fall back to a short markdown summary with the PNG paths — do
-  not describe pixels you could have shown.
-
-The presentation is for the user, not for the repo: it replaces neither the
-backlog row, the ADR, nor the `.capture.json` evidence beside each PNG, and
-nothing in `docs/` should link to it. Detail and worked examples:
-`docs/development/visual_testing.md`.
+Create a report only when the user explicitly requests one. The optional
+template remains at `scripts/present_template.html`. The publication procedure
+remains in `docs/development/visual_testing.md` for future use.
 
 ## Observability
 
@@ -734,3 +690,16 @@ both cost us runtime regressions:
   Bevy's (`.after(RenderSystems::QueueMeshes).before(RenderSystems::PhaseSort)`),
   or a per-frame material mutation dequeues it after it adds itself and it never
   draws.
+
+## Learned User Preferences
+
+- Primary development machine is a Mac; FPS and battery/power draw are first-class constraints, not afterthoughts.
+- 3D render scale must leave UI at OS HiDPI; never shrink the HUD with the world.
+- Quality and Laptop profiles must not change window mode; the game should start in the default borderless fullscreen.
+- Laptop quality keeps clouds and woody foliage; its primary performance levers are 0.50× 3D render scale and a 30 Hz cap. Capture and screenshots stay on Showcase.
+
+## Learned Workspace Facts
+
+- Render scale is 3D-only: draw the main 3D target at a fraction and upscale to the swapchain, with UI on a full-resolution camera at OS HiDPI. Window `scale_factor_override` is the wrong lever — it shrinks the HUD and does not cut pixels in borderless fullscreen.
+- Quality presets (Showcase / Laptop / Custom) in `thalos_preferences` stamp editable knobs. First macOS run defaults to Laptop and persists it; existing Showcase files stay put; `THALOS_QUALITY` / `just … quality=` pins one session without writing back; capture ignores the pin.
+- `thalos_clouds` owns the shared compute marcher and weather cubes; `thalos_body_render` keeps the planetary BodySky composite. Kòrsou consumes the same marcher through a local Earth-shell adapter — do not fork a second cloud system.

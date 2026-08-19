@@ -400,6 +400,8 @@ fn record(
             terrain_lod = f64::from(graphics.terrain_lod),
             msaa_samples = u64::from(preferences.msaa.samples()),
             shadow_cascade_budget = crate::rendering::sun_shadow::cascade_budget() as u64,
+            shadow_quality = crate::rendering::sun_shadow::quality_label(),
+            shadow_map_size_px = u64::from(crate::rendering::sun_shadow::SHADOW_MAP_SIZE),
             vsync_enabled,
             has_primary_window = window.is_some(),
             window_width_px = window.map_or(0, |window| window.resolution.physical_width()) as u64,

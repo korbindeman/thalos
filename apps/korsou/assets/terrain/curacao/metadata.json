@@ -1,5 +1,5 @@
 {
-  "format_version": 5,
+  "format_version": 6,
   "name": "Curaçao Copernicus GLO-30 terrain explorer",
   "source_product": "Copernicus DEM GLO-30, 2021 release",
   "source_doi": "https://doi.org/10.5270/ESA-c5d3d65",
@@ -163,7 +163,7 @@
       0.0,
       0.0,
       0.0,
-      2.9806309,
+      4.8850665,
       4.5723114,
       0.0,
       0.0,
@@ -268,7 +268,7 @@
       7.3817596,
       4.919361,
       2.633793,
-      1.1831102,
+      1.3851672,
       0.0,
       0.0,
       0.0,
@@ -280,7 +280,7 @@
       0.0,
       0.0,
       0.0,
-      11.546637,
+      13.96529,
       6.48991,
       9.02272,
       8.669945,
@@ -296,7 +296,7 @@
       0.0,
       0.0,
       0.0,
-      12.964264,
+      14.602009,
       15.27533,
       10.124672,
       5.6361217,
@@ -6876,14 +6876,16 @@
     ]
   },
   "coastline": {
-    "representation": "OpenStreetMap vector coastline rasterized as a signed-distance field",
-    "method": "natural=coastline ways assembled into closed rings, projected to EPSG:32619, mapped to Bevy +X east/-Z north, sampled at the fixed visual terrain spacing, and used to clip mixed triangles",
-    "limitation": "piecewise-linear zero contour is limited by the 15 m shoreline field; tides, beach profiles, cliffs, and inland water need separate data",
-    "source_file": "curacao-coastline-osm.json",
+    "representation": "OSM land/sea rings densified with Sentinel-2 NDWI waterline crossings, kept as polylines and rasterized as a signed-distance field",
+    "method": "OSM natural=coastline rings stay the land/sea topology; Sentinel-2 B03/B08 NDWI zero-crossings densify long chords; runtime clips mixed triangles to those polylines",
+    "limitation": "Sentinel-2 waterline is a photographed instant inside a 40 m OSM corridor; tides, beach/cliff profiles, and inland water still need dedicated data. GLO-30 remains 30 m inland of the waterline",
+    "source_file": "curacao-coastline-rings.json",
     "source_timestamp": "2026-08-07T20:31:21Z",
     "source_url": "https://www.openstreetmap.org",
-    "attribution": "© OpenStreetMap contributors, data available under the Open Database License (ODbL)",
-    "license": "Open Data Commons Open Database License (ODbL) 1.0",
+    "attribution": "© OpenStreetMap contributors, data available under the Open Database License (ODbL); Contains modified Copernicus Sentinel-2 data (ESA), processed to L2A COGs by Element 84 / AWS Earth Search",
+    "license": "Open Data Commons Open Database License (ODbL) 1.0; Copernicus Sentinel data (ESA)",
+    "polyline_file": "coast_polylines.bin",
+    "polyline_vertex_count": 48912,
     "distance_file": "coast_distance_l6.i16",
     "distance_width": 4097,
     "distance_height": 4097,
@@ -6896,30 +6898,11 @@
     ],
     "distance_units_per_metre": 10.0,
     "distance_clamp_m": 120.0,
-    "way_count": 120,
-    "node_count": 13435
+    "way_count": 42,
+    "node_count": 48912
   },
   "synthetic_detail": "not baked; runtime-only visual displacement, never returned by DEM queries",
   "source_rasters": [
-    {
-      "file": "Copernicus_DSM_COG_10_N12_00_W070_00_DEM.tif",
-      "width": 3600,
-      "height": 3600,
-      "pixel_scale_degrees": [
-        0.0002777777777777778,
-        0.0002777777777777778
-      ],
-      "sample_bounds_wgs84": [
-        -70.0,
-        12.000277777777779,
-        -69.00027777777778,
-        13.0
-      ],
-      "raster_type": "RasterPixelIsPoint",
-      "no_data": null,
-      "min_elevation_m": -7.739621,
-      "max_elevation_m": 335.7408
-    },
     {
       "file": "Copernicus_DSM_COG_10_N12_00_W069_00_DEM.tif",
       "width": 3600,
@@ -6938,6 +6921,25 @@
       "no_data": null,
       "min_elevation_m": -19.387527,
       "max_elevation_m": 225.81882
+    },
+    {
+      "file": "Copernicus_DSM_COG_10_N12_00_W070_00_DEM.tif",
+      "width": 3600,
+      "height": 3600,
+      "pixel_scale_degrees": [
+        0.0002777777777777778,
+        0.0002777777777777778
+      ],
+      "sample_bounds_wgs84": [
+        -70.0,
+        12.000277777777779,
+        -69.00027777777778,
+        13.0
+      ],
+      "raster_type": "RasterPixelIsPoint",
+      "no_data": null,
+      "min_elevation_m": -7.739621,
+      "max_elevation_m": 335.7408
     }
   ],
   "levels": [

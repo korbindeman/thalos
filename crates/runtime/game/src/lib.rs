@@ -604,6 +604,16 @@ impl AppBuilder {
             if let Some(foliage) = graphics.foliage {
                 app_preferences.graphics.foliage = foliage;
             }
+            if let Ok(raw) = std::env::var("THALOS_SCREENSHOT_RENDER_SCALE") {
+                let scale: f32 = raw.parse().unwrap_or_else(|error| {
+                    panic!("invalid THALOS_SCREENSHOT_RENDER_SCALE {raw:?}: {error}")
+                });
+                app_preferences.graphics.render_scale = scale.clamp(
+                    thalos_preferences::RENDER_SCALE_MIN,
+                    thalos_preferences::RENDER_SCALE_MAX,
+                );
+                app_preferences.graphics.preset = thalos_preferences::QualityPreset::Custom;
+            }
             app_settings.graphics = graphics_settings::GraphicsSettings::for_capture(graphics);
             // Capture evidence must not depend on a player's last dragged HUD
             // arrangement. The default workspace gives deterministic framing;
@@ -616,7 +626,7 @@ impl AppBuilder {
             let window = &app_preferences.window;
             let game = &app_settings.graphics;
             eprintln!(
-                "quality {} — render {:.2}×, cap {} Hz, foliage {}, clouds {}, grass {}, terrain {:.2}×, shadows {}, window {:?} {}×{}",
+                "quality {} — render {:.2}×, cap {} Hz, foliage {}, clouds {}, grass {}, terrain {:.2}×, shadows {} ({} cascades), window {:?} {}×{}",
                 graphics.preset.label(),
                 graphics.render_scale,
                 graphics.frame_cap_hz,
@@ -624,7 +634,8 @@ impl AppBuilder {
                 if game.clouds { "on" } else { "off" },
                 if game.grass { "on" } else { "off" },
                 game.terrain_lod,
-                game.shadow_cascades,
+                game.shadow_quality.label(),
+                game.shadow_quality.cascade_count(),
                 window.mode,
                 window.resolution.0,
                 window.resolution.1,

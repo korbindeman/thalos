@@ -778,6 +778,7 @@ fn drive_veg_tiles(
     bake: Res<ImpostorBake>,
     anchor: Res<ViewAnchor>,
     lod_camera: Query<(&Camera, &Projection), With<ShipCamera>>,
+    render_scale: Res<thalos_preferences::RenderScaleState>,
     mut commands: Commands,
     mut diag: Local<u32>,
 ) {
@@ -853,8 +854,8 @@ fn drive_veg_tiles(
                 return None;
             };
             Some((
-                camera
-                    .physical_viewport_size()
+                render_scale
+                    .physical_viewport(camera)
                     .map_or(1080.0, |size| size.y.max(1) as f64),
                 perspective.fov as f64,
             ))

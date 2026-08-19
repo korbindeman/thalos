@@ -17,11 +17,121 @@
 //! same meaning in Kòrsou and live in `thalos_preferences::GraphicsPreferences`.
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use thalos_capture_protocol::CaptureGraphicsOverrides;
 use thalos_preferences::{
     GraphicsPreferences, QualityOverrides, QualityPreset, effective_graphics,
 };
+
+/// Player-facing quality of the custom sun-shadow rig.
+///
+/// Active maps keep the settled 4096² resolution. Lower tiers reduce range
+/// by parking whole cascade cameras, the operation the measured cascade ladder
+/// proves removes frame work without weakening the near cascade's detail.
+#[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub enum ShadowQuality {
+    Off,
+    Low,
+    Medium,
+    #[default]
+    High,
+}
+
+impl ShadowQuality {
+    pub const ALL: [Self; 4] = [Self::Off, Self::Low, Self::Medium, Self::High];
+
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Off",
+            Self::Low => "Low",
+            Self::Medium => "Medium",
+            Self::High => "High",
+        }
+    }
+
+    pub const fn cascade_count(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Low => 2,
+            Self::Medium => 3,
+            Self::High => 4,
+        }
+    }
+
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "off" | "none" => Some(Self::Off),
+            "low" => Some(Self::Low),
+            "medium" | "med" => Some(Self::Medium),
+            "high" | "showcase" => Some(Self::High),
+            _ => None,
+        }
+    }
+
+    const fn from_legacy_cascades(cascades: u64) -> Self {
+        match cascades {
+            0 => Self::Off,
+            1 | 2 => Self::Low,
+            3 => Self::Medium,
+            _ => Self::High,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ShadowQuality {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ShadowQualityVisitor;
+
+        impl<'de> de::Visitor<'de> for ShadowQualityVisitor {
+            type Value = ShadowQuality;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("Off, Low, Medium, High, or a legacy cascade count")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(ShadowQuality::from_legacy_cascades(value))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    return Err(E::custom("shadow cascade count cannot be negative"));
+                }
+                self.visit_u64(value as u64)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                ShadowQuality::parse(value)
+                    .ok_or_else(|| E::unknown_variant(value, &["Off", "Low", "Medium", "High"]))
+            }
+
+            fn visit_enum<A>(self, data: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::EnumAccess<'de>,
+            {
+                use serde::de::VariantAccess;
+
+                let (variant, access) = data.variant::<String>()?;
+                access.unit_variant()?;
+                self.visit_str(&variant)
+            }
+        }
+
+        deserializer.deserialize_any(ShadowQualityVisitor)
+    }
+}
 
 // ── Resource ───────────────────────────────────────────────────────────────────
 
@@ -52,9 +162,10 @@ pub struct GraphicsSettings {
     /// rule; 0.5 is the Laptop coarsening. The VRAM brake still multiplies on
     /// top of this.
     pub terrain_lod: f32,
-    /// Live sun-shadow cascade count, 0..=4. `THALOS_SHADOW_CASCADES` still
-    /// pins a measurement session.
-    pub shadow_cascades: u8,
+    /// Player-facing sun-shadow bundle. `THALOS_SHADOW_CASCADES` remains the
+    /// lower-level measurement override.
+    #[serde(alias = "shadow_cascades")]
+    pub shadow_quality: ShadowQuality,
 }
 
 impl Default for GraphicsSettings {
@@ -66,25 +177,23 @@ impl Default for GraphicsSettings {
 impl GraphicsSettings {
     pub const TERRAIN_LOD_MIN: f32 = 1.0 / 3.0;
     pub const TERRAIN_LOD_MAX: f32 = 1.0;
-    pub const SHADOW_CASCADES_MAX: u8 = 4;
-
     pub fn showcase() -> Self {
         Self {
             clouds: true,
             grass: true,
             gpu_grass: true,
             terrain_lod: 1.0,
-            shadow_cascades: Self::SHADOW_CASCADES_MAX,
+            shadow_quality: ShadowQuality::High,
         }
     }
 
     pub fn laptop() -> Self {
         Self {
-            clouds: false,
+            clouds: true,
             grass: false,
             gpu_grass: false,
             terrain_lod: 0.5,
-            shadow_cascades: 2,
+            shadow_quality: ShadowQuality::Low,
         }
     }
 
@@ -113,7 +222,6 @@ impl GraphicsSettings {
         } else {
             1.0
         };
-        self.shadow_cascades = self.shadow_cascades.min(Self::SHADOW_CASCADES_MAX);
         self
     }
 
@@ -215,16 +323,16 @@ mod tests {
         assert!(settings.grass);
         assert!(settings.gpu_grass);
         assert_eq!(settings.terrain_lod, 1.0);
-        assert_eq!(settings.shadow_cascades, 4);
+        assert_eq!(settings.shadow_quality, ShadowQuality::High);
     }
 
     #[test]
-    fn laptop_game_bundle_parks_expensive_layers() {
+    fn laptop_game_bundle_keeps_clouds_while_reducing_secondary_costs() {
         let laptop = GraphicsSettings::laptop();
-        assert!(!laptop.clouds);
+        assert!(laptop.clouds);
         assert!(!laptop.grass);
         assert_eq!(laptop.terrain_lod, 0.5);
-        assert_eq!(laptop.shadow_cascades, 2);
+        assert_eq!(laptop.shadow_quality, ShadowQuality::Low);
         assert!(laptop.matches_preset(QualityPreset::Laptop));
         assert!(!laptop.matches_preset(QualityPreset::Showcase));
     }
@@ -242,6 +350,34 @@ mod tests {
         assert!(preferences.foliage);
         assert!(!overrides.foliage_enabled(&preferences));
     }
+
+    #[test]
+    fn legacy_cascade_count_migrates_to_named_shadow_quality() {
+        let off: GraphicsSettings = ron::from_str("(shadow_cascades:0)").unwrap();
+        let one: GraphicsSettings = ron::from_str("(shadow_cascades:1)").unwrap();
+        let low: GraphicsSettings = ron::from_str("(shadow_cascades:2)").unwrap();
+        let medium: GraphicsSettings = ron::from_str("(shadow_cascades:3)").unwrap();
+        let high: GraphicsSettings = ron::from_str("(shadow_cascades:4)").unwrap();
+
+        assert_eq!(off.shadow_quality, ShadowQuality::Off);
+        assert_eq!(one.shadow_quality, ShadowQuality::Low);
+        assert_eq!(low.shadow_quality, ShadowQuality::Low);
+        assert_eq!(medium.shadow_quality, ShadowQuality::Medium);
+        assert_eq!(high.shadow_quality, ShadowQuality::High);
+    }
+
+    #[test]
+    fn named_shadow_quality_round_trips() {
+        let expected = GraphicsSettings {
+            shadow_quality: ShadowQuality::Medium,
+            ..GraphicsSettings::showcase()
+        };
+        let encoded = ron::to_string(&expected).unwrap();
+        let decoded: GraphicsSettings = ron::from_str(&encoded).unwrap();
+
+        assert_eq!(decoded, expected);
+        assert!(encoded.contains("shadow_quality:Medium"));
+    }
 }
 
 // ── Plugin ──────────────────────────────────────────────────────────────────────
@@ -253,14 +389,16 @@ impl Plugin for GraphicsSettingsPlugin {
         // The resource is inserted in `main()` from the unified `settings.ron`
         // and persisted by `crate::settings::AppSettingsPlugin`; this plugin
         // registers the type and keeps game knobs stamped from the shared preset.
-        app.register_type::<GraphicsSettings>().add_systems(
-            Update,
-            (
-                stamp_game_graphics_from_preset,
-                mark_custom_from_game_knobs,
-                sync_shadow_cascade_budget,
-            ),
-        );
+        app.register_type::<ShadowQuality>()
+            .register_type::<GraphicsSettings>()
+            .add_systems(
+                Update,
+                (
+                    stamp_game_graphics_from_preset,
+                    mark_custom_from_game_knobs,
+                    sync_shadow_quality,
+                ),
+            );
     }
 }
 
@@ -312,20 +450,22 @@ fn mark_custom_from_game_knobs(
     }
 }
 
-fn sync_shadow_cascade_budget(
+fn sync_shadow_quality(
     graphics: Res<GraphicsSettings>,
     overrides: Res<QualityOverrides>,
     prefs: Res<GraphicsPreferences>,
 ) {
-    if std::env::var("THALOS_SHADOW_CASCADES").is_ok() {
+    if std::env::var("THALOS_SHADOW_CASCADES").is_ok()
+        || std::env::var("THALOS_SHADOW_QUALITY").is_ok()
+    {
         return;
     }
-    let cascades = if overrides.preset.is_some() {
+    let quality = if overrides.preset.is_some() {
         GraphicsSettings::for_preset(effective_graphics(&prefs, &overrides).preset)
-            .map(|settings| settings.shadow_cascades)
-            .unwrap_or(graphics.shadow_cascades)
+            .map(|settings| settings.shadow_quality)
+            .unwrap_or(graphics.shadow_quality)
     } else {
-        graphics.shadow_cascades
+        graphics.shadow_quality
     };
-    crate::rendering::sun_shadow::set_cascade_budget(cascades as usize);
+    crate::rendering::sun_shadow::set_cascade_budget(quality.cascade_count() as usize);
 }

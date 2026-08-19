@@ -51,9 +51,11 @@ pub fn run(stream: &Stream) -> Vec<Finding> {
     findings.extend(errors_and_warnings(stream));
     findings.extend(capture_health(stream));
     findings.extend(frame_health(stream));
+    findings.extend(tile_loading_health(stream));
     findings.extend(shadow_health(stream));
     findings.extend(planet_reflection_health(stream));
     findings.extend(gear_ground_health(stream));
+    findings.extend(scene_depth_health(stream));
     findings.extend(approach_autopilot_health(stream));
     findings.extend(orbit_autoflight_health(stream));
     findings.extend(staging_sequence_health(stream));
@@ -64,6 +66,59 @@ pub fn run(stream: &Stream) -> Vec<Finding> {
     findings.extend(lane_noise(stream));
     findings.sort_by_key(|finding| finding.severity);
     findings
+}
+
+// ── tile startup ───────────────────────────────────────────────────────────
+
+fn tile_loading_health(stream: &Stream) -> Vec<Finding> {
+    let mut total = 0usize;
+    let mut slow = 0usize;
+    let mut worst: Option<(&str, f64, u64, u64)> = None;
+    for record in stream
+        .events("first_coverage")
+        .filter(|record| record.target.ends_with("::tile_terrain"))
+    {
+        let Some(elapsed_ms) = record.f64("elapsed_ms") else {
+            continue;
+        };
+        total += 1;
+        if elapsed_ms < TILE_FIRST_COVERAGE_MS_WATCH {
+            continue;
+        }
+        slow += 1;
+        let candidate = (
+            record.session.as_str(),
+            elapsed_ms,
+            record.u64("resident").unwrap_or(0),
+            record.u64("desired").unwrap_or(0),
+        );
+        if worst.is_none_or(|(_, previous, _, _)| elapsed_ms > previous) {
+            worst = Some(candidate);
+        }
+    }
+
+    let Some((session, elapsed_ms, resident, desired)) = worst else {
+        return Vec::new();
+    };
+    vec![
+        Finding::new(
+            if elapsed_ms >= TILE_FIRST_COVERAGE_MS_ATTENTION {
+                Severity::Attention
+            } else {
+                Severity::Watch
+            },
+            "slow_initial_tile_coverage",
+            format!(
+                "{slow} of {total} initial tile covers exceeded {:.1} s (worst {:.1} s)",
+                TILE_FIRST_COVERAGE_MS_WATCH / 1_000.0,
+                elapsed_ms / 1_000.0,
+            ),
+            format!("runtime.jsonl session={session} event=first_coverage"),
+        )
+        .with_detail(format!(
+            "the worst handoff needed {resident} resident tiles for {desired} final desired leaves"
+        )),
+    ]
 }
 
 // ── runway-destination autoflight ──────────────────────────────────────────
@@ -778,6 +833,37 @@ fn errors_and_warnings(stream: &Stream) -> Vec<Finding> {
         findings.push(finding);
     }
     findings
+}
+
+// ── scene-depth copy ───────────────────────────────────────────────────────
+
+fn scene_depth_health(stream: &Stream) -> Vec<Finding> {
+    let mut by_session: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in stream
+        .events("depth_copy_skipped")
+        .filter(|record| record.target.ends_with("::scene_depth"))
+    {
+        *by_session.entry(record.session.as_str()).or_insert(0) += 1;
+    }
+    let Some((session, count)) = by_session
+        .into_iter()
+        .max_by_key(|(_, count)| *count)
+        .filter(|(_, count)| *count >= SCENE_DEPTH_COPY_SKIP_ATTENTION)
+    else {
+        return Vec::new();
+    };
+    vec![Finding::new(
+        Severity::Attention,
+        "scene_depth_copy_skipped",
+        format!(
+            "scene-depth copy skipped {count} time{} in session {session} — sky will paint over geometry above the horizon",
+            plural(count)
+        ),
+        format!("runtime.jsonl session={session} event=depth_copy_skipped"),
+    )
+    .with_detail(
+        "3D target size and SceneDepthImage stayed different; Laptop 0.5× render scale is the usual hang",
+    )]
 }
 
 // ── whole-card GPU health ──────────────────────────────────────────────────
@@ -1650,6 +1736,30 @@ mod tests {
     }
 
     #[test]
+    fn initial_tile_coverage_check_is_quiet_when_fast_and_fires_when_slow() {
+        let coverage = |session: &str, elapsed_ms: f64| {
+            record(
+                session,
+                1_000,
+                "INFO",
+                "thalos::diagnostic::tile_terrain",
+                json!({
+                    "event": "first_coverage",
+                    "elapsed_ms": elapsed_ms,
+                    "resident": 96,
+                    "desired": 633,
+                }),
+            )
+        };
+        assert!(
+            !finding_ids(vec![coverage("fast", 1_200.0)]).contains(&"slow_initial_tile_coverage")
+        );
+        assert!(
+            finding_ids(vec![coverage("slow", 6_500.0)]).contains(&"slow_initial_tile_coverage")
+        );
+    }
+
+    #[test]
     fn one_go_around_is_healthy_but_hitting_the_retry_limit_fires() {
         let once = vec![record(
             "ga-one",
@@ -2054,6 +2164,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn scene_depth_copy_skip_fires_on_a_hang_not_a_resize_seam() {
+        let skip = |session: &str, n: usize| -> Vec<Record> {
+            (0..n)
+                .map(|index| {
+                    record(
+                        session,
+                        1_000 + index as u128,
+                        "INFO",
+                        "thalos::diagnostic::scene_depth",
+                        json!({
+                            "event": "depth_copy_skipped",
+                            "src_width": 3024,
+                            "src_height": 1898,
+                            "dst_width": 1512,
+                            "dst_height": 948,
+                            "skip_count": (index as u32 + 1) * 60,
+                        }),
+                    )
+                })
+                .collect()
+        };
+        assert!(
+            !finding_ids(skip("seam", 2)).contains(&"scene_depth_copy_skipped"),
+            "a one- or two-sample resize seam must not fire"
+        );
+        assert!(
+            finding_ids(skip("hang", 3)).contains(&"scene_depth_copy_skipped"),
+            "a persistent size mismatch must fire"
+        );
+    }
+
     /// The cascade-mode switch parks cascades 2–3, so a mode that oscillates
     /// blinks every ground shadow in the world. The check must separate that
     /// from the one-way transitions an honest climb produces — otherwise it
@@ -2273,6 +2415,20 @@ mod tests {
             json!({"event": "residency_gauge", "split_scale": 0.6, "instances": 2}),
         )];
         assert!(ids(brake).contains(&"tile_budget_brake"));
+
+        let slow_tile_cover = vec![record(
+            "s",
+            1,
+            "INFO",
+            "thalos::diagnostic::tile_terrain",
+            json!({
+                "event": "first_coverage",
+                "elapsed_ms": TILE_FIRST_COVERAGE_MS_ATTENTION,
+                "resident": 96,
+                "desired": 633,
+            }),
+        )];
+        assert!(ids(slow_tile_cover).contains(&"slow_initial_tile_coverage"));
 
         let shadow_desync = vec![record(
             "s",

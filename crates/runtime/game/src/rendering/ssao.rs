@@ -229,6 +229,7 @@ fn resize_ao_image(
     ao_raw: Option<Res<AoRawImage>>,
     mut images: ResMut<Assets<Image>>,
     cameras: Query<&Camera, With<ShipCamera>>,
+    render_scale: Res<thalos_preferences::RenderScaleState>,
 ) {
     let (Some(ao_image), Some(ao_raw)) = (ao_image, ao_raw) else {
         return;
@@ -236,7 +237,7 @@ fn resize_ao_image(
     let Ok(camera) = cameras.single() else {
         return;
     };
-    let Some(viewport) = camera.physical_viewport_size() else {
+    let Some(viewport) = render_scale.physical_viewport(camera) else {
         return;
     };
     if viewport.x == 0 || viewport.y == 0 {

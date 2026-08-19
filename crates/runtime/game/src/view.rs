@@ -54,7 +54,8 @@ impl Plugin for ViewPlugin {
                 apply_active_camera
                     .after(toggle_view_input)
                     .after(crate::SimStage::Sync)
-                    .before(crate::SimStage::Camera),
+                    .before(crate::SimStage::Camera)
+                    .before(thalos_preferences::RenderScaleSet),
             )
             .add_systems(PostUpdate, propagate_view_render_layers);
     }
@@ -157,6 +158,7 @@ fn apply_active_camera(
     view: Res<ViewMode>,
     ctx: Option<Res<State<GameContext>>>,
     mut commands: Commands,
+    render_scale: Res<thalos_preferences::RenderScaleState>,
     mut cameras: Query<
         (
             Entity,
@@ -186,9 +188,13 @@ fn apply_active_camera(
         if camera.is_active != should {
             camera.is_active = should;
         }
-        // The active window camera is the default UI camera (bevy_ui renders to
-        // it, and an inactive default means no UI at all).
-        if should && !has_ui {
+        // When render scale is below 1, a dedicated full-res camera owns UI so
+        // the HUD is not baked into the upscaled 3D target.
+        if render_scale.presents_ui_separately {
+            if has_ui {
+                commands.entity(entity).remove::<IsDefaultUiCamera>();
+            }
+        } else if should && !has_ui {
             commands.entity(entity).insert(IsDefaultUiCamera);
         } else if !should && has_ui {
             commands.entity(entity).remove::<IsDefaultUiCamera>();

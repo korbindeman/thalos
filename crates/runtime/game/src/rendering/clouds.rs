@@ -515,7 +515,10 @@ pub(super) fn drive_clouds(
     sim: Res<SimulationState>,
     cache: Res<SolarSystemState>,
     exposure: Res<CameraExposure>,
-    graphics: Res<GraphicsSettings>,
+    graphics_io: (
+        Res<GraphicsSettings>,
+        Res<thalos_preferences::RenderScaleState>,
+    ),
     fill: Res<BodyCloudFill>,
     sky_ambient: Res<crate::reflection_probe::SkyAmbient>,
     mut active: ResMut<ActiveCloudBody>,
@@ -530,6 +533,7 @@ pub(super) fn drive_clouds(
     // .1 = whether receivers apply it (the `cloud-shadow` capture axis).
     mut cloud_shadow_io: (ResMut<CloudShadowMap>, Res<CloudShadowConfig>),
 ) {
+    let (graphics, render_scale) = graphics_io;
     let (ref mut cloud_shadow, ref shadow_config) = cloud_shadow_io;
     // Stand the sun-transmittance cascade down FIRST, and let the success path
     // below raise it again. Every early-out here (clouds off, no camera, no
@@ -552,7 +556,7 @@ pub(super) fn drive_clouds(
     let Ok((cam_gt, camera)) = ship_cam_q.single() else {
         return;
     };
-    if let Some(viewport) = camera.physical_viewport_size() {
+    if let Some(viewport) = render_scale.physical_viewport(camera) {
         config.set_viewport_resolution(viewport);
     }
     let cam_pos = cam_gt.translation();

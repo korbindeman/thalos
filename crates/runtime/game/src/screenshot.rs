@@ -1817,6 +1817,8 @@ impl ScreenshotConfig {
     /// - `THALOS_SCREENSHOT_CLOUD_COVERAGE` — optional global coverage scale.
     /// - `THALOS_SCREENSHOT_GRAPHICS` — cold-capture compatibility form for
     ///   typed graphics settings, e.g. `clouds=off,grass=on,foliage=off`.
+    /// - `THALOS_SCREENSHOT_RENDER_SCALE` — 3D main-target scale (0.25–1.0).
+    ///   Capture defaults to 1.0; set `0.5` to probe Laptop 3D scale.
     /// - `THALOS_SCREENSHOT_REPORT` — JSONL report path (defaults under
     ///   `artifacts/diagnostics/`).
     /// - `THALOS_SCREENSHOT_OCEAN_TIME` — optional fixed canonical ocean time
@@ -2572,6 +2574,17 @@ pub struct HeadlessScreenshotPlugin {
     pub persistent: bool,
 }
 
+/// Marks a boot whose capture driver owns readiness for the camera view it
+/// will actually render.
+///
+/// The loading screen cannot wait for tile coverage before the driver poses
+/// that camera: the driver runs in [`AppState::Running`]. The terrain loading
+/// gate therefore waits only for a live tile root in headless boots, while the
+/// capture driver performs the strict `coverage_ready && settled` check after
+/// applying the requested pose.
+#[derive(Resource)]
+pub(crate) struct HeadlessCaptureOwnsTerrainReadiness;
+
 impl Plugin for HeadlessScreenshotPlugin {
     fn build(&self, app: &mut App) {
         match capture_clock_drive_from_env() {
@@ -2589,6 +2602,7 @@ impl Plugin for HeadlessScreenshotPlugin {
         }
 
         app.init_resource::<ScreenshotDriver>()
+            .insert_resource(HeadlessCaptureOwnsTerrainReadiness)
             .insert_resource(CaptureRuntimeOverrides::from_env())
             .add_systems(
                 Startup,
@@ -2985,6 +2999,8 @@ fn poll_capture_requests(
         clouds: next_graphics.clouds,
         grass: next_graphics.grass,
         foliage: preferences.foliage,
+        shadow_cascades: crate::rendering::sun_shadow::cascade_budget() as u8,
+        shadow_map_size_px: crate::rendering::sun_shadow::SHADOW_MAP_SIZE,
     });
     *graphics = next_graphics;
     runtime.values = request.overrides;
@@ -3251,10 +3267,11 @@ fn apply_live_capture_diagnostics(
 
 fn terrain_inspection_override(raw: Option<&str>) -> f32 {
     match raw.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
-        "" | "lit" | "default" | "off" => 0.0,
-        "fullbright" | "albedo" | "on" => 1.0,
-        "geo-normal" | "geometric-normal" | "smooth-normal" => 2.0,
-        "legacy-regolith" | "unfiltered-regolith" => 3.0,
+        "" | "lit" | "default" | "off" | "0" => 0.0,
+        "fullbright" | "albedo" | "on" | "1" => 1.0,
+        "geo-normal" | "geometric-normal" | "smooth-normal" | "2" => 2.0,
+        "legacy-regolith" | "unfiltered-regolith" | "3" => 3.0,
+        "base-color" | "baked-albedo" | "4" => 4.0,
         other => {
             warn!(target: "thalos::screenshot", "unknown terrain inspection {other:?}; using lit");
             0.0
@@ -3956,6 +3973,21 @@ fn drive_headless_screenshot(
         .find(|(_, body)| body.body_id == homeworld.0)
         .map(|(root, _)| root);
     if let Some(root) = ground {
+        let settled = root.coverage_ready() && root.settled();
+        if !settled {
+            driver.terrain_wait_s += wall_dt_s;
+            if driver.terrain_wait_s < MASSIF_STREAM_TIMEOUT_S {
+                return;
+            }
+            warn!(
+                target: "thalos::screenshot",
+                "tile coverage still unsettled after {:.0} s ({} resident of {} desired) — \
+                 capturing anyway; the receipt marks this image invalid as terrain evidence",
+                driver.terrain_wait_s,
+                root.resident_count(),
+                root.desired_count(),
+            );
+        }
         let scale = root.split_scale();
         driver.worst_split_scale = Some(driver.worst_split_scale.unwrap_or(1.0).min(scale));
         if scale < 1.0 {
@@ -3984,6 +4016,8 @@ fn drive_headless_screenshot(
             worst_split_scale: driver.worst_split_scale.unwrap_or(1.0),
             resident_tiles: root.resident_count(),
             desired_tiles: root.desired_count(),
+            settled: root.coverage_ready() && root.settled(),
+            settle_wait_s: driver.terrain_wait_s,
             resident_mib: root.resident_bytes() as f64 / (1024.0 * 1024.0),
             budget_mib: match thalos_body_render::tiles::residency_budget_bytes() {
                 // `usize::MAX` is the documented "budget disabled" sentinel;

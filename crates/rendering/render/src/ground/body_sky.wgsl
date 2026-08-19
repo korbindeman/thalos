@@ -356,8 +356,8 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     let cam_right = view.world_from_view[0].xyz;
     let cam_up    = view.world_from_view[1].xyz;
     let cam_fwd   = -view.world_from_view[2].xyz;
-    let ndc_x = (in.clip_position.x / view.viewport.z) * 2.0 - 1.0;
-    let ndc_y = 1.0 - (in.clip_position.y / view.viewport.w) * 2.0;
+        let ndc_x = (in.clip_position.x / view.main_pass_viewport.z) * 2.0 - 1.0;
+        let ndc_y = 1.0 - (in.clip_position.y / view.main_pass_viewport.w) * 2.0;
     let tan_fov_y = 1.0 / view.clip_from_view[1][1];
     let tan_fov_x = 1.0 / view.clip_from_view[0][0];
     let ray_dir = normalize(
@@ -527,7 +527,7 @@ fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
             // grazing incidence. Every field sample below is
             // mip-filtered to this footprint, so foreshortened
             // coastlines average instead of shredding into moiré.
-            let pixel_angle = 2.0 * tan_fov_y / max(view.viewport.w, 1.0);
+            let pixel_angle = 2.0 * tan_fov_y / max(view.main_pass_viewport.w, 1.0);
             let footprint_rad =
                 pixel_angle * t_ocean / (r_sea * max(mu_hit, 1.0e-3));
             ocean_fp_m = footprint_rad * r_sea;
