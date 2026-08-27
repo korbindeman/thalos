@@ -1,6 +1,6 @@
 # Cinematics: director, replay, and scripted control
 
-Reference key `cine §N`. Status lives in [backlog.md](../backlog.md) Track 5
+Reference key `cine §N`. Status lives in [backlog.jsonl](../backlog.jsonl)
 (`CINE-*`) — this doc holds strategy and rationale only.
 
 ## 1. What this is

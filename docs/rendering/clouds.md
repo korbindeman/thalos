@@ -4,7 +4,7 @@
 CLOUD-4 and CLOUD-6 have second slices landed and headless-verified (see the
 2026-07-22 checkpoint below).
 This document is the strategy and technical plan;
-[backlog.md](../backlog.md) is the execution queue, while
+[backlog.jsonl](../backlog.jsonl) is the execution queue (`just queue`), while
 [atmosphere.md](atmosphere.md) remains the spec for what the renderer ships
 today. Architecture choices are fixed by
 [ADR-20260720T212214Z-one-weather-field-many-cloud-projections](../adr/20260720T212214Z-one-weather-field-many-cloud-projections.md).
@@ -618,8 +618,9 @@ evidence only, no timing claims):
 
 ### BL-33 fidelity convergence checkpoint (2026-07-22)
 
-The static BL-33/CLOUD-6 convergence slices are headless-verified; the item is
-`verify` pending the user-run in-motion surface↔orbit handoff.
+The static BL-33/CLOUD-6 convergence slices are headless-verified. The in-motion
+surface↔orbit handoff remains a play-session check; later disagreement is a new
+row (ADR-20260819T065009Z).
 
 - **Canonical weather resolution and hierarchy.** Correcting the old scale
   estimate showed that a 256 face represented about 19.5 km/texel at the

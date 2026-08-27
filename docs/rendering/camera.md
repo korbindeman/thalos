@@ -1,7 +1,7 @@
 # Camera optics and photographic capture
 
 **Status:** CAM-1 landed compile- and capture-clean 2026-07-29; interactive
-freecam/viewpoint verification remains in `docs/backlog.md`.
+freecam/viewpoint verification remains in `docs/backlog.jsonl`.
 
 Thalos should be as satisfying to photograph as it is to fly. The camera
 therefore needs a coherent photographic model that works in the interactive
@@ -188,7 +188,7 @@ not add grain unless a later sensor model assigns the gain to ISO explicitly.
 
 ## 7. Delivery slices
 
-Backlog status and priority live only in `docs/backlog.md`.
+Backlog status and priority live only in `docs/backlog.jsonl`.
 
 - **CAM-1 — Shared optics authority and freecam control.**
   Full-frame-horizontal focal length, sensor gate/crop, projection
@@ -224,9 +224,10 @@ record the requested focal length, a 36 mm horizontal gate, the same 16:9
 sensor window and 1920×1080 output, exact source relation, and
 `workspace_matches: true`.
 
-CAM-1 remains `verify` until the user confirms freecam entry/exit has no
-unexpected jump; slider, angle readout, and spring zoom agree; and an
-F9-save → F8-apply round trip restores the same framing.
+CAM-1's headless lens matrix is in `artifacts/visual/runs/cam-1-lens/`. Freecam
+entry/exit, slider/readout agreement, and F9→F8 round-trip remain a play-session
+check; later disagreement is a new row, not an open `verify` gate
+(ADR-20260819T065009Z).
 
 Later slices add matched focus/aperture captures, composite regression captures,
 and exposure comparisons with every other camera and scene input held fixed.

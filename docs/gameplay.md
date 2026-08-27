@@ -2,7 +2,7 @@
 
 **Status: horizon design (updated 2026-07-29).** The shape the game is aiming at,
 recorded so decisions downstream of it stay consistent. It is not a parallel
-status tracker: subsystem roadmaps hold strategy and `backlog.md` alone schedules
+status tracker: subsystem roadmaps hold strategy and `backlog.jsonl` alone schedules
 their execution.
 
 This document owns the design of the **Thalos game**, the project's primary

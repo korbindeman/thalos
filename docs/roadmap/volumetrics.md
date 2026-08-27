@@ -1,7 +1,7 @@
 # Volumetrics — a shared foundation, not a shared renderer
 
 **Background sprint.** Strategy and sequencing live here; status lives in
-`docs/backlog.md`. The seam is fixed by ADR-20260730T034500Z: **share the
+`docs/backlog.jsonl`. The seam is fixed by ADR-20260730T034500Z: **share the
 radiance terms, keep the march per-effect.**
 
 ## The idea

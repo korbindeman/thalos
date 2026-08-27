@@ -3,7 +3,7 @@
 **Status: future world/gameplay program (2026-07-29, revised 2026-08-08 after
 the Kòrsou water transfer).** The rendering foundation exists, but this program
 stays behind the neural-terrain × standard-path renderer keystone until
-explicitly pulled forward. `docs/backlog.md` is the only status authority.
+explicitly pulled forward. `docs/backlog.jsonl` is the only status authority (`just queue`).
 
 This roadmap turns the ocean from an attractive surface into a traversable world.
 It joins the current rendering work in
@@ -182,7 +182,7 @@ not collapse into alternating dark/light lines, crawling noise or a flat sea.
 ## 6. Program
 
 The stable work IDs are owned here; their status lives only in
-`docs/backlog.md`.
+`docs/backlog.jsonl`.
 
 ### OCEAN-2 — shared dynamic sea foundation
 

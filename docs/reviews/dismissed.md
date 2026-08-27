@@ -1,8 +1,7 @@
 # Dismissed findings
 
-The [expert-review](../../.claude/skills/expert-review/SKILL.md) harness's
-**memory**. Every finding the refuter ruled `by-design` or `wrong` lands here
-with its citation, and every expert reads the rows for its slice before filing.
+Findings the retired expert-review harness ruled `by-design` or `wrong`, with
+citations. Read before filing a defect in a previously reviewed slice.
 
 Without this file the routine re-discovers the same twenty things every week and
 you stop reading it by week three. Appending is not bookkeeping — it is the

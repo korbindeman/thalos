@@ -63,7 +63,7 @@ Findings carry a stable `id`. What each usually means, and the first move:
 **Before filing anything**, check whether it is already known:
 
 ```bash
-rg -i '<keyword>' docs/backlog.md docs/incidents/
+rg -i '<keyword>' docs/backlog.jsonl docs/incidents/
 ```
 
 A row that already covers it gets the new evidence appended (dates, counts) —

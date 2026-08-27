@@ -211,6 +211,17 @@ map:
 diag hours="24" *args:
     cargo run --release -q -p thalos_diag -- --since {{hours}} {{args}}
 
+# Live backlog: next / wip / blocked only. Analogous to `just diag`.
+# `just queue -- --json` for machine use; `just queue <id>` prints one record.
+queue *args:
+    python3 scripts/backlog.py queue {{args}}
+
+# Mutate the queue: `just backlog done <id>`, `later`, `wip`, `next`,
+# `just backlog note <id> "…"`, `just backlog add --track ntr --title "…"`.
+# Closing strips the note; notes are capped at 360 characters.
+backlog *args:
+    python3 scripts/backlog.py {{args}}
+
 # Offline perf report: renders one session of the runtime.jsonl perf lane
 # (frame gauges, spikes, optional THALOS_PERF_RECORD full-rate blocks) to
 # artifacts/diagnostics/reports/<session>/report.html + summary.json.

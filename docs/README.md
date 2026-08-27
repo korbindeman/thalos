@@ -8,7 +8,7 @@ else is grouped by role or primary subsystem; this file is the canonical map.
 | Document | Authority |
 |----------|-----------|
 | [Project purpose](purpose.md) | **North star:** the game, internal world foundation, secondary applications, and the boundaries between them |
-| [Backlog](backlog.md) | **Execution:** the status-tracked queue, the answer to “what’s next?”, and the only status authority |
+| [Backlog](backlog.md) | **Execution:** `just queue` over [backlog.jsonl](backlog.jsonl) |
 | [Architecture](architecture.md) | **Codebase:** workspace layout, ownership, dependency boundaries, and the crate/module anatomy |
 | [Gameplay](gameplay.md) | **Primary application:** the spaceflight game's pillars, core loop, progression, and long-horizon player experience |
 | [Documentation map](README.md) | **Navigation:** where each kind of knowledge belongs |
@@ -103,15 +103,12 @@ How to build, inspect, capture, and verify the project.
 
 ### [Reviews](reviews/)
 
-Output of the adversarial expert-review harness
-(`.claude/skills/expert-review/SKILL.md`) — specialist agents audit a slice of the
-codebase, a hostile refuter kills what it can, survivors land in a dated report.
-Claims that survived scrutiny, **not** tracked work: the harness never writes to
-the backlog, and you promote what you agree with.
+Historical output of an adversarial audit harness (retired 2026-08-19;
+ADR-20260819T065557Z). Claims that survived scrutiny, **not** tracked work.
 
-- [How to read a report, and the report template](reviews/README.md)
-- [Coverage ledger](reviews/coverage.md) — reviewed `(slice, lens)` pairs; drives selection.
-- [Dismissed findings](reviews/dismissed.md) — `by-design` / `wrong` verdicts with citations; the harness's memory.
+- [How to read a report](reviews/README.md)
+- [Coverage ledger](reviews/coverage.md)
+- [Dismissed findings](reviews/dismissed.md)
 
 ### [Reference](reference/)
 
@@ -134,15 +131,13 @@ canonical specs above; they do not replace them.
 
 `CLAUDE.md` at the repository root is the agent operating manual. It is loaded
 into **every** agent context, so it is deliberately kept to current direction,
-verification rules, and hard invariants — detail belongs in the documents above,
-and anything added there must earn its place in every session. Cursor loads
-additional specialist rules from [`.cursor/rules/`](../.cursor/rules/) when
-matching files are in play (shaders, Bevy render-graph). Skills live only under
-`.claude/skills/`: `steer` routes new work between the roadmap and the backlog,
-`diag-triage` runs the diagnostics pass — `just diag`, then findings into rows,
-incidents, or a stated non-action (`development/tooling.md` § Reading the lane)
-— and `expert-review` runs the adversarial audit into [reviews/](reviews/). The
-`wgsl-bevy` skill collects naga pitfalls.
+a *where to look* table, verification rules, and hard invariants.
+`AGENTS.md` is a pointer to it (Cursor loads both filenames). Cursor also loads
+specialist rules from [`.cursor/rules/`](../.cursor/rules/) when matching files
+are in play (shaders, Bevy render-graph). Skills live under `.claude/skills/`:
+`steer` starts from `just queue`, `diag-triage` runs the diagnostics pass, and
+`wgsl-bevy` collects naga pitfalls. Historical adversarial-review reports live
+in [reviews/](reviews/); that harness is retired until the skill exists again.
 
 ## Placement rules
 

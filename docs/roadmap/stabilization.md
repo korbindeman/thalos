@@ -42,8 +42,8 @@ optimization profile.
 - **Fallback is policy, not error handling.** Pre-alpha profiles may accept a
   named fallback per planet/stage. Missing or invalid content never opts into a
   fallback by accident.
-- **Backlog status and planet status are different facts.** `docs/backlog.md`
-  remains the only authority for development work. Planet status is derived
+- **Backlog status and planet status are different facts.** `docs/backlog.jsonl`
+  remains the only authority for development work (`just queue`). Planet status is derived
   from recipes, hashes, artifacts, and acceptance receipts.
 - **The distribution is allowlisted.** Stock craft and runtime assets are named
   explicitly. Copying all of `assets/` or `ships/` is not a release contract.

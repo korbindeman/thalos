@@ -2,7 +2,7 @@
 
 **Status:** design / plan of record · **Written:** 2026-07-25
 **Decision:** [ADR-20260725T004758Z-biome-is-the-terrain-authority](../adr/20260725T004758Z-biome-is-the-terrain-authority.md)
-**Cross-ref prefix:** `bio §N` · **Rows:** `BIO-1` … `BIO-7` in [backlog.md](../backlog.md)
+**Cross-ref prefix:** `bio §N` · **Rows:** `BIO-1` … `BIO-7` in [backlog.jsonl](../backlog.jsonl)
 
 Companion docs: [terrain_macro.md](terrain_macro.md) (the climate/landcover fields
 this consumes — its §4 "Phase 2 remainder" is superseded by this doc),

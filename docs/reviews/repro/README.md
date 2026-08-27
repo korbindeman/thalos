@@ -1,8 +1,7 @@
 # Repro artifacts
 
-Failing tests and probe harnesses produced by the
-[expert-review](../../../.claude/skills/expert-review/SKILL.md) harness, one
-directory per run: `<run-timestamp>-<slug>/`.
+Failing tests and probe harnesses produced by the retired expert-review
+harness, one directory per run: `<run-timestamp>-<slug>/`.
 
 **These files are never compiled.** They live outside every crate on purpose —
 a `.rs` file here is *source to paste back*, not a test the workspace builds.

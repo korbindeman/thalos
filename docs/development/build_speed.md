@@ -423,11 +423,11 @@ Principles first, then the two concrete shapes.
   catches type/borrow errors in a fraction of a link. Only build a linked
   artifact (`just game`/`just screenshot`) when you actually need to run or see
   something.
-- **Verify visually, headless.** Terrain/lighting/scatter changes are `verify`,
-  not `done`, until a headless capture confirms them — `just screenshot
-  <preset>`, `just preview`, `just compare <preset> <axis>`. Agents run these and
-  read the PNG directly; only genuine "does it feel right in motion" needs the
-  user. (See visual_testing.md, terrain.md.)
+- **Verify visually, headless.** Terrain/lighting/scatter changes get a
+  headless capture — `just screenshot <preset>`, `just preview`, `just compare
+  <preset> <axis>`. Agents run these and read the PNG directly; only genuine
+  "does it feel right in motion" needs the user, and that ask does not hold the
+  backlog row open (ADR-20260819T065009Z). (See visual_testing.md, terrain.md.)
 - **Never run the game interactively to check compile/agent work** — that's the
   user's job (`CLAUDE.md`). The headless tools are the agent's eyes.
 
@@ -554,8 +554,9 @@ SHA-256 file, extracts the ZIP, then launches `thalos_game.exe --verify-install`
 from an unrelated empty directory. That non-rendering gate proves all runtime
 content resolves beside the executable and verifies the LFS-backed neural
 rasters against their sidecar dimensions and SHA-256 hashes. It does not replace
-the user's Windows/GPU play test; a newly landed package stays `verify` until it
-has launched and rendered on the target machine.
+the user's Windows/GPU play test; a newly landed package still wants a render
+on the target machine, but that is extra data, not a backlog `verify` gate
+(ADR-20260819T065009Z).
 
 Windows compilation and packaging are separate jobs joined by a short-lived
 executable artifact. If archive verification fails, **rerun failed jobs** repeats

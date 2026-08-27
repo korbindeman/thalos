@@ -1,12 +1,14 @@
 # Reviews
 
-Output of the **adversarial expert review** harness
-(`.claude/skills/expert-review/`): a panel of specialist agents reads a slice of
-the codebase in character, and a hostile refuter tries to kill every finding
-before it reaches this directory.
+Historical output of the adversarial expert-review harness. The skill
+(`.claude/skills/expert-review/`) is **retired** as of 2026-08-19
+(ADR-20260819T065557Z) — it was advertised in every agent session and the
+directory was already gone. Existing reports stay; do not run the cadence
+until the skill is restored.
 
-Runs weekly as a cloud routine, and on demand — *"expert review of the
-propagator"*.
+Reports are **claims that survived scrutiny**, not tracked work. The backlog
+is the status authority. Before filing a defect an earlier run may have
+settled, check [`dismissed.md`](dismissed.md).
 
 ## What lives here
 
@@ -14,15 +16,14 @@ propagator"*.
 |---|---|
 | `<YYYYMMDDTHHMMSSZ>-<slug>.md` | One run's report. Immutable once written. |
 | [`repro/`](repro/README.md) | Paste-back test source and probe harnesses backing the findings. **Never compiled** — outside every crate on purpose. |
-| `coverage.md` | Which `(slice, lens)` pairs have been reviewed, when, at what commit. Drives selection. |
-| `dismissed.md` | Findings ruled `by-design` or `wrong`, with the citation. **The harness's memory** — read before filing, so nothing is re-litigated. |
+| `coverage.md` | Which `(slice, lens)` pairs were reviewed. Historical. |
+| `dismissed.md` | Findings ruled `by-design` or `wrong`. Read before filing. |
 
-Slice definitions live with the skill, in
-[`.claude/skills/expert-review/slices.md`](../../.claude/skills/expert-review/slices.md).
+Slice definitions lived with the retired skill; they are not in tree.
 
 ## What this is not
 
-**Not a status authority.** [`backlog.md`](../backlog.md) is, and the harness
+**Not a status authority.** [`backlog.jsonl`](../backlog.jsonl) is (`just queue`), and the harness
 never writes to it. A report is a pile of *claims that survived scrutiny*, not
 work that exists. You promote what you agree with — by hand or via the `steer`
 skill — and everything else stays here as a record of what was considered.
