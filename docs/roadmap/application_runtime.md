@@ -5,8 +5,8 @@
 [ADR-20260809T201216Z-light-runtime-capability-bundles](../adr/20260809T201216Z-light-runtime-capability-bundles.md)
 **Cross-ref prefix:** `app §N`
 
-This document is strategy and sequencing. `docs/backlog.md` remains the sole
-execution-status authority.
+This document is strategy and sequencing. `docs/backlog.jsonl` remains the sole
+execution-status authority (`just queue`).
 
 ## §1 Outcome
 
@@ -261,8 +261,9 @@ forks. The shared F3 diagnostics slice now removes the second demonstrated
 interactive-shell fork: the common ring/panel/graph live in
 `thalos_diagnostics_ui`, and both former application shells have been replaced
 by typed extension plugins. Its code/test/dependency gates are complete; live
-layout and shader output remain at `verify` because the headless host exposed
-no GPU.
+layout and shader output were unobserved in the landing session because the
+headless host exposed no GPU. Later disagreement is a new row
+(ADR-20260819T065009Z).
 APP-4 stays later because the canonical capture path is scenario-coupled
 and load-bearing.
 

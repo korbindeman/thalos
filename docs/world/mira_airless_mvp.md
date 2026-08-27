@@ -1,7 +1,7 @@
 # Mira airless terrain MVP
 
 **Status:** playable package-backed MVP landed 2026-07-20; production diffusion path specified · **Decision:** [ADR-20260720T211046Z-offline-terrain-packages](../adr/20260720T211046Z-offline-terrain-packages.md) ·
-**Execution:** `MIRA-0`…`MIRA-4` in [backlog.md](../backlog.md) · **Completion
+**Execution:** `MIRA-0`…`MIRA-4` in [backlog.jsonl](../backlog.jsonl) · **Completion
 program:** [mira_learned_terrain.md](../roadmap/mira_learned_terrain.md)
 
 ### Landed compatibility vertical slice
@@ -542,9 +542,9 @@ orbit/EVA routes without copying placement logic. Tune the fixed package and
 client detail budget, then verify camera floor, HUD altitude, EVA/SLF contact,
 landing gear, and on-rails terrain impact against the package-backed surface.
 
-**Exit:** all automated probes/headless captures pass; the user verifies both
-Mira routes and orbit-to-ground continuity. Until that live pass, the slice is
-`verify`, not `done`.
+**Exit:** all automated probes/headless captures pass; the user can still
+reject a live Mira route or orbit-to-ground continuity, and that is a new row
+(ADR-20260819T065009Z).
 
 ## 9. Verification and budgets
 

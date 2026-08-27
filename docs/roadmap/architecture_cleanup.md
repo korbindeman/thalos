@@ -3,7 +3,7 @@
 **Status:** plan drafted 2026-07-05 from a three-track codebase audit (craft
 lifecycle, mode/state machinery, duplication/dead-code inventory). This doc is
 rationale and sequencing only — what has actually landed is in
-[`docs/backlog.md`](../backlog.md).
+[`docs/backlog.jsonl`](../backlog.jsonl) (`just queue`).
 
 The runtime-monolith continuation now has its own focused plan:
 [`application_runtime.md`](application_runtime.md) (`app`). It turns the
@@ -377,6 +377,6 @@ drag / typing / hangar flows).
   at edit time (the Phase-3 "blocked" claim was already stale).
 - **Delete, don't deprecate**, except where a one-package transition mirror is
   explicitly called out (package E).
-- Status for these packages lives in `docs/backlog.md`, not here. When a package
+- Status for these packages lives in `docs/backlog.jsonl`, not here. When a package
   lands, flip its backlog row and update the spec it changed (`ui_flow.md`,
   `regimes.md`, `base_building.md`, `boot.md`) — this doc keeps the rationale.

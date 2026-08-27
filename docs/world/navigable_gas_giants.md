@@ -2,7 +2,7 @@
 
 **Status:** direction captured 2026-07-29; no implementation has landed.
 This document owns the product and architecture direction for ships entering
-gas- and ice-giant atmospheres. The execution queue is `docs/backlog.md`.
+gas- and ice-giant atmospheres. The execution queue is `docs/backlog.jsonl`.
 
 Gas giants should be places, not only distant pictures. A ship can approach
 from orbit, descend through haze and cloud systems, fly inside the visible

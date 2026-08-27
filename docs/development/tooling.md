@@ -540,6 +540,24 @@ window says *nothing ran* rather than implying health — the distinction matter
 because "no records" is equally consistent with "quiet day" and "the lane
 stopped writing".
 
+### Reading the queue: `just queue`
+
+The execution lane has the same shape as the diagnostic lane: a hot file that
+grew past "read this first", and a reader that prints only what is pickable.
+
+```bash
+just queue              # next / wip / blocked, truncated titles
+just queue -- --json
+just queue HYD-1        # one record
+just backlog done HYD-1 # close (strips the note)
+just backlog note HYD-1 "done-criteria, max 360 chars"
+```
+
+`docs/backlog.jsonl` is the status authority. `docs/backlog.md` is a pointer.
+Closing a row is `just backlog done <id>` — not table surgery. Steer runs
+`just queue` instead of reading the file cover-to-cover
+(ADR-20260819T070046Z).
+
 Findings carry a stable `id`, a headline with its **denominator**, at most four
 evidence lines, and where to look next. Current checks: `error_events`,
 `warn_events`, `capture_failures`, `capture_retries`, `capture_boot_rate`,
@@ -559,7 +577,7 @@ that passes forever).
 
 **The daily pass** is the `diag-triage` skill (`.claude/skills/diag-triage/`):
 run the reader, interpret each finding against known mechanisms, dedupe against
-`docs/backlog.md` and `docs/incidents/`, and end each one in a row, an incident,
+`docs/backlog.jsonl` and `docs/incidents/`, and end each one in a row, an incident,
 or an explicit *no action, because …*. Its second job is signal-to-noise
 maintenance — see below.
 

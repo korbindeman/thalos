@@ -176,7 +176,7 @@ the screenshot time override changes phase only.
 The cross-discipline product program now lives in
 [`roadmap/ocean_systems.md`](../roadmap/ocean_systems.md) (`sea §N`). This
 section owns the rendering mechanism inside that program; `OCEAN-2` through
-`OCEAN-7` in `backlog.md` are its execution slices. The local displacement and
+`OCEAN-7` in `backlog.jsonl` are its execution slices. The local displacement and
 physics work do not reopen the analytic global surface or the one signed
 coastline.
 

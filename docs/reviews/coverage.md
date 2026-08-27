@@ -1,12 +1,7 @@
 # Review coverage ledger
 
-Which `(slice, lens)` pairs the [expert-review](../../.claude/skills/expert-review/SKILL.md)
-harness has already looked at. **Drives selection**: without it, every run
-re-reads the same hot files and the rest of the tree is never audited.
-
-Slices and their lenses are defined in
-[`slices.md`](../../.claude/skills/expert-review/slices.md) — 46 pairs in total,
-so a 4-per-week cadence sweeps the codebase in roughly three months.
+Which `(slice, lens)` pairs the retired expert-review harness looked at.
+Historical. Slice definitions lived with the skill, which is not in tree.
 
 **A pair not listed here has never been reviewed** and outranks everything listed.
 Among listed pairs, priority is staleness × churn: commits touching the slice's

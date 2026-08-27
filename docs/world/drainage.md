@@ -2,7 +2,7 @@
 
 The canonical plan for deriving watersheds, lakes, river channels, terrain
 conditioning, and inland water from Thalos's completed neural terrain. This
-document owns the `HYD-*` namespace. The backlog is the status authority; this
+document owns the `HYD-*` namespace. `docs/backlog.jsonl` is the status authority (`just queue`); this
 document owns the contract, sequencing, open forks, and acceptance gates.
 
 ## §1 Purpose and boundary

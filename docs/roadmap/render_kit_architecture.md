@@ -8,8 +8,8 @@
 [ADR-20260808T205119Z-korsou-second-application-render-kit](../adr/20260808T205119Z-korsou-second-application-render-kit.md)
 **Cross-ref prefix:** `rkit §N`
 
-This document is strategy and sequencing. `docs/backlog.md` remains the sole
-execution-status authority.
+This document is strategy and sequencing. `docs/backlog.jsonl` remains the sole
+execution-status authority (`just queue`).
 
 ## §1 Outcome
 
@@ -417,4 +417,4 @@ RK-0 through RK-6 are implemented. The concrete result is:
   automatically for its legacy variant.
 
 Execution status and any remaining runtime-only acceptance checks live solely in
-`docs/backlog.md`.
+`docs/backlog.jsonl`.
