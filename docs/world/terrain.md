@@ -24,12 +24,14 @@ shadows, and the future RT reflection geometry all derive from the *same* tile
 height authority.
 
 - **Generation** — a black box behind `SurfaceQuery` (`thalos_terrain`, pure
-  Rust, no Bevy). Today procedural bodies use `ProceduralSurface`, while Mira's
-  compatibility MVP loads an immutable offline `BakedSurface` package whose
-  height already uses an adaptive ancestor-fallback residual pyramid. Planned
-  learned production packages use the same contract plus a
-  deterministic close-detail reconstructor. Both are sampled into tiles on
-  demand and expose the same gameplay height authority.
+  Rust, no Bevy). Thalos uses `DiffusionSurface` by default: the learned
+  planetary chart plus every complete 90 m window on disk, with analytic filler
+  outside those windows. `THALOS_TERRAIN=procedural` selects `ProceduralSurface`
+  for a session A/B. Mira's compatibility MVP loads an immutable offline
+  `BakedSurface` package whose height already uses an adaptive ancestor-fallback
+  residual pyramid. Planned learned production packages use the same contract
+  plus a deterministic close-detail reconstructor. Both are sampled into tiles
+  on demand and expose the same gameplay height authority.
 - **Rendering** — `thalos_body_render::tiles`: a camera-driven cube-sphere
   quadtree of ordinary `Mesh` + `StandardMaterial`/`TileTerrainMaterial`
   entities on Bevy's standard path, sampling the body's `SurfaceQuery` directly.

@@ -79,6 +79,7 @@ const OVERRIDE_KEYS: &[&str] = &[
     "THALOS_TERRAIN_INSPECTION",
     "THALOS_TERRAIN_CULL",
     "THALOS_TERRAIN",
+    "THALOS_TERRAIN_BANDS",
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
     "THALOS_TILE_BUDGET_MB",
@@ -96,6 +97,9 @@ const STARTUP_OVERRIDE_KEYS: &[&str] = &[
     "THALOS_SCREENSHOT_SIZE",
     "THALOS_TERRAIN_CULL",
     "THALOS_TERRAIN",
+    // Band ablation is a boot-time `OnceLock` in `DiffusionSurface`, and it
+    // changes tile synthesis, so a warm host would serve the old surface.
+    "THALOS_TERRAIN_BANDS",
     "THALOS_TILE_RENDERER",
     "THALOS_TILE_CACHE",
     "THALOS_TILE_BUDGET_MB",

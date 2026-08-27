@@ -6,11 +6,11 @@
 //! elevation profile through its centre, so the foreshore drop and the beach
 //! berm are visible as a curve rather than only as constants in the source.
 //!
-//! Honours `THALOS_TERRAIN=diffusion` (same toggle as the game and `just map`),
-//! so it is the offline A/B for "do both backings have the same coast?".
+//! Honours `THALOS_TERRAIN` (diffusion by default, same as the game and `just map`).
+//! `THALOS_TERRAIN=procedural` is the A/B.
 //!
 //! Run: `cargo run --release -p thalos_terrain --example coast_preview`
-//!      `THALOS_TERRAIN=diffusion cargo run --release -p thalos_terrain --example coast_preview`
+//!      `THALOS_TERRAIN=procedural cargo run --release -p thalos_terrain --example coast_preview`
 //! Output: `target/coast_preview[_diffusion].png`
 
 use glam::DVec3;
@@ -35,10 +35,7 @@ const PROF_LO: f64 = -90.0;
 const PROF_HI: f64 = 210.0;
 
 fn load_surface() -> (Box<dyn SurfaceQuery>, &'static str) {
-    let diffusion = std::env::var("THALOS_TERRAIN")
-        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
-        .unwrap_or(false);
-    if diffusion {
+    if thalos_terrain::thalos_terrain_prefers_diffusion() {
         let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
         match DiffusionSurface::load(dir, RADIUS_M as f32, 2) {
             Ok(surface) => return (Box::new(surface), "diffusion"),

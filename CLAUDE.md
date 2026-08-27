@@ -3,703 +3,270 @@
 Operating manual for agents working in this repository. It carries only what an
 agent needs **in context every session**: current direction, how to verify work,
 and the invariants that are expensive to rediscover. Everything else lives in
-`docs/` — **`docs/README.md` is the canonical documentation map**, and
-`docs/architecture.md` holds the crate/module anatomy this file used to inline.
+`docs/` — **`docs/README.md` is the canonical documentation map**. Cursor loads
+specialist rules from `.cursor/rules/` when matching files are in play.
 
 ## Project purpose
 
-The name **Thalos** currently covers three related things; keep their boundary
-explicit until a future rename gives the wider project its own name:
+**Thalos** currently names three things; keep the boundary explicit:
 
-- the **Thalos game** is the primary product: a spaceflight simulator intended
-  for release, not a renderer showcase;
-- the **world foundation** is the project's internal personal engine for
-  representing, emulating, and rendering natural worlds, from small flat maps
-  through several spherical or ellipsoidal bodies to full solar systems;
-- **Kòrsou** is a real secondary passion project and focused real-world
-  laboratory, developed tangentially and possibly targeting the web later. It
-  is neither a disposable demo nor a scenario inside the game.
+- the **Thalos game** is the product: a spaceflight simulator intended for
+  release, not a renderer showcase;
+- the **world foundation** is the internal engine for representing and rendering
+  natural worlds (planar maps through solar systems);
+- **Kòrsou** is a real secondary project and focused laboratory — not a demo and
+  not a scenario inside the game.
 
-The game remains the product and integration anchor. Focused applications may
-deepen terrain, ocean, foliage, atmosphere, and other systems in a constrained
-environment; promote findings into the shared foundation only when the
-mechanism genuinely matches, then bring them back to every relevant
-application. Share meaning, not topology: planar, cube-sphere, analytic-body,
-far-body, and geodetic-ellipsoid concerns stay in explicit adapters. Full
-purpose and decision rules: `docs/purpose.md`.
+The game is the integration anchor. Focused apps may deepen a system; promote
+into the foundation only when the mechanism genuinely matches, then bring it
+back. Share meaning, not topology: planar / cube-sphere / analytic-body /
+far-body / ellipsoid stay in explicit adapters. Full purpose: `docs/purpose.md`.
 
-The Thalos game is a planetary exploration / orbital-mechanics sandbox in Rust
-(edition 2024, Bevy 0.19, glam 0.32), in **pre-alpha**. Project architecture and
-tooling are still being shaped — you are encouraged to tear down infrastructure
-you find lacking and replace it with something better. You don't need
-permission; you do need to leave a trail: say what you replaced and why, and
-update this file plus the relevant `docs/` spec in the same change. No silent
-rewrites.
+Planetary exploration / orbital-mechanics sandbox in Rust (edition 2024, Bevy
+0.19, glam 0.32), **pre-alpha**. Tear down infrastructure that is lacking and
+replace it — leave a trail in this file plus the relevant `docs/` spec. No
+silent rewrites.
 
 ## Current focus
 
-**Keystone sprint (primary; 2026-07-23, ADR-20260723T142945Z)** — *make Thalos
-look good*, through two paired efforts designed for each other:
+**Keystone** (`docs/roadmap/neural_terrain_renderer.md`, `ntr §N`;
+ADR-20260723T142945Z): *make Thalos look good*.
 
-- **Neural terrain** — terrain-diffusion-style hierarchical diffusion, fine-tuned
-  offline behind the terrain-package boundary (ADR-20260723T143155Z);
-  Thalos/earth-like first, airless second.
-- **A renderer on Bevy's standard path** — terrain and every opaque surface as
-  ordinary `Mesh` + `StandardMaterial`/`ExtendedMaterial` under Bevy
-  lighting/shadows. One lighting universe is reached by moving terrain onto
-  Bevy's path (where crafts already live), *not* by porting crafts onto the
-  custom spine. Volumetrics/sky — BodySky atmosphere, clouds, analytic ocean,
-  celestial sky — remain custom composites; that is the explicit carve-out.
+- **Neural terrain** is the default height backing (`DiffusionSurface`;
+  `THALOS_TERRAIN=procedural` is the session A/B), fine-tuned offline behind the
+  terrain-package boundary. Thalos/earth-like first.
+- **Tiles are the default ground** (`thalos_body_render::tiles`): ordinary
+  `Mesh` + `StandardMaterial`/`ExtendedMaterial` on Bevy's lighting path.
+  `thalos_udlod` and the old terrain WGSL stack are sealed legacy. Spine-port
+  graphics items (F4r/F5r/F7/F8/F9/W12r/TM1) stay frozen; composites (clouds,
+  atmosphere, ocean, plumes, celestial sky, capture) continue. MIRA-1 paused
+  after L2.
 
-The vehicle is a standalone clean-room probe repo (gates M0–M5) whose M5
-extraction brings results back here. Strategy: `docs/roadmap/neural_terrain_renderer.md`
-(`ntr §N`). Consequences in this repo: **the extracted tile renderer
-(`thalos_body_render::tiles`) is now the default ground**, and **`thalos_udlod`
-and the terrain WGSL stack are legacy / end-of-life** (defect-driven fixes only,
-see *Ground renderer* below); the spine-port graphics items
-(F4r/F5r/F7/F8/F9/W12r/TM1) are **frozen**; the composites (clouds, atmosphere,
-ocean, plumes, celestial sky, capture harness) continue; MIRA-1 pauses after its
-L2 gate.
-
-**Background sprints** — architecture & code quality
-(`docs/roadmap/architecture_cleanup.md`, `clean §N`), the lightweight
-capability-selected application runtime (`docs/roadmap/application_runtime.md`,
-`app §N`), and the surviving graphics-fidelity composites
-(`docs/roadmap/graphics_fidelity.md`, `gfx §N`, whose **one-world principle**
-still holds: every surface obeys the same light, shadows, occlusion, and air).
+What's next is `docs/backlog.md`, not this paragraph. Background sprints:
+`docs/roadmap/architecture_cleanup.md` (`clean`),
+`docs/roadmap/application_runtime.md` (`app`),
+`docs/roadmap/graphics_fidelity.md` (`gfx` — one-world lighting still holds).
 
 ## Steering & memory
 
-**Default: do the work.** The records below exist to keep one coherent roadmap
-and to stop us re-learning expensive lessons — not to gate changes. Writing is
-the exception; when you're unsure whether something earns a record, it doesn't.
-(ADR-20260724T223339Z; conventions in `docs/README.md`.)
+**Default: do the work.** Writing is the exception (ADR-20260724T223339Z).
 
-- **`docs/backlog.md`** — the queue, and the answer to "what's next?". Statuses
-  `next` / `wip` / **`verify`** (landed compile-clean, awaiting runtime or
-  screenshot verification) / `blocked` / `done` / `later`. It tracks work that
-  **outlives the current session**: multi-step items, anything handed to the user,
-  anything deliberately deferred. Something you find *and finish* in the same
-  change needs no row — the commit is the record. The backlog is the **only**
-  status authority; plan docs hold rationale and sequencing, never a parallel
-  checkbox to keep in sync.
-- **`steer` skill** — "what's next?" → propose the top item, then stop for a go;
-  "add X / fix Y" → just do it (a row only if it won't finish now); vision talk →
-  update the plan doc, then decompose into rows.
-- **`docs/adr/`** — one record per decision that is **expensive to reverse** and
-  would otherwise be re-litigated or re-explored: architecture seams, rejected
-  approaches a future agent will be tempted to retry, constraints that look
-  arbitrary from the code. Ordinary judgment calls belong in the commit message.
-  Before reopening a settled area, `rg '<topic>' docs/adr` — don't read the
-  directory. Immutable once accepted; supersede, don't rewrite.
-- **`docs/reviews/`** — output of the `expert-review` skill: specialist agents
-  audit a code slice in character, a hostile refuter kills what it can, survivors
-  land in a dated report. Runs weekly in the cloud and on demand ("expert review
-  of the propagator"). **Claims that survived scrutiny, not tracked work** — the
-  harness never writes to the backlog; you promote what you agree with. Before
-  filing a defect an earlier run may have settled, check
-  `docs/reviews/dismissed.md`.
-- **`docs/incidents/`** — bugs whose diagnosis was **non-obvious**: the symptom,
-  the mechanism, and the tell that identifies a recurrence. Short is correct.
+- **`docs/backlog.md`** — the only status authority (`next` / `wip` /
+  **`verify`** / `blocked` / `done` / `later`). Rows are for work that outlives
+  the session. Plan docs hold rationale, never a parallel checkbox.
+- **`steer` skill** — "what's next?" → propose, then stop for a go; "add X /
+  fix Y" → just do it (a row only if it won't finish now); vision → update the
+  plan doc, then decompose into rows.
+- **`docs/adr/`** — expensive-to-reverse decisions. `rg '<topic>' docs/adr`
+  before reopening; supersede, don't rewrite.
+- **`docs/reviews/`** — `expert-review` survivors, not tracked work. Check
+  `docs/reviews/dismissed.md` before re-filing a settled defect.
+- **`docs/incidents/`** — non-obvious bugs: symptom, mechanism, recurrence tell.
   Written in the same change as the fix.
-- **Identifiers are chronological, never sequential**:
-  `<KIND>-<YYYYMMDDTHHMMSSZ>-<kebab-slug>` from `date -u '+%Y%m%dT%H%M%SZ'`.
-  Never allocate "the next number" (ADR-20260722T170714Z).
+- **IDs are chronological**: `<KIND>-<YYYYMMDDTHHMMSSZ>-<kebab-slug>`. Unix:
+  `date -u '+%Y%m%dT%H%M%SZ'`. PowerShell:
+  `[DateTime]::UtcNow.ToString("yyyyMMdd'T'HHmmss'Z'")`. Never allocate "the
+  next number" (ADR-20260722T170714Z).
 
 ## Standing quality bar
 
-- **One canonical path per operation.** Spawning/placing/teleporting a craft,
-  opening/closing a game mode, placing a structure — each gets one shared core
-  every entry point routes through. A new entry point *parameterizes* the core;
-  it does not fork it.
-- **N by default.** No new system assumes "the one craft / runway / base". A kept
-  single-instance assumption is behind an accessor and recorded in the plan doc.
-- **Finish in-flight unifications first** — `GameContext` (`docs/gameplay/ui_flow.md`)
-  and `CraftRegime` (`docs/simulation/regimes.md`) exist to kill state sprawl;
-  completing them outranks new features.
-- **Delete dead code on contact** — the superseded path you touch goes in the
-  same change, not left "for reference".
-- **Crates split on payoff — don't be shy about creating one.** A crate is a
-  compile unit, an ownership boundary, and an iteration harness at once;
-  create or split one whenever the boundary buys a **cheaper edit loop**, a
-  **compiler-enforced dependency guarantee**, a **standalone preview
-  harness**, or **agent isolation** (ADR-20260731T024003Z; layers, guardrails,
-  and the Phase 5 runtime dismantling live in `docs/architecture.md`).
-  Feature crates depend only *downward* — domain crates and
-  `thalos_game_state` — never on each other; two feature crates wanting each
-  other means the shared thing belongs a layer down. New feature work goes in
-  a feature crate when it clears the bar; `thalos_runtime` accepts only
-  composition, sim-coupled drivers, and glue. Modules still handle ordinary
-  sub-feature size, and never split what's scheduled for demolition
-  (`thalos_udlod`, the procedural terrain chain).
+- **One canonical path per operation.** A new entry point parameterizes the
+  core; it does not fork it.
+- **N by default.** No new system assumes "the one craft / runway / base".
+- **Finish in-flight unifications first** — `GameContext`
+  (`docs/gameplay/ui_flow.md`) and `CraftRegime` (`docs/simulation/regimes.md`)
+  outrank new features.
+- **Delete dead code on contact.**
+- **Crates split on payoff** (ADR-20260731T024003Z): cheaper edit loop,
+  compiler-enforced dependency, standalone preview, or agent isolation. Feature
+  crates depend only downward (domain + `thalos_game_state`), never on each
+  other. Don't split what's scheduled for demolition (`thalos_udlod`, the
+  procedural terrain chain). Layers: `docs/architecture.md`.
 - **The shared runtime is light by default.** `thalos_runtime` is an
-  empty-default capability facade (`docs/roadmap/application_runtime.md`,
-  ADR-20260809T201216Z): Kòrsou selects the interactive shell; the game opts
-  into the complete `game` bundle. Simulation/gameplay/planetary become
-  independent selectors only after honest crate boundaries exist. Features select optional
-  crate/plugin edges at composition — they never replace crate boundaries or
-  spread `#[cfg]` through implementation systems. A disabled capability must
-  be absent from the dependency graph, not merely inactive at runtime.
-- **Size work in LLM tokens, not days.** The work is done by agents, so
-  "two days" / "a week" / "a sprint" are meaningless units here — they describe
-  a human workday nobody is spending. Estimate and compare in the currency that
-  actually varies: **tokens** (and the agent-sessions they buy). Say "~200k
-  tokens, one session" or "multi-session, several M tokens", not "half a day".
-  The same applies to sequencing and scope calls: an option is cheap because it
-  is few tokens to build and verify, not because it is quick to type. Wall-clock
-  still counts where it is a real constraint — build times, capture latency,
-  a user play session — but that is machine or human *time*, never an effort
-  estimate. Backlog rows, plan docs, and ADRs follow this rule.
+  empty-default capability facade (ADR-20260809T201216Z). A disabled capability
+  must be absent from the dependency graph, not merely inactive.
+- **Size work in LLM tokens, not days.** "~200k tokens, one session" — not
+  "half a day". Wall-clock still counts for builds, capture latency, and play.
 
 ## Bug fixing
 
-Diagnose before patching:
+1. Hypothesis set from the symptom — don't jump to the first plausible fix.
+2. Rule candidates out with targeted, falsifiable tests.
+3. Fix the cause, structurally.
 
-1. **Reason to a hypothesis set** from the symptom — don't jump to the first
-   plausible fix.
-2. **Rule candidates out with targeted, falsifiable tests** that distinguish
-   between hypotheses rather than confirming a guess.
-3. **Fix the cause, not the symptom** — structurally, removing the class of bug.
-
-A change that makes the symptom disappear without an explanation of *why* is not
-a fix. Search `docs/incidents/` for a prior (`rg '<symptom>' docs/incidents/`)
-before re-deriving a diagnosis. If the diagnosis was non-obvious — a wrong-looking
-first hypothesis, a mechanism nobody would guess from the symptom — write the
-post-mortem in the same change; a typo-grade fix needs none.
+A silent symptom-disappearance is not a fix. `rg '<symptom>' docs/incidents/`
+before re-deriving. Non-obvious diagnosis → post-mortem in the same change;
+typo-grade fixes need none.
 
 ## Commands
 
 ```bash
-just game [mode]        # USER-RUN ONLY; stops the capture host, then owns the
-                        # one machine-wide renderer lease. modes: menu (default) orbit
-                        #   polar eva landing final cruise runway runway-approach
-                        #   shipyard hub mira mira-eva
-                        #   On macOS, quality defaults to laptop. quality=showcase
-                        #   or THALOS_QUALITY overrides the session pin.
-just check [package]    # fast type-check (default thalos_game)
-just build              # cargo build --workspace
-just clippy             # cargo clippy --workspace
-just test               # cargo test -p thalos_physics_canonical
-cargo test -p thalos_physics_canonical -- test_name
-
-just screenshot <name>  # headless still → artifacts/visual/latest/<name>.png.
-                        #   <name> = a scripted preset or a saved viewpoint slug
-                        #   ('latest' = newest). An unknown name prints the list.
-just capture <name>...  # batch several scenes through one host invocation
-just compare <preset> <axis>   # N-way matrix → artifacts/visual/runs/comparisons/
-just screenshot-cold / just compare-cold   # clean-process isolated evidence
-just capture-status / just capture-stop    # persistent capture host
-just build-reset        # the ONE supported full artifact reset
-just publish-report <page>.html.in  # embed + validate images → canonical .html
-
-just map                # whole-planet biome + relief maps, per-biome stats → target/
-just preview            # headless procedural-object gallery → artifacts/visual/latest/
-just nd-preview           # headless navigation-display preview (8 approach
-                        #   situations, real plans + real shader)
-just ui-preview         # headless UI kitchen sink → artifacts/visual/latest/
-just loading-preview    # headless loading-screen preview (bar, status line,
-                        #   GPU/VRAM/residency readout). The ONLY way to see
-                        #   that screen — it despawns before any capture
-                        #   preset can shoot it.
-just terrain-assets     # download + verify Git-LFS learned terrain payloads
-just bake Mira          # rebuild assets/terrain_packages/Mira.bin offline
-just validate-bake Mira # validate package schema/index/checksums/payload
-just texgen             # rebuild versioned vegetation atlases offline
-just diag [hours]       # diagnostics triage: what in the last <hours> of the
-                        #   runtime + tool lanes crossed a threshold (--json for
-                        #   machine use). A healthy window says so and stops.
-just perf-report [s]    # runtime.jsonl perf lane → HTML + summary.json per
-                        #   session (latest | <pid>-<ms> | --list); F3 in-game
-                        #   shows the same data live (tooling.md · perf lane)
-just perf-bisect [p]    # one warmed offscreen foliage × custom-shadow matrix
-                        #   (default preset forest-stand) → headless-matrix.json
-just perf-shadow-bisect [p] # warmed 4→0 custom-shadow cascade cost ladder
-                            #   → headless-shadow-cascades.json
-just perf-terrain-bisect [p] # warmed terrain layers/PBR/base-colour ablation
-                             #   → headless-terrain-material.json
-just perf-terrain-prepass-bisect [p] # warmed depth-prepass on/off controls
-                                     #   → headless-terrain-prepass.json
-just perf-terrain-index-bisect [p] # warmed 129²↔33² index-density controls
-                                   #   → headless-terrain-index.json
-just perf-terrain-culling-bisect [p] # warmed full↔tight tile AABB controls
-                                     #   → headless-terrain-culling.json
-just trace              # profile-tracy build (needs Tracy GUI v0.11.x running)
-just release <kind>     # bump version, commit, tag, push
+just game [mode]            # USER-RUN ONLY (owns the machine-wide renderer lease)
+just check [package]        # fast type-check (default thalos_game)
+just screenshot <name>      # headless still → artifacts/visual/latest/
+just capture <name>...      # batch through one host
+just compare <preset> <axis>
+just diag [hours]           # what crossed a threshold in the runtime + tool lanes
+just map                    # whole-planet biome + relief maps
+just preview / ui-preview / loading-preview
 ```
 
-`preview-window` / `ui-preview-window` are interactive variants — user-run.
+The justfile is the catalog; `docs/development/tooling.md` holds contracts.
+New agent-facing entry points go there, not here.
 
-The `justfile` is not a catalog of every useful command: add a recipe only for
-stable human-facing entry points or multi-step orchestration agents get wrong in
-bare shell. One-liners belong in this file or a `docs/` page as described shell.
+## Verification
 
-## Verification: what you may and may not run
-
-**Do not launch the game yourself.** Building and type-checking are encouraged;
-*running* `just game` is the user's job — they have the display, the input
-devices, and the judgment for "does it feel right". There is no remote-inspection
-channel; don't try to drive or observe a live session programmatically. Ask the
-user to run a mode and send a screenshot when you need interactive behaviour, a
-specific in-flight moment, or temporal feel.
-
-**Headless capture is yours to run, and you are expected to use it.**
-`just screenshot` / `just capture` / `just compare` / `just preview` /
-`just ui-preview` / `just loading-preview` / `just map` are agent-runnable, render on the real GPU
-off-screen, and write PNGs you **Read directly**. Framing knobs without a
+**Do not launch the game.** `just game` is the user's job. Headless capture is
+yours: `just screenshot` / `capture` / `compare` / `preview` / `ui-preview` /
+`loading-preview` / `just map`. Read the PNGs directly. Framing knobs without a
 recompile: `THALOS_SCREENSHOT_{AZIMUTH,ELEVATION,DISTANCE,SIZE,OUT,WARMUP,HUD}`.
-`artifacts/visual/latest/` is the curated one-image-per-preset surface;
-numbered experiments and alternate framings go to `artifacts/visual/runs/` via
-`THALOS_SCREENSHOT_OUT`.
 
-**Check capture provenance before treating an image as your evidence.** The
-capture client serializes parallel agents and worktrees through one
-machine-wide kernel lock, rebuilds when the resident host's
-content fingerprint does not include the current Rust/Cargo inputs, and prints
-the exact source fingerprint used. Every PNG has a neighboring
-`<name>.capture.json` receipt with Git revision/dirty state, renderer-launch
-source, post-capture workspace source, and `workspace_matches`. If that field is
-false, the checkout advanced after the capture's source floor; the image
-includes that floor, while later edits may or may not be present. Recapture only
-when one of those later edits is itself under verification. Comparison manifests
-carry the same fields.
+**Check provenance** in the neighboring `.capture.json` (`workspace_matches`).
+If false, the image includes an older source floor — recapture only when a later
+edit is itself under verification.
 
-**A terrain / biome / scatter / visual change that compiles but hasn't been
-screenshotted is `verify`, not `done`.** If no preset frames what you changed,
-add a deterministic `ScreenshotPreset` — do not approximate it with manual camera
-placement.
+A terrain / biome / scatter / visual change that compiles but hasn't been
+screenshotted is `verify`, not `done`. Add a `ScreenshotPreset` if none frames
+it.
 
-**A dirty worktree is not your problem — keep implementing.** Several agents may
-be editing the workspace at once, so a build or capture can fail on errors in
-code you never touched. Don't chase them, don't "fix" another agent's half-landed
-change, and don't stall waiting for a green build. Confirm the breakage is
-outside your own edits, finish your implementation, and hand verification to the
-user — they run it once the worktree is clean and come back with feedback. Say
-plainly in your report that verification was blocked and by what.
+**A dirty worktree is not your problem.** Confirm breakage is outside your
+edits, finish, and say what blocked verification.
 
-**Confirm you see what the user sees — and agree on scope — before you fix it.**
-A visual complaint in words ("the terrain looks washed out", "the trees pop")
-under-determines both the defect and how much should change; agents routinely fix
-a different artifact than the one that was reported, or rewrite a subsystem when a
-constant was meant. So, for any user-reported visual issue: capture the scene
-first, then say back in plain language — no jargon, no code — **what you see in
-the image**, **what you believe the problem is**, and **what you intend to touch
-versus leave alone**. If the capture doesn't show the symptom, say that rather
-than inventing a mechanism that explains it. Then stop for a yes. This is the one
-place where asking beats doing: a wrong read costs a whole edit-capture cycle,
-and the user has the screenshot open. Once confirmed, run the loop below without
-further check-ins.
+**Visual complaints: capture first, then stop for a yes.** Say back in plain
+language what you see, what you believe the problem is, and what you will touch
+versus leave alone. If the capture doesn't show the symptom, say that.
 
-**The comparison loop** (full detail: `docs/development/visual_testing.md`):
+**Comparison loop** (full: `docs/development/visual_testing.md`): one typed
+axis; inspect stderr → `manifest.json` → contact sheet → full frames; reject
+the run if any variant logged a shader/pipeline error (**BL-20**: Bevy can
+fatal-log and still exit 0). Pin the cause before patching.
 
-1. State the visible symptom or goal and the plausible causes *before* editing.
-2. Reproduce with an existing preset (or add one).
-3. Choose **one typed axis** that separates the candidates. Never smuggle several
-   setting changes into one variant.
-4. Run the matrix, e.g. `just compare spaceport-aerial ssao`.
-5. Inspect in order: process stderr → `manifest.json` → `contact_sheet.png` →
-   full-resolution captures → wipes/diffs. Pixel metrics are evidence, not a
-   verdict.
-6. **Reject the whole comparison** if any variant logged a shader/pipeline error
-   or is missing a render layer — known gap **BL-20**: Bevy can log a fatal
-   pipeline validation error while the process still exits zero, so the existence
-   of PNGs is not proof of a valid run.
-7. Pin the root cause before patching, then rerun the exact preset/axis and keep
-   the matched before/after evidence (the canonical comparison dir is overwritten
-   on rerun — copy it first when revision-to-revision proof is needed).
+Player handoff: **F9** saves the view; `just screenshot <slug>` replays it
+(`latest` = newest). **F8** manages `assets/viewpoints.json`.
 
-Do **not** build a live multi-camera / split-screen comparison renderer, and do
-not call two ad-hoc manual screenshots an A/B (ADR-20260721T192218Z): a split
-viewport changes LOD, SSAO, shadows, and antialiasing under test. `just compare`
-is not a performance benchmark — use profiling for that.
-
-**Getting runtime numbers out: write them to a file** and read the file
-afterwards — never ask the user to read numbers off a console. How, and what
-makes a number worth emitting, is the *Observability* section below.
-
-**Player→agent handoff:** in any 3-D view the user can press **F9** to save the
-current view in one keypress (F9, Enter takes the suggested name; F9, type,
-Enter overrides it) or **F8** to manage saved viewpoints in
-`assets/viewpoints.json`; replay one headlessly with `just screenshot <slug>`
-(`latest` = newest entry). ADR-20260724T211627Z.
-
-## Presenting your work
-
-Use the normal chat response to hand work back. If images are evidence, show or
-link the PNG files directly and give a short summary. Do not create an HTML
-report artifact after each change.
-
-Create a report only when the user explicitly requests one. The optional
-template remains at `scripts/present_template.html`. The publication procedure
-remains in `docs/development/visual_testing.md` for future use.
+Hand work back in chat. Show PNGs when they are evidence. No HTML report unless
+the user asks.
 
 ## Observability
 
-**An agent diagnoses exactly as well as the data already in the tree.** You
-cannot attach a debugger, watch a frame, or feel a hitch; every session that has
-to ask the user to reproduce is a session spent guessing, and every hour of
-guessing is paid again by the next agent. So instrumentation is not overhead
-added after something breaks — it is the artifact that makes all later work
-cheap. When in doubt, emit the number. Contract, storage, and the current lane
-inventory: `docs/development/tooling.md`.
+An agent diagnoses from data already in the tree. When in doubt, emit the
+number. Full contract: `docs/development/tooling.md`.
 
-**One lane, one target, one file.** Structured runtime telemetry is
-`info!(target: "thalos::diagnostic::<subsystem>", event = "…", field = …)`.
-`thalos_runtime` installs one process-wide tracing layer that writes it to
-`artifacts/diagnostics/runtime.jsonl` (schema, session `<pid>-<start-ms>`,
-timestamp, level, target, typed fields) and keeps it off the console. Don't
-invent a second console diagnostic target, and don't open a new JSONL merely to
-avoid choosing an event name — a separate sink needs an independent schema *and*
-lifecycle (capture receipts, GPU-memory sampling, shadow traces qualify).
-**The console is for humans:** `info!` = a short lifecycle or state change,
-`warn!`/`error!` = what broke and what to do. Periodic gauges, numeric dumps,
-calibration samples, and investigation traces never go there.
-
-**Events are data, not sentences.** `event = "<snake_case_noun>"` is the stable
-key an agent greps and a report tool groups by; keep it stable once written.
-Fields are flat scalars with the unit in the name (`_ms`, `_mib`, `_m`, `_hz`,
-`_frac`), never a formatted string an agent has to re-parse. The message string
-is a label for the human tail-reading the file, never the payload.
-
-**A diagnostic that can't falsify a hypothesis isn't a diagnostic.** Emit the
-quantity that *separates* candidate causes, not the one that's easy to reach.
-Ratios and gauges carry their denominator (resident *and* budget, spent *and*
-share, count *and* the cap that would bite); rates carry their window; anything
-per-process carries `pid`/`session`, because the user often runs several
-instances at once — always split `runtime.jsonl` by session before drawing a
-conclusion. The standing example: tile residency logged only *cumulative*
-landings, so a 19,200-landing session was equally consistent with a 1 GiB
-working set and a 6 GiB one, and the OOM was undiagnosable from the log until a
-residency gauge replaced it (INC-20260725T012104Z).
-
-**Instrument first, then patch.** In the *Bug fixing* loop, step 2's
-"falsifiable test" is usually a diagnostic, not a code change. If existing data
-can't distinguish your hypotheses, the first commit is the instrument — landed,
-handed to the user if it needs a play session, and kept afterwards. Instruments
-added to catch a bug stay in the tree as the recurrence tell; delete one only
-when the thing it measures is gone.
-
-**Every developer tool is a production surface — and the capture lane is the
-most load-bearing thing in the repo.** Agent throughput is bounded by
-`just screenshot`: every second of its latency, every spurious rebuild, every
-lock wait, and every flake is multiplied by every agent and every iteration.
-Treat capture slowness, contention, and silently-wrong output as defects of the
-highest class, not as facts of life; the same goes for `just capture` /
-`compare` / `preview` / `map` / `bake` / `texgen`. Each tool run must leave a
-machine-readable record of **what it did, how long each phase took, and how it
-ended**: outcome, per-phase timings, source fingerprint and rebuild reason, lock
-wait, retries, and the failure reason on the error path. Exit code plus stderr
-prose is not enough — **BL-20 is exactly a fatal pipeline error under exit 0.**
-
-**Non-crash failure is the failure mode that matters.** A capture that renders
-zero clouds, drops a render layer, or quietly serves a stale cache still exits 0
-and still writes a plausible PNG. Where an invariant is checkable, check it in
-process and record the verdict beside the artifact (the `.capture.json` receipt
-is the established place), so the agent reading the image can tell *correct*
-from merely *produced*. A known-silent failure gets a recorded check in the same
-change as its fix, or it will be re-diagnosed from scratch.
-
-**Cost discipline, so nobody turns it off.** Always-on lanes are periodic
-(≥ 1 s), allocation-free on the hot path, and must not perturb what they
-measure. Heavy modes — full-rate frame records, per-tile traces, GPU counters —
-are `THALOS_*` opt-in and must never need a recompile: an env var an agent can
-set beats a better metric behind a Cargo feature.
-
-**Every diagnostic owes the reader a check.** The lane has a reader —
-**`just diag [hours]`** (`tools/diag`) — which reports only what crossed a
-threshold, and a **daily triage routine** (`diag-triage` skill) that turns
-findings into rows, incidents, or an explicit "no action, because …". So an
-event is not finished when it is emitted. Adding one means answering: *what
-question does it answer, what value makes it actionable, and which check reads
-it?* If no check reads it, either add one to `tools/diag/src/checks.rs` or don't
-add the event — an event nobody reads is cost with no signal. Thresholds live in
-`tools/diag/src/finding.rs`, each a named constant with the reason it sits where
-it does, and each one is tested to fire on the defect it exists for and to stay
-silent on a healthy window.
-
-**Signal-to-noise is maintained, not achieved.** The lane is shared, so its
-budget is shared: a periodic gauge that dominates the file makes every future
-read more expensive (`just diag` flags this as `lane_noise`). Sample it, demote
-it to a `THALOS_*` opt-in mode, or delete it. Same for the reader: a check that
-fires daily and is dismissed daily is a wrong threshold or a dead check — tune
-the constant or remove it. **Delete instruments whose subsystem is gone**, the
-same way you delete dead code on contact.
-
-**Improving the tooling is your job too — no permission needed.** When you hit
-friction that an instrument, a receipt field, a `just` recipe, a diag check, or a
-faster capture path would remove, build it in the same session instead of
-routing around it. Building the tool is usually a fraction of the debugging
-session it saves, and unlike the fix itself it pays out again for every agent
-after you — so bias toward building it. The bar is **measurably better
-debugging**: name the hypothesis the new data separates, the guess it removes, or
-the phase it shortens. Speculative dashboards and events nobody reads fail that
-bar (*Every diagnostic owes the reader a check*, above). Then **make it
-discoverable, or it does not exist**: a new agent-facing entry point goes in the
-*Commands* list above, its contract and lane in `docs/development/tooling.md`,
-anything expensive to rediscover in an ADR or incident, and multi-session tooling
-work in `docs/backlog.md`. Say in your report what you added and why.
-
-**Read the artifacts before asking.** `just diag` first (it names the session
-worth opening), then `artifacts/diagnostics/runtime.jsonl` and `tools.jsonl`, the
-`.capture.json` receipt beside every PNG, `just perf-report [session|latest]`
-(HTML + `summary.json`), and F3 in-game.
-On Windows NVIDIA systems, `THALOS_GPU_HEALTH=1` adds one-second whole-card
-`gpu_health` samples (VRAM, temperature, power, utilization, clocks); a failed
-NVML query is the timestamped adapter-loss tell read by `just diag`. It is
-investigation-only and off during ordinary play/capture.
-Asking the user to reproduce is justified only after you've read the existing
-evidence and can name what it does *not* show. Deep profiling stays a user-run
-escalation: `cargo run --release -p thalos_game --features profile-chrome`, then
-`python3 scripts/analyze_trace.py trace-<date>.json`
-(`--around-name <span> --window-ms <ms>` scopes it around an event); the perf
-lane's job is to tell you when that's worth asking for.
-
-**One interface: `thalos_diagnostics`.** The event contract, JSONL sink, session
-id, path resolution, and rotation live in `crates/foundation/diagnostics` (no
-Bevy), so the game, the capture host, the capture client, and the offline tools
-all record on the same terms. The game installs it as a Bevy log layer
-(`runtime_diagnostics.rs` is now just that adapter) → `runtime.jsonl`; a tool
-calls `install_tool_lane()` and wraps each unit of work in a `ToolRun`
-(`phase` / `count` / `field` / `ok` / `fail`) → `tools.jsonl`. **The capture
-client is instrumented**: one record per shot with `host_action` (why it did or
-didn't pay for a boot), phase timings for source-snapshot / host-start /
-shader-reload / render / validate, retry and rebuild counters, plus a separate
-`capture_lock` event for machine-lock contention. Details:
-`docs/development/tooling.md`. Remaining under
-BL-20260729T040504Z-unified-diagnostics: the host-internal render split, run
-records for the offline tools, the shared reader (`just diag`), and folding the
-per-preset capture JSONLs into the stream.
+- One lane: `info!(target: "thalos::diagnostic::<subsystem>", event = "…",
+  field = …)` → `artifacts/diagnostics/runtime.jsonl`. Console is for humans.
+  Tools: `thalos_diagnostics::install_tool_lane()` → `tools.jsonl`.
+- Events are data (`snake_case` noun, unit-suffixed scalars). Gauges carry
+  their denominator. A diagnostic that cannot falsify a hypothesis is not one.
+- Instrument first, then patch. Every event needs a `just diag` check
+  (`tools/diag/src/checks.rs`) or it does not ship.
+- Capture slowness and silent-wrong output are first-class defects. Read
+  `just diag`, the `.capture.json` receipt, and the JSONL before asking the
+  user to reproduce.
 
 ## Build & iteration
 
-`rust-toolchain.toml` pins Rust 1.97.0 with `clippy` + `rustfmt`, on the default
-LLVM backend. Full policy and machine-specific recipes:
-`docs/development/build_speed.md`. Load-bearing rules:
+Rust 1.97.0 (`rust-toolchain.toml`). Policy: `docs/development/build_speed.md`.
 
-- **One Cargo command at a time** against the workspace `target/`. Parallel
-  agents need separate worktrees (and therefore separate target dirs); size them
-  with `scripts/setup-build-env.{sh,ps1}`. A worktree created *outside* the
-  checkout needs `--all-worktrees` provisioning or it builds with the stock
-  linker and no job budget.
-- **The screenshot loop has exactly two speeds, by design** (ADR-20260724T153619Z):
-  WGSL edits **hot-reload** in the running capture host (~3 s to a fresh PNG —
-  keep visual iteration WGSL-first); any **Rust/manifest edit restarts the host
-  automatically** on the next `just screenshot` (~1.5–2.5 min warm). There is no
-  in-process Rust reload. `just capture-stop` is optional hygiene.
-- **Never hand-roll `cargo clean -p <subset>`.** The dev lane links Bevy
-  dynamically, so `bevy_dylib` and everything linked against it are *one artifact
-  set*; a partial clean yields `undefined symbol: anon.*.llvm.*`
-  (INC-20260724T182642Z) — an artifact problem, never a missing dependency. The
-  capture client self-heals once; if its retry fails, run `just build-reset`.
-- **Keep every dev renderer lane on the one `dev-renderer` fingerprint.** Any
-  other Bevy/wgpu feature mixture forces another full graph rebuild. wgpu's
-  `counters` stays opt-in behind `thalos_game/gpu-counters`.
-- **No unstable `-Zthreads`** (INC-0006: parallel-MIR ICE poisoned incremental
-  objects). No compiler cache — sccache was removed (ADR-20260723T222214Z).
-- Expect the first build after changing flags, profiles, or Bevy/wgpu features to
-  take minutes. That is a one-time graph rebuild; don't churn those inputs.
+- **One Cargo command at a time** against workspace `target/`. Parallel agents
+  need separate worktrees (`scripts/setup-build-env.{sh,ps1}`).
+- Screenshot loop: WGSL **hot-reloads** (~3 s); Rust/manifest **restarts the
+  host** (~1.5–2.5 min). No in-process Rust reload (ADR-20260724T153619Z).
+- **Never** `cargo clean -p <subset>` — partial clean poisons `bevy_dylib`
+  (INC-20260724T182642Z). Capture client self-heals once; then `just build-reset`.
+- Every dev renderer lane stays on the one `dev-renderer` fingerprint.
+- No unstable `-Zthreads` (INC-0006). No compiler cache (ADR-20260723T222214Z).
 
 ## Codebase map
 
-Pure-Rust libraries (no Bevy) — `thalos_render_model` (validated immutable
-render-frame inputs), `thalos_world` (authored body/system truth),
-`thalos_physics_canonical` (orbital mechanics, aero, surface-local frame),
-`thalos_control` (fly-by-wire), `thalos_terrain` (`SurfaceQuery` + generation),
-`thalos_celestial` (sky model), `thalos_texgen` (offline textures),
-`thalos_weather` (seeded shallow-water weather sim **and** the cloud weather
-cube itself — `cloud_cube` owns `CloudWeatherField`, its derivation, and the
-one `COVERAGE_SCALE` trim; iterate via its `sim_probe` example, seconds per
-round, no runtime rebuild).
-
-Bevy consumers — `thalos_game_state` (`crates/gameplay/state`, the game-state
-**blackboard**: shared resources/components + accessors + single-writer doc
-comments, no systems — what feature crates read and the runtime writes;
-ADR-20260731T024003Z), the **gameplay feature crates** that read it
-(`thalos_hud`, `thalos_map`, `thalos_shipyard_editor`, `thalos_structures` under
-`crates/gameplay/` — each depends only downward, **never on each other or on
-the runtime**, and orders against the published `thalos_game_state::sched`
-system sets rather than another crate's systems),
-`thalos_preferences` (`crates/interface/preferences`, the shared window,
-UI-scale, MSAA, persistence, and modular settings-menu host used by both apps),
-`thalos_viewer` (`crates/interface/viewer`, shared semantic freecam motion,
-physical optics, level/ground/speed preferences, freecam panel, and the one
-frame-tagged viewpoint store/CRUD/F8/F9 UI over explicit application spatial
-adapters),
-`thalos_runtime` (`crates/runtime/app`, the thin empty-default capability
-facade shared by player apps and capture tools), `thalos_game_runtime`
-(`crates/runtime/game`, the transitional complete game composition selected by
-the facade's explicit `game` bundle), `thalos_game` (`apps/game`, thin
-launcher), `korsou` (`apps/korsou`, real-world explorer with planar and
-WGS84/EGM2008 ellipsoid adapters that selects only `interactive` and has no
-simulation/gameplay capability), `thalos_body_render` +
-`thalos_render_foundation` + `thalos_body_shading` + `thalos_ocean` +
-`thalos_vegetation` (shared GPU passes plus topology-independent shading,
-water, and woody-appearance payloads), `thalos_body_render` (planetary and
-far-body adapters; owns the default `tiles` ground renderer and is the sole,
-feature-gated consumer of the optional legacy `thalos_udlod` baseline),
-`thalos_physics_local` (Avian boundary),
-`thalos_shipyard` (construction model), `thalos_input`, `thalos_ui`,
-`thalos_capture_{protocol,runtime}`, vendored `big_space`.
-
-Systems run in `SimStage` order **Physics → Sync → Camera**; input intent
-collection runs in `PreUpdate` before them.
-
-**Module-level anatomy — what each crate owns, its submodules, and the data flow
-— is in `docs/architecture.md`.** Subsystem behaviour is owned by the specs in
+Crate/module anatomy: `docs/architecture.md`. Behaviour: specs in
 `docs/gameplay/`, `docs/simulation/`, `docs/world/`, `docs/rendering/`.
+
+Sim order is **Physics → Sync → Camera**; input intent runs in `PreUpdate`
+before them. Feature crates order against `thalos_game_state::sched`, never
+against each other.
 
 ## Invariants
 
 **Crate boundaries**
 
-- **The pure crates have no Bevy**, even transitively: `thalos_render_model`,
+- Pure crates have no Bevy, even transitively: `thalos_render_model`,
   `thalos_world`, `thalos_physics_canonical`, `thalos_terrain`,
-  `thalos_celestial`. CI-guarded with a `cargo tree` check.
-  (`bevy_erosion_filter` is allowed only via
-  `default-features = false`, which pulls no Bevy engine crate.)
+  `thalos_celestial`. (`bevy_erosion_filter` only with `default-features = false`.)
 - Avian lives behind `thalos_physics_local`; never add it to
-  `physics_canonical`. Don't derive `Reflect` there either — mirror canonical
-  state into a Bevy resource at the bridge (`CraftStateMirror`).
-- `thalos_body_render` is the **sole** consumer of `thalos_udlod`, so replacing
-  the ground backend stays localized.
+  `physics_canonical`. Don't derive `Reflect` there — mirror into
+  `CraftStateMirror` at the bridge.
+- `thalos_body_render` is the sole consumer of `thalos_udlod`.
 - `thalos_render_foundation` owns GPU resources and pass ordering only. It may
   depend on Bevy and `thalos_diagnostics`, never on a world, spatial adapter,
-  gameplay crate, or application composition. CI guards this dependency seam.
+  gameplay crate, or application composition.
 
-**Ground renderer: tiles by default, udlod is legacy**
+**Ground renderer**
 
-- **`thalos_body_render::tiles` is the ground renderer** — terrain as ordinary
-  `Mesh` + `StandardMaterial` on Bevy's standard path, driven per frame from
-  `ViewAnchor` by `rendering::tile_terrain`. New terrain, shading, scatter, or
-  LOD work goes here.
-- **`thalos_udlod` + `body_render::ground`'s terrain half + the terrain WGSL
-  stack (`body_terrain.wgsl`, udlod's shaders) are sealed legacy**: defect-driven
-  fixes only. They are absent from every default application graph and exist
-  only behind the optional `legacy-udlod` feature for matched A/B evidence.
-- **`THALOS_TILE_RENDERER=0` is a feature-only A/B baseline, not a supported
-  mode** — it requires a binary built with `legacy-udlod`. The canonical
-  `renderer` compare axis adds that feature automatically for the legacy cold
-  capture; ordinary `just game`/capture builds do not compile it. Anything else
-  (including unset) is the tile path.
-- The analytic composites that live in `body_render::ground` — `BodySky`,
-  `BodyOcean`, the impostor handoff — are **not** legacy; they are the
-  ADR-20260723T142945Z carve-out and outlive udlod.
+- `thalos_body_render::tiles` is the ground. New terrain / shading / scatter /
+  LOD work goes here, driven per frame from `ViewAnchor`.
+- `thalos_udlod` + `body_render::ground`'s terrain half + `body_terrain.wgsl`
+  are sealed legacy: defect-driven fixes only, behind `legacy-udlod`.
+- `THALOS_TILE_RENDERER=0` is a feature-only A/B baseline, not a supported
+  mode. Unset is the tile path.
+- `BodySky`, `BodyOcean`, and the impostor handoff in `body_render::ground`
+  are **not** legacy.
 
 **One authority per concern**
 
-- **One propagator everywhere.** Live stepping and prediction both route through
-  the same `ShipPropagator`, or "where the ship is" diverges from "where it will
-  be". Body positions are always queried through `BodyTrajectoryProvider`.
-- **One craft state, one authority.** Presentation reads snapshots or accessors,
-  never parallel transform-owned state.
-- **One solar-system state.** `SolarSystemState` is the frame-local source for
-  body + environment state; render, map, impostor, terrain, and material systems
-  are projections of it, not co-owners.
-- **Single-writer resources.** The sole writer is named in the resource's doc
-  comment: `SolarSystemState` ← `sync_solar_system_state`, `MapSnapshot` ←
+- One `ShipPropagator` for live stepping and prediction. Body positions through
+  `BodyTrajectoryProvider`.
+- Presentation reads snapshots or accessors, never parallel transform-owned
+  craft state.
+- `SolarSystemState` is the frame-local source for body + environment; render,
+  map, impostor, terrain, and materials are projections of it.
+- Single-writer resources: the writer is named in the resource's doc comment.
+  Known: `SolarSystemState` ← `sync_solar_system_state`, `MapSnapshot` ←
   `update_map_snapshot`, `CraftStateMirror` ← `refresh_craft_state_mirror`,
   `CraftRegimeState` ← `regime::resolve_regime`, `AvianAuthority` ←
   `compute_avian_authority`, `ViewAnchor` ← `update_view_anchor`,
   `FlightProgram` ← `autoflight::update_flight_program`,
-  `AutoflightAnnunciation` ← `control_bus::realize_control`. Don't add a
-  second writer; route through an accessor or reconsider the ownership.
-- **Autoflight is two layers, and locks are declared** (ADR-20260731T232619Z).
-  Strategic `FlightProgram` (targets, sequencing, staging commands) is separate
-  from the tactical attitude/throttle channels that `thalos_control::arbitrate`
-  resolves. A new automation source declares `required_locks()` for itself —
-  never add a term to a lock table keyed on a mode enum, which is how warp came
-  to be locked through an entire ballistic coast. Panels emit
-  `AutoflightRequest` and never mutate a program or the burn executor.
-- **One height authority.** `BodySurfaceRegistry` builds one
-  `Arc<dyn SurfaceQuery>` per body, and every consumer — ground LOD render, the
-  near-surface `HeightSourceRegistry` (colliders, camera floor, HUD altitude,
-  EVA), propagator collision — reads that same selected surface. Thalos has **no
-  sea-level layer**: sea level is the constant **0 m**.
-- **One view anchor.** `ViewAnchor` is the per-frame answer to "where is the
-  view?" for every view-dependent detail system (scatter, shadow-cascade centre).
-  Never anchor detail to the player craft or a mode flag — new camera modes must
-  get correct detail with zero per-mode plumbing.
-- **One sim-pause boundary.** `sim_clock::SimClock` folds every pause source into
-  a zero sim delta. Do not pause `Time<Virtual>`/`Res<Time>` as the game-wide sim
-  pause; presentation and UI animation use `Time<Real>`.
-- **One shader library per concern** (below).
+  `AutoflightAnnunciation` ← `control_bus::realize_control`.
+- Autoflight is two layers (ADR-20260731T232619Z): strategic `FlightProgram`
+  vs tactical channels `thalos_control::arbitrate` resolves. A new source
+  declares `required_locks()`; panels emit `AutoflightRequest`.
+- One height authority: `BodySurfaceRegistry` builds one
+  `Arc<dyn SurfaceQuery>` per body. Sea level is the constant **0 m**.
+- One `ViewAnchor` for every view-dependent detail system. Never anchor detail
+  to the player craft or a mode flag.
+- One sim-pause: `sim_clock::SimClock` → zero sim delta. Do not pause
+  `Time<Virtual>`/`Res<Time>`; presentation uses `Time<Real>`.
 - Real-space rendering lives under BigSpace; the active ship camera owns
-  `FloatingOrigin`. Map systems read `MapSnapshot` and never touch real-space
-  entities.
-- Semantic player input comes from `thalos_input` intent resources; raw Bevy
-  input only for cursor positions, picking, and UI internals.
+  `FloatingOrigin`. Map systems read `MapSnapshot`.
+- Semantic input from `thalos_input` intent resources; raw Bevy input only for
+  cursor, picking, and UI internals.
 
 **Traps**
 
-- **Every spawn scenario starts paused** (warp 0×). `spawn::apply_initial_warp`
-  is the single source of truth, gated by `spawn::AutoRun` (`THALOS_AUTO_RUN=1`
-  resumes and skips the start screen); deferred placement flows must not reset
-  warp themselves.
-- **`EditorPart` is the only thing separating the build world from the flying
-  craft** in the same ECS `World`. A system aggregating part components for the
-  *flight* craft must filter `Without<EditorPart>`.
-- **Tile-cache staleness is silent.** If you add an input to tile synthesis, fold
-  it into the cache namespace, and bump `thalos_terrain::GENERATOR_VERSION` when
-  generation output changes — otherwise a cached run renders old terrain.
-  `THALOS_TILE_CACHE=0` disables the disk tier while iterating.
-- **Per-body failures stay per-body.** A missing/stale terrain package degrades
-  *that body* (`BodySurfaceRegistry::degraded`) instead of panicking; integrity is
-  enforced at the request boundary, where capture refuses a shot whose *target*
-  body is degraded (INC-20260724T182643Z). Apply the same shape to new
-  body-scoped resources.
-- **A detached process must inherit nothing from the caller's console/pipes.** On
-  Windows, `CreateProcess` inherits every inheritable handle; launch via
-  `Start-Process` with redirection in a shim (INC-20260724T185500Z).
-- **No planet/terrain generation tests.** Generation is in an iterative phase;
-  these tests slow the visual loop. Verify with `just map` + `just screenshot`
-  instead. `crates/domain/terrain` and its `ProceduralSurface` generator are the
-  source of truth — there is no separate Terrain Lab.
+- Every spawn starts paused (warp 0×). `spawn::apply_initial_warp` is the
+  source of truth, gated by `spawn::AutoRun` (`THALOS_AUTO_RUN=1`).
+- `EditorPart` is the only marker separating the build world from the flying
+  craft. Flight aggregators must filter `Without<EditorPart>`.
+- Tile-cache staleness is silent. New synthesis inputs go in the cache
+  namespace; bump `thalos_terrain::GENERATOR_VERSION` when output changes.
+  `THALOS_TILE_CACHE=0` disables the disk tier.
+- Per-body failures stay per-body (`BodySurfaceRegistry::degraded`). Capture
+  refuses a shot whose *target* body is degraded (INC-20260724T182643Z).
+- Detached processes inherit nothing from the caller's console/pipes. On
+  Windows, launch via `Start-Process` with redirection (INC-20260724T185500Z).
+- No planet/terrain generation tests. Verify with `just map` +
+  `just screenshot`. `crates/domain/terrain` is the source of truth.
 
-## Shared shader library rule
+## Learned constraints
 
-Every surface material (`body_terrain.wgsl`, `tree_standard.wgsl`,
-`grass.wgsl`, `rock.wgsl`, `ground_patch.wgsl`, `tree_impostor_standard.wgsl`)
-**must** import from the shared libraries, never re-implement lighting/palette
-locally. When a palette or BRDF constant moves, it moves in one place. (The
-tree/impostor materials are on Bevy's standard path since 2026-07-29 — they
-take *lighting* from Bevy PBR, but their albedo/palette still comes from
-`thalos::foliage`/`thalos::landcover`, and they receive the shared
-`thalos::shadow` cascade + cloud transmittance.)
-
-| Import path | Key exports |
-|---|---|
-| `thalos::lighting` | `shade_surface`, `shade_foliage`, `compute_surface_sky`, `moonlight_radiance`, `object_aerial_recession`, `sun_daylight` |
-| `thalos::shadow` | `ShadowCascadeBlock`, `sun_shadow_factor` |
-| `thalos::landcover` | `vegetation_color`, `vegetation_understory_color` (near-field: canopy darkening reduced to a residual), `forest_coverage` (CPU mirror: `ground/landcover.rs`) |
-| `thalos::foliage` | foliage albedo model (near mesh + impostor bake) |
-| `thalos::grass_displace` | `grass_blade_world_pos` |
-
-The `wgsl-bevy` skill (`.claude/skills/wgsl-bevy/SKILL.md`) collects WGSL/naga
-pitfalls — reserved words, strict type rules, `naga_oil` import quirks. Treat it
-as a living document: add any WGSL error worth remembering.
-
-## Bevy 0.19
-
-Full notes: `docs/development/bevy.md`. Two ordering rules are non-negotiable —
-both cost us runtime regressions:
-
-- **Any post pass that calls `post_process_write()` must sit in the exact chain
-  slot its old render-graph node held** (set membership *and* a relative
-  `.after()`). `ViewTarget`'s ping-pong parity index persists across frames, so a
-  mis-slotted flip makes the presented buffer alternate → global flicker.
-- **Retained binned render phases**: a custom queue system must run *after*
-  Bevy's (`.after(RenderSystems::QueueMeshes).before(RenderSystems::PhaseSort)`),
-  or a per-frame material mutation dequeues it after it adds itself and it never
-  draws.
-
-## Learned User Preferences
-
-- Primary development machine is a Mac; FPS and battery/power draw are first-class constraints, not afterthoughts.
-- 3D render scale must leave UI at OS HiDPI; never shrink the HUD with the world.
-- Quality and Laptop profiles must not change window mode; the game should start in the default borderless fullscreen.
-- Laptop quality keeps clouds and woody foliage; its primary performance levers are 0.50× 3D render scale and a 30 Hz cap. Capture and screenshots stay on Showcase.
-
-## Learned Workspace Facts
-
-- Render scale is 3D-only: draw the main 3D target at a fraction and upscale to the swapchain, with UI on a full-resolution camera at OS HiDPI. Window `scale_factor_override` is the wrong lever — it shrinks the HUD and does not cut pixels in borderless fullscreen.
-- Quality presets (Showcase / Laptop / Custom) in `thalos_preferences` stamp editable knobs. First macOS run defaults to Laptop and persists it; existing Showcase files stay put; `THALOS_QUALITY` / `just … quality=` pins one session without writing back; capture ignores the pin.
-- `thalos_clouds` owns the shared compute marcher and weather cubes; `thalos_body_render` keeps the planetary BodySky composite. Kòrsou consumes the same marcher through a local Earth-shell adapter — do not fork a second cloud system.
+- Primary machine is a Mac: FPS and battery are first-class. This checkout
+  also runs on Windows — the handle-inheritance trap above still applies.
+- 3D render scale must leave UI at OS HiDPI. Draw the 3D target at a fraction
+  and upscale; `scale_factor_override` shrinks the HUD and is the wrong lever.
+- Quality / Laptop must not change window mode (default borderless fullscreen).
+  Laptop keeps clouds and woody foliage; levers are 0.50× 3D scale and a 30 Hz
+  cap. Capture stays on Showcase. `THALOS_QUALITY` / `just … quality=` pins one
+  session without writing back; capture ignores the pin.
+- `thalos_clouds` owns the shared compute marcher and weather cubes;
+  `thalos_body_render` keeps the planetary BodySky composite. Kòrsou consumes
+  the same marcher through a local Earth-shell adapter — do not fork a second
+  cloud system.

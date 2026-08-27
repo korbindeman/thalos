@@ -34,7 +34,7 @@ Genuinely ambiguous? Ask one question.
 
 ## § Propose — "what's next?"
 
-1. **Sanity-check** the backlog against `jj log` / `jj st`: fix statuses that have
+1. **Sanity-check** the backlog against `git log` / `git status`: fix statuses that have
    obviously gone stale. A skim, not an audit.
 2. **Pick.** Candidates = `next` with no unmet deps, **plus the `verify` queue as a
    standing candidate** — when several landed items await verification, one bundled

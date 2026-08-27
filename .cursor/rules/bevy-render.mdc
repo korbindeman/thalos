@@ -1,0 +1,19 @@
+---
+description: Bevy 0.19 render-graph ordering traps
+globs: "crates/rendering/**/*.rs,crates/runtime/**/*.rs"
+alwaysApply: false
+---
+
+# Bevy 0.19 render ordering
+
+Full notes: `docs/development/bevy.md`. Two rules are non-negotiable — both
+cost runtime regressions:
+
+- **Any post pass that calls `post_process_write()` must sit in the exact chain
+  slot its old render-graph node held** (set membership *and* a relative
+  `.after()`). `ViewTarget`'s ping-pong parity index persists across frames, so
+  a mis-slotted flip makes the presented buffer alternate → global flicker.
+- **Retained binned render phases**: a custom queue system must run after
+  Bevy's (`.after(RenderSystems::QueueMeshes).before(RenderSystems::PhaseSort)`),
+  or a per-frame material mutation dequeues it after it adds itself and it
+  never draws.

@@ -14,6 +14,10 @@
 #import bevy_pbr::forward_io::{Vertex, VertexOutput}
 #endif
 
+// Reading the MATERIAL bind group from a vertex stage that also serves the
+// prepass and the shadow pass is what forces `DISPLACED_PREPASS_ALPHA_MODE`
+// (tiles/material.rs): a depth-only opaque pass would otherwise bind an empty
+// group 3 here and wgpu would fail pipeline creation outright.
 @group(#{MATERIAL_BIND_GROUP}) @binding(111)
 var tile_position_atlas: texture_2d_array<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(112)

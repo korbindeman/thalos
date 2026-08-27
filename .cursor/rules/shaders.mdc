@@ -1,0 +1,30 @@
+---
+description: Shared WGSL library rule and naga pitfalls pointer
+globs: "**/*.wgsl"
+alwaysApply: false
+---
+
+# Shared shader libraries
+
+Every surface material (`body_terrain.wgsl`, `tree_standard.wgsl`, `grass.wgsl`,
+`rock.wgsl`, `ground_patch.wgsl`, `tree_impostor_standard.wgsl`) **must** import
+from the shared libraries, never re-implement lighting/palette locally. When a
+palette or BRDF constant moves, it moves in one place.
+
+Tree/impostor materials take *lighting* from Bevy PBR; albedo/palette still
+comes from `thalos::foliage` / `thalos::landcover`, and they receive
+`thalos::shadow` + cloud transmittance.
+
+| Import path | Key exports |
+|---|---|
+| `thalos::lighting` | `shade_surface`, `shade_foliage`, `compute_surface_sky`, `moonlight_radiance`, `object_aerial_recession`, `sun_daylight` |
+| `thalos::shadow` | `ShadowCascadeBlock`, `sun_shadow_factor` |
+| `thalos::landcover` | `vegetation_color`, `vegetation_understory_color`, `forest_coverage` (CPU mirror: `ground/landcover.rs`) |
+| `thalos::foliage` | foliage albedo model (near mesh + impostor bake) |
+| `thalos::grass_displace` | `grass_blade_world_pos` |
+
+`body_terrain.wgsl` is sealed legacy (defect-driven fixes only) but still obeys
+this rule.
+
+naga / naga_oil pitfalls (reserved words, `const` imports, prepass bind groups):
+`.claude/skills/wgsl-bevy/SKILL.md`. Append any new WGSL error worth remembering.

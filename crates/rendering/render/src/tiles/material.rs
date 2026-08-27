@@ -29,6 +29,49 @@ pub type TileCasterMaterial = ExtendedMaterial<StandardMaterial, TileCasterExten
 
 const TILE_DISPLACEMENT_SHADER: &str = "shaders/tile_displacement.wgsl";
 
+/// **Load-bearing, and not about transparency at all** — this is what keeps the
+/// tile atlases bound while the displacement vertex shader runs in the depth
+/// prepass and in Bevy's shadow pass. Leave it on both extensions.
+///
+/// Bevy 0.19 skips the material bind group for a *depth-only opaque* pass: the
+/// prepass pipeline gets `empty_layout` at group 3 and the phase is drawn with
+/// `PrepassOpaqueDepthOnlyDrawFunction` / `ShadowsDepthOnlyDrawFunction`, which
+/// never bind it (`bevy_pbr::prepass::is_depth_only_opaque_prepass`,
+/// `render/light.rs`). Our prepass/shadow vertex stage is
+/// [`TILE_DISPLACEMENT_SHADER`], which *reads* group 3 (bindings 111/112) to
+/// find the vertex it is meant to place — so that pass builds a pipeline whose
+/// vertex shader references a binding the layout doesn't have, and wgpu kills
+/// the process at pipeline creation:
+///
+/// ```text
+/// In Device::create_render_pipeline, label = 'pbr_prepass_pipeline'
+///   Shader global ResourceBinding { group: 3, binding: 111 } is not available
+///   in the pipeline layout
+/// ```
+///
+/// The escape hatch Bevy checks for is `MeshPipelineKey::MAY_DISCARD` (and
+/// `PREPASS_READS_MATERIAL`, which 0.19.0 defines and reads but never sets, so
+/// it is unreachable from a `Material` impl). `MAY_DISCARD` is reachable, and
+/// only through the alpha mode: `AlphaMode::Mask` puts the material in the
+/// alpha-mask phase, whose draw function binds group 3 and whose pipeline gets
+/// the real material layout in both the prepass and the shadow pass.
+///
+/// Nothing is actually masked. This overrides only the *pipeline-level* alpha
+/// mode; the base `StandardMaterial` stays `AlphaMode::Opaque`, so the GPU-side
+/// material flags still say opaque and `alpha_discard` forces alpha to 1.0 in
+/// both `tile_terrain.wgsl` and Bevy's prepass fragment. The main-pass pipeline
+/// is unchanged apart from a `MAY_DISCARD` shader def (blend, depth write and
+/// depth compare are all picked from the blend bits, which stay opaque).
+///
+/// Cost: terrain moves from `Opaque3d` to `AlphaMask3d` (same node, drawn
+/// straight after opaque), and the depth prepass now compiles a fragment stage
+/// for it — Bevy's void `prepass_alpha_discard` entry — which forfeits early-Z
+/// depth writes on the prepass draw. If that ever shows up in the perf lane,
+/// the fix is a no-op prepass fragment shader of our own, not removing this.
+///
+/// INC-20260826T124420Z-tile-prepass-material-bind-group.
+const DISPLACED_PREPASS_ALPHA_MODE: AlphaMode = AlphaMode::Mask(0.5);
+
 /// Mirror of the WGSL `TileShadingParams` (declaration order is the contract).
 #[derive(Clone, Copy, ShaderType, Debug)]
 pub struct TileShadingParams {
@@ -170,6 +213,10 @@ pub struct TileShadingExtension {
 }
 
 impl MaterialExtension for TileShadingExtension {
+    fn alpha_mode() -> Option<AlphaMode> {
+        Some(DISPLACED_PREPASS_ALPHA_MODE)
+    }
+
     fn vertex_shader() -> ShaderRef {
         TILE_DISPLACEMENT_SHADER.into()
     }
@@ -203,6 +250,10 @@ pub struct TileCasterExtension {
 }
 
 impl MaterialExtension for TileCasterExtension {
+    fn alpha_mode() -> Option<AlphaMode> {
+        Some(DISPLACED_PREPASS_ALPHA_MODE)
+    }
+
     fn vertex_shader() -> ShaderRef {
         TILE_DISPLACEMENT_SHADER.into()
     }

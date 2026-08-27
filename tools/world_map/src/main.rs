@@ -145,8 +145,8 @@ struct Px {
 }
 
 /// The tool's surface: the canonical procedural planet, or the NTR-X2a
-/// terrain-diffusion backing when `THALOS_TERRAIN=diffusion` (same toggle and
-/// data directory as the game's `BodySurfaceRegistry`).
+/// terrain-diffusion backing (default; same toggle and data directory as the
+/// game's `BodySurfaceRegistry`). `THALOS_TERRAIN=procedural` is the A/B.
 enum MapSurface {
     Procedural(ProceduralSurface),
     Diffusion(DiffusionSurface),
@@ -192,9 +192,7 @@ fn main() {
         .map(|km| km * 1000.0)
         .unwrap_or(3_186_000.0);
     let seed = env_f64("WORLD_SEED").map(|s| s as u32).unwrap_or(2);
-    let diffusion = std::env::var("THALOS_TERRAIN")
-        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
-        .unwrap_or(false);
+    let diffusion = thalos_terrain::thalos_terrain_prefers_diffusion();
     let surface = if diffusion {
         let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
         match DiffusionSurface::load(dir, radius_m as f32, seed) {
@@ -225,7 +223,7 @@ fn main() {
                 MapSurface::Diffusion(s)
             }
             Err(e) => {
-                eprintln!("THALOS_TERRAIN=diffusion: {e}; falling back to procedural");
+                eprintln!("diffusion load failed: {e}; falling back to procedural");
                 MapSurface::Procedural(attach_rivers(
                     ProceduralSurface::new(radius_m as f32, seed),
                     "procedural",

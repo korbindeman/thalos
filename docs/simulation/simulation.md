@@ -23,7 +23,7 @@ implementation is the patched-conics + `KeplerianPropagator` core.
 > `WarpIntegrator`, navigation contexts/encounters, `ManeuverFrame`,
 > the hydrate/collapse bridge trait, and the `sim_core`/`ephemeris`/
 > `flight` crate split remain target design, unbuilt** — the actual
-> crate layout is in CLAUDE.md, and the next force-model step
+> crate layout is in `docs/architecture.md`, and the next force-model step
 > (drag-aware prediction / perturbed coast) is regimes Phase C, which
 > will redesign the warp-integration regime on its own terms.
 

@@ -649,6 +649,48 @@ the client's outside view of the host. The host-internal split (scene settle vs.
 warmup frames vs. readback/encode) is not separated yet, and the offline tools
 (`bake`, `texgen`, `map`, `preview`) have no run record.
 
+### `band_roughness_probe` — where the terrain's slope energy lives
+
+```bash
+cargo run --release -p thalos_terrain --example band_roughness_probe
+THALOS_TERRAIN=procedural cargo run --release -p thalos_terrain --example band_roughness_probe
+```
+
+No renderer, no game boot, a few seconds. Answers the question a screenshot
+cannot: **which band is responsible for how the ground reads.**
+
+"The terrain looks bumpy / mushy / crumpled" is a claim about *slope at some
+wavelength*, and the height cascade has a band at nearly every wavelength. The
+probe samples a transect twice at each of a ladder of footprints; because every
+band is footprint-gated, the difference between two footprints is exactly the
+content between them. It prints, per shell:
+
+- **amp RMS m** — how tall that shell's content is.
+- **slope RMS / slope deg** — how *steep* it is. This is the bumpiness number.
+  **Slope rising toward the fine shells is a defect**: soil-mantled ground
+  smooths as you approach it, so a ladder whose slope grows per octave will
+  always read as crumple, whatever its amplitude (INC-20260827T194228Z).
+
+It also prints the **base slope distribution** at 90 m — the quantity the fine
+band's regime selection keys on, so a threshold is never a guess — and writes a
+2 m/px shaded relief per site to `target/relief_<site>_<backing>_<bands>.png`.
+Read that image: closed rings, cloverleaf lobes or evenly sized cells mean an
+unrounded fold somewhere in the cascade.
+
+Pair it with the band ablation:
+
+```bash
+THALOS_TERRAIN=diffusion THALOS_TERRAIN_BANDS=-fine cargo run --release -p thalos_terrain --example band_roughness_probe
+```
+
+`THALOS_TERRAIN_BANDS` drops a named band from `DiffusionSurface::height` and
+nothing else. It is folded into the tile cache namespace and is in the capture
+client's **startup-override** set, so `THALOS_TERRAIN_BANDS=-fine just screenshot <name>`
+restarts the host and cannot serve tiles generated with the band on.
+
+Sites are the two saved viewpoints the band was rebuilt against; edit `SITES`
+to point it somewhere else.
+
 ### `just nd-preview` — navigation-display preview
 
 Renders the ND (`hud/mfd/widgets/nav_display.rs` + `assets/shaders/nav_display.wgsl`)

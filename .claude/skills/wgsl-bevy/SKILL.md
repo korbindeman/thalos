@@ -213,6 +213,42 @@ safe. Per-material prepass opt-in/out in Bevy 0.18 is `fn enable_prepass() -> bo
 (the `MaterialPlugin { prepass_enabled }` field is gone). Landed June 2026 for the
 grass depth prepass (`grass_prepass.wgsl` + `thalos::grass_displace`).
 
+### A prepass vertex shader that reads the material bind group must NOT be `AlphaMode::Opaque`
+
+Bevy 0.19 skips the material bind group for a **depth-only opaque** pass: the
+pipeline gets `empty_layout` at group 3 and the draw function
+(`PrepassOpaqueDepthOnlyDrawFunction`, or `ShadowsDepthOnlyDrawFunction` for
+Bevy's shadow maps) never binds it. A `prepass_vertex_shader()` that reads
+`@group(#{MATERIAL_BIND_GROUP})` — a displacement atlas, a per-instance table —
+therefore builds a pipeline referencing a binding its own layout omits, and the
+**fatal** wgpu error takes the process down:
+
+```text
+create_render_pipeline, label = 'pbr_prepass_pipeline'
+  Shader global ResourceBinding { group: 3, binding: 111 } is not available in
+  the pipeline layout → Binding is missing from the pipeline layout
+```
+
+Fix: `AlphaMode::Mask(_)` — it sets `MeshPipelineKey::MAY_DISCARD`, which is the
+only user-reachable bit that disqualifies the depth-only path in **both** the
+prepass and the shadow queue. (`PREPASS_READS_MATERIAL` looks like the intended
+opt-in and is read by `light.rs`, but 0.19.0 never sets it and no `Material` impl
+can — neither queue ORs `MaterialProperties::mesh_pipeline_key_bits` into the mesh
+key. Recheck on the next Bevy bump.) Override it at the *pipeline* level only —
+`MaterialExtension::alpha_mode() -> Option<AlphaMode>` — and leave the base
+`StandardMaterial` opaque, so the GPU-side flags still say opaque, `alpha_discard`
+forces alpha to 1.0, and nothing is actually masked. The main-pass pipeline is then
+identical apart from a `MAY_DISCARD` def (blend/depth come from the blend bits).
+
+Two debugging notes. `pbr_prepass_pipeline` exists nowhere in Bevy or this repo:
+the label is Bevy's `prepass_pipeline` with `StandardMaterial::specialize`'s `pbr_`
+prefix, so it only tells you the culprit is some `ExtendedMaterial<StandardMaterial, _>`
+— and it covers the camera prepass *and* the shadow pass. And "the binding works in
+the main pass" is not evidence against this: the main pass always binds group 3.
+Cost of the fix: the depth prepass compiles a fragment stage (Bevy's void
+`prepass_alpha_discard`), losing early-Z depth writes on that draw. NTR-X1 tile
+terrain, August 2026 — INC-20260826T124420Z.
+
 ### A depth prepass forces Equal depth-test → Z-fights coincident opaque surfaces
 
 Enabling a `DepthPrepass` makes the main opaque pass use an **Equal** depth compare

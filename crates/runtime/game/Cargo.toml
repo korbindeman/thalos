@@ -80,7 +80,7 @@ neural-terrain-default = ["neural-terrain"]
 # stack-overflowed the app, INC-20260724T044418Z); Rust edits restart the
 # capture host instead, automatically.
 dev-renderer = [
-    "neural-terrain",
+    "neural-terrain-default",
     "bevy/dynamic_linking",
     "bevy/embedded_watcher",
     "dep:bevy_render_gl_backend",

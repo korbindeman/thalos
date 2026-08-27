@@ -541,12 +541,11 @@ Terrain's build contract is capability-first:
 |---|---|---|
 | *(none, no defaults)* | no | procedural |
 | `neural-terrain` | yes | procedural |
-| `neural-terrain-default` | yes | neural |
+| `neural-terrain-default` (game/capture default) | yes | neural |
 
 `THALOS_TERRAIN=procedural` or `neural` remains a runtime A/B override, but it
-cannot request a capability omitted at build time. When neural terrain becomes
-the ordinary game default, `apps/game/Cargo.toml` can add
-`neural-terrain-default` to its `default` list; procedural artifacts remain
+cannot request a capability omitted at build time. Ordinary `just game` /
+capture builds enable `neural-terrain-default`. Procedural artifacts remain
 reproducible with `--no-default-features`.
 
 `scripts/package-game.ps1` copies only content supported by the built binary,

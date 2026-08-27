@@ -8,8 +8,9 @@ edition.workspace = true
 thalos_capture_runtime = { path = "../../crates/capture/runtime" }
 
 [features]
+default = ["neural-terrain-default"]
 neural-terrain = ["thalos_capture_runtime/neural-terrain"]
 neural-terrain-default = ["neural-terrain", "thalos_capture_runtime/neural-terrain-default"]
-dev-renderer = ["neural-terrain", "thalos_capture_runtime/dev-renderer"]
+dev-renderer = ["neural-terrain-default", "thalos_capture_runtime/dev-renderer"]
 gpu-counters = ["thalos_capture_runtime/gpu-counters"]
 legacy-udlod = ["thalos_capture_runtime/legacy-udlod"]

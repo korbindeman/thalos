@@ -1542,8 +1542,11 @@ assets/solar_system.ron + assets/bodies/<body>.ron
 ## Terrain generation (procedural bodies + Mira offline-package MVP)
 
 `BodySurfaceRegistry` constructs one canonical `Arc<dyn SurfaceQuery>` per body.
-Most bodies use `ProceduralSurface`, a pure analytic function of `(direction,
-lod)` in f64 body-local coordinates. Mira is the first offline-package body:
+Thalos uses `DiffusionSurface` by default (planetary chart plus every complete
+local 90 m window; `THALOS_TERRAIN=procedural` is the session A/B). Other
+procedural bodies use `ProceduralSurface`, a pure analytic function of
+`(direction, lod)` in f64 body-local coordinates. Mira is the first
+offline-package body:
 `just bake Mira` writes `assets/terrain_packages/Mira.bin`, and startup validates
 its content key before loading `BakedSurface`. There is no runtime/startup bake
 check: a missing or stale package fails with the explicit bake command. Every

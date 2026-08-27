@@ -94,21 +94,23 @@ If the Windows script reports that it changed user environment variables, open
 a new terminal before building. Parallel-agent and worktree provisioning is
 covered in [the build workflow](docs/development/build_speed.md).
 
-### 3. Enable the learned Thalos terrain
+### 3. Learned Thalos terrain
 
-The learned terrain payload is versioned with the repository, but the content
-backend remains an explicit development choice. Create a gitignored
-`.env.just` in the repository root containing:
+Ordinary `just game` / capture builds use the diffusion terrain provider:
+the planetary chart plus every complete 90 m window on disk. The spaceport
+window is versioned through Git LFS. A clone made without LFS still runs —
+you get the chart and analytic filler everywhere a window is missing.
 
-```dotenv
-THALOS_TERRAIN=diffusion
+```bash
+just terrain-assets
 ```
 
-Every `just` command loads this file. Without the setting, Thalos uses the
-procedural terrain backing; without the large detail payload, the diffusion
-backing still runs but falls back to lower-detail terrain around the spaceport.
-The extracted tile renderer itself is already the default ground renderer and
-needs no additional toggle.
+That command installs the repository-local LFS filters, downloads the
+checked-in windows, and verifies their hashes. To A/B the old analytic planet
+for one session, set `THALOS_TERRAIN=procedural`. To share a newly baked
+window with other machines, copy `thalos_site_detail_<slug>_90m.{f32,json}`
+into `assets/terrain_packages/thalos_diffusion/`, commit (Git LFS stores the
+raster), and pull on the other device.
 
 ### 4. Verify the checkout
 
@@ -162,10 +164,10 @@ without reintroducing a compiler wrapper.
 
 The terrain features intentionally separate capability from selection:
 
-- `neural-terrain` includes the learned runtime and payload but leaves the
-  procedural terrain selected by default.
-- `neural-terrain-default` implies `neural-terrain` and selects it unless
-  `THALOS_TERRAIN=procedural` overrides the session.
+- Ordinary game and capture defaults select learned (diffusion) terrain.
+- `THALOS_TERRAIN=procedural` is the session A/B back to the analytic planet.
+- `neural-terrain` without `neural-terrain-default` includes the learned
+  runtime but leaves the analytic planet selected.
 - `--no-default-features` with neither feature produces a procedural-only
   package and omits the learned payload.
 

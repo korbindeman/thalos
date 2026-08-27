@@ -26,7 +26,7 @@ use thalos_terrain::load_static_package_artifact;
 use thalos_terrain::{
     BodyArchetype, DynamicSurfaceState, PackageSurface, PlanetSurface, ProceduralSurface,
     SurfaceQuery, TerrainCompileContext, TerrainConfig, cache, compile_dynamic_surface_layers,
-    compile_tectonics_from_config,
+    compile_tectonics_from_config, parse_thalos_terrain_env,
 };
 #[cfg(debug_assertions)]
 use thalos_terrain::{TerrainCompileOptions, load_static_package};
@@ -165,19 +165,7 @@ fn select_thalos_diffusion(
         .filter(|value| !value.is_empty())
     {
         None => neural_default,
-        Some(value)
-            if matches_ignore_ascii_case(value, &["diffusion", "neural", "1", "true", "on"]) =>
-        {
-            true
-        }
-        Some(value) if matches_ignore_ascii_case(value, &["procedural", "0", "false", "off"]) => {
-            false
-        }
-        Some(value) => {
-            return Err(format!(
-                "unknown THALOS_TERRAIN={value:?}; expected neural, diffusion, or procedural"
-            ));
-        }
+        Some(value) => parse_thalos_terrain_env(value)?,
     };
     if requested && !neural_available {
         return Err(
@@ -186,12 +174,6 @@ fn select_thalos_diffusion(
         );
     }
     Ok(requested)
-}
-
-fn matches_ignore_ascii_case(value: &str, candidates: &[&str]) -> bool {
-    candidates
-        .iter()
-        .any(|candidate| value.eq_ignore_ascii_case(candidate))
 }
 
 impl BodySurfaceRegistry {
@@ -225,19 +207,31 @@ impl BodySurfaceRegistry {
                         }
                         let fingerprint =
                             thalos_terrain::GENERATOR_VERSION ^ surface.content_fingerprint;
+                        let window_count = surface.detail_window_count();
+                        let window_names = surface.detail_window_names().collect::<Vec<_>>();
                         bevy::log::info!(
-                            "Thalos: terrain-diffusion surface active (fingerprint {fingerprint:#x})"
+                            "Thalos: terrain-diffusion surface active ({window_count} 90 m windows, fingerprint {fingerprint:#x})"
                         );
+                        if window_count == 0 {
+                            bevy::log::warn!(
+                                "Thalos: no local 90 m diffusion windows; rendering the planetary chart plus analytic filler. Run `just terrain-assets` to fetch checked-in tiles, or bake more into assets/terrain_packages/thalos_diffusion"
+                            );
+                        } else {
+                            bevy::log::info!(
+                                "Thalos: local diffusion windows: {}",
+                                window_names.join(", ")
+                            );
+                        }
                         registry.surfaces.insert(body.id, Arc::new(surface));
                         registry.fingerprints.insert(body.id, fingerprint);
                         continue;
                     }
                     Err(error) => {
-                        return Err(format!(
-                            "neural terrain was selected but {} failed to load: {error}. \
-                             Re-download the complete build or run `just terrain-assets` in a developer checkout",
+                        bevy::log::error!(
+                            "Thalos: terrain-diffusion package failed to load from {}: {error}. \
+                             Using procedural base. Run `just terrain-assets` to fetch the learned chart and windows",
                             dir.display()
-                        ));
+                        );
                     }
                 }
                 #[cfg(not(feature = "neural-terrain"))]

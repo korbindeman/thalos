@@ -103,12 +103,6 @@ fn verify_neural_payloads(dir: &std::path::Path) -> Result<(), String> {
         })
         .collect::<Vec<_>>();
     details.sort();
-    if details.is_empty() {
-        return Err(format!(
-            "neural terrain capability requires at least one native detail window in {}",
-            dir.display()
-        ));
-    }
     for sidecar in details {
         verify_raster_payload(&sidecar)?;
     }

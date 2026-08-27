@@ -314,10 +314,37 @@ const SNOW_ALBEDO: vec3<f32> = vec3<f32>(0.62, 0.64, 0.68);
 // the band phase stays continuous across wrap boundaries. Bed thickness
 // ≈ TILE_WRAP_M / |K| ≈ 128 m along the dip normal — thick enough to read
 // from the aerial framings (finer beds vanish below the 90 m relief).
-// Direction ≈ the local radial at the showcase window (lat 8.5, lon 178.4),
-// so beds stack near-horizontally there like real sedimentary strata; the
-// low-frequency warp supplies the dip/undulation variation.
-const DIP_K: vec3<f32> = vec3<f32>(-63.0, 9.0, 2.0);
+//
+// **The direction must not be radial.** It used to be within 3.6° of the local
+// radial over the shipped viewpoints — chosen deliberately, so that beds would
+// "stack near-horizontally like real sedimentary strata". Horizontal bedding is
+// realistic for a plateau or a butte, but its planes are *level surfaces*, and
+// a level surface cutting any landform traces that landform's contours. On the
+// smooth cones this terrain builds, that drew a set of concentric light rings
+// down every mountainside — a topographic map painted onto the rock, with no
+// relief behind it (user 2026-08-27, INC-20260827T202201Z; proved by zeroing
+// the `strata` albedo weight alone, which removed the rings and left the
+// fall-line striation intact).
+//
+// So the frame now dips ~30° there instead. Two consequences worth keeping:
+// the traces cut across the slope, which is what makes bedding read as bedding
+// rather than as contours; and the ground spacing of the traces is
+// `thickness / sin(angle between bed and surface)`, which is **never finer
+// than the bed thickness** — so this term cannot alias however steep the face.
+//
+// A single global frame still has a degenerate cap wherever it happens to line
+// up with the radial; `BEDDING_DIP_*` below fades the term out there rather
+// than moving the defect to a different longitude. Geologically varying dip
+// (per tectonic province) is the real answer if bedding ever needs to be more
+// than a texture.
+const DIP_K: vec3<f32> = vec3<f32>(-57.0, 9.0, -27.0);
+
+// Sine of the bedding dip (`|K̂ × up|`) over which the strata term fades in:
+// fully retired below ~11.5°, fully present above ~27°. This is the structural
+// half of the ring fix — it removes the degeneracy everywhere on the body, not
+// only where `DIP_K` was retuned to avoid it.
+const BEDDING_DIP_LO: f32 = 0.20;
+const BEDDING_DIP_HI: f32 = 0.45;
 
 // Fall-line gully striation (see `material_layers`'s rock layer). Couloir
 // scale: ~32 m across the slope, elongated over ~96 m down the fall line.
@@ -853,7 +880,13 @@ fn material_layers(
         let warp = fbm3_periodic(p / 512.0, 2, TILE_WRAP_M / 512.0) - 0.5;
         let band_coord = dot(p, DIP_K) / TILE_WRAP_M + warp * 1.6;
         let band = abs(fract(band_coord) * 2.0 - 1.0); // triangle wave
-        let strata = smoothstep(0.25, 0.75, band) - 0.5;
+        // Bedding dip: how far the bed planes lean off the local level surface.
+        // At zero they ARE level surfaces and their traces are contour lines,
+        // so the term retires rather than drawing a topographic map (see
+        // `DIP_K`). `up` is the radial, which is what "level" means here.
+        let bedding_dip = length(cross(normalize(DIP_K), up));
+        let bedded = smoothstep(BEDDING_DIP_LO, BEDDING_DIP_HI, bedding_dip);
+        let strata = (smoothstep(0.25, 0.75, band) - 0.5) * bedded;
 
         // Fall-line gully striation: an isotropic body-space field, low-passed
         // ALONG the fall line so couloir-scale features elongate downhill.
@@ -909,7 +942,10 @@ fn material_layers(
         let grain_fade = footprint_band(footprint_m, 15.0, 90.0);
         if detail_fade > 0.0 {
             let dg = fbm3_perlin_grad(p / 64.0, 2, TILE_WRAP_M / 64.0);
-            let ledge = smoothstep(0.25, 0.75, band) - smoothstep(0.75, 0.98, band);
+            // Same dip retirement as the albedo: a level bedding plane would
+            // emboss the contours instead of painting them, which is the same
+            // artifact with a specular highlight on it.
+            let ledge = (smoothstep(0.25, 0.75, band) - smoothstep(0.75, 0.98, band)) * bedded;
             // Isotropic grain everywhere rock shows; ledges + striation only
             // on faces, for the same reason the bedding albedo is.
             n_off += dg.yzw * rock_m * grain_fade * 0.20

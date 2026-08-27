@@ -12,14 +12,13 @@ thalos_runtime = {
 }
 
 [features]
-default = []
+default = ["neural-terrain-default"]
 # Capability and default are separate so release/profile builds can choose
-# exactly what they contain. `neural-terrain-default` implies the capability;
-# a future global default is one edit to `default` above, while
-# `--no-default-features` remains a reproducible procedural-only build.
+# exactly what they contain. Learned (diffusion) terrain is the ordinary
+# default; `--no-default-features` remains a reproducible procedural-only build.
 neural-terrain = ["thalos_runtime/neural-terrain"]
 neural-terrain-default = ["neural-terrain", "thalos_runtime/neural-terrain-default"]
-dev-renderer = ["neural-terrain", "thalos_runtime/dev-renderer"]
+dev-renderer = ["neural-terrain-default", "thalos_runtime/dev-renderer"]
 profile-chrome = ["thalos_runtime/profile-chrome"]
 profile-tracy = ["thalos_runtime/profile-tracy"]
 gpu-counters = ["thalos_runtime/gpu-counters"]

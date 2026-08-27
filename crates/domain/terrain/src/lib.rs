@@ -54,7 +54,9 @@ pub use cold_desert_field::*;
 /// frame empty ground.
 pub use crater_profile::degradation_factor;
 pub use cubemap::{Cubemap, CubemapAccumulator, CubemapFace, default_resolution};
-pub use diffusion_surface::DiffusionSurface;
+pub use diffusion_surface::{
+    DiffusionSurface, parse_thalos_terrain_env, thalos_terrain_env, thalos_terrain_prefers_diffusion,
+};
 pub use feature_compiler::*;
 pub use field_surface::FieldSurface;
 pub use generic_terrestrial_field::*;

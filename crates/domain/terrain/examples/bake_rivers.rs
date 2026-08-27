@@ -35,7 +35,7 @@
 //!
 //! ```text
 //! cargo run -p thalos_terrain --release --example bake_rivers [px_m]
-//! THALOS_TERRAIN=diffusion cargo run -p thalos_terrain --release --example bake_rivers
+//! THALOS_TERRAIN=procedural cargo run -p thalos_terrain --release --example bake_rivers
 //! ```
 
 use glam::DVec3;
@@ -73,10 +73,7 @@ fn encode_log_discharge(discharge_m3_s: f32) -> u8 {
 }
 
 fn load_surface() -> (Box<dyn SurfaceQuery>, &'static str) {
-    let diffusion = std::env::var("THALOS_TERRAIN")
-        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
-        .unwrap_or(false);
-    if diffusion {
+    if thalos_terrain::thalos_terrain_prefers_diffusion() {
         let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
         match DiffusionSurface::load(dir, RADIUS_M as f32, BODY_SEED) {
             Ok(s) => return (Box::new(s), "diffusion"),

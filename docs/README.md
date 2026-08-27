@@ -135,14 +135,14 @@ canonical specs above; they do not replace them.
 `CLAUDE.md` at the repository root is the agent operating manual. It is loaded
 into **every** agent context, so it is deliberately kept to current direction,
 verification rules, and hard invariants — detail belongs in the documents above,
-and anything added there must earn its place in every session. Two skills sit
-beside it: `steer` (`.claude/skills/steer/SKILL.md`) routes new work between the
-roadmap and the backlog, and `diag-triage`
-(`.claude/skills/diag-triage/SKILL.md`) runs the diagnostics pass — `just diag`,
-then findings into rows, incidents, or a stated non-action
-(`development/tooling.md` § Reading the lane). A third, `expert-review`
-(`.claude/skills/expert-review/SKILL.md`), runs the adversarial audit into
-[reviews/](reviews/).
+and anything added there must earn its place in every session. Cursor loads
+additional specialist rules from [`.cursor/rules/`](../.cursor/rules/) when
+matching files are in play (shaders, Bevy render-graph). Skills live only under
+`.claude/skills/`: `steer` routes new work between the roadmap and the backlog,
+`diag-triage` runs the diagnostics pass — `just diag`, then findings into rows,
+incidents, or a stated non-action (`development/tooling.md` § Reading the lane)
+— and `expert-review` runs the adversarial audit into [reviews/](reviews/). The
+`wgsl-bevy` skill collects naga pitfalls.
 
 ## Placement rules
 

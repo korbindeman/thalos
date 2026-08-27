@@ -31,10 +31,7 @@ const SEED: u32 = 2;
 /// waterline from the authored signed sea field, so both should report the same
 /// LOD-invariance — that equality is the point of the measurement.
 fn load_surface() -> Box<dyn SurfaceQuery> {
-    let diffusion = std::env::var("THALOS_TERRAIN")
-        .map(|v| v.trim().eq_ignore_ascii_case("diffusion"))
-        .unwrap_or(false);
-    if diffusion {
+    if thalos_terrain::thalos_terrain_prefers_diffusion() {
         let dir = std::path::Path::new("assets/terrain_packages/thalos_diffusion");
         match DiffusionSurface::load(dir, RADIUS_M as f32, 2) {
             Ok(surface) => {
