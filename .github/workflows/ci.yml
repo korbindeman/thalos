@@ -94,7 +94,7 @@ jobs:
             echo "OK: ${package} default graph excludes thalos_udlod"
           done
 
-          legacy_consumers="$(cargo tree -p thalos_body_render --features legacy-udlod \
+          legacy_consumers="$(cargo tree --color never -p thalos_body_render --features legacy-udlod \
             -i thalos_udlod -e normal | tail -n +2 \
             | grep -vE '^[├└]── thalos_body_render ' || true)"
           if [ -n "$legacy_consumers" ]; then
